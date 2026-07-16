@@ -224,7 +224,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and how to open issue
 - [ ] **Add Other Messaging Platforms**
 - [ ] **Prune Old Weights (Future Milestone)**
 
-[![GitHub stars](https://shields.io)](https://github.com)
+[[![GitHub stars](https://shields.io)](https://github.com)](https://www.star-history.com/?repos=huyedits%2FSymbio&type=date&legend=top-left)
 
 
 This converts notes into training samples and runs LoRA fine-tuning.
