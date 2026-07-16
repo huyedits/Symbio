@@ -102,6 +102,40 @@ class BrowserSession:
             raise RuntimeError("Browser is not open. Use browser_open first.")
         return self._page
 
+    # Errors that mean the Playwright connection itself is wedged (dead
+    # greenlet/thread, closed pipe or loop) — no further call can succeed.
+    _FATAL_MARKERS = (
+        "cannot switch to a different thread",
+        "has been closed",
+        "connection closed",
+        "event loop is closed",
+        "pipe closed",
+    )
+
+    def _reset(self):
+        """Tear down a broken session so the next browser_open starts clean."""
+        for closer in (
+            lambda: self._browser.close() if self._browser else None,
+            lambda: self._playwright.stop() if self._playwright else None,
+        ):
+            try:
+                closer()
+            except Exception:
+                pass
+        self._browser = None
+        self._playwright = None
+        self._page = None
+
+    def _fail(self, op: str, e: Exception) -> str:
+        msg = str(e).lower()
+        if any(marker in msg for marker in self._FATAL_MARKERS):
+            self._reset()
+            return (
+                f"Browser {op} error: the browser session broke and was reset. "
+                "Use browser_open to reopen the page."
+            )
+        return f"Browser {op} error: {_short_error(e)}"
+
     def _check_url(self, url: str) -> tuple[bool, str]:
         if not url:
             return False, "URL is empty."
@@ -127,7 +161,7 @@ class BrowserSession:
             title = page.title()
             return f"Opened browser at {url}. Page title: {title}"
         except Exception as e:
-            return f"Browser open error: {_short_error(e)}"
+            return self._fail("open", e)
 
     def navigate(self, url: str) -> str:
         return self.open(url)
@@ -141,7 +175,7 @@ class BrowserSession:
             text = re.sub(r"[ \t]+", " ", text)
             return _truncated(text.strip(), 4000)
         except Exception as e:
-            return f"Browser get_text error: {_short_error(e)}"
+            return self._fail("get_text", e)
 
     def get_html(self) -> str:
         page = self._ensure_open()
@@ -149,7 +183,7 @@ class BrowserSession:
             html = page.content()
             return _truncated(html.strip(), 4000)
         except Exception as e:
-            return f"Browser get_html error: {_short_error(e)}"
+            return self._fail("get_html", e)
 
     _TIMEOUT_MS = 4000
 
@@ -188,7 +222,7 @@ class BrowserSession:
                 )
             return "Error: provide selector or text to click."
         except Exception as e:
-            return f"Browser click error: {_short_error(e)}"
+            return self._fail("click", e)
 
     def type_text(self, text: str, selector: str = "", press_enter: bool = False) -> str:
         page = self._ensure_open()
@@ -207,7 +241,7 @@ class BrowserSession:
                 page.keyboard.press("Enter")
             return f"Typed '{text}'" + (" and pressed Enter." if press_enter else ".")
         except Exception as e:
-            return f"Browser type error: {_short_error(e)}"
+            return self._fail("type", e)
 
     def press(self, key: str) -> str:
         page = self._ensure_open()
@@ -215,7 +249,7 @@ class BrowserSession:
             page.keyboard.press(key)
             return f"Pressed '{key}'."
         except Exception as e:
-            return f"Browser press error: {_short_error(e)}"
+            return self._fail("press", e)
 
     def evaluate(self, script: str) -> str:
         page = self._ensure_open()
@@ -223,7 +257,7 @@ class BrowserSession:
             result = page.evaluate(script)
             return json.dumps(result, ensure_ascii=False, default=str)[:4000]
         except Exception as e:
-            return f"Browser evaluate error: {_short_error(e)}"
+            return self._fail("evaluate", e)
 
     def screenshot(self) -> str:
         page = self._ensure_open()
@@ -232,7 +266,7 @@ class BrowserSession:
             page.screenshot(path=str(path), full_page=True)
             return f"Saved browser screenshot: {path.name}"
         except Exception as e:
-            return f"Browser screenshot error: {_short_error(e)}"
+            return self._fail("screenshot", e)
 
     def close(self) -> str:
         try:
