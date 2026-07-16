@@ -144,6 +144,15 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             "Search the web for Python 3.14 release date.",
             '<tool_call>{"name": "web_search", "arguments": {"query": "Python 3.14 release date"}}</tool_call>Here are the search results.',
         ),
+        # --- Browser ---
+        (
+            "Open example.com in the browser.",
+            '<tool_call>{"name": "browser_open", "arguments": {"url": "https://example.com"}}</tool_call>Opening example.com.',
+        ),
+        (
+            "Scroll down to the next short.",
+            '<tool_call>{"name": "browser_scroll", "arguments": {"direction": "down"}}</tool_call>Scrolling down.',
+        ),
         # --- Email Q&A ---
         (
             "Can you read my emails?",

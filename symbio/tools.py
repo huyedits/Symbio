@@ -316,6 +316,19 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
             "run": lambda params, a=agent: _tool_browser_press(a, params),
         },
         {
+            "name": "browser_scroll",
+            "description": "Scroll the current browser page up or down (e.g. to the next video in a shorts feed).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string", "enum": ["down", "up"]},
+                    "amount": {"type": "integer", "description": "Pixels to scroll; default 800."},
+                },
+            },
+            "readonly": False,
+            "run": lambda params, a=agent: _tool_browser_scroll(a, params),
+        },
+        {
             "name": "browser_get_text",
             "description": "Return the visible text of the current browser page.",
             "parameters": {"type": "object", "properties": {}},
@@ -897,6 +910,15 @@ def _tool_browser_press(agent: AIAgent, args: dict[str, Any]) -> str:
     if agent._browser_session is None:
         return "Browser automation is not available."
     return agent._browser_session.press(args.get("key", ""))
+
+
+def _tool_browser_scroll(agent: AIAgent, args: dict[str, Any]) -> str:
+    if agent._browser_session is None:
+        return "Browser automation is not available."
+    return agent._browser_session.scroll(
+        direction=args.get("direction", "down"),
+        amount=int(args.get("amount", 0) or 0),
+    )
 
 
 def _tool_browser_get_text(agent: AIAgent, _args: dict[str, Any]) -> str:

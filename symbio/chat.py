@@ -58,7 +58,7 @@ def build_system_prompt(assistant_name: str, user_name: str, _tools: list[dict[s
         "  list_threads — list unread emails\n"
         "  get_thread — read one email thread\n"
         "  web_search / web_extract — web lookup\n"
-        "  browser_open / browser_navigate / browser_click / browser_type / browser_screenshot — control a web browser\n"
+        "  browser_open / browser_navigate / browser_click / browser_type / browser_scroll / browser_screenshot — control a web browser\n"
         "  browser_get_text / browser_get_html / browser_evaluate — read the current page\n"
         "  desktop_screenshot / desktop_click / desktop_type / desktop_press — control the macOS desktop\n\n"
         "Guidelines:\n"
@@ -73,6 +73,8 @@ def build_system_prompt(assistant_name: str, user_name: str, _tools: list[dict[s
         "- To run Python code, use execute_code and start the code with 'from symbio_tools import *'.\n"
         "  symbio_tools only provides read_file, write_file, patch, search_files, terminal, web_search, web_extract;\n"
         "  for everything else use standard Python (e.g. import math; print(math.factorial(7))).\n"
+        "- Take initiative: never tell the user to run a tool or do a step you can do yourself.\n"
+        "  If a tool says the browser is not open, call browser_open with the right URL and continue the task.\n"
         "- Talk normally outside tags. Never include internal reasoning or analysis.\n"
         f"- When you speak, 'I/me/my' means {assistant_name}; 'you/your' means {user_name}.\n"
         "- Keep replies concise. After a tool succeeds, answer the user; do NOT repeat the tool.\n"
@@ -98,6 +100,8 @@ def build_system_prompt(assistant_name: str, user_name: str, _tools: list[dict[s
         f'Assistant: <tool_call>{{"name": "browser_click", "arguments": {{"text": "More information"}}}}</tool_call>Clicking the link.\n'
         f"User: Take a screenshot of the page.\n"
         f'Assistant: <tool_call>{{"name": "browser_screenshot", "arguments": {{}}}}</tool_call>Taking a screenshot.\n'
+        f"User: Scroll down to the next short.\n"
+        f'Assistant: <tool_call>{{"name": "browser_scroll", "arguments": {{"direction": "down"}}}}</tool_call>Scrolling down.\n'
         f"User: Type 'hello' into the search box and submit.\n"
         f'Assistant: <tool_call>{{"name": "browser_type", "arguments": {{"selector": "input[name=q]", "text": "hello", "press_enter": true}}}}</tool_call>Typing and submitting.\n'
         f"User: What text is on the page?\n"
