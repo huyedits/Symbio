@@ -278,7 +278,7 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
         },
         {
             "name": "browser_click",
-            "description": "Click an element in the browser by CSS selector or visible text.",
+            "description": "Click an element in the browser by CSS selector or visible text. Prefer text for buttons/links; selectors click the first visible match.",
             "parameters": {
                 "type": "object",
                 "properties": {

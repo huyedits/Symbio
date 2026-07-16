@@ -47,6 +47,21 @@ def _scheme_ok(url: str) -> bool:
         return False
 
 
+def _short_error(e: Exception) -> str:
+    """First line of an exception message; Playwright appends huge call logs."""
+    lines = str(e).strip().splitlines()
+    return lines[0] if lines else e.__class__.__name__
+
+
+def _first_visible(locator: Any) -> tuple[Any | None, int]:
+    """Return (first visible element, total match count) for a locator."""
+    count = locator.count()
+    visible = locator.filter(visible=True)
+    if visible.count() > 0:
+        return visible.first, count
+    return None, count
+
+
 def _confirm_domain(domain: str) -> bool:
     """Prompt the user before opening a new domain."""
     print(f"  [Computer] Allow browser to access '{domain}'? [y/N]:", end=" ", flush=True)
@@ -112,7 +127,7 @@ class BrowserSession:
             title = page.title()
             return f"Opened browser at {url}. Page title: {title}"
         except Exception as e:
-            return f"Browser open error: {e}"
+            return f"Browser open error: {_short_error(e)}"
 
     def navigate(self, url: str) -> str:
         return self.open(url)
@@ -126,7 +141,7 @@ class BrowserSession:
             text = re.sub(r"[ \t]+", " ", text)
             return _truncated(text.strip(), 4000)
         except Exception as e:
-            return f"Browser get_text error: {e}"
+            return f"Browser get_text error: {_short_error(e)}"
 
     def get_html(self) -> str:
         page = self._ensure_open()
@@ -134,34 +149,65 @@ class BrowserSession:
             html = page.content()
             return _truncated(html.strip(), 4000)
         except Exception as e:
-            return f"Browser get_html error: {e}"
+            return f"Browser get_html error: {_short_error(e)}"
+
+    _TIMEOUT_MS = 4000
 
     def click(self, selector: str = "", text: str = "") -> str:
         page = self._ensure_open()
         try:
             if selector:
-                page.click(selector, timeout=10000)
-                return f"Clicked element matching '{selector}'."
+                # Generic selectors often match dozens of elements, many
+                # hidden; click the first *visible* match instead of the
+                # first match (which times out on hidden elements).
+                target, count = _first_visible(page.locator(selector))
+                if target is not None:
+                    target.click(timeout=self._TIMEOUT_MS)
+                    which = f" (first visible of {count} matches)" if count > 1 else ""
+                    return f"Clicked element matching '{selector}'{which}."
+                if not text:
+                    if count == 0:
+                        return f"Click failed: nothing matches selector '{selector}'. Try clicking by visible text instead."
+                    return (
+                        f"Click failed: '{selector}' matched {count} element(s) but none are visible. "
+                        "Use a more specific selector or click by visible text."
+                    )
             if text:
-                # Use Playwright's get_by_text which is resilient.
-                page.get_by_text(text, exact=False).first.click(timeout=10000)
-                return f"Clicked element containing text '{text}'."
+                target, count = _first_visible(page.get_by_text(text, exact=False))
+                if target is None:
+                    for role in ("button", "link"):
+                        target, count = _first_visible(page.get_by_role(role, name=text, exact=False))
+                        if target is not None:
+                            break
+                if target is not None:
+                    target.click(timeout=self._TIMEOUT_MS)
+                    return f"Clicked element containing text '{text}'."
+                return (
+                    f"Click failed: no visible element with text '{text}'. "
+                    "Use browser_get_text to see what is on the page."
+                )
             return "Error: provide selector or text to click."
         except Exception as e:
-            return f"Browser click error: {e}"
+            return f"Browser click error: {_short_error(e)}"
 
     def type_text(self, text: str, selector: str = "", press_enter: bool = False) -> str:
         page = self._ensure_open()
         try:
             if selector:
-                page.fill(selector, text, timeout=10000)
+                target, count = _first_visible(page.locator(selector))
+                if target is None:
+                    return (
+                        f"Type failed: no visible element matches '{selector}' "
+                        f"({count} hidden match(es))."
+                    )
+                target.fill(text, timeout=self._TIMEOUT_MS)
             else:
                 page.keyboard.type(text, delay=10)
             if press_enter:
                 page.keyboard.press("Enter")
             return f"Typed '{text}'" + (" and pressed Enter." if press_enter else ".")
         except Exception as e:
-            return f"Browser type error: {e}"
+            return f"Browser type error: {_short_error(e)}"
 
     def press(self, key: str) -> str:
         page = self._ensure_open()
@@ -169,7 +215,7 @@ class BrowserSession:
             page.keyboard.press(key)
             return f"Pressed '{key}'."
         except Exception as e:
-            return f"Browser press error: {e}"
+            return f"Browser press error: {_short_error(e)}"
 
     def evaluate(self, script: str) -> str:
         page = self._ensure_open()
@@ -177,7 +223,7 @@ class BrowserSession:
             result = page.evaluate(script)
             return json.dumps(result, ensure_ascii=False, default=str)[:4000]
         except Exception as e:
-            return f"Browser evaluate error: {e}"
+            return f"Browser evaluate error: {_short_error(e)}"
 
     def screenshot(self) -> str:
         page = self._ensure_open()
@@ -186,7 +232,7 @@ class BrowserSession:
             page.screenshot(path=str(path), full_page=True)
             return f"Saved browser screenshot: {path.name}"
         except Exception as e:
-            return f"Browser screenshot error: {e}"
+            return f"Browser screenshot error: {_short_error(e)}"
 
     def close(self) -> str:
         try:
