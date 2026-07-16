@@ -58,6 +58,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_output_len": 4000,
         "temperature": 0.1,
         "top_p": 0.9,
+        "repetition_penalty": 1.15,
     },
     "model": {
         "allow_lora": True,

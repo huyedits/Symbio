@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from mlx_lm import load, stream_generate
-from mlx_lm.sample_utils import make_sampler
+from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 from symbio.chat import build_system_prompt
 from symbio.config import can_run_lora, detect_model_type
@@ -173,6 +173,12 @@ class AIAgent:
             temp=config["agent"]["temperature"],
             top_p=config["agent"]["top_p"],
         )
+        # Near-greedy sampling on a small overfit model degenerates into
+        # repetition loops on out-of-distribution input; penalize repeats.
+        self.logits_processors = make_logits_processors(
+            repetition_penalty=config["agent"].get("repetition_penalty", 1.15),
+            repetition_context_size=64,
+        )
         self.session_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         self.session_log = LOG_DIR / f"session_{self.session_id}.jsonl"
         self.store = SessionStore(PROJECT_DIR / "logs" / "sessions.db")
@@ -217,9 +223,19 @@ class AIAgent:
                 self.tokenizer,
                 prompt=prompt,
                 sampler=self.sampler,
+                logits_processors=self.logits_processors,
                 max_tokens=self.config["agent"].get("max_output_len", 1024),
             ):
                 parts.append(response.text)
+                # Runaway-loop breaker: degenerate output (repeated chars,
+                # cycling patterns) reuses the same 4-grams over and over,
+                # while natural text keeps them mostly unique.
+                if len(parts) % 16 == 0:
+                    tail = "".join(parts)[-320:]
+                    if len(tail) >= 320:
+                        grams = {tail[i:i + 4] for i in range(len(tail) - 3)}
+                        if len(grams) / (len(tail) - 3) < 0.35:
+                            break
                 if printer is not None:
                     printer.update("".join(parts))
         finally:
