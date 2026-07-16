@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -183,8 +184,38 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
     write(valid_samples, VALID_FILE)
 
 
+def _run_lora_chunk(cmd: list[str]) -> tuple[bool, float | None]:
+    """Run one mlx_lm lora invocation, streaming its output.
+
+    Returns (ok, last reported validation loss).
+    """
+    val_re = re.compile(r"Val loss ([0-9.]+)")
+    last_val: float | None = None
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end="")
+            m = val_re.search(line)
+            if m:
+                last_val = float(m.group(1))
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        proc.wait()
+        raise
+    return proc.returncode == 0, last_val
+
+
 def run_training(config: dict[str, Any], model_type: str = "dense", iters: int | None = None) -> bool:
-    """Run an MLX LoRA fine-tuning pass. Returns True on success."""
+    """Run MLX LoRA fine-tuning. Returns True on success.
+
+    When `iters` is not given and `lora.adaptive` is enabled, training runs in
+    chunks of `lora.iters` and keeps going while validation loss improves by
+    at least `lora.min_improvement`, until it reaches `lora.target_val_loss`
+    or the hard `lora.max_iters` cap. An explicit `iters` (e.g. the short
+    /learn passes) always runs a single fixed pass.
+    """
     ok, reason = can_run_lora(config, model_type)
     if not ok:
         print(f"  [System] Training skipped: {reason}")
@@ -195,7 +226,11 @@ def run_training(config: dict[str, Any], model_type: str = "dense", iters: int |
         return False
 
     lora = config["lora"]
-    train_iters = iters if iters is not None else lora["iters"]
+    adaptive = iters is None and lora.get("adaptive", True)
+    chunk_iters = iters if iters is not None else lora["iters"]
+    max_iters = lora.get("max_iters", 200)
+    target = lora.get("target_val_loss", 0.05)
+    min_improvement = lora.get("min_improvement", 0.02)
     print("\n  [System] Starting MLX LoRA Fine-Tuning\n")
 
     lora_config = {
@@ -209,14 +244,14 @@ def run_training(config: dict[str, Any], model_type: str = "dense", iters: int |
     with os.fdopen(config_fd, "w") as f:
         yaml.dump(lora_config, f)
 
-    cmd = [
+    base_cmd = [
         sys.executable, "-m", "mlx_lm", "lora",
         "--model", config["model_name"],
         "--train",
         "--data", str(DATA_DIR),
         "--batch-size", str(lora["batch_size"]),
         "--num-layers", str(lora["num_layers"]),
-        "--iters", str(train_iters),
+        "--iters", str(chunk_iters),
         "--learning-rate", str(lora["learning_rate"]),
         "--steps-per-eval", str(lora["steps_per_eval"]),
         "--max-seq-length", str(lora["max_seq_length"]),
@@ -224,11 +259,44 @@ def run_training(config: dict[str, Any], model_type: str = "dense", iters: int |
         "--save-every", str(lora["save_every"]),
         "--config", config_path,
     ]
+
+    total_iters = 0
+    prev_val: float | None = None
+    resume = False
     try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError:
-        print("  [System] Training failed.")
-        return False
+        while True:
+            cmd = list(base_cmd)
+            if resume:
+                cmd += ["--resume-adapter-file", str(ADAPTER_DIR / "adapters.safetensors")]
+            chunk_ok, val = _run_lora_chunk(cmd)
+            if not chunk_ok:
+                print("  [System] Training failed.")
+                return False
+            total_iters += chunk_iters
+
+            if not adaptive:
+                break
+            if val is None:
+                print("  [System] No validation loss reported; stopping after one pass.")
+                break
+            if val <= target:
+                print(f"  [System] Val loss {val:.3f} reached target {target}; done after {total_iters} iters.")
+                break
+            if prev_val is not None and prev_val - val < min_improvement:
+                print(
+                    f"  [System] Val loss plateaued ({prev_val:.3f} -> {val:.3f}); "
+                    f"stopping after {total_iters} iters."
+                )
+                break
+            if total_iters >= max_iters:
+                print(f"  [System] Hit max_iters cap ({max_iters}); stopping.")
+                break
+            prev_val = val
+            resume = True
+            print(
+                f"  [System] Val loss {val:.3f} still improving; "
+                f"continuing ({total_iters}/{max_iters} iters)."
+            )
     except KeyboardInterrupt:
         print("  [System] Training stopped.")
         return False

@@ -44,6 +44,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "batch_size": 1,
         "learning_rate": 1e-4,
         "iters": 50,
+        # Adaptive training: keep running chunks of `iters` while validation
+        # loss improves by `min_improvement`, until `target_val_loss` or the
+        # hard `max_iters` cap. Keep `iters` a multiple of `steps_per_eval`.
+        "adaptive": True,
+        "max_iters": 200,
+        "target_val_loss": 0.05,
+        "min_improvement": 0.02,
         # Every sample carries the full system prompt (~800 tokens); 1024
         # truncated long samples mid-reply, which trains truncated outputs.
         "max_seq_length": 2048,
