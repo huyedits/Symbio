@@ -1,0 +1,279 @@
+"""AIAgent class for Symbio."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from mlx_lm import generate, load
+from mlx_lm.sample_utils import make_sampler
+
+from symbio.chat import build_system_prompt
+from symbio.config import can_run_lora, detect_model_type
+from symbio.constants import ADAPTER_DIR, DEFAULT_CONFIG, LOG_DIR, PROJECT_DIR
+from symbio.learn import _is_system_observation
+from symbio.llm import run_training, save_history_pairs
+from symbio.store import SessionStore
+from symbio.tools import (
+    build_tool_registry,
+    execute_tools,
+    openai_tool_schemas,
+    run_single_tool,
+    tool_few_shots,
+    tool_metadata,
+)
+from symbio.utils import (
+    clean_response,
+    has_dangling_tool_call,
+    parse_tools,
+    strip_dangling_tool_call,
+    strip_generation_artifacts,
+    strip_tool_tags,
+)
+
+from rag import Retriever
+from planner import TrainingPlanner
+
+# Browser / desktop automation helpers (lazy-imported inside runners if missing).
+try:
+    from symbio.computer import (
+        BrowserSession,
+        desktop_click,
+        desktop_move,
+        desktop_press,
+        desktop_screenshot,
+        desktop_type,
+    )
+except Exception:
+    BrowserSession = None  # type: ignore
+    desktop_click = desktop_move = desktop_press = desktop_screenshot = desktop_type = None  # type: ignore
+
+
+logger = logging.getLogger("chat")
+
+
+class AIAgent:
+    """Hermes-style autonomous agent loop over an MLX model + LoRA adapter."""
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        model: Any,
+        tokenizer: Any,
+        adapter_loaded: bool,
+    ):
+        self.config = config
+        self.model = model
+        self.tokenizer = tokenizer
+        self.adapter_loaded = adapter_loaded
+        self.tools = build_tool_registry(self)
+        self.system_prompt = build_system_prompt(
+            config["assistant_name"], config["user_name"], self.tools
+        )
+        self.history: list[dict[str, str]] = []
+        self.sampler = make_sampler(
+            temp=config["agent"]["temperature"],
+            top_p=config["agent"]["top_p"],
+        )
+        self.session_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.session_log = LOG_DIR / f"session_{self.session_id}.jsonl"
+        self.store = SessionStore(PROJECT_DIR / "logs" / "sessions.db")
+        self.store.new_session(self.session_id)
+        self.retriever = Retriever(
+            config, session_store=self.store, exclude_session_id=self.session_id
+        )
+        self.planner = TrainingPlanner(config)
+        self._code_calls_this_turn = 0
+        self._browser_session = BrowserSession() if BrowserSession else None
+
+    def _openai_tool_schemas(self) -> list[dict[str, Any]]:
+        return openai_tool_schemas(self.tools)
+
+    def _tool_few_shots(self) -> list[dict[str, str]]:
+        return tool_few_shots(self.config)
+
+    def _tool_metadata(self, name: str) -> dict[str, Any]:
+        return tool_metadata(name, self.tools, self)
+
+    def _execute_tools(self, tools: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, str]]:
+        return execute_tools(self, tools)
+
+    def _run_single_tool(self, name: str, params: dict[str, Any]) -> str:
+        return run_single_tool(self, name, params)
+
+    def update_identity(self, assistant_name: str, user_name: str):
+        self.config["assistant_name"] = assistant_name
+        self.config["user_name"] = user_name
+        self.system_prompt = build_system_prompt(assistant_name, user_name, self.tools)
+
+    def _persist_turn(self, role: str, content: str):
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "role": role,
+            "content": content,
+        }
+        with open(self.session_log, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+        self.store.append(self.session_id, role, content)
+
+    def run(self, user_input: str) -> dict[str, Any]:
+        self._code_calls_this_turn = 0
+        self.history.append({"role": "user", "content": user_input})
+        self._persist_turn("user", user_input)
+
+        final_text = ""
+        max_turns = self.config["agent"].get("max_turns") or self.config["agent"].get("max_tool_rounds", 10)
+        history_limit = self.config["agent"]["history_limit"]
+
+        executed_sigs: set[tuple[str, str]] = set()
+        mutating_types_executed: set[str] = set()
+        tools_used: list[str] = []
+
+        for _round in range(max_turns):
+            messages = [{"role": "system", "content": self.system_prompt}]
+
+            # Retrieve relevant notes/sessions on the first round and inject
+            # them as additional context before the conversation history.
+            if _round == 0:
+                context = self.retriever.build_context(user_input)
+                if context:
+                    messages.append({"role": "user", "content": context})
+
+            if _round == 0:
+                messages.extend(self._tool_few_shots())
+
+            messages.extend(self.history[-history_limit:])
+
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+                tools=self._openai_tool_schemas(),
+            )
+
+            reply = ""
+            tools: list[tuple[str, dict[str, Any]]] = []
+            mlx_error = False
+            for _attempt in range(2):
+                try:
+                    raw_reply = generate(
+                        self.model,
+                        self.tokenizer,
+                        prompt=prompt,
+                        sampler=self.sampler,
+                        verbose=False,
+                        max_tokens=self.config["agent"].get("max_output_len", 1024),
+                    )
+                except Exception as e:
+                    print(f"[MLX Error: {e}]")
+                    mlx_error = True
+                    break
+                reply = strip_generation_artifacts(clean_response(raw_reply.strip()))
+                tools = parse_tools(reply)
+                # A dangling <tool_call> means generation stopped mid-call;
+                # resample once before giving up on the tool call.
+                if not has_dangling_tool_call(reply):
+                    break
+            if mlx_error:
+                break
+            if not tools:
+                # Drop truncated tool markup so it never reaches the user,
+                # the history, or the session store (RAG would re-inject it).
+                reply = strip_dangling_tool_call(reply)
+
+            unique_tools: list[tuple[str, dict[str, Any]]] = []
+            for name, params in tools:
+                sig = (name, json.dumps(params, sort_keys=True, ensure_ascii=False))
+                if sig in executed_sigs:
+                    continue
+                executed_sigs.add(sig)
+                meta = self._tool_metadata(name)
+                if not meta.get("readonly") and name in mutating_types_executed:
+                    continue
+                if not meta.get("readonly"):
+                    mutating_types_executed.add(name)
+                unique_tools.append((name, params))
+            tools = unique_tools
+
+            display = strip_tool_tags(reply)
+            final_text = display
+
+            if display.strip():
+                print(f"{self.config['assistant_name']:8}: {display}")
+                logger.info(f"{self.config['assistant_name']}: {display}")
+
+            self.history.append({"role": "assistant", "content": reply})
+            self._persist_turn("assistant", reply)
+
+            if not tools:
+                if not display.strip():
+                    final_text = "[Received an empty reply.]"
+                    print(f"{self.config['assistant_name']:8}: {final_text}")
+                break
+
+            tool_results = self._execute_tools(tools)
+            tools_used.extend(name for name, _ in tools)
+            observations: list[str] = []
+            for name, out in tool_results:
+                indented = out.replace("\n", "\n  ")
+                print(f"  [Observation {name}] {indented}")
+                observations.append(f"{name}: {out}")
+                tool_id = f"{name}_{hashlib.md5(out.encode()).hexdigest()[:8]}"
+                self.history.append({"role": "tool", "content": out, "tool_call_id": tool_id})
+                self._persist_turn("tool", f"[{tool_id}] {out}")
+
+            obs_text = "\n".join(observations)
+            observation_msg = (
+                f"[System observation — do NOT repeat the same tool call; reply to the user]: {obs_text}"
+            )
+            self.history.append({"role": "user", "content": observation_msg})
+            self._persist_turn("user", observation_msg)
+        else:
+            final_text = "[Reached the maximum number of turns.]"
+            print(f"{self.config['assistant_name']:8}: {final_text}")
+
+        while len(self.history) > history_limit + 8:
+            self.history.pop(0)
+
+        self.planner.record_turn(user_input, final_text, tools=list(dict.fromkeys(tools_used)))
+        return {"text": final_text, "history": self.history}
+
+    def chat(self, user_input: str) -> str:
+        return self.run(user_input)["text"]
+
+    def forget_last(self) -> int:
+        removed = 0
+        while self.history and self.history[-1]["role"] == "assistant":
+            self.history.pop()
+            removed += 1
+        while (
+            self.history
+            and self.history[-1]["role"] == "user"
+            and not _is_system_observation(self.history[-1]["content"])
+        ):
+            self.history.pop()
+            removed += 1
+        return removed
+
+    def save_history_pairs(self) -> int:
+        return save_history_pairs(self.history, self.tokenizer, self.system_prompt, planner=self.planner)
+
+    def digest_notes(self) -> int:
+        from symbio.llm import digest_notes_to_training
+        return digest_notes_to_training(self.tokenizer, self.system_prompt, planner=self.planner)
+
+    def reload_adapter(self):
+        model_type = detect_model_type(self.model)
+        ok, reason = can_run_lora(self.config, model_type)
+        if not ok:
+            print(f"  [System] Cannot reload adapter: {reason}")
+            return
+        self.model, self.tokenizer = load(
+            self.config["model_name"], adapter_path=str(ADAPTER_DIR)
+        )
+        self.adapter_loaded = True
