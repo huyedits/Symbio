@@ -13,12 +13,14 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import yaml
 from mlx_lm import load, generate
 from mlx_lm.sample_utils import make_sampler
 
@@ -348,6 +350,23 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             "Save your notes and train on them.",
             "<digest /><train />I'll digest the notes and start training so they stick.",
         ),
+        # Cron scheduling demonstrations
+        (
+            "Remind me every day at 9am to stretch.",
+            f"Will do, {user}. <cron expr='0 9 * * *'>stretch</cron>",
+        ),
+        (
+            "It's 14:00 right now. Remind me in 30 minutes to check the oven.",
+            "Got it — that's 14:30. <cron at='14:30'>check the oven</cron>",
+        ),
+        (
+            "Check disk space every morning at 8.",
+            "Scheduled a daily disk check. <cron expr='0 8 * * *'>cmd:df -h</cron>",
+        ),
+        (
+            "Remind me every Monday at 10 to review my notes.",
+            f"Done, {user}. <cron expr='0 10 * * 1'>review your notes</cron>",
+        ),
     ]
 
     for user_msg, assistant_msg in samples:
@@ -523,6 +542,19 @@ def run_training(config: dict[str, Any]) -> bool:
 
     lora = config["lora"]
     print("\n  [System] Starting MLX LoRA Fine-Tuning\n")
+
+    # mlx_lm only accepts rank/dropout/scale via a config file, not CLI flags.
+    lora_config = {
+        "lora_parameters": {
+            "rank": lora["rank"],
+            "dropout": lora["dropout"],
+            "scale": lora["scale"],
+        }
+    }
+    config_fd, config_path = tempfile.mkstemp(suffix=".yaml", dir=str(DATA_DIR))
+    with os.fdopen(config_fd, "w") as f:
+        yaml.dump(lora_config, f)
+
     cmd = [
         sys.executable, "-m", "mlx_lm", "lora",
         "--model", config["model_name"],
@@ -536,9 +568,7 @@ def run_training(config: dict[str, Any]) -> bool:
         "--max-seq-length", str(lora["max_seq_length"]),
         "--adapter-path", str(ADAPTER_DIR),
         "--save-every", str(lora["save_every"]),
-        "--lora-rank", str(lora["rank"]),
-        "--lora-dropout", str(lora["dropout"]),
-        "--lora-scale", str(lora["scale"]),
+        "--config", config_path,
     ]
     try:
         subprocess.run(cmd, check=True)
@@ -548,6 +578,11 @@ def run_training(config: dict[str, Any]) -> bool:
     except KeyboardInterrupt:
         print("  [System] Training stopped.")
         return False
+    finally:
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
 
     config_file = ADAPTER_DIR / "adapter_config.json"
     weight_files = list(ADAPTER_DIR.glob("adapters.*"))
