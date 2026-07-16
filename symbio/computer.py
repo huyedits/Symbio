@@ -99,7 +99,9 @@ class BrowserSession:
 
     def _ensure_open(self) -> Any:
         if self._page is None:
-            raise RuntimeError("Browser is not open. Use browser_open first.")
+            raise RuntimeError(
+                "Browser is not open. Call browser_open with the target URL yourself, then retry."
+            )
         return self._page
 
     # Errors that mean the Playwright connection itself is wedged (dead
@@ -250,6 +252,20 @@ class BrowserSession:
             return f"Pressed '{key}'."
         except Exception as e:
             return self._fail("press", e)
+
+    def scroll(self, direction: str = "down", amount: int = 0) -> str:
+        page = self._ensure_open()
+        try:
+            if direction not in ("down", "up"):
+                return "Error: direction must be 'down' or 'up'."
+            dy = amount if amount > 0 else 800
+            if direction == "up":
+                dy = -dy
+            page.mouse.wheel(0, dy)
+            page.wait_for_timeout(300)
+            return f"Scrolled {direction} {abs(dy)}px."
+        except Exception as e:
+            return self._fail("scroll", e)
 
     def evaluate(self, script: str) -> str:
         page = self._ensure_open()
