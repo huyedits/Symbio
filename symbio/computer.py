@@ -53,6 +53,41 @@ def _short_error(e: Exception) -> str:
     return lines[0] if lines else e.__class__.__name__
 
 
+# Loose key names small models emit, mapped to Playwright's canonical names —
+# same idea as the Hermes tool-call normalization in parse_tools.
+_KEY_ALIASES = {
+    "down": "ArrowDown", "up": "ArrowUp", "left": "ArrowLeft", "right": "ArrowRight",
+    "arrowdown": "ArrowDown", "arrowup": "ArrowUp", "arrowleft": "ArrowLeft", "arrowright": "ArrowRight",
+    "enter": "Enter", "return": "Enter",
+    "esc": "Escape", "escape": "Escape",
+    "space": "Space", "spacebar": "Space",
+    "tab": "Tab", "backspace": "Backspace",
+    "delete": "Delete", "del": "Delete",
+    "home": "Home", "end": "End",
+    "pageup": "PageUp", "page up": "PageUp", "pgup": "PageUp",
+    "pagedown": "PageDown", "page down": "PageDown", "pgdn": "PageDown",
+    "shift": "Shift", "ctrl": "Control", "control": "Control",
+    "alt": "Alt", "option": "Alt",
+    "cmd": "Meta", "command": "Meta", "meta": "Meta", "win": "Meta",
+}
+
+
+def _normalize_key(key: str) -> str:
+    """Map a loosely-named key ('down', 'page down', 'ctrl+a') to Playwright's names."""
+    key = key.strip()
+    if "+" in key:
+        parts = [p.strip() for p in key.split("+") if p.strip()]
+        return "+".join(_normalize_key(p) for p in parts)
+    low = key.lower()
+    if low in _KEY_ALIASES:
+        return _KEY_ALIASES[low]
+    if len(key) == 1:
+        return key
+    if re.fullmatch(r"f\d{1,2}", low):
+        return low.upper()
+    return key[:1].upper() + key[1:]
+
+
 def _first_visible(locator: Any) -> tuple[Any | None, int]:
     """Return (first visible element, total match count) for a locator."""
     count = locator.count()
@@ -248,8 +283,9 @@ class BrowserSession:
     def press(self, key: str) -> str:
         page = self._ensure_open()
         try:
-            page.keyboard.press(key)
-            return f"Pressed '{key}'."
+            normalized = _normalize_key(key)
+            page.keyboard.press(normalized)
+            return f"Pressed '{normalized}'."
         except Exception as e:
             return self._fail("press", e)
 
@@ -360,7 +396,11 @@ def desktop_type(text: str, interval: float = 0.01) -> str:
 def desktop_press(key: str) -> str:
     try:
         pyautogui = _init_pyautogui()
-        pyautogui.press(key)
-        return f"Pressed '{key}' on the desktop."
+        # pyautogui wants lowercase names ('down', 'pagedown', 'command').
+        k = key.strip().lower().replace(" ", "")
+        k = {"arrowdown": "down", "arrowup": "up", "arrowleft": "left", "arrowright": "right",
+             "control": "ctrl", "meta": "command", "cmd": "command", "return": "enter"}.get(k, k)
+        pyautogui.press(k)
+        return f"Pressed '{k}' on the desktop."
     except Exception as e:
         return f"Desktop press error: {e}"
