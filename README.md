@@ -39,7 +39,11 @@ Edit `config.json` to change the model, LoRA settings, or agent behavior:
 | `agent.temperature` | `0.1` | Sampling temperature (low for deterministic tool use) |
 | `lora.dropout` | `0.1` | LoRA dropout to reduce overfitting |
 | `lora.scale` | `5.0` | LoRA adapter scale |
-| `lora.iters` | `50` | LoRA training iterations |
+| `lora.iters` | `50` | LoRA iterations per training chunk |
+| `lora.adaptive` | `true` | Keep training in chunks while validation loss improves |
+| `lora.max_iters` | `200` | Hard cap on total adaptive iterations |
+| `lora.target_val_loss` | `0.05` | Stop early once validation loss reaches this |
+| `lora.min_improvement` | `0.02` | Stop when a chunk improves val loss less than this |
 | `learn.boost_factor` | `3` | Copies of a correction sample written to training data |
 | `learn.short_train_iters` | `10` | Iterations for the quick `/learn` fine-tune pass |
 
