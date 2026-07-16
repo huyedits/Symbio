@@ -320,6 +320,9 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
             "description": "Return the visible text of the current browser page.",
             "parameters": {"type": "object", "properties": {}},
             "readonly": True,
+            # Playwright's sync API binds to the thread that opened the
+            # browser; never run these on the parallel executor.
+            "serial": True,
             "run": lambda params, a=agent: _tool_browser_get_text(a, params),
         },
         {
@@ -327,6 +330,7 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
             "description": "Return the HTML of the current browser page.",
             "parameters": {"type": "object", "properties": {}},
             "readonly": True,
+            "serial": True,
             "run": lambda params, a=agent: _tool_browser_get_html(a, params),
         },
         {
@@ -960,23 +964,33 @@ def _tool_desktop_press(agent: AIAgent, args: dict[str, Any]) -> str:
     return desktop_press(args.get("key", ""))
 
 
+def _parallel_safe(meta: dict[str, Any]) -> bool:
+    """Read-only tools run in parallel unless they are thread-bound (serial)."""
+    return bool(meta.get("readonly")) and not meta.get("serial")
+
+
 def execute_tools(agent: AIAgent, tools: list[tuple[str, dict[str, Any]]]) -> list[tuple[str, str]]:
-    """Execute tools. Consecutive read-only tools run in parallel."""
+    """Execute tools. Consecutive parallel-safe read-only tools run concurrently."""
     results: list[tuple[str, str]] = []
     i = 0
     while i < len(tools):
         name, params = tools[i]
         meta = tool_metadata(name, agent.tools, agent)
-        if meta.get("readonly"):
+        if _parallel_safe(meta):
             group: list[tuple[int, str, dict[str, Any]]] = []
             j = i
             while j < len(tools):
                 n2, p2 = tools[j]
-                if tool_metadata(n2, agent.tools, agent).get("readonly"):
+                if _parallel_safe(tool_metadata(n2, agent.tools, agent)):
                     group.append((j, n2, p2))
                     j += 1
                 else:
                     break
+            if len(group) == 1:
+                _, n, p = group[0]
+                results.append((n, run_single_tool(agent, n, p)))
+                i = j
+                continue
             outs: list[tuple[str, str]] = [("", "")] * len(group)
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(group), 4)) as ex:
                 futures = {
