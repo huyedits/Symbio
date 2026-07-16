@@ -153,6 +153,20 @@ def _escape_json_control_chars(payload: str) -> str:
     return "".join(out)
 
 
+def _repair_tool_json(payload: str) -> str:
+    """Fix JSON malformations small models commonly emit in tool calls.
+
+    Only used after strict parsing fails, so valid payloads are never touched.
+    """
+    # Key missing its closing quote: {"url: "https://x"} -> {"url": "https://x"}
+    payload = re.sub(r'"(\w+): "', r'"\1": "', payload)
+    # Unquoted key: {name: "x"} -> {"name": "x"}
+    payload = re.sub(r'([{,]\s*)(\w+)(\s*:)', r'\1"\2"\3', payload)
+    # Trailing comma before a closing brace/bracket.
+    payload = re.sub(r',\s*([}\]])', r'\1', payload)
+    return payload
+
+
 def parse_tools(reply: str) -> list[tuple[str, dict[str, Any]]]:
     """Extract tool calls from model reply.
 
@@ -165,10 +179,14 @@ def parse_tools(reply: str) -> list[tuple[str, dict[str, Any]]]:
     for m in re.finditer(
         r'<tool_call\b[^>]*>(.*?)</tool_call>', reply, re.DOTALL | re.IGNORECASE
     ):
+        raw = _escape_json_control_chars(m.group(1).strip())
         try:
-            data = json.loads(_escape_json_control_chars(m.group(1).strip()))
+            data = json.loads(raw)
         except json.JSONDecodeError:
-            continue
+            try:
+                data = json.loads(_repair_tool_json(raw))
+            except json.JSONDecodeError:
+                continue
         name = data.get("name") or data.get("function")
         arguments = data.get("arguments") or data.get("args", {})
         if not isinstance(arguments, dict):
