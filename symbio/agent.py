@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,48 @@ except Exception:
 logger = logging.getLogger("chat")
 
 
+class _Spinner:
+    """Terminal spinner shown while waiting for visible model output.
+
+    Runs on a daemon thread and anchors itself with carriage returns; stop()
+    erases the line so streamed text can take its place. No-op when stdout
+    is not a TTY (tests, pipes).
+    """
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, label: str = "thinking…"):
+        self.label = label
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.active = sys.stdout.isatty()
+
+    def start(self):
+        if not self.active or self._thread is not None:
+            return
+        self._stop_event.clear()
+
+        def _spin():
+            i = 0
+            while not self._stop_event.wait(0.08):
+                frame = self._FRAMES[i % len(self._FRAMES)]
+                sys.stdout.write(f"\r{frame} {self.label}")
+                sys.stdout.flush()
+                i += 1
+
+        self._thread = threading.Thread(target=_spin, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._thread is None:
+            return
+        self._stop_event.set()
+        self._thread.join()
+        self._thread = None
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+
+
 class _StreamPrinter:
     """Incrementally print the visible (tool-markup-free) part of a streaming reply.
 
@@ -65,8 +108,9 @@ class _StreamPrinter:
     tool-only replies print nothing.
     """
 
-    def __init__(self, prefix: str):
+    def __init__(self, prefix: str, spinner: _Spinner | None = None):
         self.prefix = prefix
+        self.spinner = spinner
         self.printed = ""
         self.prefix_shown = False
 
@@ -80,6 +124,8 @@ class _StreamPrinter:
         if not delta:
             return
         if not self.prefix_shown:
+            if self.spinner is not None:
+                self.spinner.stop()
             sys.stdout.write(self.prefix)
             self.prefix_shown = True
         sys.stdout.write(delta)
@@ -154,18 +200,30 @@ class AIAgent:
         return run_single_tool(self, name, params)
 
     def _generate_stream(self, prompt: str, printer: _StreamPrinter | None) -> str:
-        """Generate a reply, echoing visible text to stdout as tokens arrive."""
+        """Generate a reply, echoing visible text to stdout as tokens arrive.
+
+        A spinner covers prompt processing and any stretch of non-visible
+        output (e.g. while a tool call is being written); it disappears the
+        moment the first visible character streams.
+        """
+        spinner = _Spinner()
+        if printer is not None:
+            printer.spinner = spinner
+        spinner.start()
         parts: list[str] = []
-        for response in stream_generate(
-            self.model,
-            self.tokenizer,
-            prompt=prompt,
-            sampler=self.sampler,
-            max_tokens=self.config["agent"].get("max_output_len", 1024),
-        ):
-            parts.append(response.text)
-            if printer is not None:
-                printer.update("".join(parts))
+        try:
+            for response in stream_generate(
+                self.model,
+                self.tokenizer,
+                prompt=prompt,
+                sampler=self.sampler,
+                max_tokens=self.config["agent"].get("max_output_len", 1024),
+            ):
+                parts.append(response.text)
+                if printer is not None:
+                    printer.update("".join(parts))
+        finally:
+            spinner.stop()
         return "".join(parts)
 
     def update_identity(self, assistant_name: str, user_name: str):
