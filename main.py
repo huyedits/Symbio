@@ -78,7 +78,7 @@ def load_config() -> dict[str, Any]:
     return config
 
 
-# Used when no per-user prompt.md exists; a local prompt.md overrides it.
+# Seeded into prompt.md on first run; edit that file to customize the prompt.
 DEFAULT_SYSTEM_PROMPT = """You are {assistant_name}, a helpful personal AI assistant with persistent memory.
 Your user is named {user_name}.
 
@@ -100,10 +100,11 @@ Guidelines:
 
 
 def build_system_prompt(assistant_name: str, user_name: str) -> str:
-    template = (
-        prompt.read_text(encoding="utf-8") if prompt.exists() else DEFAULT_SYSTEM_PROMPT
+    if not prompt.exists():
+        prompt.write_text(DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
+    return prompt.read_text(encoding="utf-8").format(
+        assistant_name=assistant_name, user_name=user_name
     )
-    return template.format(assistant_name=assistant_name, user_name=user_name)
 
 
 # --- Logger ---

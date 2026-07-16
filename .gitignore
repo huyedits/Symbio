@@ -24,7 +24,9 @@ training_data/tmp*.yaml
 
 # Per-user data: every install generates its own config, notes,
 # training corpus, and LoRA adapter on first run — never ship them.
+# prompt.md is seeded from DEFAULT_SYSTEM_PROMPT in main.py on first run.
 config.json
+prompt.md
 notes/
 training_data/
 adapters/

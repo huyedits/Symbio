@@ -58,16 +58,20 @@ def test_system_prompt_substitutes_names():
     print("test_system_prompt_substitutes_names passed")
 
 
-def test_system_prompt_falls_back_without_prompt_md():
+def test_system_prompt_seeds_missing_prompt_md():
     real_prompt = main.prompt
-    main.prompt = main.PROJECT_DIR / "prompt.md.does-not-exist"
+    seeded = main.PROJECT_DIR / "prompt.md.seedtest"
+    main.prompt = seeded
     try:
         sp = main.build_system_prompt("Caine", "Huy")
+        assert seeded.exists(), "prompt file was not seeded"
+        assert seeded.read_text(encoding="utf-8") == main.DEFAULT_SYSTEM_PROMPT
     finally:
         main.prompt = real_prompt
+        seeded.unlink(missing_ok=True)
     assert "Caine" in sp and "Huy" in sp, sp
     assert "<cmd>" in sp, sp
-    print("test_system_prompt_falls_back_without_prompt_md passed")
+    print("test_system_prompt_seeds_missing_prompt_md passed")
 
 
 def test_parse_and_strip_tool_tags():
@@ -127,7 +131,7 @@ def test_sandbox_blocks_dangerous_commands():
 def run_all():
     with preserve_training_state():
         test_system_prompt_substitutes_names()
-        test_system_prompt_falls_back_without_prompt_md()
+        test_system_prompt_seeds_missing_prompt_md()
         test_parse_and_strip_tool_tags()
         test_sandbox_blocks_dangerous_commands()
         test_agent_loop_feeds_observation_back()
