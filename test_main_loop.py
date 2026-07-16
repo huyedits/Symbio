@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """End-to-end tests for main.py's autonomous agent loop, driven by a scripted
-fake model so tool parsing, sandbox execution, observation feedback, and the
-max-rounds bound are exercised deterministically (no model load needed)."""
+fake model so tool parsing, sandbox execution, observation feedback, cron
+scheduling, and the max-rounds bound are exercised deterministically (no
+model load needed)."""
 import builtins
+from contextlib import contextmanager
+from datetime import datetime
 
 import main
 from test_utils import preserve_training_state
@@ -78,14 +81,94 @@ def test_parse_and_strip_tool_tags():
     reply = (
         "Sure. <note title='Coffee'>Huy likes coffee.</note>"
         "<cmd>echo hi</cmd><digest /><train />"
+        "<cron expr='*/5 * * * *'>hydrate</cron>"
+        "<cron at='2026-12-31 23:59'>happy new year</cron>"
     )
     tools = main.parse_tools(reply)
     names = [name for name, _ in tools]
-    assert names == ["write_note", "run_command", "digest_notes", "train_adapter"], names
+    assert names == [
+        "write_note", "run_command", "digest_notes", "train_adapter",
+        "schedule_job", "schedule_job",
+    ], names
     assert tools[0][1] == {"title": "Coffee", "body": "Huy likes coffee."}
     assert tools[1][1] == {"cmd": "echo hi"}
+    assert tools[4][1] == {"schedule": "*/5 * * * *", "text": "hydrate"}
+    assert tools[5][1] == {"schedule": "at 2026-12-31 23:59", "text": "happy new year"}
     assert main.strip_tool_tags(reply) == "Sure.", repr(main.strip_tool_tags(reply))
     print("test_parse_and_strip_tool_tags passed")
+
+
+@contextmanager
+def scratch_cron_file():
+    real_file = main.CRON_FILE
+    main.CRON_FILE = main.PROJECT_DIR / "cron_jobs.test.json"
+    try:
+        main.CRON_FILE.unlink(missing_ok=True)
+        yield
+    finally:
+        main.CRON_FILE.unlink(missing_ok=True)
+        main.CRON_FILE = real_file
+
+
+def test_cron_matching():
+    dt = datetime(2026, 7, 16, 9, 30)  # a Thursday
+    assert main.cron_matches("* * * * *", dt)
+    assert main.cron_matches("30 9 * * *", dt)
+    assert not main.cron_matches("31 9 * * *", dt)
+    assert main.cron_matches("*/15 * * * *", dt)
+    assert not main.cron_matches("*/7 * * * *", dt)
+    assert main.cron_matches("0-45 9 16 7 *", dt)
+    assert main.cron_matches("30 9 * * 4", dt)  # cron weekday: Thursday = 4
+    assert not main.cron_matches("30 9 * * 0", dt)
+    assert main.cron_matches("30 9 * * 0,4", dt)
+    assert main.validate_cron_expr("* * * *") is not None
+    assert main.validate_cron_expr("bogus * * * *") is not None
+    assert main.validate_cron_expr("*/10 8-18 * * 1-5") is None
+    print("test_cron_matching passed")
+
+
+def test_cron_jobs_fire_and_expire():
+    with scratch_cron_file():
+        config = main.load_config()
+        one_shot = main.add_cron_job("at 2026-01-01 09:00", "wish Huy a happy new year")
+        assert one_shot["schedule"] == "at 2026-01-01 09:00", one_shot
+        main.add_cron_job("*/5 * * * *", "cmd:echo cron-ok")
+
+        now = datetime(2026, 1, 1, 9, 5)
+        events = main.check_due_jobs(config, now=now)
+        assert any("happy new year" in e for e in events), events
+        assert any("cron-ok" in e for e in events), events
+
+        # One-shot is gone; recurring fires at most once per minute.
+        assert main.check_due_jobs(config, now=now) == []
+        events = main.check_due_jobs(config, now=datetime(2026, 1, 1, 9, 10))
+        assert len(events) == 1 and "cron-ok" in events[0], events
+
+        # Future one-shots stay quiet; bad schedules are rejected up front.
+        main.add_cron_job("at 2099-01-01 00:00", "far future")
+        assert main.check_due_jobs(config, now=datetime(2026, 1, 1, 9, 11)) == []
+        try:
+            main.add_cron_job("whenever", "x")
+            raise AssertionError("expected ValueError for bad schedule")
+        except ValueError:
+            pass
+    print("test_cron_jobs_fire_and_expire passed")
+
+
+def test_agent_loop_schedules_job_from_tag():
+    with scratch_cron_file():
+        session = ScriptedSession(
+            user_inputs=["Remind me every day at 9am to stretch.", "/quit", "n"],
+            model_replies=[
+                "Will do. <cron expr='0 9 * * *'>stretch</cron>",
+                "Scheduled it, Huy.",
+            ],
+        )
+        session.run()
+        jobs = main.load_cron_jobs()
+        assert len(jobs) == 1 and jobs[0]["schedule"] == "0 9 * * *", jobs
+        assert "Scheduled job" in session.prompts_seen[1], session.prompts_seen[1]
+    print("test_agent_loop_schedules_job_from_tag passed")
 
 
 def test_agent_loop_feeds_observation_back():
@@ -104,6 +187,8 @@ def test_agent_loop_feeds_observation_back():
     assert "[System observation:" in second, second
     assert "loop-e2e-marker" in second, second
     assert "exited ok" in second, second
+    # Every round grounds the model in wall-clock time.
+    assert "computer clock" in session.prompts_seen[0], session.prompts_seen[0]
     print("test_agent_loop_feeds_observation_back passed")
 
 
@@ -133,9 +218,12 @@ def run_all():
         test_system_prompt_substitutes_names()
         test_system_prompt_seeds_missing_prompt_md()
         test_parse_and_strip_tool_tags()
+        test_cron_matching()
+        test_cron_jobs_fire_and_expire()
         test_sandbox_blocks_dangerous_commands()
         test_agent_loop_feeds_observation_back()
         test_agent_loop_stops_at_max_rounds()
+        test_agent_loop_schedules_job_from_tag()
     print("\nAll main.py agent-loop tests passed.")
 
 
