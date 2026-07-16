@@ -1,0 +1,20 @@
+{
+  "dense_3b": {
+    "model_name": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+    "description": "Dense 3B — best tool-use accuracy, matches the trained LoRA adapter",
+    "adapter_compatible": true,
+    "memory_note": "~2 GB on disk, ~4-6 GB RAM at runtime"
+  },
+  "moe_a27b": {
+    "model_name": "mlx-community/Qwen1.5-MoE-A2.7B-Chat-4bit",
+    "description": "MoE 14.3B total / 2.7B active — experimental, weaker tool following",
+    "adapter_compatible": false,
+    "memory_note": "~8 GB on disk, ~8-10 GB RAM at runtime"
+  },
+  "dense_1.5b": {
+    "model_name": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+    "description": "Dense 1.5B — smallest/fastest dense option, no matching LoRA adapter",
+    "adapter_compatible": false,
+    "memory_note": "~1 GB on disk, ~2-3 GB RAM at runtime"
+  }
+}

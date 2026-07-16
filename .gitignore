@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+
+# Virtual environment
+venv/
+.env
+
+# OS
+.DS_Store
+
+# Claude Code session metadata
+.claude/
+
+# Project runtime outputs
+logs/
+*.log
+adapters.bak.*/
+training_data/*.bak.*
+training_data/tmp*.yaml
+
+# Per-user data: every install generates its own config, notes,
+# training corpus, and LoRA adapter on first run — never ship them.
+config.json
+notes/
+training_data/
+adapters/
+screenshots/
+sandbox/caine_tools.py
+sandbox/symbio_tools.py

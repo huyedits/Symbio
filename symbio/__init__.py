@@ -1,0 +1,103 @@
+"""Symbio: a personal, autonomous, self-fine-tuning AI assistant."""
+
+from symbio.agent import AIAgent
+from symbio.chat import build_system_prompt, chat_loop
+from symbio.config import (
+    detect_model_type,
+    list_model_presets,
+    load_config,
+    maybe_update_names_from_message,
+    save_config,
+    setup_names,
+    switch_model_preset,
+)
+from symbio.constants import (
+    ADAPTER_DIR,
+    CONFIG_FILE,
+    DATA_DIR,
+    DEFAULT_CONFIG,
+    DIGEST_MANIFEST,
+    LOG_DIR,
+    MISTAKES_ARCHIVE_DIR,
+    MISTAKES_DIR,
+    MODELS_FILE,
+    NOTES_DIR,
+    PROJECT_DIR,
+    SANDBOX_DIR,
+    SCREENSHOTS_DIR,
+    TRAIN_FILE,
+    VALID_FILE,
+)
+from symbio.learn import (
+    _archive_mistake_notes,
+    _digest_mistakes_to_training,
+    _find_correction_sample,
+    _is_correction,
+    _is_system_observation,
+    _looks_like_correction,
+    _mistake_note_count,
+    _safe_mistake_filename,
+    _save_mistake_note,
+    learn_from_last_correction,
+    maybe_train_on_mistakes,
+)
+from symbio.llm import (
+    append_chat_pair,
+    append_training_text,
+    build_chat_training_sample,
+    digest_notes_to_training,
+    prune_adapters,
+    run_training,
+    seed_training_data,
+)
+from symbio.sandbox import _is_code_safe, _run_execute_code, _run_sandboxed, _write_symbio_tools_stub
+from symbio.store import SessionStore
+from symbio.utils import (
+    parse_tools,
+    clean_response,
+    ensure_seed_notes,
+    save_note,
+    strip_generation_artifacts,
+    strip_tool_tags,
+)
+
+__all__ = [
+    "AIAgent",
+    "ADAPTER_DIR",
+    "CONFIG_FILE",
+    "DATA_DIR",
+    "DEFAULT_CONFIG",
+    "DIGEST_MANIFEST",
+    "LOG_DIR",
+    "MISTAKES_ARCHIVE_DIR",
+    "MISTAKES_DIR",
+    "MODELS_FILE",
+    "NOTES_DIR",
+    "PROJECT_DIR",
+    "SANDBOX_DIR",
+    "SCREENSHOTS_DIR",
+    "TRAIN_FILE",
+    "VALID_FILE",
+    "SessionStore",
+    "build_system_prompt",
+    "chat_loop",
+    "clean_response",
+    "detect_model_type",
+    "digest_notes_to_training",
+    "ensure_seed_notes",
+    "learn_from_last_correction",
+    "list_model_presets",
+    "load_config",
+    "maybe_train_on_mistakes",
+    "maybe_update_names_from_message",
+    "parse_tools",
+    "prune_adapters",
+    "run_training",
+    "save_config",
+    "save_note",
+    "seed_training_data",
+    "setup_names",
+    "strip_generation_artifacts",
+    "strip_tool_tags",
+    "switch_model_preset",
+]
