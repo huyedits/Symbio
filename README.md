@@ -1,6 +1,7 @@
 # Symbio
+Your machine, your way.
 
-A personal, autonomous, self-fine-tuning AI assistant for all, running on small MLX models with LoRA.
+Symbio develops as you tell it what to do in repeat.
 
 ## What it does
 
