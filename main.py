@@ -1,36 +1,761 @@
 #!/usr/bin/env python3
-"""Symbio: thin backward-compatible CLI entry point.
-
-This module re-exports the public API from the `symbio` package so existing
-scripts that do `from main import AIAgent, load_config` continue to work.
+"""Caine: a personal, autonomous, self-fine-tuning Hermes-style agent.
+and conversation via LoRA. Per-user identity is configurable in config.json
+or via CLI flags.
 """
 
 import argparse
+import hashlib
+import json
+import logging
+import os
+import re
+import shlex
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from mlx_lm import load
+from mlx_lm import load, generate
+from mlx_lm.sample_utils import make_sampler
 
-from symbio import (
-    AIAgent,
-    DEFAULT_CONFIG,
-    build_system_prompt,
-    chat_loop,
-    detect_model_type,
-    ensure_seed_notes,
-    load_config,
-    run_training,
-    save_config,
-    seed_training_data,
-    setup_names,
-)
-from symbio.config import _adapter_matches_model
-from symbio.constants import ADAPTER_DIR, CONFIG_FILE, TRAIN_FILE
+# ======================== PATHS =========================
+PROJECT_DIR = Path(__file__).parent.resolve()
+LOG_DIR = PROJECT_DIR / "logs"
+DATA_DIR = PROJECT_DIR / "training_data"
+TRAIN_FILE = DATA_DIR / "train.jsonl"
+ADAPTER_DIR = PROJECT_DIR / "adapters"
+NOTES_DIR = PROJECT_DIR / "notes"
+SANDBOX_DIR = PROJECT_DIR / "sandbox"
+DIGEST_MANIFEST = DATA_DIR / "digest_manifest.json"
+CONFIG_FILE = PROJECT_DIR / "config.json"
+prompt = PROJECT_DIR / "prompt.md"
+for d in (LOG_DIR, DATA_DIR, ADAPTER_DIR, NOTES_DIR, SANDBOX_DIR):
+    d.mkdir(parents=True, exist_ok=True)
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "model_name": "Qwen/Qwen3-0.6B",
+    "assistant_name": "Caine",
+    "user_name": "Huy",
+    "lora": {
+        "rank": 8,
+        "dropout": 0.0,
+        "scale": 20.0,
+        "num_layers": 8,
+        "batch_size": 1,
+        "learning_rate": 1e-4,
+        "iters": 300,
+        "max_seq_length": 512,
+        "steps_per_eval": 100,
+        "save_every": 100,
+    },
+    "agent": {
+        "max_tool_rounds": 5,
+        "history_limit": 40,
+        "sandbox_timeout": 30,
+        "max_output_len": 4000,
+        "temperature": 0.7,
+        "top_p": 0.9,
+    },
+}
+# ========================================================
+
+
+def load_config() -> dict[str, Any]:
+    """Load config.json if present; merge with sensible defaults."""
+    config = DEFAULT_CONFIG.copy()
+    if CONFIG_FILE.exists():
+        try:
+            user_config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            config.update(user_config)
+            if "lora" in user_config:
+                config["lora"] = {**DEFAULT_CONFIG["lora"], **user_config["lora"]}
+            if "agent" in user_config:
+                config["agent"] = {**DEFAULT_CONFIG["agent"], **user_config["agent"]}
+        except Exception as e:
+            print(f"[Config warning] Could not read {CONFIG_FILE}: {e}")
+    return config
+
+
+# Used when no per-user prompt.md exists; a local prompt.md overrides it.
+DEFAULT_SYSTEM_PROMPT = """You are {assistant_name}, a helpful personal AI assistant with persistent memory.
+Your user is named {user_name}.
+
+You can take actions by using special tags in your response:
+  <note title='T'>body</note> — save a markdown note
+  <cmd>command</cmd> — run a sandboxed shell command
+  <digest /> — convert unsaved notes to training data
+  <train /> — fine-tune your LoRA weights on accumulated knowledge
+
+Guidelines:
+- Write a note whenever {user_name} teaches you something important.
+- After writing 2+ new notes, call <digest /> then <train /> to remember them.
+- If {user_name} asks you to check the system, use <cmd>.
+- Talk normally outside the tags.
+- NEVER include internal reasoning, thinking, or analysis in your final reply.
+- Address {user_name} by name when it feels natural.
+- Keep replies concise unless asked for detail.
+"""
+
+
+def build_system_prompt(assistant_name: str, user_name: str) -> str:
+    template = (
+        prompt.read_text(encoding="utf-8") if prompt.exists() else DEFAULT_SYSTEM_PROMPT
+    )
+    return template.format(assistant_name=assistant_name, user_name=user_name)
+
+
+# --- Logger ---
+chat_logger = logging.getLogger("chat")
+chat_logger.setLevel(logging.INFO)
+chat_logger.propagate = False
+log_path = LOG_DIR / f"chat_{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
+fh = logging.FileHandler(log_path)
+fh.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
+chat_logger.addHandler(fh)
+# ========================================================
+
+
+# Common thinking/reasoning delimiters that must never reach the user or training data.
+_THINKING_PATTERNS = [
+    r"<thinking\b[^>]*>.*?</thinking>",
+    r"</?thinking\b[^>]*>.*?</?thinking>",
+    r"<analysis\b[^>]*>.*?</analysis>",
+    r"<reasoning\b[^>]*>.*?</reasoning>",
+    r"<think\b[^>]*>.*?</think>",
+    r" thinking\s+.*?/thinking",
+    r"\bthinking\s*:?\s*\n.*?\n/?thinking",
+    r"\breasoning\s*:?\s*\n.*?\n/?reasoning",
+]
+
+
+def clean_response(text: str) -> str:
+    for pattern in _THINKING_PATTERNS:
+        text = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"^Assistant:\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^user:\s*", "", text, flags=re.IGNORECASE)
+    # Collapse multiple blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int):
+    note_count = len(list(NOTES_DIR.glob("*.md")))
+    print("\n" + "=" * 50)
+    print(f"  {config['assistant_name'].upper()} — PERSONAL CHAT-FINETUNE CLI")
+    print(f"   Model  : {config['model_name']}")
+    print(f"   User   : {config['user_name']}")
+    print(f"   LoRA   : {'YES' if adapter_loaded else 'None (base)'}")
+    print(f"   Data   : {dataset_size:,} bytes")
+    print(f"   Notes  : {note_count}")
+    print("-" * 50)
+    print("Commands: /quit  /save  /train  /forget_last  /status  /prune")
+    print("         /run <cmd>  /note [title]  /notes  /digest")
+    print("  (Caine can also use <note>, <cmd>, <digest />, <train /> by itself)")
+    print("-" * 50)
+
+
+def append_training_text(text: str):
+    with open(TRAIN_FILE, "a", encoding="utf-8") as f:
+        json.dump({"text": text}, f)
+        f.write("\n")
+
+
+def build_chat_training_sample(messages: list[dict[str, str]], tokenizer) -> str:
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+        enable_thinking=False,
+    )
+
+
+def append_chat_pair(user_msg: str, assistant_msg: str, tokenizer, system_prompt: str):
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_msg},
+        {"role": "assistant", "content": clean_response(assistant_msg)},
+    ]
+    append_training_text(build_chat_training_sample(messages, tokenizer))
+
+
+def digest_notes_to_training(tokenizer, system_prompt: str) -> int:
+    files = sorted(NOTES_DIR.glob("*.md"))
+    if not files:
+        return 0
+
+    manifest: dict[str, str] = {}
+    if DIGEST_MANIFEST.exists():
+        try:
+            manifest = json.loads(DIGEST_MANIFEST.read_text())
+        except Exception:
+            manifest = {}
+
+    added = 0
+    new_manifest = {}
+
+    for f in files:
+        content = f.read_text(encoding="utf-8").strip()
+        if not content:
+            continue
+
+        h = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        new_manifest[f.name] = h
+        if manifest.get(f.name) == h:
+            continue
+
+        lines = content.splitlines()
+        title = f.stem.replace("_", " ")
+        body = content
+        if lines and lines[0].startswith("# "):
+            title = lines[0][2:].strip()
+            body = "\n".join(lines[1:]).strip()
+
+        if len(body) < 5:
+            continue
+
+        topic = title.replace("_", " ").replace("-", " ")
+
+        # Direct note reproduction
+        messages_doc = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Write a markdown note titled '{title}'."},
+            {"role": "assistant", "content": body},
+        ]
+        append_training_text(build_chat_training_sample(messages_doc, tokenizer))
+
+        # Question/answer from notes
+        messages_qa = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"According to your notes, what do you know about '{topic}'?"},
+            {"role": "assistant", "content": body},
+        ]
+        append_training_text(build_chat_training_sample(messages_qa, tokenizer))
+
+        added += 2
+
+    DIGEST_MANIFEST.write_text(json.dumps(new_manifest, indent=2))
+    return added
+
+
+def run_sandboxed(command: str, config: dict[str, Any]):
+    command = command.strip()
+    if not command:
+        return False, "Empty command."
+    try:
+        args = shlex.split(command)
+    except ValueError as e:
+        return False, f"Parse error: {e}"
+    if not args:
+        return False, "Empty command."
+
+    blocked = {
+        "rm", "sudo", "su", "dd", "mkfs", "fdisk", "mount", "umount",
+        "chmod", "chown", "curl", "wget", "ssh", "scp", "bash", "sh", "zsh",
+        "fish", "python", "python3", "perl", "ruby", "php", "node", "npm",
+    }
+    if args[0] in blocked:
+        return False, f"'{args[0]}' is blocked in sandbox."
+
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=config["agent"]["sandbox_timeout"],
+            cwd=SANDBOX_DIR,
+            shell=False,
+        )
+        out = result.stdout
+        if result.stderr:
+            out += "\n" + result.stderr
+        out = out.strip()
+        max_len = config["agent"]["max_output_len"]
+        if len(out) > max_len:
+            out = out[:max_len] + "\n... (truncated)"
+        return result.returncode == 0, out
+    except subprocess.TimeoutExpired:
+        return False, f"Timed out after {config['agent']['sandbox_timeout']}s."
+    except FileNotFoundError:
+        return False, f"Command not found: {args[0]}"
+    except Exception as e:
+        return False, str(e)
+
+
+def save_note(title: str, body: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in (" ", "-", "_") else "_" for c in title)
+    safe = safe.strip().replace(" ", "_")[:40]
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = NOTES_DIR / f"{ts}_{safe}.md"
+    path.write_text(f"# {title}\n\n{body}\n", encoding="utf-8")
+    return path
+
+
+def ensure_seed_notes(config: dict[str, Any]):
+    """If notes/ is empty, seed the two identity facts as markdown notes."""
+    if any(NOTES_DIR.glob("*.md")):
+        return
+    save_note("My Identity", f"I am {config['assistant_name']}, a helpful personal AI assistant.")
+    save_note("User Identity", f"My user's name is {config['user_name']}.")
+
+
+def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
+    """Seed a minimal clean corpus so the model has correct identity/tool examples
+    even before any real conversation is saved."""
+    if TRAIN_FILE.exists() and TRAIN_FILE.stat().st_size > 0:
+        return
+
+    assistant = config["assistant_name"]
+    user = config["user_name"]
+
+    samples = [
+        # Identity
+        (
+            f"What is your name?",
+            f"I am {assistant}, your personal AI assistant.",
+        ),
+        (
+            f"My name is {user}.",
+            f"Nice to meet you, {user}! I'll remember that. <note title='User Identity'>{user} is my user's name.</note>",
+        ),
+        (
+            f"What is my name?",
+            f"Your name is {user}, {user}.",
+        ),
+        # Tool-use demonstration
+        (
+            "Please remember that I prefer concise replies.",
+            "Got it. <note title='User Preference'>The user prefers concise replies.</note>",
+        ),
+        (
+            "Save your notes and train on them.",
+            "<digest /><train />I'll digest the notes and start training so they stick.",
+        ),
+    ]
+
+    for user_msg, assistant_msg in samples:
+        append_chat_pair(user_msg, assistant_msg, tokenizer, system_prompt)
+
+
+def run_training(config: dict[str, Any]) -> bool:
+    if not TRAIN_FILE.exists() or TRAIN_FILE.stat().st_size == 0:
+        print("  [System] No training data available.")
+        return False
+
+    lora = config["lora"]
+    print("\n  [System] Starting MLX LoRA Fine-Tuning\n")
+    cmd = [
+        sys.executable, "-m", "mlx_lm", "lora",
+        "--model", config["model_name"],
+        "--train",
+        "--data", str(DATA_DIR),
+        "--batch-size", str(lora["batch_size"]),
+        "--num-layers", str(lora["num_layers"]),
+        "--iters", str(lora["iters"]),
+        "--learning-rate", str(lora["learning_rate"]),
+        "--steps-per-eval", str(lora["steps_per_eval"]),
+        "--max-seq-length", str(lora["max_seq_length"]),
+        "--adapter-path", str(ADAPTER_DIR),
+        "--save-every", str(lora["save_every"]),
+        "--lora-rank", str(lora["rank"]),
+        "--lora-dropout", str(lora["dropout"]),
+        "--lora-scale", str(lora["scale"]),
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError:
+        print("  [System] Training failed.")
+        return False
+    except KeyboardInterrupt:
+        print("  [System] Training stopped.")
+        return False
+
+    config_file = ADAPTER_DIR / "adapter_config.json"
+    weight_files = list(ADAPTER_DIR.glob("adapters.*"))
+    if not config_file.exists() or not weight_files:
+        print("  [System] Adapter files missing after training.")
+        return False
+
+    adapter_kb = sum(f.stat().st_size for f in ADAPTER_DIR.iterdir() if f.is_file()) // 1024
+    print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB")
+    return True
+
+
+def prune_adapters() -> dict[str, Any]:
+    """Remove intermediate checkpoints and report adapter footprint."""
+    removed = []
+    for cp in ADAPTER_DIR.glob("[0-9]*_adapters.*"):
+        cp.unlink()
+        removed.append(cp.name)
+
+    total_bytes = sum(f.stat().st_size for f in ADAPTER_DIR.iterdir() if f.is_file())
+    return {
+        "removed": removed,
+        "total_kb": total_bytes // 1024,
+        "files": [f.name for f in ADAPTER_DIR.iterdir() if f.is_file()],
+    }
+
+
+def parse_tools(reply: str) -> list[tuple[str, dict[str, Any]]]:
+    """Extract tool calls from the model reply."""
+    tools: list[tuple[str, dict[str, Any]]] = []
+
+    for m in re.finditer(
+        r'<note\s+title=[\'"]([^\'"]*?)[\'"]>(.*?)</note>', reply, re.DOTALL
+    ):
+        tools.append(("write_note", {
+            "title": m.group(1).strip(),
+            "body": m.group(2).strip(),
+        }))
+
+    for m in re.finditer(r'<cmd>(.*?)</cmd>', reply, re.DOTALL):
+        tools.append(("run_command", {"cmd": m.group(1).strip()}))
+
+    if re.search(r'<digest\s*/>', reply) or re.search(r'<digest></digest>', reply):
+        tools.append(("digest_notes", {}))
+
+    if re.search(r'<train\s*/>', reply) or re.search(r'<train></train>', reply):
+        tools.append(("train_adapter", {}))
+
+    return tools
+
+
+def strip_tool_tags(reply: str) -> str:
+    display = reply
+    display = re.sub(r'<note\s+title=[\'"][^\'"]*?[\'"]>(.*?)</note>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<cmd>(.*?)</cmd>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<digest\s*/>', '', display)
+    display = re.sub(r'<digest></digest>', '', display)
+    display = re.sub(r'<train\s*/>', '', display)
+    display = re.sub(r'<train></train>', '', display)
+    return clean_response(display)
+
+
+def save_history_pairs(history: list[dict[str, str]], tokenizer, system_prompt: str) -> int:
+    """Save clean (user, assistant) pairs from history to training data."""
+    saved_count = 0
+    i = 0
+    while i < len(history):
+        if (
+            history[i]["role"] == "user"
+            and not history[i]["content"].startswith("[System observation:")
+        ):
+            if i + 1 < len(history) and history[i + 1]["role"] == "assistant":
+                # Build context: up to 3 prior clean pairs
+                context = []
+                j = i - 1
+                pairs = 0
+                while j >= 1 and pairs < 3:
+                    if (
+                        history[j]["role"] == "assistant"
+                        and history[j - 1]["role"] == "user"
+                        and not history[j - 1]["content"].startswith("[System observation:")
+                    ):
+                        context.insert(0, {
+                            "user": history[j - 1]["content"],
+                            "assistant": clean_response(history[j]["content"]),
+                        })
+                        j -= 2
+                        pairs += 1
+                    else:
+                        j -= 1
+
+                messages = [{"role": "system", "content": system_prompt}]
+                for turn in context:
+                    messages.append({"role": "user", "content": turn["user"]})
+                    messages.append({"role": "assistant", "content": turn["assistant"]})
+                messages.append({"role": "user", "content": history[i]["content"]})
+                messages.append(
+                    {"role": "assistant", "content": clean_response(history[i + 1]["content"])}
+                )
+
+                append_training_text(build_chat_training_sample(messages, tokenizer))
+                saved_count += 1
+                i += 2
+                continue
+        i += 1
+    return saved_count
+
+
+def chat_loop(config: dict[str, Any]):
+    print(" Loading model...")
+    sampler = make_sampler(
+        temp=config["agent"]["temperature"],
+        top_p=config["agent"]["top_p"],
+    )
+    system_prompt = build_system_prompt(config["assistant_name"], config["user_name"])
+    adapter_config = ADAPTER_DIR / "adapter_config.json"
+
+    if adapter_config.exists():
+        print(" Found existing adapter. Loading it...")
+        try:
+            model, tokenizer = load(config["model_name"], adapter_path=str(ADAPTER_DIR))
+        except Exception as e:
+            print(f" Could not load adapter: {e}")
+            print(" Falling back to base model...")
+            model, tokenizer = load(config["model_name"])
+    else:
+        model, tokenizer = load(config["model_name"])
+
+    # Seed identity notes + clean training corpus on first run.
+    ensure_seed_notes(config)
+    seed_training_data(tokenizer, system_prompt, config)
+
+    dataset_size = TRAIN_FILE.stat().st_size if TRAIN_FILE.exists() else 0
+    print_banner(config, adapter_config.exists(), dataset_size)
+
+    history: list[dict[str, str]] = []
+
+    while True:
+        try:
+            user_input = input(f"{config['user_name']:8}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            user_input = "/quit"
+
+        # ---- Manual Slash Commands (overrides) ----
+        if user_input.startswith("/"):
+            cmd = user_input.lower()
+
+            if cmd in ("/quit", "/q", "/exit"):
+                print(" Exiting chat.")
+                break
+
+            elif cmd == "/forget_last":
+                removed = 0
+                while history and history[-1]["role"] == "assistant":
+                    history.pop()
+                    removed += 1
+                while (
+                    history
+                    and history[-1]["role"] == "user"
+                    and not history[-1]["content"].startswith("[System observation:")
+                ):
+                    history.pop()
+                    removed += 1
+                print(f"  Forgot last exchange." if removed else " Nothing to forget.")
+                continue
+
+            elif cmd == "/save":
+                if not history:
+                    print(" Nothing to save yet.")
+                else:
+                    saved_count = save_history_pairs(history, tokenizer, system_prompt)
+                    print(f" Saved {saved_count} exchange(s) to training data.")
+                continue
+
+            elif cmd == "/train":
+                trained = run_training(config)
+                if trained and adapter_config.exists():
+                    print("\n Reloading model with updated adapter...")
+                    try:
+                        model, tokenizer = load(config["model_name"], adapter_path=str(ADAPTER_DIR))
+                        print("  Adapter reloaded.")
+                    except Exception as e:
+                        print(f" Could not reload adapter: {e}")
+                continue
+
+            elif cmd == "/digest":
+                added = digest_notes_to_training(tokenizer, system_prompt)
+                if added:
+                    print(f"  Digested {added} new note samples into training data.")
+                else:
+                    print("  No new or changed notes to digest.")
+                continue
+
+            elif cmd.startswith("/run"):
+                shell_cmd = user_input[4:].strip()
+                if not shell_cmd:
+                    print("  Usage: /run <command>")
+                    continue
+                print(f"\n  $ {shell_cmd}")
+                ok, output = run_sandboxed(shell_cmd, config)
+                status = "ok" if ok else "err"
+                print(f"  [{status}]")
+                for line in output.splitlines():
+                    print(f"  {line}")
+                append_chat_pair(
+                    user_msg=f"Run this sandbox command and show the output:\n{shell_cmd}",
+                    assistant_msg=output,
+                    tokenizer=tokenizer,
+                    system_prompt=system_prompt,
+                )
+                print("  -> Logged to training data.\n")
+                continue
+
+            elif cmd.startswith("/note"):
+                title = user_input[5:].strip()
+                if not title:
+                    title = input("  Note title: ").strip()
+                if not title:
+                    print("  Cancelled.")
+                    continue
+                body = ""
+                print("  Content (empty line to finish):")
+                try:
+                    while True:
+                        line = input()
+                        if line == "":
+                            break
+                        body += line + "\n"
+                except (EOFError, KeyboardInterrupt):
+                    pass
+                if not body.strip():
+                    print("  Empty note, cancelled.")
+                    continue
+                path = save_note(title, body.strip())
+                print(f"  Saved: {path.name}")
+                continue
+
+            elif cmd == "/notes":
+                files = sorted(NOTES_DIR.glob("*.md"))
+                if not files:
+                    print("  No notes yet.")
+                else:
+                    print(f"  {len(files)} note(s):")
+                    for f in files:
+                        print(f"    - {f.name}")
+                continue
+
+            elif cmd == "/status":
+                files = sorted(NOTES_DIR.glob("*.md"))
+                data_size = TRAIN_FILE.stat().st_size if TRAIN_FILE.exists() else 0
+                adapter_files = list(ADAPTER_DIR.glob("adapters.*"))
+                adapter_kb = sum(f.stat().st_size for f in ADAPTER_DIR.iterdir() if f.is_file()) // 1024
+                print(f"  Model: {config['model_name']}")
+                print(f"  Assistant: {config['assistant_name']} | User: {config['user_name']}")
+                print(f"  Notes: {len(files)}")
+                print(f"  Training data: {data_size:,} bytes")
+                print(f"  Adapter loaded: {'YES' if adapter_config.exists() else 'NO'}")
+                print(f"  Adapter files: {len(adapter_files)} ({adapter_kb:,} KB)")
+                continue
+
+            elif cmd == "/prune":
+                info = prune_adapters()
+                if info["removed"]:
+                    print(f"  Removed {len(info['removed'])} stale checkpoint(s):")
+                    for name in info["removed"]:
+                        print(f"    - {name}")
+                else:
+                    print("  No stale checkpoints to remove.")
+                print(f"  Current adapter footprint: {info['total_kb']:,} KB")
+                print("  Note: mlx_lm LoRA adapters do not support true weight pruning; keeping rank low and removing checkpoints is the practical way to stay small.")
+                continue
+
+            else:
+                print("  Unknown command.")
+                continue
+
+        if not user_input:
+            continue
+
+        chat_logger.info(f"User: {user_input}")
+        history.append({"role": "user", "content": user_input})
+
+        # ---- Autonomous Agent Loop ----
+        max_rounds = config["agent"]["max_tool_rounds"]
+        for round_num in range(max_rounds):
+            messages = [{"role": "system", "content": system_prompt}]
+            messages.extend(history[-config["agent"]["history_limit"]:])
+
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+
+            try:
+                raw_reply = generate(model, tokenizer, prompt=prompt, sampler=sampler, verbose=False)
+                reply = raw_reply.strip()
+            except Exception as e:
+                print(f"[MLX Error: {e}]")
+                break
+
+            tools = parse_tools(reply)
+            display = strip_tool_tags(reply)
+
+            if display.strip():
+                print(f"{config['assistant_name']:8}: {display}")
+                chat_logger.info(f"{config['assistant_name']}: {display}")
+
+            if not tools:
+                # Normal turn: store assistant reply and wait for next user input
+                history.append({"role": "assistant", "content": reply})
+                while len(history) > config["agent"]["history_limit"] + 8:
+                    history.pop(0)
+                break
+
+            # There are tools to execute
+            history.append({"role": "assistant", "content": reply})
+
+            observations = []
+            for name, params in tools:
+                print(f"  [Tool: {name}]")
+
+                if name == "write_note":
+                    try:
+                        p = save_note(params["title"], params["body"])
+                        observations.append(f"Saved note: {p.name}")
+                    except Exception as e:
+                        observations.append(f"Failed to save note: {e}")
+
+                elif name == "run_command":
+                    ok, out = run_sandboxed(params["cmd"], config)
+                    observations.append(
+                        f"Command '{params['cmd']}' exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
+                    )
+
+                elif name == "digest_notes":
+                    try:
+                        cnt = digest_notes_to_training(tokenizer, system_prompt)
+                        observations.append(f"Digested {cnt} new training samples from notes.")
+                    except Exception as e:
+                        observations.append(f"Digest error: {e}")
+
+                elif name == "train_adapter":
+                    trained = run_training(config)
+                    if trained and adapter_config.exists():
+                        try:
+                            model, tokenizer = load(config["model_name"], adapter_path=str(ADAPTER_DIR))
+                            observations.append("Training complete. Adapter reloaded.")
+                        except Exception as e:
+                            observations.append(f"Training done but reload failed: {e}")
+                    else:
+                        observations.append("Training skipped (no new data or failed).")
+
+            # Feed observations back as a system/user turn
+            obs_text = "\n".join(observations)
+            print(f"  [Observation] {obs_text.replace(chr(10), chr(10) + '  ')}")
+            history.append({"role": "user", "content": f"[System observation: {obs_text}]"})
+
+            while len(history) > config["agent"]["history_limit"] + 8:
+                history.pop(0)
+
+        # End agent loop
+
+    # ---- End of Session ----
+    if history:
+        save = input("\n Save conversation for training? [y/N]: ").strip().lower()
+        if save in ("y", "yes"):
+            saved_count = save_history_pairs(history, tokenizer, system_prompt)
+            print(f"    Appended {saved_count} exchange(s) to {TRAIN_FILE}")
+
+            if input("  Train now? [y/N]: ").strip().lower() in ("y", "yes"):
+                trained = run_training(config)
+                if trained and adapter_config.exists():
+                    print("\n Reloading model...")
+                    try:
+                        model, tokenizer = load(config["model_name"], adapter_path=str(ADAPTER_DIR))
+                    except Exception as e:
+                        print(f" Could not reload: {e}")
 
 
 def main():
     config = load_config()
 
-    parser = argparse.ArgumentParser(description="Symbio: Autonomous Chat + LoRA")
+    parser = argparse.ArgumentParser(description="Caine: Autonomous Chat + LoRA")
     parser.add_argument("--train", action="store_true", help="Run training and exit")
     parser.add_argument("--model", type=str, default=config["model_name"], help="Base model")
     parser.add_argument("--assistant-name", type=str, default=config["assistant_name"], help="Assistant name")
@@ -42,31 +767,11 @@ def main():
     config["user_name"] = args.user_name
 
     if args.train:
-        print(" Loading model to detect architecture...")
-        model, _ = load(config["model_name"])
-        model_type = detect_model_type(model)
-        print(f" Model type: {model_type}")
-        run_training(config, model_type=model_type)
+        run_training(config)
     else:
         chat_loop(config)
 
 
-# Re-export the public API so `from main import ...` keeps working.
-__all__ = [
-    "AIAgent",
-    "DEFAULT_CONFIG",
-    "_adapter_matches_model",
-    "build_system_prompt",
-    "chat_loop",
-    "detect_model_type",
-    "ensure_seed_notes",
-    "load_config",
-    "main",
-    "run_training",
-    "save_config",
-    "seed_training_data",
-    "setup_names",
-]
 
 if __name__ == "__main__":
     main()
