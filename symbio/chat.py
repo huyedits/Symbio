@@ -1,6 +1,7 @@
 """System prompt, banner, response cleaning, and CLI chat loop for Symbio."""
 
 import logging
+import sys
 from datetime import datetime
 from typing import Any
 
@@ -367,6 +368,12 @@ def chat_loop(config: dict[str, Any]):
                 continue
 
         if not user_input:
+            # Empty Enter: move the cursor back up and clear the line so the
+            # prompt stays anchored instead of stacking a new "name:" line.
+            # Nothing is logged, persisted, or sent to the model.
+            if sys.stdout.isatty():
+                sys.stdout.write("\033[F\033[K")
+                sys.stdout.flush()
             continue
 
         # Detect in-conversation name changes (e.g. "My name is Alice" or "Your name is Jarvis").

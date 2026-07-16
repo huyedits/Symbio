@@ -44,7 +44,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "batch_size": 1,
         "learning_rate": 1e-4,
         "iters": 50,
-        "max_seq_length": 1024,
+        # Every sample carries the full system prompt (~800 tokens); 1024
+        # truncated long samples mid-reply, which trains truncated outputs.
+        "max_seq_length": 2048,
         "steps_per_eval": 25,
         "save_every": 50,
     },
