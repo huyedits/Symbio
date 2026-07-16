@@ -217,19 +217,14 @@ We are actively looking for help on:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and how to open issues/PRs.
 
-## Training from notes
-
-After saving notes with `/note` or `<note>`:
-
 
  > future projection <
 - [ ] **Add MCP (Model Context Protocol)**
 - [ ] **Add More Tools**
 - [ ] **Add Other Messaging Platforms**
 - [ ] **Prune Old Weights (Future Milestone)**
-```
-/digest
-/train
-```
+
+[![GitHub stars](https://shields.io)](https://github.com)
+
 
 This converts notes into training samples and runs LoRA fine-tuning.
