@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from mlx_lm import generate, load
+from mlx_lm import load, stream_generate
 from mlx_lm.sample_utils import make_sampler
 
 from symbio.chat import build_system_prompt
@@ -54,6 +55,53 @@ except Exception:
 
 
 logger = logging.getLogger("chat")
+
+
+class _StreamPrinter:
+    """Incrementally print the visible (tool-markup-free) part of a streaming reply.
+
+    Tool calls and other tags are suppressed live via strip_tool_tags; the
+    name prefix is only shown once the first visible character arrives, so
+    tool-only replies print nothing.
+    """
+
+    def __init__(self, prefix: str):
+        self.prefix = prefix
+        self.printed = ""
+        self.prefix_shown = False
+
+    def update(self, full_text: str):
+        visible = strip_tool_tags(full_text)
+        # Only print monotonic extensions; cleanup can transiently shrink the
+        # visible text while a tag is being generated.
+        if not visible or not visible.startswith(self.printed):
+            return
+        delta = visible[len(self.printed):]
+        if not delta:
+            return
+        if not self.prefix_shown:
+            sys.stdout.write(self.prefix)
+            self.prefix_shown = True
+        sys.stdout.write(delta)
+        sys.stdout.flush()
+        self.printed = visible
+
+    def close(self, final_display: str) -> bool:
+        """Reconcile streamed output with the final cleaned text.
+
+        Returns True if the reply is now fully printed on screen.
+        """
+        if not self.prefix_shown:
+            return False
+        if final_display.startswith(self.printed):
+            sys.stdout.write(final_display[len(self.printed):] + "\n")
+        else:
+            # A retry or final cleanup diverged from what was streamed;
+            # reprint the canonical line so the transcript is correct.
+            sys.stdout.write("\n" + self.prefix + final_display + "\n")
+        sys.stdout.flush()
+        self.printed = final_display
+        return True
 
 
 class AIAgent:
@@ -104,6 +152,21 @@ class AIAgent:
 
     def _run_single_tool(self, name: str, params: dict[str, Any]) -> str:
         return run_single_tool(self, name, params)
+
+    def _generate_stream(self, prompt: str, printer: _StreamPrinter | None) -> str:
+        """Generate a reply, echoing visible text to stdout as tokens arrive."""
+        parts: list[str] = []
+        for response in stream_generate(
+            self.model,
+            self.tokenizer,
+            prompt=prompt,
+            sampler=self.sampler,
+            max_tokens=self.config["agent"].get("max_output_len", 1024),
+        ):
+            parts.append(response.text)
+            if printer is not None:
+                printer.update("".join(parts))
+        return "".join(parts)
 
     def update_identity(self, assistant_name: str, user_name: str):
         self.config["assistant_name"] = assistant_name
@@ -159,15 +222,13 @@ class AIAgent:
             reply = ""
             tools: list[tuple[str, dict[str, Any]]] = []
             mlx_error = False
+            printer = _StreamPrinter(f"{self.config['assistant_name']:8}: ")
             for _attempt in range(2):
                 try:
-                    raw_reply = generate(
-                        self.model,
-                        self.tokenizer,
-                        prompt=prompt,
-                        sampler=self.sampler,
-                        verbose=False,
-                        max_tokens=self.config["agent"].get("max_output_len", 1024),
+                    # Stream only the first attempt; a retry reconciles later
+                    # via printer.close() so text is never shown twice.
+                    raw_reply = self._generate_stream(
+                        prompt, printer if _attempt == 0 else None
                     )
                 except Exception as e:
                     print(f"[MLX Error: {e}]")
@@ -204,8 +265,12 @@ class AIAgent:
             final_text = display
 
             if display.strip():
-                print(f"{self.config['assistant_name']:8}: {display}")
+                if not printer.close(display):
+                    print(f"{self.config['assistant_name']:8}: {display}")
                 logger.info(f"{self.config['assistant_name']}: {display}")
+            elif printer.prefix_shown:
+                # Streamed text that cleanup later removed; end the line.
+                print()
 
             self.history.append({"role": "assistant", "content": reply})
             self._persist_turn("assistant", reply)
