@@ -196,13 +196,32 @@ def test_agent_loop_feeds_observation_back():
 def test_agent_loop_stops_at_max_rounds():
     config = main.load_config()
     max_rounds = config["agent"]["max_tool_rounds"]
+    # Distinct commands each round so the repeat guard doesn't cut in early.
     session = ScriptedSession(
         user_inputs=["Keep running commands forever.", "/quit", "n"],
-        model_replies=["<cmd>echo again</cmd>"] * (max_rounds + 5),
+        model_replies=[f"<cmd>echo round{i}</cmd>" for i in range(max_rounds + 5)],
     )
     session.run()
     assert len(session.prompts_seen) == max_rounds, len(session.prompts_seen)
     print("test_agent_loop_stops_at_max_rounds passed")
+
+
+def test_agent_loop_breaks_on_repeated_tool_call():
+    session = ScriptedSession(
+        user_inputs=["what is the latest news?", "/quit", "n"],
+        model_replies=["Here you go. <cmd>echo same-call</cmd>"] * 10,
+    )
+    session.run()
+    # Round 1 executes the command; round 2 repeats it verbatim -> loop ends.
+    assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+    print("test_agent_loop_breaks_on_repeated_tool_call passed")
+
+
+def test_strip_unterminated_tag():
+    cut_off = "Here are the stories:\n1. Big story — <cmd>open 'https://example.com/very/long"
+    assert main.strip_tool_tags(cut_off) == "Here are the stories:\n1. Big story —"
+    assert main.parse_tools(cut_off) == []
+    print("test_strip_unterminated_tag passed")
 
 
 def test_execute_code_tool():
@@ -344,6 +363,8 @@ def run_all():
         test_sandbox_blocks_dangerous_commands()
         test_agent_loop_feeds_observation_back()
         test_agent_loop_stops_at_max_rounds()
+        test_agent_loop_breaks_on_repeated_tool_call()
+        test_strip_unterminated_tag()
         test_agent_loop_schedules_job_from_tag()
     print("\nAll main.py agent-loop tests passed.")
 
