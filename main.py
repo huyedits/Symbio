@@ -5,6 +5,7 @@ or via CLI flags.
 """
 
 import argparse
+import ast
 import hashlib
 import json
 import logging
@@ -24,6 +25,8 @@ from typing import Any
 import yaml
 from mlx_lm import load, generate
 from mlx_lm.sample_utils import make_sampler
+
+from rag import Retriever
 
 # ======================== PATHS =========================
 PROJECT_DIR = Path(__file__).parent.resolve()
@@ -60,9 +63,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_tool_rounds": 5,
         "history_limit": 40,
         "sandbox_timeout": 30,
+        "code_timeout": 60,
         "max_output_len": 4000,
         "temperature": 0.7,
         "top_p": 0.9,
+    },
+    "rag": {
+        "enabled": True,
+        "top_k": 5,
+        "max_context_tokens": 1500,
+        "sources": ["notes"],
     },
 }
 # ========================================================
@@ -79,6 +89,8 @@ def load_config() -> dict[str, Any]:
                 config["lora"] = {**DEFAULT_CONFIG["lora"], **user_config["lora"]}
             if "agent" in user_config:
                 config["agent"] = {**DEFAULT_CONFIG["agent"], **user_config["agent"]}
+            if "rag" in user_config:
+                config["rag"] = {**DEFAULT_CONFIG["rag"], **user_config["rag"]}
         except Exception as e:
             print(f"[Config warning] Could not read {CONFIG_FILE}: {e}")
     return config
@@ -91,15 +103,17 @@ Your user is named {user_name}.
 You can take actions by using special tags in your response:
   <note title='T'>body</note> — save a markdown note
   <cmd>command</cmd> — run a sandboxed shell command
+  <py>print(2 + 2)</py> — run a short Python script and see its output (pure computation; no os/network imports)
   <digest /> — convert unsaved notes to training data
   <train /> — fine-tune your LoRA weights on accumulated knowledge
   <cron expr='0 9 * * *'>text</cron> — recurring reminder (5-field cron; this example fires daily at 9:00)
   <cron at='2026-07-17 21:30'>text</cron> — one-time reminder at that exact date and time
 
 Guidelines:
-- Write a note whenever {user_name} teaches you something important.
+- Write a note whenever {user_name} teaches you something important. Saved notes are automatically retrieved into your context when relevant — notes are your unlimited long-term memory, so prefer saving knowledge there over trying to memorize it.
 - After writing 2+ new notes, call <digest /> then <train /> to remember them.
 - If {user_name} asks you to check the system, use <cmd>.
+- For math or anything worth computing exactly, write and run code with <py> and answer from its printed output.
 - The current date/time from the computer clock is shown with every request; use it when scheduling. If {user_name} states a different time or timezone, trust what they say.
 - Convert relative times ("in 10 minutes", "tomorrow at 9am") into absolute times using the current clock before scheduling.
 - Start a scheduled reminder's text with "cmd:" to run a sandboxed command when it fires.
@@ -187,7 +201,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     print("-" * 50)
     print("Commands: /quit  /save  /train  /forget_last  /status  /prune")
     print("         /run <cmd>  /note [title]  /notes  /digest  /cron")
-    print("  (Caine can also use <note>, <cmd>, <digest />, <train />, <cron> by itself)")
+    print("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     print("-" * 50)
 
 
@@ -318,6 +332,73 @@ def run_sandboxed(command: str, config: dict[str, Any]):
         return False, str(e)
 
 
+# Imports that would let sandboxed code touch the filesystem, network, or
+# host process; scripts are for pure computation (math, datetime, json, ...).
+_BLOCKED_IMPORTS = frozenset({
+    "os", "sys", "subprocess", "pathlib", "shutil", "socket", "http", "urllib",
+    "ftplib", "smtplib", "imaplib", "pickle", "ctypes", "multiprocessing",
+    "threading", "tempfile", "asyncio", "importlib", "pkgutil", "site", "builtins",
+})
+
+
+def _is_code_safe(code: str) -> tuple[bool, str]:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return False, f"Syntax error: {e}"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in _BLOCKED_IMPORTS:
+                    return False, f"Import '{alias.name}' is not allowed in the sandbox."
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                return False, "Relative imports are not allowed in the sandbox."
+            if (node.module or "").split(".")[0] in _BLOCKED_IMPORTS:
+                return False, f"Import '{node.module}' is not allowed in the sandbox."
+    return True, ""
+
+
+def run_python_code(code: str, config: dict[str, Any]) -> tuple[bool, str]:
+    """Run a short Python script in the sandbox directory."""
+    code = code.strip()
+    if not code:
+        return False, "Empty code."
+    safe, msg = _is_code_safe(code)
+    if not safe:
+        return False, msg
+
+    fd, path = tempfile.mkstemp(suffix=".py", dir=str(SANDBOX_DIR), prefix="caine_code_")
+    with os.fdopen(fd, "w") as f:
+        f.write(code)
+    try:
+        result = subprocess.run(
+            [sys.executable, path],
+            capture_output=True,
+            text=True,
+            timeout=config["agent"]["code_timeout"],
+            cwd=str(SANDBOX_DIR),
+            env={"PATH": os.environ.get("PATH", "")},
+        )
+        out = result.stdout
+        if result.stderr:
+            out += "\n" + result.stderr
+        out = out.strip()
+        max_len = config["agent"]["max_output_len"]
+        if len(out) > max_len:
+            out = out[:max_len] + "\n... (truncated)"
+        return result.returncode == 0, out
+    except subprocess.TimeoutExpired:
+        return False, f"Timed out after {config['agent']['code_timeout']}s."
+    except Exception as e:
+        return False, str(e)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def save_note(title: str, body: str) -> Path:
     safe = "".join(c if c.isalnum() or c in (" ", "-", "_") else "_" for c in title)
     safe = safe.strip().replace(" ", "_")[:40]
@@ -409,6 +490,19 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         (
             "[System observation: Command 'chrome' exited error.\nOutput:\nCommand not found: chrome]",
             f"'chrome' isn't a command on this machine — trying the native way instead. <cmd>{open_chrome}</cmd>",
+        ),
+        # Run Python for exact computation, then answer from the output
+        (
+            "Run code to calculate 7 factorial.",
+            "<py>import math\nprint(math.factorial(7))</py> Running that now.",
+        ),
+        (
+            "[System observation: Python script exited ok.\nOutput:\n5040]",
+            "7! = 5,040.",
+        ),
+        (
+            "What's 2 to the power of 40, exactly?",
+            "<py>print(2 ** 40)</py> Computing it exactly.",
         ),
         # Web/YouTube search = open a search URL in the browser
         (
@@ -679,6 +773,9 @@ def parse_tools(reply: str) -> list[tuple[str, dict[str, Any]]]:
     for m in re.finditer(r'<cmd>(.*?)</cmd>', reply, re.DOTALL):
         tools.append(("run_command", {"cmd": m.group(1).strip()}))
 
+    for m in re.finditer(r'<py>(.*?)</py>', reply, re.DOTALL):
+        tools.append(("execute_code", {"code": m.group(1).strip()}))
+
     if re.search(r'<digest\s*/>', reply) or re.search(r'<digest></digest>', reply):
         tools.append(("digest_notes", {}))
 
@@ -704,6 +801,7 @@ def strip_tool_tags(reply: str) -> str:
     display = reply
     display = re.sub(r'<note\s+title=[\'"][^\'"]*?[\'"]>(.*?)</note>', '', display, flags=re.DOTALL)
     display = re.sub(r'<cmd>(.*?)</cmd>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<py>(.*?)</py>', '', display, flags=re.DOTALL)
     display = re.sub(r'<digest\s*/>', '', display)
     display = re.sub(r'<digest></digest>', '', display)
     display = re.sub(r'<train\s*/>', '', display)
@@ -786,6 +884,7 @@ def chat_loop(config: dict[str, Any]):
     print_banner(config, adapter_config.exists(), dataset_size)
 
     history: list[dict[str, str]] = []
+    retriever = Retriever(config)
 
     # Background scheduler: fires due cron jobs, prints a notice immediately,
     # and queues the event for the model to see on the next turn.
@@ -992,10 +1091,15 @@ def chat_loop(config: dict[str, Any]):
 
         history.append({"role": "user", "content": user_input})
 
+        # Unbounded knowledge: pull relevant saved notes into this turn's
+        # context. Retrieval text never enters history or training data.
+        rag_context = retriever.build_context(user_input)
+        rag_block = f"\n\n{rag_context}" if rag_context else ""
+
         # ---- Autonomous Agent Loop ----
         max_rounds = config["agent"]["max_tool_rounds"]
         for round_num in range(max_rounds):
-            messages = [{"role": "system", "content": system_prompt + env_note() + time_note()}]
+            messages = [{"role": "system", "content": system_prompt + rag_block + env_note() + time_note()}]
             messages.extend(history[-config["agent"]["history_limit"]:])
 
             prompt = tokenizer.apply_chat_template(
@@ -1036,6 +1140,7 @@ def chat_loop(config: dict[str, Any]):
                 if name == "write_note":
                     try:
                         p = save_note(params["title"], params["body"])
+                        retriever.invalidate_cache()
                         observations.append(f"Saved note: {p.name}")
                     except Exception as e:
                         observations.append(f"Failed to save note: {e}")
@@ -1044,6 +1149,12 @@ def chat_loop(config: dict[str, Any]):
                     ok, out = run_sandboxed(params["cmd"], config)
                     observations.append(
                         f"Command '{params['cmd']}' exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
+                    )
+
+                elif name == "execute_code":
+                    ok, out = run_python_code(params["code"], config)
+                    observations.append(
+                        f"Python script exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
                     )
 
                 elif name == "digest_notes":

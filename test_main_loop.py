@@ -205,6 +205,67 @@ def test_agent_loop_stops_at_max_rounds():
     print("test_agent_loop_stops_at_max_rounds passed")
 
 
+def test_execute_code_tool():
+    config = main.load_config()
+    # <py> tag parses and strips
+    reply = "Sure. <py>print(6 * 7)</py>"
+    tools = main.parse_tools(reply)
+    assert tools == [("execute_code", {"code": "print(6 * 7)"})], tools
+    assert main.strip_tool_tags(reply) == "Sure."
+
+    ok, out = main.run_python_code("import math\nprint(math.factorial(7))", config)
+    assert ok and out == "5040", (ok, out)
+
+    ok, out = main.run_python_code("import os\nprint(os.listdir('/'))", config)
+    assert not ok and "not allowed" in out, (ok, out)
+    ok, out = main.run_python_code("import socket", config)
+    assert not ok and "not allowed" in out, (ok, out)
+    ok, out = main.run_python_code("print(", config)
+    assert not ok and "Syntax error" in out, (ok, out)
+    print("test_execute_code_tool passed")
+
+
+def test_agent_loop_runs_python():
+    session = ScriptedSession(
+        user_inputs=["What is 12 factorial?", "/quit", "n"],
+        model_replies=[
+            "<py>import math\nprint(math.factorial(12))</py>",
+            "12! = 479,001,600.",
+        ],
+    )
+    session.run()
+    assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+    assert "479001600" in session.prompts_seen[1], session.prompts_seen[1]
+    assert "Python script exited ok" in session.prompts_seen[1], session.prompts_seen[1]
+    print("test_agent_loop_runs_python passed")
+
+
+def test_rag_injects_saved_notes():
+    note_path = main.save_note(
+        "Zephyr Project", "The Zephyr project deadline is March 3rd and uses Rust."
+    )
+    try:
+        session = ScriptedSession(
+            user_inputs=["What do you know about the Zephyr project?", "/quit", "n"],
+            model_replies=["The Zephyr project is due March 3rd and uses Rust."],
+        )
+        session.run()
+        first = session.prompts_seen[0]
+        assert "Retrieved context" in first, first
+        assert "March 3rd" in first, first
+    finally:
+        note_path.unlink(missing_ok=True)
+
+    # Unrelated questions get no retrieval block.
+    session = ScriptedSession(
+        user_inputs=["hey", "/quit", "n"],
+        model_replies=["Hey Huy!"],
+    )
+    session.run()
+    assert "Retrieved context" not in session.prompts_seen[0]
+    print("test_rag_injects_saved_notes passed")
+
+
 def test_sandbox_blocks_dangerous_commands():
     config = main.load_config()
     ok, out = main.run_sandboxed("rm -rf /", config)
@@ -221,6 +282,9 @@ def run_all():
         test_parse_and_strip_tool_tags()
         test_cron_matching()
         test_cron_jobs_fire_and_expire()
+        test_execute_code_tool()
+        test_agent_loop_runs_python()
+        test_rag_injects_saved_notes()
         test_sandbox_blocks_dangerous_commands()
         test_agent_loop_feeds_observation_back()
         test_agent_loop_stops_at_max_rounds()
