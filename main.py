@@ -46,8 +46,9 @@ CONFIG_FILE = PROJECT_DIR / "config.json"
 CRON_FILE = PROJECT_DIR / "cron_jobs.json"
 MEMORY_FILE = PROJECT_DIR / "agent_memory.md"
 PROFILE_FILE = PROJECT_DIR / "user_profile.md"
+SESSIONS_DIR = PROJECT_DIR / "sessions"
 prompt = PROJECT_DIR / "prompt.md"
-for d in (LOG_DIR, DATA_DIR, ADAPTER_DIR, NOTES_DIR, SANDBOX_DIR):
+for d in (LOG_DIR, DATA_DIR, ADAPTER_DIR, NOTES_DIR, SANDBOX_DIR, SESSIONS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -98,7 +99,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "top_k": 5,
         "max_context_tokens": 1500,
-        "sources": ["notes"],
+        "sources": ["notes", "sessions"],
     },
     "memory": {
         "enabled": True,
@@ -157,6 +158,7 @@ You can take actions by using special tags in your response:
   <cron at='2026-07-17 21:30'>text</cron> — one-time reminder at that exact date and time
 
 Guidelines:
+- You are {assistant_name} and only {assistant_name}; the human you are talking to is {user_name}. Never call yourself {user_name} and never call {user_name} by your name.
 - Write a note whenever {user_name} teaches you something important. Saved notes are automatically retrieved into your context when relevant — notes are your unlimited long-term memory, so prefer saving knowledge there over trying to memorize it.
 - Your <memory> and <profile> stores are small and always visible to you: keep only high-value durable facts there (conventions, preferences, who {user_name} is), and consolidate when told they're over the limit. Bulk knowledge belongs in notes.
 - When a multi-step approach works well, save it as a note titled 'Skill: <name>' listing the steps — it will come back to you when a similar task appears.
@@ -633,7 +635,15 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         ),
         (
             f"What is my name?",
-            f"Your name is {user}, {user}.",
+            f"Your name is {user}.",
+        ),
+        (
+            f"Are you {user}?",
+            f"No — I'm {assistant}, your assistant. You're {user}.",
+        ),
+        (
+            "Who is who here?",
+            f"I'm {assistant}, the assistant. You're {user}, my user.",
         ),
         # Tool-use demonstration: "remember a fact" = note, "remind me at a time" = cron
         (
@@ -740,6 +750,56 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
 
     for user_msg, assistant_msg in samples:
         append_chat_pair(user_msg, assistant_msg, tokenizer, system_prompt)
+
+
+# ======================== SESSION HISTORY =========================
+class SessionStore:
+    """One JSONL file per chat session; keyword search across past sessions
+    feeds the RAG retriever so old conversations stay findable."""
+
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self.path = SESSIONS_DIR / f"{session_id}.jsonl"
+
+    def log(self, role: str, content: str):
+        content = content.strip()
+        if not content:
+            return
+        with open(self.path, "a", encoding="utf-8") as f:
+            json.dump({
+                "role": role,
+                "content": content,
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            }, f)
+            f.write("\n")
+
+    @staticmethod
+    def search(query: str, limit: int = 5, exclude_session: str | None = None) -> list[dict[str, Any]]:
+        terms = {w for w in re.sub(r"[^\w\s]", " ", query.lower()).split() if len(w) > 1}
+        if not terms:
+            return []
+        scored: list[tuple[float, dict[str, Any]]] = []
+        # Newest sessions first; cap the scan so search stays fast forever.
+        files = sorted(SESSIONS_DIR.glob("*.jsonl"), reverse=True)[:100]
+        for path in files:
+            if exclude_session and path.stem == exclude_session:
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                words = set(re.sub(r"[^\w\s]", " ", row.get("content", "").lower()).split())
+                overlap = len(terms & words)
+                if overlap:
+                    scored.append((overlap / len(terms), row))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [row for _, row in scored[:limit]]
+# ========================================================
 
 
 # ======================== SELF-CONFIGURATION =========================
@@ -1278,7 +1338,11 @@ def chat_loop(config: dict[str, Any]):
     print_banner(config, adapter_config.exists(), dataset_size)
 
     history: list[dict[str, str]] = []
-    retriever = Retriever(config)
+    session_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S-%f}"
+    session_store = SessionStore(session_id)
+    # Past sessions are retrievable; the live one is excluded to avoid echo.
+    retriever = Retriever(config, session_store=session_store,
+                          exclude_session_id=session_id)
     user_turns = 0
 
     # Background scheduler: fires due cron jobs, prints a notice immediately,
@@ -1516,6 +1580,7 @@ def chat_loop(config: dict[str, Any]):
             continue
 
         chat_logger.info(f"User: {user_input}")
+        session_store.log("user", user_input)
 
         # Surface any cron events that fired since the last turn.
         with cron_lock:
@@ -1583,6 +1648,7 @@ def chat_loop(config: dict[str, Any]):
             if display.strip():
                 print(f"{config['assistant_name']:8}: {display}")
                 chat_logger.info(f"{config['assistant_name']}: {display}")
+                session_store.log("assistant", display)
 
             # Never re-run a tool call already executed this turn — a model
             # that repeats itself would otherwise loop until max_rounds.

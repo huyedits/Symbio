@@ -30,6 +30,7 @@ prompt.md
 cron_jobs.json
 agent_memory.md
 user_profile.md
+sessions/
 notes/
 training_data/
 adapters/
