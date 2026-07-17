@@ -28,6 +28,8 @@ training_data/tmp*.yaml
 config.json
 prompt.md
 cron_jobs.json
+agent_memory.md
+user_profile.md
 notes/
 training_data/
 adapters/

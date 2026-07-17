@@ -313,6 +313,64 @@ def test_agent_loop_answers_from_search():
     print("test_agent_loop_answers_from_search passed")
 
 
+@contextmanager
+def scratch_memory_files():
+    real_mem, real_prof = main.MEMORY_FILE, main.PROFILE_FILE
+    main.MEMORY_FILE = main.PROJECT_DIR / "agent_memory.test.md"
+    main.PROFILE_FILE = main.PROJECT_DIR / "user_profile.test.md"
+    try:
+        yield
+    finally:
+        main.MEMORY_FILE.unlink(missing_ok=True)
+        main.PROFILE_FILE.unlink(missing_ok=True)
+        main.MEMORY_FILE, main.PROFILE_FILE = real_mem, real_prof
+
+
+def test_curated_memory_store():
+    config = main.load_config()
+    with scratch_memory_files():
+        reply = "<memory>Repo uses MLX.</memory><profile replace='all'>Huy likes bullets.</profile>"
+        tools = main.parse_tools(reply)
+        assert ("save_memory", {"store": "memory", "content": "Repo uses MLX.", "replace": False}) in tools, tools
+        assert ("save_memory", {"store": "profile", "content": "Huy likes bullets.", "replace": True}) in tools, tools
+        assert main.strip_tool_tags(reply) == ""
+
+        msg = main.save_memory("memory", "Repo uses MLX.", config)
+        assert "Saved" in msg, msg
+        main.save_memory("profile", "Huy likes bullets.", config)
+        block = main.curated_memory_block(config)
+        assert "Repo uses MLX." in block and "Huy likes bullets." in block, block
+
+        # Over-limit append gets a consolidation nag; replace='all' shrinks it.
+        msg = main.save_memory("memory", "x" * 3000, config)
+        assert "over the limit" in msg, msg
+        msg = main.save_memory("memory", "Only this.", config, replace=True)
+        assert "over the limit" not in msg, msg
+        assert main.MEMORY_FILE.read_text() == "Only this.\n"
+    print("test_curated_memory_store passed")
+
+
+def test_memory_injected_and_flushed():
+    config = main.load_config()
+    flush_min = config["memory"]["flush_min_turns"]
+    with scratch_memory_files():
+        main.MEMORY_FILE.write_text("Deploys happen on Fridays.\n")
+        # Enough turns to cross the flush threshold, then /quit.
+        chit_chat = [f"hello {i}" for i in range(flush_min)]
+        session = ScriptedSession(
+            user_inputs=chit_chat + ["/quit", "n"],
+            model_replies=["Hi!"] * flush_min
+            + ["<memory>Huy tests features right after asking for them.</memory>"],
+        )
+        session.run()
+        # Always-on memory is in every prompt.
+        assert "Deploys happen on Fridays." in session.prompts_seen[0], session.prompts_seen[0]
+        # The flush turn ran and persisted the model's parting memory.
+        saved = main.MEMORY_FILE.read_text()
+        assert "tests features right after asking" in saved, saved
+    print("test_memory_injected_and_flushed passed")
+
+
 def test_rag_injects_saved_notes():
     note_path = main.save_note(
         "Zephyr Project", "The Zephyr project deadline is March 3rd and uses Rust."
@@ -359,6 +417,8 @@ def run_all():
         test_agent_loop_runs_python()
         test_web_tools()
         test_agent_loop_answers_from_search()
+        test_curated_memory_store()
+        test_memory_injected_and_flushed()
         test_rag_injects_saved_notes()
         test_sandbox_blocks_dangerous_commands()
         test_agent_loop_feeds_observation_back()

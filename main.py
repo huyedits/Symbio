@@ -43,6 +43,8 @@ SANDBOX_DIR = PROJECT_DIR / "sandbox"
 DIGEST_MANIFEST = DATA_DIR / "digest_manifest.json"
 CONFIG_FILE = PROJECT_DIR / "config.json"
 CRON_FILE = PROJECT_DIR / "cron_jobs.json"
+MEMORY_FILE = PROJECT_DIR / "agent_memory.md"
+PROFILE_FILE = PROJECT_DIR / "user_profile.md"
 prompt = PROJECT_DIR / "prompt.md"
 for d in (LOG_DIR, DATA_DIR, ADAPTER_DIR, NOTES_DIR, SANDBOX_DIR):
     d.mkdir(parents=True, exist_ok=True)
@@ -78,6 +80,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_context_tokens": 1500,
         "sources": ["notes"],
     },
+    "memory": {
+        "enabled": True,
+        "memory_char_limit": 2200,
+        "profile_char_limit": 1375,
+        "nudge_interval": 10,
+        "flush_min_turns": 6,
+    },
 }
 # ========================================================
 
@@ -95,6 +104,8 @@ def load_config() -> dict[str, Any]:
                 config["agent"] = {**DEFAULT_CONFIG["agent"], **user_config["agent"]}
             if "rag" in user_config:
                 config["rag"] = {**DEFAULT_CONFIG["rag"], **user_config["rag"]}
+            if "memory" in user_config:
+                config["memory"] = {**DEFAULT_CONFIG["memory"], **user_config["memory"]}
         except Exception as e:
             print(f"[Config warning] Could not read {CONFIG_FILE}: {e}")
     return config
@@ -110,6 +121,8 @@ You can take actions by using special tags in your response:
   <py>print(2 + 2)</py> — run a short Python script and see its output (pure computation; no os/network imports)
   <search>query</search> — web search; the results come back to you as text to answer from
   <read>https://url</read> — fetch a page's text content so you can read it
+  <memory>fact</memory> — append to your always-in-context memory (use replace='all' to rewrite it)
+  <profile>fact about {user_name}</profile> — append to your profile of {user_name} (replace='all' to rewrite)
   <digest /> — convert unsaved notes to training data
   <train /> — fine-tune your LoRA weights on accumulated knowledge
   <cron expr='0 9 * * *'>text</cron> — recurring reminder (5-field cron; this example fires daily at 9:00)
@@ -117,6 +130,8 @@ You can take actions by using special tags in your response:
 
 Guidelines:
 - Write a note whenever {user_name} teaches you something important. Saved notes are automatically retrieved into your context when relevant — notes are your unlimited long-term memory, so prefer saving knowledge there over trying to memorize it.
+- Your <memory> and <profile> stores are small and always visible to you: keep only high-value durable facts there (conventions, preferences, who {user_name} is), and consolidate when told they're over the limit. Bulk knowledge belongs in notes.
+- When a multi-step approach works well, save it as a note titled 'Skill: <name>' listing the steps — it will come back to you when a similar task appears.
 - After writing 2+ new notes, call <digest /> then <train /> to remember them.
 - If {user_name} asks you to check the system, use <cmd>.
 - For math or anything worth computing exactly, write and run code with <py> and answer from its printed output.
@@ -665,6 +680,11 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             "What's 2 to the power of 40, exactly?",
             "<py>print(2 ** 40)</py> Computing it exactly.",
         ),
+        # Curated memory: durable preferences go to <profile>/<memory>
+        (
+            "I prefer replies in bullet points from now on.",
+            f"Got it, {user} — bullets from here on. <profile>Prefers replies formatted as bullet points.</profile>",
+        ),
         # Current information = <search> and answer from the returned results
         (
             "What is the latest news?",
@@ -695,6 +715,61 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
 
     for user_msg, assistant_msg in samples:
         append_chat_pair(user_msg, assistant_msg, tokenizer, system_prompt)
+
+
+# ======================== CURATED MEMORY =========================
+# Two small always-in-context stores, distinct from RAG notes: agent_memory.md
+# (durable facts/conventions the agent learned) and user_profile.md (who the
+# user is). Char caps force consolidation instead of hoarding.
+
+
+def _store_path(store: str) -> Path:
+    return PROFILE_FILE if store == "profile" else MEMORY_FILE
+
+
+def _store_limit(store: str, config: dict[str, Any]) -> int:
+    key = "profile_char_limit" if store == "profile" else "memory_char_limit"
+    return int(config["memory"][key])
+
+
+def save_memory(store: str, content: str, config: dict[str, Any], replace: bool = False) -> str:
+    """Append (or replace) an entry in a curated memory store; nag when full."""
+    content = content.strip()
+    if not content:
+        return "Empty memory content."
+    path = _store_path(store)
+    if replace or not path.exists():
+        path.write_text(content + "\n", encoding="utf-8")
+    else:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(content + "\n")
+    size = len(path.read_text(encoding="utf-8"))
+    limit = _store_limit(store, config)
+    name = path.name
+    if size > limit:
+        return (
+            f"Saved to {name}, but it is now {size}/{limit} chars — over the limit. "
+            f"Rewrite it smaller with <{'profile' if store == 'profile' else 'memory'} "
+            f"replace='all'>...</...> keeping only what matters."
+        )
+    return f"Saved to {name} ({size}/{limit} chars)."
+
+
+def curated_memory_block(config: dict[str, Any]) -> str:
+    """The always-on memory injected into the system prompt each turn."""
+    if not config["memory"]["enabled"]:
+        return ""
+    parts = []
+    if MEMORY_FILE.exists():
+        text = MEMORY_FILE.read_text(encoding="utf-8").strip()
+        if text:
+            parts.append(f"[Your saved memory]\n{text}")
+    if PROFILE_FILE.exists():
+        text = PROFILE_FILE.read_text(encoding="utf-8").strip()
+        if text:
+            parts.append(f"[About {config['user_name']}]\n{text}")
+    return ("\n\n" + "\n\n".join(parts)) if parts else ""
+# ========================================================
 
 
 # ======================== CRON JOBS =========================
@@ -958,6 +1033,24 @@ def parse_tools(reply: str) -> list[tuple[str, dict[str, Any]]]:
     for m in re.finditer(r'<read>(.*?)</read>', reply, re.DOTALL):
         tools.append(("read_page", {"url": m.group(1).strip()}))
 
+    for m in re.finditer(
+        r'<memory(\s+replace=[\'"]all[\'"])?>(.*?)</memory>', reply, re.DOTALL
+    ):
+        tools.append(("save_memory", {
+            "store": "memory",
+            "content": m.group(2).strip(),
+            "replace": bool(m.group(1)),
+        }))
+
+    for m in re.finditer(
+        r'<profile(\s+replace=[\'"]all[\'"])?>(.*?)</profile>', reply, re.DOTALL
+    ):
+        tools.append(("save_memory", {
+            "store": "profile",
+            "content": m.group(2).strip(),
+            "replace": bool(m.group(1)),
+        }))
+
     if re.search(r'<digest\s*/>', reply) or re.search(r'<digest></digest>', reply):
         tools.append(("digest_notes", {}))
 
@@ -986,6 +1079,8 @@ def strip_tool_tags(reply: str) -> str:
     display = re.sub(r'<py>(.*?)</py>', '', display, flags=re.DOTALL)
     display = re.sub(r'<search>(.*?)</search>', '', display, flags=re.DOTALL)
     display = re.sub(r'<read>(.*?)</read>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<memory[^>]*>(.*?)</memory>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<profile[^>]*>(.*?)</profile>', '', display, flags=re.DOTALL)
     display = re.sub(r'<digest\s*/>', '', display)
     display = re.sub(r'<digest></digest>', '', display)
     display = re.sub(r'<train\s*/>', '', display)
@@ -993,7 +1088,7 @@ def strip_tool_tags(reply: str) -> str:
     display = re.sub(r'<cron\s+[^>]*?>(.*?)</cron>', '', display, flags=re.DOTALL)
     # A reply cut off mid-tag leaves an unterminated tag; never show it.
     display = re.sub(
-        r'<(?:cmd|py|search|read|note|cron|digest|train)\b[^>]*>[^<]*$',
+        r'<(?:cmd|py|search|read|note|cron|digest|train|memory|profile)\b[^>]*>[^<]*$',
         '', display, flags=re.DOTALL,
     )
     return clean_response(display)
@@ -1074,6 +1169,7 @@ def chat_loop(config: dict[str, Any]):
 
     history: list[dict[str, str]] = []
     retriever = Retriever(config)
+    user_turns = 0
 
     # Background scheduler: fires due cron jobs, prints a notice immediately,
     # and queues the event for the model to see on the next turn.
@@ -1107,6 +1203,38 @@ def chat_loop(config: dict[str, Any]):
             cmd = user_input.lower()
 
             if cmd in ("/quit", "/q", "/exit"):
+                # Memory flush: one last turn to persist before context is lost.
+                flush_min = config["memory"]["flush_min_turns"]
+                if config["memory"]["enabled"] and flush_min and user_turns >= flush_min and history:
+                    print(" Letting the model save memories before exit...")
+                    flush_messages = [{"role": "system", "content": (
+                        system_prompt + curated_memory_block(config) + env_note() + time_note()
+                    )}]
+                    flush_messages.extend(history[-config["agent"]["history_limit"]:])
+                    flush_messages.append({"role": "user", "content": (
+                        "[Session ending. If this conversation contained anything durable "
+                        "worth keeping — facts about the user, lessons learned, procedures "
+                        "that worked — save it now with <memory>, <profile>, or <note>. "
+                        "Reply with just the tags, or 'nothing to save'.]"
+                    )})
+                    try:
+                        flush_prompt = tokenizer.apply_chat_template(
+                            flush_messages, tokenize=False,
+                            add_generation_prompt=True, enable_thinking=False,
+                        )
+                        flush_reply = generate(
+                            model, tokenizer, prompt=flush_prompt, sampler=sampler, verbose=False
+                        )
+                        for name, params in parse_tools(flush_reply):
+                            if name == "save_memory":
+                                msg = save_memory(params["store"], params["content"], config,
+                                                  replace=params.get("replace", False))
+                                print(f"  [Memory] {msg}")
+                            elif name == "write_note":
+                                p = save_note(params["title"], params["body"])
+                                print(f"  [Memory] Saved note: {p.name}")
+                    except Exception as e:
+                        print(f"  [Memory flush skipped: {e}]")
                 print(" Exiting chat.")
                 break
 
@@ -1285,11 +1413,24 @@ def chat_loop(config: dict[str, Any]):
         rag_context = retriever.build_context(user_input)
         rag_block = f"\n\n{rag_context}" if rag_context else ""
 
+        user_turns += 1
+        nudge_every = config["memory"]["nudge_interval"]
+        nudge_block = ""
+        if config["memory"]["enabled"] and nudge_every and user_turns % nudge_every == 0:
+            nudge_block = (
+                f"\n\n[Reminder: if this session taught you anything durable about "
+                f"{config['user_name']} or how to do your job, save it now with "
+                f"<memory> or <profile>. Skip if nothing is worth keeping.]"
+            )
+
         # ---- Autonomous Agent Loop ----
         max_rounds = config["agent"]["max_tool_rounds"]
         executed_calls: set[str] = set()
         for round_num in range(max_rounds):
-            messages = [{"role": "system", "content": system_prompt + rag_block + env_note() + time_note()}]
+            messages = [{"role": "system", "content": (
+                system_prompt + curated_memory_block(config) + rag_block
+                + env_note() + time_note() + nudge_block
+            )}]
             messages.extend(history[-config["agent"]["history_limit"]:])
 
             prompt = tokenizer.apply_chat_template(
@@ -1367,6 +1508,12 @@ def chat_loop(config: dict[str, Any]):
                     ok, out = read_page(params["url"], config)
                     observations.append(
                         f"Reading {params['url']} {'succeeded' if ok else 'failed'}.\nContent:\n{out}"
+                    )
+
+                elif name == "save_memory":
+                    observations.append(
+                        save_memory(params["store"], params["content"], config,
+                                    replace=params.get("replace", False))
                     )
 
                 elif name == "digest_notes":
