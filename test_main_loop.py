@@ -484,13 +484,147 @@ def test_rag_injects_saved_notes():
     print("test_rag_injects_saved_notes passed")
 
 
+class FakeBrowser:
+    """Stands in for symbio.computer.BrowserSession in scripted sessions."""
+
+    def __init__(self):
+        self.actions = []
+
+    def open(self, url):
+        self.actions.append(("open", url))
+        return f"Opened browser at {url}. Page title: Fake"
+
+    def get_text(self):
+        return "Fake page text about MLX."
+
+    def click(self, selector="", text=""):
+        self.actions.append(("click", selector or text))
+        return "Clicked element containing text 'More'."
+
+    def type_text(self, text, selector="", press_enter=False):
+        return f"Typed '{text}'."
+
+    def scroll(self, direction="down", amount=0):
+        return f"Scrolled {direction} 800px."
+
+    def close(self):
+        return "Browser closed."
+
+
+def test_parse_browser_tags():
+    reply = (
+        "<browse>https://a.b/c</browse><click>Sign in</click>"
+        "<type enter='true'>lofi</type><scroll dir='up' /><scroll />"
+    )
+    tools = main.parse_tools(reply)
+    names = [n for n, _ in tools]
+    assert names == [
+        "browser_open", "browser_click", "browser_type",
+        "browser_scroll", "browser_scroll",
+    ], names
+    assert tools[0][1] == {"url": "https://a.b/c"}
+    assert tools[1][1] == {"target": "Sign in"}
+    assert tools[2][1] == {"text": "lofi", "enter": True}
+    assert tools[3][1] == {"direction": "up"}
+    assert tools[4][1] == {"direction": "down"}
+    assert main.strip_tool_tags(reply) == "", repr(main.strip_tool_tags(reply))
+    print("test_parse_browser_tags passed")
+
+
+def test_agent_loop_browses():
+    real_browser = main.BrowserSession
+    main.BrowserSession = FakeBrowser
+    try:
+        session = ScriptedSession(
+            user_inputs=["Look up the MLX docs yourself.", "/quit", "n"],
+            model_replies=[
+                "<browse>https://example.com/mlx</browse> Opening it.",
+                "The docs say: Fake page text about MLX.",
+            ],
+        )
+        session.run()
+        obs_prompt = session.prompts_seen[1]
+        assert "Opened browser at https://example.com/mlx" in obs_prompt, obs_prompt
+        assert "Fake page text about MLX" in obs_prompt, obs_prompt
+    finally:
+        main.BrowserSession = real_browser
+    print("test_agent_loop_browses passed")
+
+
+def test_digest_includes_curated_stores():
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    tok = FakeTokenizer()
+    config = main.load_config()
+    real = (main.NOTES_DIR, main.MEMORY_FILE, main.PROFILE_FILE,
+            main.DIGEST_MANIFEST, main.TRAIN_FILE)
+    tmp = Path(tempfile.mkdtemp())
+    main.NOTES_DIR = tmp / "notes"
+    main.NOTES_DIR.mkdir()
+    main.MEMORY_FILE = tmp / "agent_memory.md"
+    main.PROFILE_FILE = tmp / "user_profile.md"
+    main.DIGEST_MANIFEST = tmp / "manifest.json"
+    main.TRAIN_FILE = tmp / "train.jsonl"
+    try:
+        main.MEMORY_FILE.write_text("Deploys happen on Fridays.\n")
+        main.PROFILE_FILE.write_text(f"{config['user_name']} prefers concise replies.\n")
+        added = main.digest_notes_to_training(tok, "SYS", config)
+        assert added == 2, added
+        data = main.TRAIN_FILE.read_text()
+        assert "Fridays" in data and "concise replies" in data, data
+        # Unchanged stores are not re-digested.
+        assert main.digest_notes_to_training(tok, "SYS", config) == 0
+        # An updated profile is digested again.
+        main.PROFILE_FILE.write_text("Prefers bullet points now.\n")
+        assert main.digest_notes_to_training(tok, "SYS", config) == 1
+    finally:
+        (main.NOTES_DIR, main.MEMORY_FILE, main.PROFILE_FILE,
+         main.DIGEST_MANIFEST, main.TRAIN_FILE) = real
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("test_digest_includes_curated_stores passed")
+
+
 def test_sandbox_blocks_dangerous_commands():
     config = main.load_config()
-    ok, out = main.run_sandboxed("rm -rf /", config)
+    ok, out = main.run_sandboxed("rm -rf /", config, interactive=False)
     assert not ok and "blocked" in out, (ok, out)
     ok, out = main.run_sandboxed("echo sandbox-ok", config)
     assert ok and out == "sandbox-ok", (ok, out)
     print("test_sandbox_blocks_dangerous_commands passed")
+
+
+def test_sandbox_blocked_command_permission_prompt():
+    config = main.load_config()
+    real_input = builtins.input
+
+    # User approves: the blocked command runs.
+    builtins.input = lambda *a: "y"
+    try:
+        ok, out = main.run_sandboxed("bash -c 'echo approved-ok'", config)
+    finally:
+        builtins.input = real_input
+    assert ok and out == "approved-ok", (ok, out)
+
+    # User declines: still blocked.
+    builtins.input = lambda *a: "n"
+    try:
+        ok, out = main.run_sandboxed("bash -c 'echo approved-ok'", config)
+    finally:
+        builtins.input = real_input
+    assert not ok and "blocked" in out, (ok, out)
+
+    # Non-interactive callers (cron thread) never prompt.
+    def _fail_input(*a):
+        raise AssertionError("prompted in non-interactive mode")
+    builtins.input = _fail_input
+    try:
+        ok, out = main.run_sandboxed("bash -c 'echo approved-ok'", config, interactive=False)
+    finally:
+        builtins.input = real_input
+    assert not ok and "blocked" in out, (ok, out)
+    print("test_sandbox_blocked_command_permission_prompt passed")
 
 
 def run_all():
@@ -524,7 +658,11 @@ def _run_all_inner():
         test_memory_injected_and_flushed()
         test_session_history_cross_session_recall()
         test_rag_injects_saved_notes()
+        test_parse_browser_tags()
+        test_agent_loop_browses()
+        test_digest_includes_curated_stores()
         test_sandbox_blocks_dangerous_commands()
+        test_sandbox_blocked_command_permission_prompt()
         test_agent_loop_feeds_observation_back()
         test_agent_loop_stops_at_max_rounds()
         test_agent_loop_breaks_on_repeated_tool_call()
