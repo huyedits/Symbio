@@ -67,6 +67,14 @@ def parse_tools(reply: str) -> list[tuple[str, dict[str, Any]]]:
     for m in re.finditer(r'<scroll(?:\s+dir=[\'"](up|down)[\'"])?\s*/>', reply):
         tools.append(("browser_scroll", {"direction": m.group(1) or "down"}))
 
+    for m in re.finditer(
+        r'<skill\s+name=[\'"]([^\'"]*?)[\'"]>(.*?)</skill>', reply, re.DOTALL
+    ):
+        tools.append(("save_skill", {
+            "name": m.group(1).strip(),
+            "steps": m.group(2).strip(),
+        }))
+
     if re.search(r'<config\s+show\s*/>', reply):
         tools.append(("config_show", {}))
 
@@ -128,6 +136,7 @@ def strip_tool_tags(reply: str) -> str:
     display = re.sub(r'<click>(.*?)</click>', '', display, flags=re.DOTALL)
     display = re.sub(r'<type[^>]*>(.*?)</type>', '', display, flags=re.DOTALL)
     display = re.sub(r'<scroll[^>]*/>', '', display)
+    display = re.sub(r'<skill\s+name=[\'"][^\'"]*?[\'"]>(.*?)</skill>', '', display, flags=re.DOTALL)
     display = re.sub(r'<memory[^>]*>(.*?)</memory>', '', display, flags=re.DOTALL)
     display = re.sub(r'<profile[^>]*>(.*?)</profile>', '', display, flags=re.DOTALL)
     display = re.sub(r'<config\s+show\s*/>', '', display)
@@ -139,7 +148,7 @@ def strip_tool_tags(reply: str) -> str:
     display = re.sub(r'<cron\s+[^>]*?>(.*?)</cron>', '', display, flags=re.DOTALL)
     # A reply cut off mid-tag leaves an unterminated tag; never show it.
     display = re.sub(
-        r'<(?:cmd|py|search|read|browse|click|type|scroll|note|cron|digest|train|memory|profile|config)\b[^>]*>[^<]*$',
+        r'<(?:cmd|py|search|read|browse|click|type|scroll|note|skill|cron|digest|train|memory|profile|config)\b[^>]*>[^<]*$',
         '', display, flags=re.DOTALL,
     )
     return clean_response(display)

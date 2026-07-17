@@ -14,7 +14,7 @@ from mlx_lm.sample_utils import make_sampler
 from rag import Retriever
 from symbio import constants
 from symbio.computer import BrowserSession
-from symbio.app import cron, memory, prompts, sandbox, sessions, tooling, training, web
+from symbio.app import cron, learn, memory, prompts, sandbox, sessions, tooling, training, web
 from symbio.app.config import config_show, set_config_value
 
 
@@ -44,8 +44,8 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     print(f"   Data   : {dataset_size:,} bytes")
     print(f"   Notes  : {note_count}")
     print("-" * 50)
-    print("Commands: /quit  /save  /train  /forget_last  /status  /prune  /help")
-    print("         /run <cmd>  /note [title]  /notes  /digest  /cron  /config")
+    print("Commands: /quit  /save  /train  /learn  /forget_last  /status  /prune  /help")
+    print("         /run <cmd>  /note [title]  /notes  /skills  /digest  /cron  /config")
     print("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     print("-" * 50)
 
@@ -199,6 +199,18 @@ class ChatSession:
 
         elif cmd.startswith("/note"):
             self._cmd_note(user_input[5:].strip())
+
+        elif cmd == "/learn":
+            self._learn_from_correction(verbose=True)
+
+        elif cmd == "/skills":
+            skills = memory.list_skills()
+            if not skills:
+                print("  No skills saved yet.")
+            else:
+                print(f"  {len(skills)} skill(s):")
+                for title, path in skills:
+                    print(f"    - {title}  ({path.name})")
 
         elif cmd == "/notes":
             files = sorted(constants.NOTES_DIR.glob("*.md"))
@@ -376,11 +388,32 @@ class ChatSession:
             f"<memory> or <profile>. Skip if nothing is worth keeping.]"
         )
 
+    def _learn_from_correction(self, verbose: bool = False):
+        """Capture the last (question -> corrected answer) pair as a mistake
+        note; at the configured threshold, retrain and reload the adapter."""
+        sample = learn.find_correction_sample(self.history, self.config)
+        if sample is None:
+            if verbose:
+                print("  No recent correction detected. Say something like "
+                      "\"No, the answer is ...\" first, then run /learn.")
+            return
+        path = learn.save_mistake_note(*sample)
+        print(f"  [Learn] Correction captured: {path.name}")
+        trained = learn.maybe_train_on_mistakes(self.config, self.tokenizer, self.system_prompt)
+        if trained and self.adapter_config.exists():
+            err = self._reload_model()
+            print(f"  [Learn] Adapter reload failed: {err}" if err
+                  else "  [Learn] Adapter updated and reloaded.")
+
     # ---- The autonomous agent loop ----
 
     def _agent_turn(self, user_input: str):
         self.logger.info(f"User: {user_input}")
         self.session_store.log("user", user_input)
+
+        # Detect corrections against the pre-append history: the last real
+        # user turn is still the question the assistant just answered.
+        is_correction = learn.looks_like_correction(user_input, self.history, self.config)
 
         # Surface any cron events that fired since the last turn.
         with self.cron_lock:
@@ -474,6 +507,10 @@ class ChatSession:
             self.history.append({"role": "user", "content": f"[System observation: {obs_text}]"})
             self._trim_history()
 
+        if is_correction:
+            # The corrected answer is now in history; capture and maybe retrain.
+            self._learn_from_correction()
+
     def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
         if name == "write_note":
             try:
@@ -482,6 +519,14 @@ class ChatSession:
                 return f"Saved note: {p.name}"
             except Exception as e:
                 return f"Failed to save note: {e}"
+
+        if name == "save_skill":
+            try:
+                p = memory.save_skill(params["name"], params["steps"])
+                self.retriever.invalidate_cache()
+                return f"Saved skill note: {p.name}"
+            except Exception as e:
+                return f"Failed to save skill: {e}"
 
         if name == "run_command":
             ok, out = sandbox.run_sandboxed(params["cmd"], self.config)

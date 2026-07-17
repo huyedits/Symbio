@@ -63,6 +63,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "nudge_interval": 10,
         "flush_min_turns": 6,
     },
+    "learn": {
+        "enabled": True,
+        "auto": True,
+        "auto_train": True,
+        "mistake_threshold": 5,
+        "batch_train_iters": 25,
+        "boost_factor": 3,
+        "correction_phrases": [
+            "no,", "not quite", "that's wrong", "incorrect", "wrong",
+            "you misunderstood", "try again", "actually", "i meant",
+            "i said", "i asked", "not what", "that's not", "you're wrong",
+            "fix it", "correction", "rephrase",
+        ],
+    },
 }
 
 # Keys that must survive a restart to take effect.
@@ -78,7 +92,7 @@ def load_config() -> dict[str, Any]:
         try:
             user_config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
             config.update(user_config)
-            for section in ("lora", "agent", "rag", "memory", "web", "sandbox"):
+            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn"):
                 if section in user_config:
                     config[section] = {**DEFAULT_CONFIG[section], **user_config[section]}
         except Exception as e:

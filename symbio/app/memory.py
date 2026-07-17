@@ -27,6 +27,25 @@ def ensure_seed_notes(config: dict[str, Any]):
     save_note("User Identity", f"My user's name is {config['user_name']}.")
 
 
+def save_skill(name: str, steps: str) -> Path:
+    """Persist a reusable multi-step skill as a 'Skill:' note; RAG retrieves
+    it when a similar task appears, and digest bakes it into the weights."""
+    return save_note(f"Skill: {name}", steps)
+
+
+def list_skills() -> list[tuple[str, Path]]:
+    """All saved skills as (title, path), detected by their '# Skill:' heading."""
+    skills = []
+    for f in sorted(constants.NOTES_DIR.glob("*.md")):
+        try:
+            first_line = f.read_text(encoding="utf-8").splitlines()[0]
+        except (OSError, IndexError):
+            continue
+        if first_line.lower().startswith("# skill:"):
+            skills.append((first_line[2:].strip(), f))
+    return skills
+
+
 def _store_path(store: str) -> Path:
     return constants.PROFILE_FILE if store == "profile" else constants.MEMORY_FILE
 
