@@ -426,14 +426,17 @@ def _search_google_news(query: str, max_results: int) -> list[tuple[str, str, st
     results = []
     for item in re.findall(r"<item>(.*?)</item>", doc, re.DOTALL)[:max_results]:
         t = re.search(r"<title>(.*?)</title>", item, re.DOTALL)
-        l = re.search(r"<link>(.*?)</link>", item, re.DOTALL)
+        s = re.search(r"<source[^>]*>(.*?)</source>", item, re.DOTALL)
         d = re.search(r"<pubDate>(.*?)</pubDate>", item, re.DOTALL)
         if not t:
             continue
         title = html_to_text(html_lib.unescape(t.group(1)))
+        # Google News links are enormous redirect URLs — noise that the model
+        # tends to echo back; the source name is what a reader needs.
+        source = html_to_text(html_lib.unescape(s.group(1))) if s else ""
         results.append((
             title,
-            html_lib.unescape(l.group(1)).strip() if l else "",
+            f"via {source}" if source else "",
             f"Published {d.group(1)}" if d else "",
         ))
     return results
@@ -988,6 +991,11 @@ def strip_tool_tags(reply: str) -> str:
     display = re.sub(r'<train\s*/>', '', display)
     display = re.sub(r'<train></train>', '', display)
     display = re.sub(r'<cron\s+[^>]*?>(.*?)</cron>', '', display, flags=re.DOTALL)
+    # A reply cut off mid-tag leaves an unterminated tag; never show it.
+    display = re.sub(
+        r'<(?:cmd|py|search|read|note|cron|digest|train)\b[^>]*>[^<]*$',
+        '', display, flags=re.DOTALL,
+    )
     return clean_response(display)
 
 
@@ -1279,6 +1287,7 @@ def chat_loop(config: dict[str, Any]):
 
         # ---- Autonomous Agent Loop ----
         max_rounds = config["agent"]["max_tool_rounds"]
+        executed_calls: set[str] = set()
         for round_num in range(max_rounds):
             messages = [{"role": "system", "content": system_prompt + rag_block + env_note() + time_note()}]
             messages.extend(history[-config["agent"]["history_limit"]:])
@@ -1304,12 +1313,22 @@ def chat_loop(config: dict[str, Any]):
                 print(f"{config['assistant_name']:8}: {display}")
                 chat_logger.info(f"{config['assistant_name']}: {display}")
 
-            if not tools:
-                # Normal turn: store assistant reply and wait for next user input
+            # Never re-run a tool call already executed this turn — a model
+            # that repeats itself would otherwise loop until max_rounds.
+            fresh_tools = [
+                (n, p) for n, p in tools
+                if json.dumps([n, p], sort_keys=True) not in executed_calls
+            ]
+
+            if not fresh_tools:
+                # Normal turn (or pure repetition): store the reply and stop.
                 history.append({"role": "assistant", "content": reply})
                 while len(history) > config["agent"]["history_limit"] + 8:
                     history.pop(0)
                 break
+            tools = fresh_tools
+            for n, p in tools:
+                executed_calls.add(json.dumps([n, p], sort_keys=True))
 
             # There are tools to execute
             history.append({"role": "assistant", "content": reply})
