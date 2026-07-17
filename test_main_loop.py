@@ -240,6 +240,60 @@ def test_agent_loop_runs_python():
     print("test_agent_loop_runs_python passed")
 
 
+_DDG_FIXTURE = """
+<div class="result">
+<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fstory&amp;rut=x">Big <b>Story</b> Headline</a>
+<a class="result__snippet" href="#">Something <b>important</b> happened today.</a>
+</div>
+"""
+
+
+def test_web_tools():
+    config = main.load_config()
+
+    reply = "<search>latest news</search><read>https://example.com</read>"
+    tools = main.parse_tools(reply)
+    assert ("web_search", {"query": "latest news"}) in tools, tools
+    assert ("read_page", {"url": "https://example.com"}) in tools, tools
+    assert main.strip_tool_tags(reply) == ""
+
+    assert main.html_to_text("<p>Hello <b>world</b><script>bad()</script></p>") == "Hello world"
+
+    real_get = main._http_get
+    main._http_get = lambda url, timeout=15: _DDG_FIXTURE
+    try:
+        ok, out = main.web_search("anything", config)
+    finally:
+        main._http_get = real_get
+    assert ok, out
+    assert "Big Story Headline" in out and "https://example.com/story" in out, out
+    assert "important" in out, out
+
+    ok, out = main.read_page("file:///etc/passwd", config)
+    assert not ok and "http" in out, (ok, out)
+    print("test_web_tools passed")
+
+
+def test_agent_loop_answers_from_search():
+    real_search = main.web_search
+    main.web_search = lambda q, c, max_results=5: (True, "1. Rain expected\n   https://example.com/wx\n   Heavy rain tomorrow.")
+    try:
+        session = ScriptedSession(
+            user_inputs=["what is the latest news?", "/quit", "n"],
+            model_replies=[
+                "<search>latest news</search>",
+                "The latest: heavy rain is expected tomorrow.",
+            ],
+        )
+        session.run()
+    finally:
+        main.web_search = real_search
+    assert len(session.prompts_seen) == 2
+    assert "Rain expected" in session.prompts_seen[1], session.prompts_seen[1]
+    assert "Web search for 'latest news' succeeded" in session.prompts_seen[1]
+    print("test_agent_loop_answers_from_search passed")
+
+
 def test_rag_injects_saved_notes():
     note_path = main.save_note(
         "Zephyr Project", "The Zephyr project deadline is March 3rd and uses Rust."
@@ -284,6 +338,8 @@ def run_all():
         test_cron_jobs_fire_and_expire()
         test_execute_code_tool()
         test_agent_loop_runs_python()
+        test_web_tools()
+        test_agent_loop_answers_from_search()
         test_rag_injects_saved_notes()
         test_sandbox_blocks_dangerous_commands()
         test_agent_loop_feeds_observation_back()
