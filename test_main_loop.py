@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from symbio import constants
-from symbio.app import chat, cron, memory, sandbox, sessions, tooling, training, web
+from symbio.app import chat, cron, learn, memory, sandbox, sessions, tooling, training, web
 from symbio.app import config as app_config
 from symbio.app.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt
 from test_utils import preserve_training_state
@@ -589,6 +589,151 @@ def test_digest_includes_curated_stores():
     print("test_digest_includes_curated_stores passed")
 
 
+@contextmanager
+def scratch_notes_dir():
+    real_notes = constants.NOTES_DIR
+    constants.NOTES_DIR = constants.PROJECT_DIR / "notes.test"
+    constants.NOTES_DIR.mkdir(exist_ok=True)
+    try:
+        yield
+    finally:
+        import shutil
+        shutil.rmtree(constants.NOTES_DIR, ignore_errors=True)
+        constants.NOTES_DIR = real_notes
+
+
+@contextmanager
+def scratch_mistakes_dir():
+    real_m, real_a = constants.MISTAKES_DIR, constants.MISTAKES_ARCHIVE_DIR
+    constants.MISTAKES_DIR = constants.PROJECT_DIR / "mistakes.test"
+    constants.MISTAKES_ARCHIVE_DIR = constants.MISTAKES_DIR / "archive"
+    constants.MISTAKES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        yield
+    finally:
+        import shutil
+        shutil.rmtree(constants.MISTAKES_DIR, ignore_errors=True)
+        constants.MISTAKES_DIR, constants.MISTAKES_ARCHIVE_DIR = real_m, real_a
+
+
+def test_parse_skill_tag():
+    reply = "Done! <skill name='Check disk'>1. df -h. 2. Report Use%.</skill> Saved."
+    tools = tooling.parse_tools(reply)
+    assert tools == [("save_skill", {"name": "Check disk", "steps": "1. df -h. 2. Report Use%."})], tools
+    stripped = tooling.strip_tool_tags(reply)
+    assert "<skill" not in stripped and "df -h" not in stripped, stripped
+    print("test_parse_skill_tag passed")
+
+
+def test_agent_loop_saves_skill():
+    with scratch_notes_dir():
+        session = ScriptedSession(
+            user_inputs=["Remember how you fixed the wifi.", "/quit", "n"],
+            model_replies=[
+                "<skill name='Fix wifi'>1. Toggle wifi off. 2. Toggle it on.</skill> Saved the steps.",
+                "It's saved as a skill now.",
+            ],
+        )
+        session.run()
+        assert "Saved skill note" in session.prompts_seen[1], session.prompts_seen[1]
+        skills = memory.list_skills()
+        assert len(skills) == 1 and skills[0][0] == "Skill: Fix wifi", skills
+        body = skills[0][1].read_text()
+        assert "Toggle wifi off" in body, body
+    print("test_agent_loop_saves_skill passed")
+
+
+def test_correction_detection_and_mining():
+    config = app_config.load_config()
+    history = [
+        {"role": "user", "content": "What is the capital of Australia?"},
+        {"role": "assistant", "content": "The capital of Australia is Sydney."},
+    ]
+    # Phrase-based detection (pre-append history).
+    assert learn.looks_like_correction("No, that's wrong — it's Canberra.", history, config)
+    # Repeating the same question also counts as a correction signal.
+    assert learn.looks_like_correction("what is the capital of australia", history, config)
+    # A normal follow-up does not.
+    assert not learn.looks_like_correction("and what about New Zealand?", history, config)
+    # Slash commands and empty input never count.
+    assert not learn.looks_like_correction("/status", history, config)
+
+    history += [
+        {"role": "user", "content": "No, that's wrong — it's Canberra."},
+        {"role": "user", "content": "[System observation: something]"},
+        {"role": "assistant", "content": "You're right — the capital of Australia is Canberra."},
+    ]
+    sample = learn.find_correction_sample(history, config)
+    assert sample is not None
+    query, wrong, correction, correct = sample
+    assert query == "What is the capital of Australia?", query
+    assert "Sydney" in wrong and "Canberra" in correct, (wrong, correct)
+    assert "wrong" in correction, correction
+    print("test_correction_detection_and_mining passed")
+
+
+def test_mistake_digest_and_threshold_training():
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    config = app_config.load_config()
+    config["learn"]["mistake_threshold"] = 2
+    config["learn"]["boost_factor"] = 2
+
+    tmp = Path(tempfile.mkdtemp())
+    real_train = constants.TRAIN_FILE
+    constants.TRAIN_FILE = tmp / "train.jsonl"
+    trained_with: list[int | None] = []
+    real_run_training = training.run_training
+    training.run_training = lambda cfg, iters=None: trained_with.append(iters) or True
+    try:
+        with scratch_mistakes_dir():
+            learn.save_mistake_note("Q-alpha?", "wrong-a", "no,", "right-a")
+            # Below threshold: nothing trains, note stays.
+            assert not learn.maybe_train_on_mistakes(config, FakeTokenizer(), "SYS")
+            assert learn.mistake_note_count() == 1
+            assert trained_with == []
+
+            learn.save_mistake_note("Q-beta?", "wrong-b", "no,", "right-b")
+            # At threshold: digest (boosted), archive, train with batch iters.
+            assert learn.maybe_train_on_mistakes(config, FakeTokenizer(), "SYS")
+            assert learn.mistake_note_count() == 0
+            archived = list(constants.MISTAKES_ARCHIVE_DIR.glob("*.md"))
+            assert len(archived) == 2, archived
+            assert trained_with == [config["learn"]["batch_train_iters"]], trained_with
+            data = constants.TRAIN_FILE.read_text()
+            # boost=2 -> each corrected answer appears twice.
+            assert data.count("right-a") == 2 and data.count("right-b") == 2, data
+    finally:
+        training.run_training = real_run_training
+        constants.TRAIN_FILE = real_train
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("test_mistake_digest_and_threshold_training passed")
+
+
+def test_agent_loop_captures_correction():
+    with scratch_mistakes_dir():
+        session = ScriptedSession(
+            user_inputs=[
+                "What is the capital of Australia?",
+                "No, that's wrong — it's Canberra.",
+                "/quit", "n",
+            ],
+            model_replies=[
+                "The capital of Australia is Sydney.",
+                "You're right — the capital of Australia is Canberra.",
+            ],
+        )
+        session.run()
+        notes = [f for f in constants.MISTAKES_DIR.glob("*.md") if f.is_file()]
+        assert len(notes) == 1, notes
+        body = notes[0].read_text()
+        assert "What is the capital of Australia?" in body, body
+        assert "Sydney" in body and "Canberra" in body, body
+    print("test_agent_loop_captures_correction passed")
+
+
 def test_sandbox_blocks_dangerous_commands():
     config = app_config.load_config()
     ok, out = sandbox.run_sandboxed("rm -rf /", config, interactive=False)
@@ -663,6 +808,11 @@ def _run_all_inner():
         test_rag_injects_saved_notes()
         test_parse_browser_tags()
         test_agent_loop_browses()
+        test_parse_skill_tag()
+        test_agent_loop_saves_skill()
+        test_correction_detection_and_mining()
+        test_mistake_digest_and_threshold_training()
+        test_agent_loop_captures_correction()
         test_digest_includes_curated_stores()
         test_sandbox_blocks_dangerous_commands()
         test_sandbox_blocked_command_permission_prompt()

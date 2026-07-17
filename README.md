@@ -226,8 +226,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and how to open issue
  > future projection <
 - [ ] **Add MCP (Model Context Protocol)**
 - [ ] **Add More Tools**
-- [ ] **Self correction when hallucinating**
-- [ ] **Be able to learn new skills on the fly**
+- [x] **Self correction when hallucinating**
+- [x] **Be able to learn new skills on the fly**
 - [ ] **Add Other Messaging Platforms**
 - [ ] **Prune Old Weights (Future Milestone)**
 

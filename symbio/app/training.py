@@ -225,6 +225,12 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             "Make your replies more creative.",
             "<config set='agent.temperature'>0.9</config> Done — turning up the creativity.",
         ),
+        # Skills: save a working multi-step approach for reuse
+        (
+            "That worked — remember how you checked the disk.",
+            "<skill name='Check disk space'>1. Run df -h in the sandbox. 2. Report the Use% of /.</skill> "
+            "Saved it as a skill so I can reuse those steps next time.",
+        ),
         # Curated memory: durable preferences go to <profile>/<memory>
         (
             "I prefer replies in bullet points from now on.",
@@ -273,7 +279,9 @@ def ensure_validation_split(every_nth: int = 10, max_samples: int = 24):
     constants.VALID_FILE.write_text("\n".join(sample) + "\n", encoding="utf-8")
 
 
-def run_training(config: dict[str, Any]) -> bool:
+def run_training(config: dict[str, Any], iters: int | None = None) -> bool:
+    """Run a LoRA fine-tune. `iters` overrides lora.iters for short passes
+    (e.g. the correction-learning batches)."""
     if not constants.TRAIN_FILE.exists() or constants.TRAIN_FILE.stat().st_size == 0:
         print("  [System] No training data available.")
         return False
@@ -308,7 +316,7 @@ def run_training(config: dict[str, Any]) -> bool:
         "--data", str(constants.DATA_DIR),
         "--batch-size", str(lora["batch_size"]),
         "--num-layers", str(lora["num_layers"]),
-        "--iters", str(lora["iters"]),
+        "--iters", str(iters if iters is not None else lora["iters"]),
         "--learning-rate", str(lora["learning_rate"]),
         "--steps-per-eval", str(lora["steps_per_eval"]),
         "--max-seq-length", str(lora["max_seq_length"]),
