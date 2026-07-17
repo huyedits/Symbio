@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Caine: a personal, autonomous, self-fine-tuning Hermes-style agent.
-and conversation via LoRA. Per-user identity is configurable in config.json
-or via CLI flags.
+
+Runs a local MLX model in an agent loop with sandboxed tools, curated memory,
+RAG over notes and past sessions, and learns from notes and conversation via
+LoRA. Per-user identity is configurable in config.json or via CLI flags.
 """
 
 import argparse
@@ -38,6 +40,7 @@ PROJECT_DIR = Path(__file__).parent.resolve()
 LOG_DIR = PROJECT_DIR / "logs"
 DATA_DIR = PROJECT_DIR / "training_data"
 TRAIN_FILE = DATA_DIR / "train.jsonl"
+VALID_FILE = DATA_DIR / "valid.jsonl"
 ADAPTER_DIR = PROJECT_DIR / "adapters"
 NOTES_DIR = PROJECT_DIR / "notes"
 SANDBOX_DIR = PROJECT_DIR / "sandbox"
@@ -252,8 +255,8 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     print(f"   Data   : {dataset_size:,} bytes")
     print(f"   Notes  : {note_count}")
     print("-" * 50)
-    print("Commands: /quit  /save  /train  /forget_last  /status  /prune")
-    print("         /run <cmd>  /note [title]  /notes  /digest  /cron")
+    print("Commands: /quit  /save  /train  /forget_last  /status  /prune  /help")
+    print("         /run <cmd>  /note [title]  /notes  /digest  /cron  /config")
     print("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     print("-" * 50)
 
@@ -421,8 +424,9 @@ def html_to_text(html: str) -> str:
     return re.sub(r"\s+", " ", " ".join(parser.chunks)).strip()
 
 
-def _search_duckduckgo(query: str, max_results: int) -> list[tuple[str, str, str]]:
-    doc = _http_get("https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query))
+def _search_duckduckgo(query: str, max_results: int, timeout: int = 15) -> list[tuple[str, str, str]]:
+    doc = _http_get("https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query),
+                    timeout=timeout)
     titles = re.findall(
         r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', doc, re.DOTALL
     )
@@ -437,11 +441,12 @@ def _search_duckduckgo(query: str, max_results: int) -> list[tuple[str, str, str
     return results
 
 
-def _search_ddg_api(query: str, max_results: int) -> list[tuple[str, str, str]]:
+def _search_ddg_api(query: str, max_results: int, timeout: int = 15) -> list[tuple[str, str, str]]:
     """DuckDuckGo instant-answer API: great for factual queries, no key needed."""
     doc = _http_get(
         "https://api.duckduckgo.com/?format=json&no_html=1&q="
-        + urllib.parse.quote_plus(query)
+        + urllib.parse.quote_plus(query),
+        timeout=timeout,
     )
     data = json.loads(doc)
     results = []
@@ -459,11 +464,12 @@ def _search_ddg_api(query: str, max_results: int) -> list[tuple[str, str, str]]:
     return results
 
 
-def _search_google_news(query: str, max_results: int) -> list[tuple[str, str, str]]:
+def _search_google_news(query: str, max_results: int, timeout: int = 15) -> list[tuple[str, str, str]]:
     """Google News RSS: reliable for news and current events, no key needed."""
     doc = _http_get(
         "https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q="
-        + urllib.parse.quote_plus(query)
+        + urllib.parse.quote_plus(query),
+        timeout=timeout,
     )
     results = []
     for item in re.findall(r"<item>(.*?)</item>", doc, re.DOTALL)[:max_results]:
@@ -494,11 +500,12 @@ def web_search(query: str, config: dict[str, Any], max_results: int | None = Non
     if max_results is None:
         max_results = int(config["web"]["search_results"])
 
+    timeout = int(config["web"]["http_timeout"])
     results: list[tuple[str, str, str]] = []
     last_err = "No results found."
     for backend in (_search_duckduckgo, _search_ddg_api, _search_google_news):
         try:
-            results = backend(query, max_results)
+            results = backend(query, max_results, timeout=timeout)
         except Exception as e:
             last_err = f"Search failed: {e}"
             continue
@@ -1091,10 +1098,29 @@ def check_due_jobs(config: dict[str, Any], now: datetime | None = None) -> list[
 # ========================================================
 
 
+def ensure_validation_split(every_nth: int = 10, max_samples: int = 24):
+    """mlx_lm silently skips evaluation when valid.jsonl is missing, which
+    makes steps_per_eval meaningless. Sample a small validation set from the
+    training data so eval loss is always reported."""
+    if VALID_FILE.exists() and VALID_FILE.stat().st_size > 0:
+        return
+    lines = [l for l in TRAIN_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
+    sample = lines[::every_nth][:max_samples] or lines[:1]
+    VALID_FILE.write_text("\n".join(sample) + "\n", encoding="utf-8")
+
+
 def run_training(config: dict[str, Any]) -> bool:
     if not TRAIN_FILE.exists() or TRAIN_FILE.stat().st_size == 0:
         print("  [System] No training data available.")
         return False
+    ensure_validation_split()
+
+    # Sweep temp LoRA config files left behind by previous crashed runs.
+    for stale in DATA_DIR.glob("tmp*.yaml"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
 
     lora = config["lora"]
     print("\n  [System] Starting MLX LoRA Fine-Tuning\n")
@@ -1397,7 +1423,8 @@ def chat_loop(config: dict[str, Any]):
                             add_generation_prompt=True, enable_thinking=False,
                         )
                         flush_reply = generate(
-                            model, tokenizer, prompt=flush_prompt, sampler=sampler, verbose=False
+                            model, tokenizer, prompt=flush_prompt, sampler=sampler,
+                            max_tokens=int(config["agent"]["max_reply_tokens"]), verbose=False,
                         )
                         for name, params in parse_tools(flush_reply):
                             if name == "save_memory":
@@ -1495,6 +1522,7 @@ def chat_loop(config: dict[str, Any]):
                     print("  Empty note, cancelled.")
                     continue
                 path = save_note(title, body.strip())
+                retriever.invalidate_cache()
                 print(f"  Saved: {path.name}")
                 continue
 
@@ -1572,8 +1600,13 @@ def chat_loop(config: dict[str, Any]):
                 print("  Note: mlx_lm LoRA adapters do not support true weight pruning; keeping rank low and removing checkpoints is the practical way to stay small.")
                 continue
 
+            elif cmd in ("/help", "/h", "/?"):
+                print_banner(config, adapter_config.exists(),
+                             TRAIN_FILE.stat().st_size if TRAIN_FILE.exists() else 0)
+                continue
+
             else:
-                print("  Unknown command.")
+                print("  Unknown command. Type /help for the command list.")
                 continue
 
         if not user_input:
@@ -1618,7 +1651,7 @@ def chat_loop(config: dict[str, Any]):
         # ---- Autonomous Agent Loop ----
         max_rounds = config["agent"]["max_tool_rounds"]
         executed_calls: set[str] = set()
-        for round_num in range(max_rounds):
+        for _ in range(max_rounds):
             messages = [{"role": "system", "content": (
                 system_prompt + curated_memory_block(config) + rag_block
                 + env_note() + time_note() + nudge_block
