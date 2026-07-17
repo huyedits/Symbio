@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import re
 import shlex
 import subprocess
@@ -92,8 +93,8 @@ You can take actions by using special tags in your response:
   <cmd>command</cmd> — run a sandboxed shell command
   <digest /> — convert unsaved notes to training data
   <train /> — fine-tune your LoRA weights on accumulated knowledge
-  <cron expr='MIN HOUR DOM MON DOW'>text</cron> — schedule a recurring reminder (5-field cron)
-  <cron at='YYYY-MM-DD HH:MM'>text</cron> — schedule a one-time reminder
+  <cron expr='0 9 * * *'>text</cron> — recurring reminder (5-field cron; this example fires daily at 9:00)
+  <cron at='2026-07-17 21:30'>text</cron> — one-time reminder at that exact date and time
 
 Guidelines:
 - Write a note whenever {user_name} teaches you something important.
@@ -102,6 +103,8 @@ Guidelines:
 - The current date/time from the computer clock is shown with every request; use it when scheduling. If {user_name} states a different time or timezone, trust what they say.
 - Convert relative times ("in 10 minutes", "tomorrow at 9am") into absolute times using the current clock before scheduling.
 - Start a scheduled reminder's text with "cmd:" to run a sandboxed command when it fires.
+- You CAN run sandboxed shell commands with <cmd>; never claim otherwise.
+- If a command fails, do not repeat it or give up — try a different command that fits the environment shown with each request, then report what worked or what you tried.
 - Talk normally outside the tags.
 - NEVER include internal reasoning, thinking, or analysis in your final reply.
 - Address {user_name} by name when it feels natural.
@@ -114,6 +117,18 @@ def time_note(now: datetime | None = None) -> str:
     schedules with the computer clock (or defer to a time the user states)."""
     now = now or datetime.now()
     return f"\n\n[Current local date/time from computer clock: {now:%A, %Y-%m-%d %H:%M}]"
+
+
+def env_note() -> str:
+    """Appended to the system prompt each round so the model picks commands
+    that actually exist on this machine."""
+    system = platform.system()
+    if system == "Darwin":
+        return ("\n[Environment: macOS. Open apps with: open -a 'App Name' "
+                "(e.g. open -a 'Google Chrome'); GUI apps have no CLI names like 'chrome'.]")
+    if system == "Windows":
+        return "\n[Environment: Windows. Open apps with: start <name>.]"
+    return f"\n[Environment: {system}. Open apps/URLs with: xdg-open <target>.]"
 
 
 def build_system_prompt(assistant_name: str, user_name: str) -> str:
@@ -341,10 +356,14 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             f"What is my name?",
             f"Your name is {user}, {user}.",
         ),
-        # Tool-use demonstration
+        # Tool-use demonstration: "remember a fact" = note, "remind me at a time" = cron
         (
             "Please remember that I prefer concise replies.",
             "Got it. <note title='User Preference'>The user prefers concise replies.</note>",
+        ),
+        (
+            "Remember that my favorite color is green.",
+            f"Noted, {user}. <note title='Favorite Color'>{user}'s favorite color is green.</note>",
         ),
         (
             "Save your notes and train on them.",
@@ -366,6 +385,25 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         (
             "Remind me every Monday at 10 to review my notes.",
             f"Done, {user}. <cron expr='0 10 * * 1'>review your notes</cron>",
+        ),
+    ]
+
+    # Resilience: use this machine's native commands, and recover from a
+    # failed command instead of giving up.
+    if platform.system() == "Darwin":
+        open_chrome = "open -a 'Google Chrome'"
+    elif platform.system() == "Windows":
+        open_chrome = "start chrome"
+    else:
+        open_chrome = "xdg-open https://www.google.com"
+    samples += [
+        (
+            "Open Chrome.",
+            f"<cmd>{open_chrome}</cmd> Opening Chrome for you, {user}.",
+        ),
+        (
+            "[System observation: Command 'chrome' exited error.\nOutput:\nCommand not found: chrome]",
+            f"'chrome' isn't a command on this machine — trying the native way instead. <cmd>{open_chrome}</cmd>",
         ),
     ]
 
@@ -941,7 +979,7 @@ def chat_loop(config: dict[str, Any]):
         # ---- Autonomous Agent Loop ----
         max_rounds = config["agent"]["max_tool_rounds"]
         for round_num in range(max_rounds):
-            messages = [{"role": "system", "content": system_prompt + time_note()}]
+            messages = [{"role": "system", "content": system_prompt + env_note() + time_note()}]
             messages.extend(history[-config["agent"]["history_limit"]:])
 
             prompt = tokenizer.apply_chat_template(

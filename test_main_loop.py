@@ -187,8 +187,9 @@ def test_agent_loop_feeds_observation_back():
     assert "[System observation:" in second, second
     assert "loop-e2e-marker" in second, second
     assert "exited ok" in second, second
-    # Every round grounds the model in wall-clock time.
+    # Every round grounds the model in wall-clock time and the host OS.
     assert "computer clock" in session.prompts_seen[0], session.prompts_seen[0]
+    assert "[Environment:" in session.prompts_seen[0], session.prompts_seen[0]
     print("test_agent_loop_feeds_observation_back passed")
 
 
