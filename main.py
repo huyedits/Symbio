@@ -7,6 +7,7 @@ or via CLI flags.
 import argparse
 import ast
 import hashlib
+import html as html_lib
 import json
 import logging
 import os
@@ -18,7 +19,10 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +108,8 @@ You can take actions by using special tags in your response:
   <note title='T'>body</note> — save a markdown note
   <cmd>command</cmd> — run a sandboxed shell command
   <py>print(2 + 2)</py> — run a short Python script and see its output (pure computation; no os/network imports)
+  <search>query</search> — web search; the results come back to you as text to answer from
+  <read>https://url</read> — fetch a page's text content so you can read it
   <digest /> — convert unsaved notes to training data
   <train /> — fine-tune your LoRA weights on accumulated knowledge
   <cron expr='0 9 * * *'>text</cron> — recurring reminder (5-field cron; this example fires daily at 9:00)
@@ -114,6 +120,7 @@ Guidelines:
 - After writing 2+ new notes, call <digest /> then <train /> to remember them.
 - If {user_name} asks you to check the system, use <cmd>.
 - For math or anything worth computing exactly, write and run code with <py> and answer from its printed output.
+- For current information (news, weather, facts you're unsure of), use <search> and answer from the returned results; <read> a result URL when you need detail. Only use <cmd>open ...</cmd> when {user_name} wants the page opened in their browser.
 - The current date/time from the computer clock is shown with every request; use it when scheduling. If {user_name} states a different time or timezone, trust what they say.
 - Convert relative times ("in 10 minutes", "tomorrow at 9am") into absolute times using the current clock before scheduling.
 - Start a scheduled reminder's text with "cmd:" to run a sandboxed command when it fires.
@@ -332,6 +339,157 @@ def run_sandboxed(command: str, config: dict[str, Any]):
         return False, str(e)
 
 
+# ======================== WEB ACCESS =========================
+_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+
+
+def _http_get(url: str, timeout: int = 15) -> str:
+    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read(1_000_000).decode("utf-8", errors="replace")
+
+
+class _TextExtractor(HTMLParser):
+    _SKIP = {"script", "style", "noscript", "svg", "header", "footer", "nav"}
+
+    def __init__(self):
+        super().__init__()
+        self.chunks: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP and self._skip_depth:
+            self._skip_depth -= 1
+
+    def handle_data(self, data):
+        if not self._skip_depth and data.strip():
+            self.chunks.append(data.strip())
+
+
+def html_to_text(html: str) -> str:
+    parser = _TextExtractor()
+    try:
+        parser.feed(html)
+    except Exception:
+        pass
+    return re.sub(r"\s+", " ", " ".join(parser.chunks)).strip()
+
+
+def _search_duckduckgo(query: str, max_results: int) -> list[tuple[str, str, str]]:
+    doc = _http_get("https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query))
+    titles = re.findall(
+        r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', doc, re.DOTALL
+    )
+    snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', doc, re.DOTALL)
+    results = []
+    for i, (href, title_html) in enumerate(titles[:max_results]):
+        url = href
+        if "uddg=" in href:
+            url = urllib.parse.unquote(href.split("uddg=", 1)[1].split("&", 1)[0])
+        snippet = html_to_text(snippets[i]) if i < len(snippets) else ""
+        results.append((html_to_text(title_html), url, snippet))
+    return results
+
+
+def _search_ddg_api(query: str, max_results: int) -> list[tuple[str, str, str]]:
+    """DuckDuckGo instant-answer API: great for factual queries, no key needed."""
+    doc = _http_get(
+        "https://api.duckduckgo.com/?format=json&no_html=1&q="
+        + urllib.parse.quote_plus(query)
+    )
+    data = json.loads(doc)
+    results = []
+    if data.get("AbstractText"):
+        results.append((
+            data.get("Heading", query),
+            data.get("AbstractURL", ""),
+            data["AbstractText"],
+        ))
+    for topic in data.get("RelatedTopics", []):
+        if len(results) >= max_results:
+            break
+        if isinstance(topic, dict) and topic.get("Text") and topic.get("FirstURL"):
+            results.append((topic["Text"][:80], topic["FirstURL"], topic["Text"]))
+    return results
+
+
+def _search_google_news(query: str, max_results: int) -> list[tuple[str, str, str]]:
+    """Google News RSS: reliable for news and current events, no key needed."""
+    doc = _http_get(
+        "https://news.google.com/rss/search?hl=en-US&gl=US&ceid=US:en&q="
+        + urllib.parse.quote_plus(query)
+    )
+    results = []
+    for item in re.findall(r"<item>(.*?)</item>", doc, re.DOTALL)[:max_results]:
+        t = re.search(r"<title>(.*?)</title>", item, re.DOTALL)
+        l = re.search(r"<link>(.*?)</link>", item, re.DOTALL)
+        d = re.search(r"<pubDate>(.*?)</pubDate>", item, re.DOTALL)
+        if not t:
+            continue
+        title = html_to_text(html_lib.unescape(t.group(1)))
+        results.append((
+            title,
+            html_lib.unescape(l.group(1)).strip() if l else "",
+            f"Published {d.group(1)}" if d else "",
+        ))
+    return results
+
+
+def web_search(query: str, config: dict[str, Any], max_results: int = 5) -> tuple[bool, str]:
+    """Search the web without API keys. Backends in order: DuckDuckGo HTML
+    (full web results, sometimes bot-challenged), DuckDuckGo instant-answer
+    API (facts), Google News RSS (news/current events)."""
+    query = query.strip()
+    if not query:
+        return False, "Empty query."
+
+    results: list[tuple[str, str, str]] = []
+    last_err = "No results found."
+    for backend in (_search_duckduckgo, _search_ddg_api, _search_google_news):
+        try:
+            results = backend(query, max_results)
+        except Exception as e:
+            last_err = f"Search failed: {e}"
+            continue
+        if results:
+            break
+    if not results:
+        return False, last_err
+
+    lines = [
+        f"{i + 1}. {title}\n   {url}\n   {snippet}"
+        for i, (title, url, snippet) in enumerate(results)
+    ]
+    out = "\n".join(lines)
+    max_len = config["agent"]["max_output_len"]
+    if len(out) > max_len:
+        out = out[:max_len] + "\n... (truncated)"
+    return True, out
+
+
+def read_page(url: str, config: dict[str, Any]) -> tuple[bool, str]:
+    """Fetch a web page and return its readable text."""
+    url = url.strip()
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in ("http", "https"):
+        return False, f"Only http/https URLs can be read, got: {url!r}"
+    try:
+        text = html_to_text(_http_get(url))
+    except Exception as e:
+        return False, f"Could not read {url}: {e}"
+    if not text:
+        return False, f"No readable text found at {url}."
+    max_len = config["agent"]["max_output_len"]
+    if len(text) > max_len:
+        text = text[:max_len] + "\n... (truncated)"
+    return True, text
+# ========================================================
+
+
 # Imports that would let sandboxed code touch the filesystem, network, or
 # host process; scripts are for pure computation (math, datetime, json, ...).
 _BLOCKED_IMPORTS = frozenset({
@@ -503,6 +661,21 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         (
             "What's 2 to the power of 40, exactly?",
             "<py>print(2 ** 40)</py> Computing it exactly.",
+        ),
+        # Current information = <search> and answer from the returned results
+        (
+            "What is the latest news?",
+            "<search>latest news</search> Searching now.",
+        ),
+        (
+            "[System observation: Web search for 'latest news' succeeded.\nResults:\n"
+            "1. Major storm reaches coast\n   https://example.com/storm\n"
+            "   The storm made landfall this morning.]",
+            f"Here's the latest, {user}: a major storm made landfall this morning (example.com).",
+        ),
+        (
+            "What's the weather in Tokyo right now?",
+            "<search>Tokyo weather now</search> Checking.",
         ),
         # Web/YouTube search = open a search URL in the browser
         (
@@ -776,6 +949,12 @@ def parse_tools(reply: str) -> list[tuple[str, dict[str, Any]]]:
     for m in re.finditer(r'<py>(.*?)</py>', reply, re.DOTALL):
         tools.append(("execute_code", {"code": m.group(1).strip()}))
 
+    for m in re.finditer(r'<search>(.*?)</search>', reply, re.DOTALL):
+        tools.append(("web_search", {"query": m.group(1).strip()}))
+
+    for m in re.finditer(r'<read>(.*?)</read>', reply, re.DOTALL):
+        tools.append(("read_page", {"url": m.group(1).strip()}))
+
     if re.search(r'<digest\s*/>', reply) or re.search(r'<digest></digest>', reply):
         tools.append(("digest_notes", {}))
 
@@ -802,6 +981,8 @@ def strip_tool_tags(reply: str) -> str:
     display = re.sub(r'<note\s+title=[\'"][^\'"]*?[\'"]>(.*?)</note>', '', display, flags=re.DOTALL)
     display = re.sub(r'<cmd>(.*?)</cmd>', '', display, flags=re.DOTALL)
     display = re.sub(r'<py>(.*?)</py>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<search>(.*?)</search>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<read>(.*?)</read>', '', display, flags=re.DOTALL)
     display = re.sub(r'<digest\s*/>', '', display)
     display = re.sub(r'<digest></digest>', '', display)
     display = re.sub(r'<train\s*/>', '', display)
@@ -1155,6 +1336,18 @@ def chat_loop(config: dict[str, Any]):
                     ok, out = run_python_code(params["code"], config)
                     observations.append(
                         f"Python script exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
+                    )
+
+                elif name == "web_search":
+                    ok, out = web_search(params["query"], config)
+                    observations.append(
+                        f"Web search for '{params['query']}' {'succeeded' if ok else 'failed'}.\nResults:\n{out}"
+                    )
+
+                elif name == "read_page":
+                    ok, out = read_page(params["url"], config)
+                    observations.append(
+                        f"Reading {params['url']} {'succeeded' if ok else 'failed'}.\nContent:\n{out}"
                     )
 
                 elif name == "digest_notes":
