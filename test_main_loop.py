@@ -423,6 +423,41 @@ def test_memory_injected_and_flushed():
     print("test_memory_injected_and_flushed passed")
 
 
+def test_session_history_cross_session_recall():
+    import shutil
+    real_dir = main.SESSIONS_DIR
+    main.SESSIONS_DIR = main.PROJECT_DIR / "sessions.test"
+    main.SESSIONS_DIR.mkdir(exist_ok=True)
+    try:
+        s1 = ScriptedSession(
+            user_inputs=["my project codename is quantum-kettle", "/quit", "n"],
+            model_replies=["Noted — quantum-kettle it is."],
+        )
+        s1.run()
+        files = list(main.SESSIONS_DIR.glob("*.jsonl"))
+        assert len(files) == 1, files
+        rows = [json.loads(l) for l in files[0].read_text().splitlines()]
+        assert rows[0]["role"] == "user" and "quantum-kettle" in rows[0]["content"], rows
+        assert any(r["role"] == "assistant" for r in rows), rows
+
+        hits = main.SessionStore.search("quantum kettle codename")
+        assert hits and "quantum-kettle" in hits[0]["content"], hits
+        assert main.SessionStore.search("quantum kettle", exclude_session=files[0].stem) == []
+
+        # A later session retrieves the earlier one into context.
+        s2 = ScriptedSession(
+            user_inputs=["what was my project codename again?", "/quit", "n"],
+            model_replies=["It's quantum-kettle."],
+        )
+        s2.run()
+        first = s2.prompts_seen[0]
+        assert "Past session" in first and "quantum-kettle" in first, first
+    finally:
+        shutil.rmtree(main.SESSIONS_DIR, ignore_errors=True)
+        main.SESSIONS_DIR = real_dir
+    print("test_session_history_cross_session_recall passed")
+
+
 def test_rag_injects_saved_notes():
     note_path = main.save_note(
         "Zephyr Project", "The Zephyr project deadline is March 3rd and uses Rust."
@@ -459,6 +494,20 @@ def test_sandbox_blocks_dangerous_commands():
 
 
 def run_all():
+    import shutil
+    # Keep scripted-session chatter out of the real session store — it would
+    # otherwise pollute cross-session RAG retrieval for the actual user.
+    real_sessions = main.SESSIONS_DIR
+    main.SESSIONS_DIR = main.PROJECT_DIR / "sessions.suite"
+    main.SESSIONS_DIR.mkdir(exist_ok=True)
+    try:
+        _run_all_inner()
+    finally:
+        shutil.rmtree(main.SESSIONS_DIR, ignore_errors=True)
+        main.SESSIONS_DIR = real_sessions
+
+
+def _run_all_inner():
     with preserve_training_state():
         test_system_prompt_substitutes_names()
         test_system_prompt_seeds_missing_prompt_md()
@@ -473,6 +522,7 @@ def run_all():
         test_agent_loop_applies_config_change()
         test_curated_memory_store()
         test_memory_injected_and_flushed()
+        test_session_history_cross_session_recall()
         test_rag_injects_saved_notes()
         test_sandbox_blocks_dangerous_commands()
         test_agent_loop_feeds_observation_back()
