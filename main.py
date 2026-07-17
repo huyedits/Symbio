@@ -34,6 +34,7 @@ from mlx_lm import load, generate
 from mlx_lm.sample_utils import make_sampler
 
 from rag import Retriever
+from symbio.computer import BrowserSession
 
 # ======================== PATHS =========================
 PROJECT_DIR = Path(__file__).parent.resolve()
@@ -88,7 +89,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sandbox": {
         "blocked_commands": [
             "rm", "sudo", "su", "dd", "mkfs", "fdisk", "mount", "umount",
-            "chmod", "chown", "curl", "wget", "ssh", "scp", "bash", "sh", "zsh",
+            "chmod", "chown", "wget", "ssh", "scp", "bash", "sh", "zsh",
             "fish", "python", "python3", "perl", "ruby", "php", "node", "npm",
         ],
         "blocked_imports": [
@@ -151,6 +152,10 @@ You can take actions by using special tags in your response:
   <py>print(2 + 2)</py> — run a short Python script and see its output (pure computation; no os/network imports)
   <search>query</search> — web search; the results come back to you as text to answer from
   <read>https://url</read> — fetch a page's text content so you can read it
+  <browse>https://url</browse> — open the page in your own live browser; its text comes back to you
+  <click>Sign in</click> — click a visible element on the open page (by its text, or a CSS selector)
+  <type enter='true'>words to type</type> — type into the focused field; enter='true' also submits
+  <scroll /> — scroll the open page down (<scroll dir='up' /> for up)
   <memory>fact</memory> — append to your always-in-context memory (use replace='all' to rewrite it)
   <profile>fact about {user_name}</profile> — append to your profile of {user_name} (replace='all' to rewrite)
   <config show /> — see your current configuration
@@ -166,10 +171,12 @@ Guidelines:
 - Your <memory> and <profile> stores are small and always visible to you: keep only high-value durable facts there (conventions, preferences, who {user_name} is), and consolidate when told they're over the limit. Bulk knowledge belongs in notes.
 - When a multi-step approach works well, save it as a note titled 'Skill: <name>' listing the steps — it will come back to you when a similar task appears.
 - You may adjust your own configuration with <config> when {user_name} asks or when a setting is clearly hurting the session (check current values with <config show /> first). Changes apply from the next turn.
-- After writing 2+ new notes, call <digest /> then <train /> to remember them.
+- When you figure out something new about {user_name}, write it down right away with <profile> (or <note> for bulk detail).
+- After writing 2+ new notes or updating <memory>/<profile>, call <digest /> then <train /> — digest also converts your memory and profile stores into fine-tune data, so what you learned becomes part of your weights.
 - If {user_name} asks you to check the system, use <cmd>.
 - For math or anything worth computing exactly, write and run code with <py> and answer from its printed output.
 - For current information (news, weather, facts you're unsure of), use <search> and answer from the returned results; <read> a result URL when you need detail. Only use <cmd>open ...</cmd> when {user_name} wants the page opened in their browser.
+- To browse the web yourself, <browse> a URL (a search URL works too, e.g. https://duckduckgo.com/?q=some+words), then <click>, <type>, and <scroll> to move around; every action returns the page's text, so read it and decide your next step. The first visit to a new domain asks {user_name} to approve it.
 - The current date/time from the computer clock is shown with every request; use it when scheduling. If {user_name} states a different time or timezone, trust what they say.
 - Convert relative times ("in 10 minutes", "tomorrow at 9am") into absolute times using the current clock before scheduling.
 - Start a scheduled reminder's text with "cmd:" to run a sandboxed command when it fires.
@@ -285,10 +292,9 @@ def append_chat_pair(user_msg: str, assistant_msg: str, tokenizer, system_prompt
     append_training_text(build_chat_training_sample(messages, tokenizer))
 
 
-def digest_notes_to_training(tokenizer, system_prompt: str) -> int:
+def digest_notes_to_training(tokenizer, system_prompt: str,
+                             config: dict[str, Any] | None = None) -> int:
     files = sorted(NOTES_DIR.glob("*.md"))
-    if not files:
-        return 0
 
     manifest: dict[str, str] = {}
     if DIGEST_MANIFEST.exists():
@@ -340,11 +346,50 @@ def digest_notes_to_training(tokenizer, system_prompt: str) -> int:
 
         added += 2
 
+    # Curated memory and the user profile hold what the agent has figured out
+    # about its user; digest them too so those facts survive fine-tuning, not
+    # just prompt injection. Hash-tracked like notes: re-digested on change.
+    user_name = (config or load_config())["user_name"]
+    stores = [
+        (MEMORY_FILE, "What do you have saved in your long-term memory?"),
+        (PROFILE_FILE, f"What do you know about {user_name}?"),
+    ]
+    for path, question in stores:
+        if not path.exists():
+            continue
+        content = path.read_text(encoding="utf-8").strip()
+        if len(content) < 5:
+            continue
+        h = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        new_manifest[path.name] = h
+        if manifest.get(path.name) == h:
+            continue
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": content},
+        ]
+        append_training_text(build_chat_training_sample(messages, tokenizer))
+        added += 1
+
     DIGEST_MANIFEST.write_text(json.dumps(new_manifest, indent=2))
     return added
 
 
-def run_sandboxed(command: str, config: dict[str, Any]):
+def _ask_command_permission(command: str, binary: str) -> bool:
+    """Ask the user on the terminal to approve a normally-blocked command.
+    Any failure to read an answer (EOF, no tty, interrupt) means no."""
+    try:
+        answer = input(
+            f"\n  [Sandbox] '{binary}' is normally blocked. Allow once?\n"
+            f"    $ {command}\n  [y/N]: "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt, OSError):
+        return False
+    return answer in ("y", "yes")
+
+
+def run_sandboxed(command: str, config: dict[str, Any], interactive: bool = True):
     command = command.strip()
     if not command:
         return False, "Empty command."
@@ -357,7 +402,10 @@ def run_sandboxed(command: str, config: dict[str, Any]):
 
     blocked = set(config["sandbox"]["blocked_commands"])
     if args[0] in blocked:
-        return False, f"'{args[0]}' is blocked in sandbox."
+        # Blocked commands are not refused outright: the user can approve a
+        # one-off run. Non-interactive callers (cron thread) never prompt.
+        if not interactive or not _ask_command_permission(command, args[0]):
+            return False, f"'{args[0]}' is blocked in sandbox (user did not approve it)."
 
     try:
         result = subprocess.run(
@@ -602,6 +650,18 @@ def run_python_code(code: str, config: dict[str, Any]) -> tuple[bool, str]:
             os.unlink(path)
         except OSError:
             pass
+
+
+def _browser_peek(browser: BrowserSession) -> str:
+    """Best-effort snapshot of the live page after a browser action, so the
+    model sees what its click/type/scroll did without asking."""
+    try:
+        text = browser.get_text()
+    except Exception:
+        return ""
+    if text.startswith("Browser "):  # error string from get_text itself
+        return ""
+    return "\n\nPage text now:\n" + text[:1500]
 
 
 def save_note(title: str, body: str) -> Path:
@@ -1079,7 +1139,7 @@ def check_due_jobs(config: dict[str, Any], now: datetime | None = None) -> list[
             text = job.get("text", "")
             if text.startswith("cmd:"):
                 shell_cmd = text[4:].strip()
-                ok, out = run_sandboxed(shell_cmd, config)
+                ok, out = run_sandboxed(shell_cmd, config, interactive=False)
                 events.append(
                     f"Scheduled job {job.get('id')} ran '{shell_cmd}' "
                     f"({'ok' if ok else 'error'}):\n{out}"
@@ -1216,6 +1276,23 @@ def parse_tools(reply: str) -> list[tuple[str, dict[str, Any]]]:
     for m in re.finditer(r'<read>(.*?)</read>', reply, re.DOTALL):
         tools.append(("read_page", {"url": m.group(1).strip()}))
 
+    for m in re.finditer(r'<browse>(.*?)</browse>', reply, re.DOTALL):
+        tools.append(("browser_open", {"url": m.group(1).strip()}))
+
+    for m in re.finditer(r'<click>(.*?)</click>', reply, re.DOTALL):
+        tools.append(("browser_click", {"target": m.group(1).strip()}))
+
+    for m in re.finditer(
+        r'<type(\s+enter=[\'"](?:true|yes|1)[\'"])?>(.*?)</type>', reply, re.DOTALL
+    ):
+        tools.append(("browser_type", {
+            "text": m.group(2).strip(),
+            "enter": bool(m.group(1)),
+        }))
+
+    for m in re.finditer(r'<scroll(?:\s+dir=[\'"](up|down)[\'"])?\s*/>', reply):
+        tools.append(("browser_scroll", {"direction": m.group(1) or "down"}))
+
     if re.search(r'<config\s+show\s*/>', reply):
         tools.append(("config_show", {}))
 
@@ -1273,6 +1350,10 @@ def strip_tool_tags(reply: str) -> str:
     display = re.sub(r'<py>(.*?)</py>', '', display, flags=re.DOTALL)
     display = re.sub(r'<search>(.*?)</search>', '', display, flags=re.DOTALL)
     display = re.sub(r'<read>(.*?)</read>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<browse>(.*?)</browse>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<click>(.*?)</click>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<type[^>]*>(.*?)</type>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<scroll[^>]*/>', '', display)
     display = re.sub(r'<memory[^>]*>(.*?)</memory>', '', display, flags=re.DOTALL)
     display = re.sub(r'<profile[^>]*>(.*?)</profile>', '', display, flags=re.DOTALL)
     display = re.sub(r'<config\s+show\s*/>', '', display)
@@ -1284,7 +1365,7 @@ def strip_tool_tags(reply: str) -> str:
     display = re.sub(r'<cron\s+[^>]*?>(.*?)</cron>', '', display, flags=re.DOTALL)
     # A reply cut off mid-tag leaves an unterminated tag; never show it.
     display = re.sub(
-        r'<(?:cmd|py|search|read|note|cron|digest|train|memory|profile|config)\b[^>]*>[^<]*$',
+        r'<(?:cmd|py|search|read|browse|click|type|scroll|note|cron|digest|train|memory|profile|config)\b[^>]*>[^<]*$',
         '', display, flags=re.DOTALL,
     )
     return clean_response(display)
@@ -1369,6 +1450,7 @@ def chat_loop(config: dict[str, Any]):
     # Past sessions are retrievable; the live one is excluded to avoid echo.
     retriever = Retriever(config, session_store=session_store,
                           exclude_session_id=session_id)
+    browser = BrowserSession()
     user_turns = 0
 
     # Background scheduler: fires due cron jobs, prints a notice immediately,
@@ -1434,6 +1516,8 @@ def chat_loop(config: dict[str, Any]):
                             elif name == "write_note":
                                 p = save_note(params["title"], params["body"])
                                 print(f"  [Memory] Saved note: {p.name}")
+                    except KeyboardInterrupt:
+                        print("\n  [Memory flush interrupted — exiting without saving.]")
                     except Exception as e:
                         print(f"  [Memory flush skipped: {e}]")
                 print(" Exiting chat.")
@@ -1474,7 +1558,7 @@ def chat_loop(config: dict[str, Any]):
                 continue
 
             elif cmd == "/digest":
-                added = digest_notes_to_training(tokenizer, system_prompt)
+                added = digest_notes_to_training(tokenizer, system_prompt, config)
                 if added:
                     print(f"  Digested {added} new note samples into training data.")
                 else:
@@ -1671,6 +1755,10 @@ def chat_loop(config: dict[str, Any]):
                     max_tokens=int(config["agent"]["max_reply_tokens"]), verbose=False,
                 )
                 reply = raw_reply.strip()
+            except KeyboardInterrupt:
+                # Ctrl-C during a slow generation abandons the turn, not the app.
+                print("\n  [Generation interrupted.]")
+                break
             except Exception as e:
                 print(f"[MLX Error: {e}]")
                 break
@@ -1739,6 +1827,29 @@ def chat_loop(config: dict[str, Any]):
                         f"Reading {params['url']} {'succeeded' if ok else 'failed'}.\nContent:\n{out}"
                     )
 
+                elif name == "browser_open":
+                    out = browser.open(params["url"])
+                    if "blocked" not in out and "error" not in out.lower():
+                        out += _browser_peek(browser)
+                    observations.append(out)
+
+                elif name == "browser_click":
+                    target = params["target"]
+                    if target.startswith(("#", ".", "//", "[")):
+                        out = browser.click(selector=target)
+                    else:
+                        out = browser.click(text=target)
+                    observations.append(out + _browser_peek(browser))
+
+                elif name == "browser_type":
+                    out = browser.type_text(params["text"], press_enter=params["enter"])
+                    observations.append(out + _browser_peek(browser))
+
+                elif name == "browser_scroll":
+                    observations.append(
+                        browser.scroll(params["direction"]) + _browser_peek(browser)
+                    )
+
                 elif name == "save_memory":
                     observations.append(
                         save_memory(params["store"], params["content"], config,
@@ -1755,7 +1866,7 @@ def chat_loop(config: dict[str, Any]):
 
                 elif name == "digest_notes":
                     try:
-                        cnt = digest_notes_to_training(tokenizer, system_prompt)
+                        cnt = digest_notes_to_training(tokenizer, system_prompt, config)
                         observations.append(f"Digested {cnt} new training samples from notes.")
                     except Exception as e:
                         observations.append(f"Digest error: {e}")
@@ -1791,6 +1902,10 @@ def chat_loop(config: dict[str, Any]):
         # End agent loop
 
     # ---- End of Session ----
+    try:
+        browser.close()
+    except Exception:
+        pass
     if history:
         save = input("\n Save conversation for training? [y/N]: ").strip().lower()
         if save in ("y", "yes"):
