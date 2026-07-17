@@ -17,6 +17,12 @@ SCREENSHOTS_DIR = PROJECT_DIR / "screenshots"
 DIGEST_MANIFEST = DATA_DIR / "digest_manifest.json"
 CONFIG_FILE = PROJECT_DIR / "config.json"
 MODELS_FILE = PROJECT_DIR / "models.json"
+# Paths used by the tag-based agent in symbio.app.
+PROMPT_FILE = PROJECT_DIR / "prompt.md"
+CRON_FILE = PROJECT_DIR / "cron_jobs.json"
+MEMORY_FILE = PROJECT_DIR / "agent_memory.md"
+PROFILE_FILE = PROJECT_DIR / "user_profile.md"
+SESSIONS_DIR = PROJECT_DIR / "sessions"
 
 for d in (
     LOG_DIR,
@@ -27,6 +33,7 @@ for d in (
     MISTAKES_ARCHIVE_DIR,
     SANDBOX_DIR,
     SCREENSHOTS_DIR,
+    SESSIONS_DIR,
 ):
     d.mkdir(parents=True, exist_ok=True)
 
