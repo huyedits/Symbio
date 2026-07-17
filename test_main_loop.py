@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end tests for main.py's autonomous agent loop, driven by a scripted
+"""End-to-end tests for the symbio.app agent loop, driven by a scripted
 fake model so tool parsing, sandbox execution, observation feedback, cron
 scheduling, and the max-rounds bound are exercised deterministically (no
 model load needed)."""
@@ -8,7 +8,10 @@ import json
 from contextlib import contextmanager
 from datetime import datetime
 
-import main
+from symbio import constants
+from symbio.app import chat, cron, memory, sandbox, sessions, tooling, training, web
+from symbio.app import config as app_config
+from symbio.app.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt
 from test_utils import preserve_training_state
 
 
@@ -42,36 +45,36 @@ class ScriptedSession:
 
     def run(self):
         real_input = builtins.input
-        real_load = main.load
-        real_generate = main.generate
+        real_load = chat.load
+        real_generate = chat.generate
         builtins.input = self.fake_input
-        main.load = lambda *a, **k: (object(), FakeTokenizer())
-        main.generate = self.fake_generate
+        chat.load = lambda *a, **k: (object(), FakeTokenizer())
+        chat.generate = self.fake_generate
         try:
-            main.chat_loop(main.load_config())
+            chat.chat_loop(app_config.load_config())
         finally:
             builtins.input = real_input
-            main.load = real_load
-            main.generate = real_generate
+            chat.load = real_load
+            chat.generate = real_generate
 
 
 def test_system_prompt_substitutes_names():
-    sp = main.build_system_prompt("Caine", "Huy")
+    sp = build_system_prompt("Caine", "Huy")
     assert "Caine" in sp and "Huy" in sp, sp
     assert "{assistant_name}" not in sp and "{user_name}" not in sp, sp
     print("test_system_prompt_substitutes_names passed")
 
 
 def test_system_prompt_seeds_missing_prompt_md():
-    real_prompt = main.prompt
-    seeded = main.PROJECT_DIR / "prompt.md.seedtest"
-    main.prompt = seeded
+    real_prompt = constants.PROMPT_FILE
+    seeded = constants.PROJECT_DIR / "prompt.md.seedtest"
+    constants.PROMPT_FILE = seeded
     try:
-        sp = main.build_system_prompt("Caine", "Huy")
+        sp = build_system_prompt("Caine", "Huy")
         assert seeded.exists(), "prompt file was not seeded"
-        assert seeded.read_text(encoding="utf-8") == main.DEFAULT_SYSTEM_PROMPT
+        assert seeded.read_text(encoding="utf-8") == DEFAULT_SYSTEM_PROMPT
     finally:
-        main.prompt = real_prompt
+        constants.PROMPT_FILE = real_prompt
         seeded.unlink(missing_ok=True)
     assert "Caine" in sp and "Huy" in sp, sp
     assert "<cmd>" in sp, sp
@@ -85,7 +88,7 @@ def test_parse_and_strip_tool_tags():
         "<cron expr='*/5 * * * *'>hydrate</cron>"
         "<cron at='2026-12-31 23:59'>happy new year</cron>"
     )
-    tools = main.parse_tools(reply)
+    tools = tooling.parse_tools(reply)
     names = [name for name, _ in tools]
     assert names == [
         "write_note", "run_command", "digest_notes", "train_adapter",
@@ -95,61 +98,61 @@ def test_parse_and_strip_tool_tags():
     assert tools[1][1] == {"cmd": "echo hi"}
     assert tools[4][1] == {"schedule": "*/5 * * * *", "text": "hydrate"}
     assert tools[5][1] == {"schedule": "at 2026-12-31 23:59", "text": "happy new year"}
-    assert main.strip_tool_tags(reply) == "Sure.", repr(main.strip_tool_tags(reply))
+    assert tooling.strip_tool_tags(reply) == "Sure.", repr(tooling.strip_tool_tags(reply))
     print("test_parse_and_strip_tool_tags passed")
 
 
 @contextmanager
 def scratch_cron_file():
-    real_file = main.CRON_FILE
-    main.CRON_FILE = main.PROJECT_DIR / "cron_jobs.test.json"
+    real_file = constants.CRON_FILE
+    constants.CRON_FILE = constants.PROJECT_DIR / "cron_jobs.test.json"
     try:
-        main.CRON_FILE.unlink(missing_ok=True)
+        constants.CRON_FILE.unlink(missing_ok=True)
         yield
     finally:
-        main.CRON_FILE.unlink(missing_ok=True)
-        main.CRON_FILE = real_file
+        constants.CRON_FILE.unlink(missing_ok=True)
+        constants.CRON_FILE = real_file
 
 
 def test_cron_matching():
     dt = datetime(2026, 7, 16, 9, 30)  # a Thursday
-    assert main.cron_matches("* * * * *", dt)
-    assert main.cron_matches("30 9 * * *", dt)
-    assert not main.cron_matches("31 9 * * *", dt)
-    assert main.cron_matches("*/15 * * * *", dt)
-    assert not main.cron_matches("*/7 * * * *", dt)
-    assert main.cron_matches("0-45 9 16 7 *", dt)
-    assert main.cron_matches("30 9 * * 4", dt)  # cron weekday: Thursday = 4
-    assert not main.cron_matches("30 9 * * 0", dt)
-    assert main.cron_matches("30 9 * * 0,4", dt)
-    assert main.validate_cron_expr("* * * *") is not None
-    assert main.validate_cron_expr("bogus * * * *") is not None
-    assert main.validate_cron_expr("*/10 8-18 * * 1-5") is None
+    assert cron.cron_matches("* * * * *", dt)
+    assert cron.cron_matches("30 9 * * *", dt)
+    assert not cron.cron_matches("31 9 * * *", dt)
+    assert cron.cron_matches("*/15 * * * *", dt)
+    assert not cron.cron_matches("*/7 * * * *", dt)
+    assert cron.cron_matches("0-45 9 16 7 *", dt)
+    assert cron.cron_matches("30 9 * * 4", dt)  # cron weekday: Thursday = 4
+    assert not cron.cron_matches("30 9 * * 0", dt)
+    assert cron.cron_matches("30 9 * * 0,4", dt)
+    assert cron.validate_cron_expr("* * * *") is not None
+    assert cron.validate_cron_expr("bogus * * * *") is not None
+    assert cron.validate_cron_expr("*/10 8-18 * * 1-5") is None
     print("test_cron_matching passed")
 
 
 def test_cron_jobs_fire_and_expire():
     with scratch_cron_file():
-        config = main.load_config()
-        one_shot = main.add_cron_job("at 2026-01-01 09:00", "wish Huy a happy new year")
+        config = app_config.load_config()
+        one_shot = cron.add_cron_job("at 2026-01-01 09:00", "wish Huy a happy new year")
         assert one_shot["schedule"] == "at 2026-01-01 09:00", one_shot
-        main.add_cron_job("*/5 * * * *", "cmd:echo cron-ok")
+        cron.add_cron_job("*/5 * * * *", "cmd:echo cron-ok")
 
         now = datetime(2026, 1, 1, 9, 5)
-        events = main.check_due_jobs(config, now=now)
+        events = cron.check_due_jobs(config, now=now)
         assert any("happy new year" in e for e in events), events
         assert any("cron-ok" in e for e in events), events
 
         # One-shot is gone; recurring fires at most once per minute.
-        assert main.check_due_jobs(config, now=now) == []
-        events = main.check_due_jobs(config, now=datetime(2026, 1, 1, 9, 10))
+        assert cron.check_due_jobs(config, now=now) == []
+        events = cron.check_due_jobs(config, now=datetime(2026, 1, 1, 9, 10))
         assert len(events) == 1 and "cron-ok" in events[0], events
 
         # Future one-shots stay quiet; bad schedules are rejected up front.
-        main.add_cron_job("at 2099-01-01 00:00", "far future")
-        assert main.check_due_jobs(config, now=datetime(2026, 1, 1, 9, 11)) == []
+        cron.add_cron_job("at 2099-01-01 00:00", "far future")
+        assert cron.check_due_jobs(config, now=datetime(2026, 1, 1, 9, 11)) == []
         try:
-            main.add_cron_job("whenever", "x")
+            cron.add_cron_job("whenever", "x")
             raise AssertionError("expected ValueError for bad schedule")
         except ValueError:
             pass
@@ -166,7 +169,7 @@ def test_agent_loop_schedules_job_from_tag():
             ],
         )
         session.run()
-        jobs = main.load_cron_jobs()
+        jobs = cron.load_cron_jobs()
         assert len(jobs) == 1 and jobs[0]["schedule"] == "0 9 * * *", jobs
         assert "Scheduled job" in session.prompts_seen[1], session.prompts_seen[1]
     print("test_agent_loop_schedules_job_from_tag passed")
@@ -195,7 +198,7 @@ def test_agent_loop_feeds_observation_back():
 
 
 def test_agent_loop_stops_at_max_rounds():
-    config = main.load_config()
+    config = app_config.load_config()
     max_rounds = config["agent"]["max_tool_rounds"]
     # Distinct commands each round so the repeat guard doesn't cut in early.
     session = ScriptedSession(
@@ -220,27 +223,27 @@ def test_agent_loop_breaks_on_repeated_tool_call():
 
 def test_strip_unterminated_tag():
     cut_off = "Here are the stories:\n1. Big story — <cmd>open 'https://example.com/very/long"
-    assert main.strip_tool_tags(cut_off) == "Here are the stories:\n1. Big story —"
-    assert main.parse_tools(cut_off) == []
+    assert tooling.strip_tool_tags(cut_off) == "Here are the stories:\n1. Big story —"
+    assert tooling.parse_tools(cut_off) == []
     print("test_strip_unterminated_tag passed")
 
 
 def test_execute_code_tool():
-    config = main.load_config()
+    config = app_config.load_config()
     # <py> tag parses and strips
     reply = "Sure. <py>print(6 * 7)</py>"
-    tools = main.parse_tools(reply)
+    tools = tooling.parse_tools(reply)
     assert tools == [("execute_code", {"code": "print(6 * 7)"})], tools
-    assert main.strip_tool_tags(reply) == "Sure."
+    assert tooling.strip_tool_tags(reply) == "Sure."
 
-    ok, out = main.run_python_code("import math\nprint(math.factorial(7))", config)
+    ok, out = sandbox.run_python_code("import math\nprint(math.factorial(7))", config)
     assert ok and out == "5040", (ok, out)
 
-    ok, out = main.run_python_code("import os\nprint(os.listdir('/'))", config)
+    ok, out = sandbox.run_python_code("import os\nprint(os.listdir('/'))", config)
     assert not ok and "not allowed" in out, (ok, out)
-    ok, out = main.run_python_code("import socket", config)
+    ok, out = sandbox.run_python_code("import socket", config)
     assert not ok and "not allowed" in out, (ok, out)
-    ok, out = main.run_python_code("print(", config)
+    ok, out = sandbox.run_python_code("print(", config)
     assert not ok and "Syntax error" in out, (ok, out)
     print("test_execute_code_tool passed")
 
@@ -269,34 +272,34 @@ _DDG_FIXTURE = """
 
 
 def test_web_tools():
-    config = main.load_config()
+    config = app_config.load_config()
 
     reply = "<search>latest news</search><read>https://example.com</read>"
-    tools = main.parse_tools(reply)
+    tools = tooling.parse_tools(reply)
     assert ("web_search", {"query": "latest news"}) in tools, tools
     assert ("read_page", {"url": "https://example.com"}) in tools, tools
-    assert main.strip_tool_tags(reply) == ""
+    assert tooling.strip_tool_tags(reply) == ""
 
-    assert main.html_to_text("<p>Hello <b>world</b><script>bad()</script></p>") == "Hello world"
+    assert web.html_to_text("<p>Hello <b>world</b><script>bad()</script></p>") == "Hello world"
 
-    real_get = main._http_get
-    main._http_get = lambda url, timeout=15: _DDG_FIXTURE
+    real_get = web._http_get
+    web._http_get = lambda url, timeout=15: _DDG_FIXTURE
     try:
-        ok, out = main.web_search("anything", config)
+        ok, out = web.web_search("anything", config)
     finally:
-        main._http_get = real_get
+        web._http_get = real_get
     assert ok, out
     assert "Big Story Headline" in out and "https://example.com/story" in out, out
     assert "important" in out, out
 
-    ok, out = main.read_page("file:///etc/passwd", config)
+    ok, out = web.read_page("file:///etc/passwd", config)
     assert not ok and "http" in out, (ok, out)
     print("test_web_tools passed")
 
 
 def test_agent_loop_answers_from_search():
-    real_search = main.web_search
-    main.web_search = lambda q, c, max_results=5: (True, "1. Rain expected\n   https://example.com/wx\n   Heavy rain tomorrow.")
+    real_search = web.web_search
+    web.web_search = lambda q, c, max_results=5: (True, "1. Rain expected\n   https://example.com/wx\n   Heavy rain tomorrow.")
     try:
         session = ScriptedSession(
             user_inputs=["what is the latest news?", "/quit", "n"],
@@ -307,7 +310,7 @@ def test_agent_loop_answers_from_search():
         )
         session.run()
     finally:
-        main.web_search = real_search
+        web.web_search = real_search
     assert len(session.prompts_seen) == 2
     assert "Rain expected" in session.prompts_seen[1], session.prompts_seen[1]
     assert "Web search for 'latest news' succeeded" in session.prompts_seen[1]
@@ -316,38 +319,38 @@ def test_agent_loop_answers_from_search():
 
 @contextmanager
 def scratch_config_file(initial: str = "{}"):
-    real_cfg = main.CONFIG_FILE
-    main.CONFIG_FILE = main.PROJECT_DIR / "config.test.json"
+    real_cfg = constants.CONFIG_FILE
+    constants.CONFIG_FILE = constants.PROJECT_DIR / "config.test.json"
     try:
-        main.CONFIG_FILE.write_text(initial)
+        constants.CONFIG_FILE.write_text(initial)
         yield
     finally:
-        main.CONFIG_FILE.unlink(missing_ok=True)
-        main.CONFIG_FILE = real_cfg
+        constants.CONFIG_FILE.unlink(missing_ok=True)
+        constants.CONFIG_FILE = real_cfg
 
 
 def test_self_configuration():
     with scratch_config_file('{"agent": {"temperature": 0.1}, "unrelated": 42}'):
-        config = main.load_config()
+        config = app_config.load_config()
 
-        tools = main.parse_tools("<config show /><config set='agent.temperature'>0.4</config>")
+        tools = tooling.parse_tools("<config show /><config set='agent.temperature'>0.4</config>")
         assert ("config_show", {}) in tools, tools
         assert ("config_set", {"key": "agent.temperature", "value": "0.4"}) in tools, tools
 
-        msg = main.set_config_value(config, "agent.temperature", "0.4")
+        msg = app_config.set_config_value(config, "agent.temperature", "0.4")
         assert "Set agent.temperature" in msg, msg
         assert config["agent"]["temperature"] == 0.4
-        saved = json.loads(main.CONFIG_FILE.read_text())
+        saved = json.loads(constants.CONFIG_FILE.read_text())
         assert saved["agent"]["temperature"] == 0.4 and saved["unrelated"] == 42, saved
 
-        assert "Unknown config key" in main.set_config_value(config, "nope.nada", "1")
-        assert "Bad value" in main.set_config_value(config, "agent.max_tool_rounds", "many")
-        assert "restart" in main.set_config_value(config, "model_name", "other-model")
+        assert "Unknown config key" in app_config.set_config_value(config, "nope.nada", "1")
+        assert "Bad value" in app_config.set_config_value(config, "agent.max_tool_rounds", "many")
+        assert "restart" in app_config.set_config_value(config, "model_name", "other-model")
         # The model may not loosen its own sandbox; the user may via /config.
-        assert "user" in main.set_config_value(config, "sandbox.blocked_commands", '["rm"]')
-        assert "Set sandbox" in main.set_config_value(
+        assert "user" in app_config.set_config_value(config, "sandbox.blocked_commands", '["rm"]')
+        assert "Set sandbox" in app_config.set_config_value(
             config, "sandbox.blocked_commands", '["rm"]', allow_sandbox=True)
-        assert "Set memory.enabled" in main.set_config_value(config, "memory.enabled", "false")
+        assert "Set memory.enabled" in app_config.set_config_value(config, "memory.enabled", "false")
         assert config["memory"]["enabled"] is False
     print("test_self_configuration passed")
 
@@ -360,53 +363,53 @@ def test_agent_loop_applies_config_change():
         )
         session.run()
         assert "Set agent.temperature = 0.9" in session.prompts_seen[1], session.prompts_seen[1]
-        saved = json.loads(main.CONFIG_FILE.read_text())
+        saved = json.loads(constants.CONFIG_FILE.read_text())
         assert saved["agent"]["temperature"] == 0.9, saved
     print("test_agent_loop_applies_config_change passed")
 
 
 @contextmanager
 def scratch_memory_files():
-    real_mem, real_prof = main.MEMORY_FILE, main.PROFILE_FILE
-    main.MEMORY_FILE = main.PROJECT_DIR / "agent_memory.test.md"
-    main.PROFILE_FILE = main.PROJECT_DIR / "user_profile.test.md"
+    real_mem, real_prof = constants.MEMORY_FILE, constants.PROFILE_FILE
+    constants.MEMORY_FILE = constants.PROJECT_DIR / "agent_memory.test.md"
+    constants.PROFILE_FILE = constants.PROJECT_DIR / "user_profile.test.md"
     try:
         yield
     finally:
-        main.MEMORY_FILE.unlink(missing_ok=True)
-        main.PROFILE_FILE.unlink(missing_ok=True)
-        main.MEMORY_FILE, main.PROFILE_FILE = real_mem, real_prof
+        constants.MEMORY_FILE.unlink(missing_ok=True)
+        constants.PROFILE_FILE.unlink(missing_ok=True)
+        constants.MEMORY_FILE, constants.PROFILE_FILE = real_mem, real_prof
 
 
 def test_curated_memory_store():
-    config = main.load_config()
+    config = app_config.load_config()
     with scratch_memory_files():
         reply = "<memory>Repo uses MLX.</memory><profile replace='all'>Huy likes bullets.</profile>"
-        tools = main.parse_tools(reply)
+        tools = tooling.parse_tools(reply)
         assert ("save_memory", {"store": "memory", "content": "Repo uses MLX.", "replace": False}) in tools, tools
         assert ("save_memory", {"store": "profile", "content": "Huy likes bullets.", "replace": True}) in tools, tools
-        assert main.strip_tool_tags(reply) == ""
+        assert tooling.strip_tool_tags(reply) == ""
 
-        msg = main.save_memory("memory", "Repo uses MLX.", config)
+        msg = memory.save_memory("memory", "Repo uses MLX.", config)
         assert "Saved" in msg, msg
-        main.save_memory("profile", "Huy likes bullets.", config)
-        block = main.curated_memory_block(config)
+        memory.save_memory("profile", "Huy likes bullets.", config)
+        block = memory.curated_memory_block(config)
         assert "Repo uses MLX." in block and "Huy likes bullets." in block, block
 
         # Over-limit append gets a consolidation nag; replace='all' shrinks it.
-        msg = main.save_memory("memory", "x" * 3000, config)
+        msg = memory.save_memory("memory", "x" * 3000, config)
         assert "over the limit" in msg, msg
-        msg = main.save_memory("memory", "Only this.", config, replace=True)
+        msg = memory.save_memory("memory", "Only this.", config, replace=True)
         assert "over the limit" not in msg, msg
-        assert main.MEMORY_FILE.read_text() == "Only this.\n"
+        assert constants.MEMORY_FILE.read_text() == "Only this.\n"
     print("test_curated_memory_store passed")
 
 
 def test_memory_injected_and_flushed():
-    config = main.load_config()
+    config = app_config.load_config()
     flush_min = config["memory"]["flush_min_turns"]
     with scratch_memory_files():
-        main.MEMORY_FILE.write_text("Deploys happen on Fridays.\n")
+        constants.MEMORY_FILE.write_text("Deploys happen on Fridays.\n")
         # Enough turns to cross the flush threshold, then /quit.
         chit_chat = [f"hello {i}" for i in range(flush_min)]
         session = ScriptedSession(
@@ -418,31 +421,31 @@ def test_memory_injected_and_flushed():
         # Always-on memory is in every prompt.
         assert "Deploys happen on Fridays." in session.prompts_seen[0], session.prompts_seen[0]
         # The flush turn ran and persisted the model's parting memory.
-        saved = main.MEMORY_FILE.read_text()
+        saved = constants.MEMORY_FILE.read_text()
         assert "tests features right after asking" in saved, saved
     print("test_memory_injected_and_flushed passed")
 
 
 def test_session_history_cross_session_recall():
     import shutil
-    real_dir = main.SESSIONS_DIR
-    main.SESSIONS_DIR = main.PROJECT_DIR / "sessions.test"
-    main.SESSIONS_DIR.mkdir(exist_ok=True)
+    real_dir = constants.SESSIONS_DIR
+    constants.SESSIONS_DIR = constants.PROJECT_DIR / "sessions.test"
+    constants.SESSIONS_DIR.mkdir(exist_ok=True)
     try:
         s1 = ScriptedSession(
             user_inputs=["my project codename is quantum-kettle", "/quit", "n"],
             model_replies=["Noted — quantum-kettle it is."],
         )
         s1.run()
-        files = list(main.SESSIONS_DIR.glob("*.jsonl"))
+        files = list(constants.SESSIONS_DIR.glob("*.jsonl"))
         assert len(files) == 1, files
         rows = [json.loads(l) for l in files[0].read_text().splitlines()]
         assert rows[0]["role"] == "user" and "quantum-kettle" in rows[0]["content"], rows
         assert any(r["role"] == "assistant" for r in rows), rows
 
-        hits = main.SessionStore.search("quantum kettle codename")
+        hits = sessions.SessionStore.search("quantum kettle codename")
         assert hits and "quantum-kettle" in hits[0]["content"], hits
-        assert main.SessionStore.search("quantum kettle", exclude_session=files[0].stem) == []
+        assert sessions.SessionStore.search("quantum kettle", exclude_session=files[0].stem) == []
 
         # A later session retrieves the earlier one into context.
         s2 = ScriptedSession(
@@ -453,13 +456,13 @@ def test_session_history_cross_session_recall():
         first = s2.prompts_seen[0]
         assert "Past session" in first and "quantum-kettle" in first, first
     finally:
-        shutil.rmtree(main.SESSIONS_DIR, ignore_errors=True)
-        main.SESSIONS_DIR = real_dir
+        shutil.rmtree(constants.SESSIONS_DIR, ignore_errors=True)
+        constants.SESSIONS_DIR = real_dir
     print("test_session_history_cross_session_recall passed")
 
 
 def test_rag_injects_saved_notes():
-    note_path = main.save_note(
+    note_path = memory.save_note(
         "Zephyr Project", "The Zephyr project deadline is March 3rd and uses Rust."
     )
     try:
@@ -516,7 +519,7 @@ def test_parse_browser_tags():
         "<browse>https://a.b/c</browse><click>Sign in</click>"
         "<type enter='true'>lofi</type><scroll dir='up' /><scroll />"
     )
-    tools = main.parse_tools(reply)
+    tools = tooling.parse_tools(reply)
     names = [n for n, _ in tools]
     assert names == [
         "browser_open", "browser_click", "browser_type",
@@ -527,13 +530,13 @@ def test_parse_browser_tags():
     assert tools[2][1] == {"text": "lofi", "enter": True}
     assert tools[3][1] == {"direction": "up"}
     assert tools[4][1] == {"direction": "down"}
-    assert main.strip_tool_tags(reply) == "", repr(main.strip_tool_tags(reply))
+    assert tooling.strip_tool_tags(reply) == "", repr(tooling.strip_tool_tags(reply))
     print("test_parse_browser_tags passed")
 
 
 def test_agent_loop_browses():
-    real_browser = main.BrowserSession
-    main.BrowserSession = FakeBrowser
+    real_browser = chat.BrowserSession
+    chat.BrowserSession = FakeBrowser
     try:
         session = ScriptedSession(
             user_inputs=["Look up the MLX docs yourself.", "/quit", "n"],
@@ -547,7 +550,7 @@ def test_agent_loop_browses():
         assert "Opened browser at https://example.com/mlx" in obs_prompt, obs_prompt
         assert "Fake page text about MLX" in obs_prompt, obs_prompt
     finally:
-        main.BrowserSession = real_browser
+        chat.BrowserSession = real_browser
     print("test_agent_loop_browses passed")
 
 
@@ -557,52 +560,52 @@ def test_digest_includes_curated_stores():
     from pathlib import Path
 
     tok = FakeTokenizer()
-    config = main.load_config()
-    real = (main.NOTES_DIR, main.MEMORY_FILE, main.PROFILE_FILE,
-            main.DIGEST_MANIFEST, main.TRAIN_FILE)
+    config = app_config.load_config()
+    real = (constants.NOTES_DIR, constants.MEMORY_FILE, constants.PROFILE_FILE,
+            constants.DIGEST_MANIFEST, constants.TRAIN_FILE)
     tmp = Path(tempfile.mkdtemp())
-    main.NOTES_DIR = tmp / "notes"
-    main.NOTES_DIR.mkdir()
-    main.MEMORY_FILE = tmp / "agent_memory.md"
-    main.PROFILE_FILE = tmp / "user_profile.md"
-    main.DIGEST_MANIFEST = tmp / "manifest.json"
-    main.TRAIN_FILE = tmp / "train.jsonl"
+    constants.NOTES_DIR = tmp / "notes"
+    constants.NOTES_DIR.mkdir()
+    constants.MEMORY_FILE = tmp / "agent_memory.md"
+    constants.PROFILE_FILE = tmp / "user_profile.md"
+    constants.DIGEST_MANIFEST = tmp / "manifest.json"
+    constants.TRAIN_FILE = tmp / "train.jsonl"
     try:
-        main.MEMORY_FILE.write_text("Deploys happen on Fridays.\n")
-        main.PROFILE_FILE.write_text(f"{config['user_name']} prefers concise replies.\n")
-        added = main.digest_notes_to_training(tok, "SYS", config)
+        constants.MEMORY_FILE.write_text("Deploys happen on Fridays.\n")
+        constants.PROFILE_FILE.write_text(f"{config['user_name']} prefers concise replies.\n")
+        added = training.digest_notes_to_training(tok, "SYS", config)
         assert added == 2, added
-        data = main.TRAIN_FILE.read_text()
+        data = constants.TRAIN_FILE.read_text()
         assert "Fridays" in data and "concise replies" in data, data
         # Unchanged stores are not re-digested.
-        assert main.digest_notes_to_training(tok, "SYS", config) == 0
+        assert training.digest_notes_to_training(tok, "SYS", config) == 0
         # An updated profile is digested again.
-        main.PROFILE_FILE.write_text("Prefers bullet points now.\n")
-        assert main.digest_notes_to_training(tok, "SYS", config) == 1
+        constants.PROFILE_FILE.write_text("Prefers bullet points now.\n")
+        assert training.digest_notes_to_training(tok, "SYS", config) == 1
     finally:
-        (main.NOTES_DIR, main.MEMORY_FILE, main.PROFILE_FILE,
-         main.DIGEST_MANIFEST, main.TRAIN_FILE) = real
+        (constants.NOTES_DIR, constants.MEMORY_FILE, constants.PROFILE_FILE,
+         constants.DIGEST_MANIFEST, constants.TRAIN_FILE) = real
         shutil.rmtree(tmp, ignore_errors=True)
     print("test_digest_includes_curated_stores passed")
 
 
 def test_sandbox_blocks_dangerous_commands():
-    config = main.load_config()
-    ok, out = main.run_sandboxed("rm -rf /", config, interactive=False)
+    config = app_config.load_config()
+    ok, out = sandbox.run_sandboxed("rm -rf /", config, interactive=False)
     assert not ok and "blocked" in out, (ok, out)
-    ok, out = main.run_sandboxed("echo sandbox-ok", config)
+    ok, out = sandbox.run_sandboxed("echo sandbox-ok", config)
     assert ok and out == "sandbox-ok", (ok, out)
     print("test_sandbox_blocks_dangerous_commands passed")
 
 
 def test_sandbox_blocked_command_permission_prompt():
-    config = main.load_config()
+    config = app_config.load_config()
     real_input = builtins.input
 
     # User approves: the blocked command runs.
     builtins.input = lambda *a: "y"
     try:
-        ok, out = main.run_sandboxed("bash -c 'echo approved-ok'", config)
+        ok, out = sandbox.run_sandboxed("bash -c 'echo approved-ok'", config)
     finally:
         builtins.input = real_input
     assert ok and out == "approved-ok", (ok, out)
@@ -610,7 +613,7 @@ def test_sandbox_blocked_command_permission_prompt():
     # User declines: still blocked.
     builtins.input = lambda *a: "n"
     try:
-        ok, out = main.run_sandboxed("bash -c 'echo approved-ok'", config)
+        ok, out = sandbox.run_sandboxed("bash -c 'echo approved-ok'", config)
     finally:
         builtins.input = real_input
     assert not ok and "blocked" in out, (ok, out)
@@ -620,7 +623,7 @@ def test_sandbox_blocked_command_permission_prompt():
         raise AssertionError("prompted in non-interactive mode")
     builtins.input = _fail_input
     try:
-        ok, out = main.run_sandboxed("bash -c 'echo approved-ok'", config, interactive=False)
+        ok, out = sandbox.run_sandboxed("bash -c 'echo approved-ok'", config, interactive=False)
     finally:
         builtins.input = real_input
     assert not ok and "blocked" in out, (ok, out)
@@ -631,14 +634,14 @@ def run_all():
     import shutil
     # Keep scripted-session chatter out of the real session store — it would
     # otherwise pollute cross-session RAG retrieval for the actual user.
-    real_sessions = main.SESSIONS_DIR
-    main.SESSIONS_DIR = main.PROJECT_DIR / "sessions.suite"
-    main.SESSIONS_DIR.mkdir(exist_ok=True)
+    real_sessions = constants.SESSIONS_DIR
+    constants.SESSIONS_DIR = constants.PROJECT_DIR / "sessions.suite"
+    constants.SESSIONS_DIR.mkdir(exist_ok=True)
     try:
         _run_all_inner()
     finally:
-        shutil.rmtree(main.SESSIONS_DIR, ignore_errors=True)
-        main.SESSIONS_DIR = real_sessions
+        shutil.rmtree(constants.SESSIONS_DIR, ignore_errors=True)
+        constants.SESSIONS_DIR = real_sessions
 
 
 def _run_all_inner():
@@ -668,7 +671,7 @@ def _run_all_inner():
         test_agent_loop_breaks_on_repeated_tool_call()
         test_strip_unterminated_tag()
         test_agent_loop_schedules_job_from_tag()
-    print("\nAll main.py agent-loop tests passed.")
+    print("\nAll agent-loop tests passed.")
 
 
 if __name__ == "__main__":
