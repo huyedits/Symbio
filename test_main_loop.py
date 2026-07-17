@@ -4,6 +4,7 @@ fake model so tool parsing, sandbox execution, observation feedback, cron
 scheduling, and the max-rounds bound are exercised deterministically (no
 model load needed)."""
 import builtins
+import json
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -33,7 +34,7 @@ class ScriptedSession:
             raise EOFError
         return self.user_inputs.pop(0)
 
-    def fake_generate(self, model, tokenizer, prompt="", sampler=None, verbose=False):
+    def fake_generate(self, model, tokenizer, prompt="", sampler=None, verbose=False, **kwargs):
         self.prompts_seen.append(prompt)
         if not self.model_replies:
             return "Nothing more to say."
@@ -314,6 +315,57 @@ def test_agent_loop_answers_from_search():
 
 
 @contextmanager
+def scratch_config_file(initial: str = "{}"):
+    real_cfg = main.CONFIG_FILE
+    main.CONFIG_FILE = main.PROJECT_DIR / "config.test.json"
+    try:
+        main.CONFIG_FILE.write_text(initial)
+        yield
+    finally:
+        main.CONFIG_FILE.unlink(missing_ok=True)
+        main.CONFIG_FILE = real_cfg
+
+
+def test_self_configuration():
+    with scratch_config_file('{"agent": {"temperature": 0.1}, "unrelated": 42}'):
+        config = main.load_config()
+
+        tools = main.parse_tools("<config show /><config set='agent.temperature'>0.4</config>")
+        assert ("config_show", {}) in tools, tools
+        assert ("config_set", {"key": "agent.temperature", "value": "0.4"}) in tools, tools
+
+        msg = main.set_config_value(config, "agent.temperature", "0.4")
+        assert "Set agent.temperature" in msg, msg
+        assert config["agent"]["temperature"] == 0.4
+        saved = json.loads(main.CONFIG_FILE.read_text())
+        assert saved["agent"]["temperature"] == 0.4 and saved["unrelated"] == 42, saved
+
+        assert "Unknown config key" in main.set_config_value(config, "nope.nada", "1")
+        assert "Bad value" in main.set_config_value(config, "agent.max_tool_rounds", "many")
+        assert "restart" in main.set_config_value(config, "model_name", "other-model")
+        # The model may not loosen its own sandbox; the user may via /config.
+        assert "user" in main.set_config_value(config, "sandbox.blocked_commands", '["rm"]')
+        assert "Set sandbox" in main.set_config_value(
+            config, "sandbox.blocked_commands", '["rm"]', allow_sandbox=True)
+        assert "Set memory.enabled" in main.set_config_value(config, "memory.enabled", "false")
+        assert config["memory"]["enabled"] is False
+    print("test_self_configuration passed")
+
+
+def test_agent_loop_applies_config_change():
+    with scratch_config_file():
+        session = ScriptedSession(
+            user_inputs=["be more creative", "/quit", "n"],
+            model_replies=["<config set='agent.temperature'>0.9</config>", "Done!"],
+        )
+        session.run()
+        assert "Set agent.temperature = 0.9" in session.prompts_seen[1], session.prompts_seen[1]
+        saved = json.loads(main.CONFIG_FILE.read_text())
+        assert saved["agent"]["temperature"] == 0.9, saved
+    print("test_agent_loop_applies_config_change passed")
+
+
+@contextmanager
 def scratch_memory_files():
     real_mem, real_prof = main.MEMORY_FILE, main.PROFILE_FILE
     main.MEMORY_FILE = main.PROJECT_DIR / "agent_memory.test.md"
@@ -417,6 +469,8 @@ def run_all():
         test_agent_loop_runs_python()
         test_web_tools()
         test_agent_loop_answers_from_search()
+        test_self_configuration()
+        test_agent_loop_applies_config_change()
         test_curated_memory_store()
         test_memory_injected_and_flushed()
         test_rag_injects_saved_notes()

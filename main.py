@@ -6,6 +6,7 @@ or via CLI flags.
 
 import argparse
 import ast
+import copy
 import hashlib
 import html as html_lib
 import json
@@ -71,8 +72,27 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "sandbox_timeout": 30,
         "code_timeout": 60,
         "max_output_len": 4000,
+        "max_reply_tokens": 600,
         "temperature": 0.7,
         "top_p": 0.9,
+        "cron_poll_seconds": 20,
+    },
+    "web": {
+        "search_results": 5,
+        "http_timeout": 15,
+    },
+    "sandbox": {
+        "blocked_commands": [
+            "rm", "sudo", "su", "dd", "mkfs", "fdisk", "mount", "umount",
+            "chmod", "chown", "curl", "wget", "ssh", "scp", "bash", "sh", "zsh",
+            "fish", "python", "python3", "perl", "ruby", "php", "node", "npm",
+        ],
+        "blocked_imports": [
+            "os", "sys", "subprocess", "pathlib", "shutil", "socket", "http",
+            "urllib", "ftplib", "smtplib", "imaplib", "pickle", "ctypes",
+            "multiprocessing", "threading", "tempfile", "asyncio", "importlib",
+            "pkgutil", "site", "builtins",
+        ],
     },
     "rag": {
         "enabled": True,
@@ -93,7 +113,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 def load_config() -> dict[str, Any]:
     """Load config.json if present; merge with sensible defaults."""
-    config = DEFAULT_CONFIG.copy()
+    # Deep copy: callers (e.g. set_config_value) mutate nested sections, and a
+    # shallow copy would poison DEFAULT_CONFIG for every later load.
+    config = copy.deepcopy(DEFAULT_CONFIG)
     if CONFIG_FILE.exists():
         try:
             user_config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
@@ -106,6 +128,10 @@ def load_config() -> dict[str, Any]:
                 config["rag"] = {**DEFAULT_CONFIG["rag"], **user_config["rag"]}
             if "memory" in user_config:
                 config["memory"] = {**DEFAULT_CONFIG["memory"], **user_config["memory"]}
+            if "web" in user_config:
+                config["web"] = {**DEFAULT_CONFIG["web"], **user_config["web"]}
+            if "sandbox" in user_config:
+                config["sandbox"] = {**DEFAULT_CONFIG["sandbox"], **user_config["sandbox"]}
         except Exception as e:
             print(f"[Config warning] Could not read {CONFIG_FILE}: {e}")
     return config
@@ -123,6 +149,8 @@ You can take actions by using special tags in your response:
   <read>https://url</read> — fetch a page's text content so you can read it
   <memory>fact</memory> — append to your always-in-context memory (use replace='all' to rewrite it)
   <profile>fact about {user_name}</profile> — append to your profile of {user_name} (replace='all' to rewrite)
+  <config show /> — see your current configuration
+  <config set='agent.temperature'>0.4</config> — change a setting (persists; sandbox.* is user-only)
   <digest /> — convert unsaved notes to training data
   <train /> — fine-tune your LoRA weights on accumulated knowledge
   <cron expr='0 9 * * *'>text</cron> — recurring reminder (5-field cron; this example fires daily at 9:00)
@@ -132,6 +160,7 @@ Guidelines:
 - Write a note whenever {user_name} teaches you something important. Saved notes are automatically retrieved into your context when relevant — notes are your unlimited long-term memory, so prefer saving knowledge there over trying to memorize it.
 - Your <memory> and <profile> stores are small and always visible to you: keep only high-value durable facts there (conventions, preferences, who {user_name} is), and consolidate when told they're over the limit. Bulk knowledge belongs in notes.
 - When a multi-step approach works well, save it as a note titled 'Skill: <name>' listing the steps — it will come back to you when a similar task appears.
+- You may adjust your own configuration with <config> when {user_name} asks or when a setting is clearly hurting the session (check current values with <config show /> first). Changes apply from the next turn.
 - After writing 2+ new notes, call <digest /> then <train /> to remember them.
 - If {user_name} asks you to check the system, use <cmd>.
 - For math or anything worth computing exactly, write and run code with <py> and answer from its printed output.
@@ -321,11 +350,7 @@ def run_sandboxed(command: str, config: dict[str, Any]):
     if not args:
         return False, "Empty command."
 
-    blocked = {
-        "rm", "sudo", "su", "dd", "mkfs", "fdisk", "mount", "umount",
-        "chmod", "chown", "curl", "wget", "ssh", "scp", "bash", "sh", "zsh",
-        "fish", "python", "python3", "perl", "ruby", "php", "node", "npm",
-    }
+    blocked = set(config["sandbox"]["blocked_commands"])
     if args[0] in blocked:
         return False, f"'{args[0]}' is blocked in sandbox."
 
@@ -457,13 +482,15 @@ def _search_google_news(query: str, max_results: int) -> list[tuple[str, str, st
     return results
 
 
-def web_search(query: str, config: dict[str, Any], max_results: int = 5) -> tuple[bool, str]:
+def web_search(query: str, config: dict[str, Any], max_results: int | None = None) -> tuple[bool, str]:
     """Search the web without API keys. Backends in order: DuckDuckGo HTML
     (full web results, sometimes bot-challenged), DuckDuckGo instant-answer
     API (facts), Google News RSS (news/current events)."""
     query = query.strip()
     if not query:
         return False, "Empty query."
+    if max_results is None:
+        max_results = int(config["web"]["search_results"])
 
     results: list[tuple[str, str, str]] = []
     last_err = "No results found."
@@ -496,7 +523,7 @@ def read_page(url: str, config: dict[str, Any]) -> tuple[bool, str]:
     if scheme not in ("http", "https"):
         return False, f"Only http/https URLs can be read, got: {url!r}"
     try:
-        text = html_to_text(_http_get(url))
+        text = html_to_text(_http_get(url, timeout=int(config["web"]["http_timeout"])))
     except Exception as e:
         return False, f"Could not read {url}: {e}"
     if not text:
@@ -508,16 +535,9 @@ def read_page(url: str, config: dict[str, Any]) -> tuple[bool, str]:
 # ========================================================
 
 
-# Imports that would let sandboxed code touch the filesystem, network, or
-# host process; scripts are for pure computation (math, datetime, json, ...).
-_BLOCKED_IMPORTS = frozenset({
-    "os", "sys", "subprocess", "pathlib", "shutil", "socket", "http", "urllib",
-    "ftplib", "smtplib", "imaplib", "pickle", "ctypes", "multiprocessing",
-    "threading", "tempfile", "asyncio", "importlib", "pkgutil", "site", "builtins",
-})
-
-
-def _is_code_safe(code: str) -> tuple[bool, str]:
+def _is_code_safe(code: str, blocked_imports: set[str]) -> tuple[bool, str]:
+    """Reject imports that would let sandboxed code touch the filesystem,
+    network, or host process; scripts are for pure computation."""
     try:
         tree = ast.parse(code)
     except SyntaxError as e:
@@ -525,12 +545,12 @@ def _is_code_safe(code: str) -> tuple[bool, str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.split(".")[0] in _BLOCKED_IMPORTS:
+                if alias.name.split(".")[0] in blocked_imports:
                     return False, f"Import '{alias.name}' is not allowed in the sandbox."
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 return False, "Relative imports are not allowed in the sandbox."
-            if (node.module or "").split(".")[0] in _BLOCKED_IMPORTS:
+            if (node.module or "").split(".")[0] in blocked_imports:
                 return False, f"Import '{node.module}' is not allowed in the sandbox."
     return True, ""
 
@@ -540,7 +560,7 @@ def run_python_code(code: str, config: dict[str, Any]) -> tuple[bool, str]:
     code = code.strip()
     if not code:
         return False, "Empty code."
-    safe, msg = _is_code_safe(code)
+    safe, msg = _is_code_safe(code, set(config["sandbox"]["blocked_imports"]))
     if not safe:
         return False, msg
 
@@ -680,6 +700,11 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             "What's 2 to the power of 40, exactly?",
             "<py>print(2 ** 40)</py> Computing it exactly.",
         ),
+        # Self-configuration on request
+        (
+            "Make your replies more creative.",
+            "<config set='agent.temperature'>0.9</config> Done — turning up the creativity.",
+        ),
         # Curated memory: durable preferences go to <profile>/<memory>
         (
             "I prefer replies in bullet points from now on.",
@@ -715,6 +740,78 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
 
     for user_msg, assistant_msg in samples:
         append_chat_pair(user_msg, assistant_msg, tokenizer, system_prompt)
+
+
+# ======================== SELF-CONFIGURATION =========================
+# Keys that must survive a restart to take effect.
+_RESTART_KEYS = {"model_name"}
+
+
+def config_show(config: dict[str, Any]) -> str:
+    return json.dumps(config, indent=2)
+
+
+def _coerce_like(current: Any, raw: str) -> Any:
+    """Parse raw into the same type as the current value."""
+    if isinstance(current, bool):
+        if raw.lower() in ("true", "yes", "on", "1"):
+            return True
+        if raw.lower() in ("false", "no", "off", "0"):
+            return False
+        raise ValueError(f"Expected true/false, got {raw!r}")
+    if isinstance(current, int):
+        return int(raw)
+    if isinstance(current, float):
+        return float(raw)
+    if isinstance(current, list):
+        value = json.loads(raw)
+        if not isinstance(value, list):
+            raise ValueError("Expected a JSON list")
+        return value
+    return raw
+
+
+def set_config_value(config: dict[str, Any], key: str, raw_value: str,
+                     allow_sandbox: bool = False) -> str:
+    """Set a dotted config key (e.g. agent.temperature), persist it to
+    config.json, and apply it to the running config. Returns a status message."""
+    key = key.strip()
+    if key.startswith("sandbox.") and not allow_sandbox:
+        return "sandbox.* settings can only be changed by the user via /config set."
+
+    # Resolve the dotted path against the live config to validate it exists.
+    parts = key.split(".")
+    node: Any = config
+    for part in parts[:-1]:
+        if not isinstance(node, dict) or part not in node:
+            return f"Unknown config key: {key}"
+        node = node[part]
+    leaf = parts[-1]
+    if not isinstance(node, dict) or leaf not in node or isinstance(node[leaf], dict):
+        return f"Unknown config key: {key}"
+
+    try:
+        value = _coerce_like(node[leaf], raw_value.strip())
+    except Exception as e:
+        return f"Bad value for {key}: {e}"
+    node[leaf] = value
+
+    # Persist into config.json without disturbing unrelated user settings.
+    user_config: dict[str, Any] = {}
+    if CONFIG_FILE.exists():
+        try:
+            user_config = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            user_config = {}
+    target = user_config
+    for part in parts[:-1]:
+        target = target.setdefault(part, {})
+    target[leaf] = value
+    CONFIG_FILE.write_text(json.dumps(user_config, indent=2) + "\n", encoding="utf-8")
+
+    note = " (takes effect after restart)" if parts[0] in _RESTART_KEYS else ""
+    return f"Set {key} = {value!r}{note}."
+# ========================================================
 
 
 # ======================== CURATED MEMORY =========================
@@ -1033,6 +1130,17 @@ def parse_tools(reply: str) -> list[tuple[str, dict[str, Any]]]:
     for m in re.finditer(r'<read>(.*?)</read>', reply, re.DOTALL):
         tools.append(("read_page", {"url": m.group(1).strip()}))
 
+    if re.search(r'<config\s+show\s*/>', reply):
+        tools.append(("config_show", {}))
+
+    for m in re.finditer(
+        r'<config\s+set=[\'"]([^\'"]+)[\'"]>(.*?)</config>', reply, re.DOTALL
+    ):
+        tools.append(("config_set", {
+            "key": m.group(1).strip(),
+            "value": m.group(2).strip(),
+        }))
+
     for m in re.finditer(
         r'<memory(\s+replace=[\'"]all[\'"])?>(.*?)</memory>', reply, re.DOTALL
     ):
@@ -1081,6 +1189,8 @@ def strip_tool_tags(reply: str) -> str:
     display = re.sub(r'<read>(.*?)</read>', '', display, flags=re.DOTALL)
     display = re.sub(r'<memory[^>]*>(.*?)</memory>', '', display, flags=re.DOTALL)
     display = re.sub(r'<profile[^>]*>(.*?)</profile>', '', display, flags=re.DOTALL)
+    display = re.sub(r'<config\s+show\s*/>', '', display)
+    display = re.sub(r'<config\s+set=[\'"][^\'"]+[\'"]>(.*?)</config>', '', display, flags=re.DOTALL)
     display = re.sub(r'<digest\s*/>', '', display)
     display = re.sub(r'<digest></digest>', '', display)
     display = re.sub(r'<train\s*/>', '', display)
@@ -1088,7 +1198,7 @@ def strip_tool_tags(reply: str) -> str:
     display = re.sub(r'<cron\s+[^>]*?>(.*?)</cron>', '', display, flags=re.DOTALL)
     # A reply cut off mid-tag leaves an unterminated tag; never show it.
     display = re.sub(
-        r'<(?:cmd|py|search|read|note|cron|digest|train|memory|profile)\b[^>]*>[^<]*$',
+        r'<(?:cmd|py|search|read|note|cron|digest|train|memory|profile|config)\b[^>]*>[^<]*$',
         '', display, flags=re.DOTALL,
     )
     return clean_response(display)
@@ -1178,7 +1288,7 @@ def chat_loop(config: dict[str, Any]):
 
     def _cron_worker():
         while True:
-            time.sleep(20)
+            time.sleep(int(config["agent"]["cron_poll_seconds"]))
             try:
                 fired = check_due_jobs(config)
             except Exception:
@@ -1347,6 +1457,16 @@ def chat_loop(config: dict[str, Any]):
                 print(f"  Adapter files: {len(adapter_files)} ({adapter_kb:,} KB)")
                 continue
 
+            elif cmd.startswith("/config"):
+                parts = user_input.split(None, 3)[1:]
+                if not parts or parts[0].lower() == "show":
+                    print(config_show(config))
+                elif parts[0].lower() == "set" and len(parts) == 3:
+                    print(f"  {set_config_value(config, parts[1], parts[2], allow_sandbox=True)}")
+                else:
+                    print("  Usage: /config [show] | /config set <dotted.key> <value>")
+                continue
+
             elif cmd.startswith("/cron"):
                 try:
                     parts = shlex.split(user_input)[1:]
@@ -1413,6 +1533,13 @@ def chat_loop(config: dict[str, Any]):
         rag_context = retriever.build_context(user_input)
         rag_block = f"\n\n{rag_context}" if rag_context else ""
 
+        # Live-reload: config changes and prompt.md edits apply on the next turn.
+        sampler = make_sampler(
+            temp=config["agent"]["temperature"],
+            top_p=config["agent"]["top_p"],
+        )
+        system_prompt = build_system_prompt(config["assistant_name"], config["user_name"])
+
         user_turns += 1
         nudge_every = config["memory"]["nudge_interval"]
         nudge_block = ""
@@ -1441,7 +1568,10 @@ def chat_loop(config: dict[str, Any]):
             )
 
             try:
-                raw_reply = generate(model, tokenizer, prompt=prompt, sampler=sampler, verbose=False)
+                raw_reply = generate(
+                    model, tokenizer, prompt=prompt, sampler=sampler,
+                    max_tokens=int(config["agent"]["max_reply_tokens"]), verbose=False,
+                )
                 reply = raw_reply.strip()
             except Exception as e:
                 print(f"[MLX Error: {e}]")
@@ -1514,6 +1644,14 @@ def chat_loop(config: dict[str, Any]):
                     observations.append(
                         save_memory(params["store"], params["content"], config,
                                     replace=params.get("replace", False))
+                    )
+
+                elif name == "config_show":
+                    observations.append(f"Current configuration:\n{config_show(config)}")
+
+                elif name == "config_set":
+                    observations.append(
+                        set_config_value(config, params["key"], params["value"])
                     )
 
                 elif name == "digest_notes":
