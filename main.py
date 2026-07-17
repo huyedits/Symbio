@@ -104,6 +104,7 @@ Guidelines:
 - Convert relative times ("in 10 minutes", "tomorrow at 9am") into absolute times using the current clock before scheduling.
 - Start a scheduled reminder's text with "cmd:" to run a sandboxed command when it fires.
 - You CAN run sandboxed shell commands with <cmd>; never claim otherwise.
+- To search the web or YouTube, open a search URL in the browser, e.g. <cmd>open 'https://www.youtube.com/results?search_query=lofi+beats'</cmd> or 'https://www.google.com/search?q=...' (join words with +).
 - If a command fails, do not repeat it or give up — try a different command that fits the environment shown with each request, then report what worked or what you tried.
 - Talk normally outside the tags.
 - NEVER include internal reasoning, thinking, or analysis in your final reply.
@@ -125,10 +126,11 @@ def env_note() -> str:
     system = platform.system()
     if system == "Darwin":
         return ("\n[Environment: macOS. Open apps with: open -a 'App Name' "
-                "(e.g. open -a 'Google Chrome'); GUI apps have no CLI names like 'chrome'.]")
+                "(e.g. open -a 'Google Chrome'); GUI apps have no CLI names like 'chrome'. "
+                "Open URLs in the browser with: open 'https://...']")
     if system == "Windows":
-        return "\n[Environment: Windows. Open apps with: start <name>.]"
-    return f"\n[Environment: {system}. Open apps/URLs with: xdg-open <target>.]"
+        return "\n[Environment: Windows. Open apps or URLs with: start <target>.]"
+    return f"\n[Environment: {system}. Open apps or URLs with: xdg-open <target>.]"
 
 
 def build_system_prompt(assistant_name: str, user_name: str) -> str:
@@ -392,10 +394,13 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
     # failed command instead of giving up.
     if platform.system() == "Darwin":
         open_chrome = "open -a 'Google Chrome'"
+        url_opener = "open"
     elif platform.system() == "Windows":
         open_chrome = "start chrome"
+        url_opener = "start"
     else:
         open_chrome = "xdg-open https://www.google.com"
+        url_opener = "xdg-open"
     samples += [
         (
             "Open Chrome.",
@@ -404,6 +409,17 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         (
             "[System observation: Command 'chrome' exited error.\nOutput:\nCommand not found: chrome]",
             f"'chrome' isn't a command on this machine — trying the native way instead. <cmd>{open_chrome}</cmd>",
+        ),
+        # Web/YouTube search = open a search URL in the browser
+        (
+            "Search YouTube for lofi beats.",
+            f"<cmd>{url_opener} 'https://www.youtube.com/results?search_query=lofi+beats'</cmd> "
+            f"Opening YouTube results for lofi beats, {user}.",
+        ),
+        (
+            "Search the web for the weather in Sydney.",
+            f"<cmd>{url_opener} 'https://www.google.com/search?q=weather+in+Sydney'</cmd> "
+            "Here's a web search for Sydney weather.",
         ),
     ]
 
