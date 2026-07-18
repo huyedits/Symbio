@@ -453,6 +453,7 @@ class ChatSession:
         max_rounds = self.config["agent"]["max_tool_rounds"]
         executed_calls: set[str] = set()
         web_used = False
+        auto_searched = False
         final_display = ""
         for _ in range(max_rounds):
             messages = [{"role": "system", "content": (
@@ -499,9 +500,28 @@ class ChatSession:
             ]
 
             if not fresh_tools:
-                # Normal turn (or pure repetition): store the reply and stop.
                 self.history.append({"role": "assistant", "content": reply})
                 self._trim_history()
+                # Don't let the model fill knowledge gaps by guessing: an
+                # unsure-sounding answer with no tool call triggers one
+                # automatic web search so it can answer from results.
+                if (self.config["web"].get("auto_search_when_unsure", True)
+                        and not auto_searched and not web_used
+                        and display.strip() and learn.sounds_unsure(display)):
+                    auto_searched = True
+                    web_used = True
+                    print("  [Auto-search] Reply sounded unsure — searching the web...")
+                    ok, out = web.web_search(user_input, self.config)
+                    self.history.append({"role": "user", "content": (
+                        f"[System observation: Your answer sounded unsure, so a web "
+                        f"search for '{user_input}' ran automatically "
+                        f"({'succeeded' if ok else 'failed'}).\nResults:\n{out}\n"
+                        f"Answer from these results. If they don't help, say plainly "
+                        f"that you could not find it — do not guess.]"
+                    )})
+                    self._trim_history()
+                    continue
+                # Normal turn (or pure repetition): stop.
                 break
             for n, p in fresh_tools:
                 executed_calls.add(json.dumps([n, p], sort_keys=True))

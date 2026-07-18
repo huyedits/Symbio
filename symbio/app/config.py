@@ -36,6 +36,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "web": {
         "search_results": 5,
         "http_timeout": 15,
+        "auto_search_when_unsure": True,
     },
     "sandbox": {
         "blocked_commands": [

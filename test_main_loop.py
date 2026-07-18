@@ -792,6 +792,61 @@ def test_agent_loop_captures_correction():
     print("test_agent_loop_captures_correction passed")
 
 
+def test_sounds_unsure():
+    for text in [
+        "I'm not sure who holds that record.",
+        "I don't know the answer to that.",
+        "I don't have information about that event.",
+        "As an AI, I cannot answer that.",
+        "Hard to say without more data.",
+    ]:
+        assert learn.sounds_unsure(text), text
+    for text in [
+        "The capital of France is Paris.",
+        "Done! I saved the note.",
+        "2 to the power of 40 is 1,099,511,627,776.",
+    ]:
+        assert not learn.sounds_unsure(text), text
+    print("test_sounds_unsure passed")
+
+
+def test_agent_loop_auto_searches_when_unsure():
+    real_search = web.web_search
+    web.web_search = lambda q, c, max_results=5: (
+        True, "1. Wilt Chamberlain's 100-point game\n   https://example.com/wilt\n   Scored 100 points in 1962.")
+    try:
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["Who holds the NBA single-game scoring record?", "/quit", "n"],
+                model_replies=[
+                    "Hmm, I'm not sure who holds that record.",
+                    "It's Wilt Chamberlain, who scored 100 points in a single game in 1962.",
+                ],
+            )
+            session.run()
+            # Unsure reply with no tool call -> automatic search -> second round.
+            assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+            obs = session.prompts_seen[1]
+            assert "ran automatically" in obs, obs
+            assert "Wilt Chamberlain" in obs, obs
+            # The rescued answer counts as research and is remembered.
+            learned = [f for f in constants.NOTES_DIR.glob("*.md")
+                       if f.read_text().startswith("# Learned:")]
+            assert len(learned) == 1, learned
+            assert "100 points" in learned[0].read_text()
+
+        # Confident answers never trigger the auto-search.
+        session = ScriptedSession(
+            user_inputs=["hey", "/quit", "n"],
+            model_replies=["Hello Huy!"],
+        )
+        session.run()
+        assert len(session.prompts_seen) == 1, len(session.prompts_seen)
+    finally:
+        web.web_search = real_search
+    print("test_agent_loop_auto_searches_when_unsure passed")
+
+
 def test_sandbox_blocks_dangerous_commands():
     config = app_config.load_config()
     ok, out = sandbox.run_sandboxed("rm -rf /", config, interactive=False)
@@ -873,6 +928,8 @@ def _run_all_inner():
         test_agent_loop_captures_correction()
         test_remember_research_filters()
         test_agent_loop_remembers_research()
+        test_sounds_unsure()
+        test_agent_loop_auto_searches_when_unsure()
         test_digest_includes_curated_stores()
         test_sandbox_blocks_dangerous_commands()
         test_sandbox_blocked_command_permission_prompt()
