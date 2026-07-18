@@ -229,9 +229,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and how to open issue
 
  > future projection <
 - [ ] **Add MCP (Model Context Protocol)**
-- [ ] **Add More Tools**
+- [x] **Add More Tools** — live browser (`<browse>`/`<click>`/`<type>`/`<scroll>`), `<skill>`, permission-gated sandbox
 - [x] **Self correction when hallucinating**
 - [x] **Be able to learn new skills on the fly**
+- [x] **Remember new info found from web research** — auto-saved as `Learned:` notes, trained in on digest
 - [ ] **Add Other Messaging Platforms**
 - [ ] **Prune Old Weights (Future Milestone)**
 
