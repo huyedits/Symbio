@@ -301,20 +301,73 @@ def test_agent_loop_answers_from_search():
     real_search = web.web_search
     web.web_search = lambda q, c, max_results=5: (True, "1. Rain expected\n   https://example.com/wx\n   Heavy rain tomorrow.")
     try:
-        session = ScriptedSession(
-            user_inputs=["what is the latest news?", "/quit", "n"],
-            model_replies=[
-                "<search>latest news</search>",
-                "The latest: heavy rain is expected tomorrow.",
-            ],
-        )
-        session.run()
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["what is the latest news?", "/quit", "n"],
+                model_replies=[
+                    "<search>latest news</search>",
+                    "The latest: heavy rain is expected tomorrow.",
+                ],
+            )
+            session.run()
+            # Ephemeral lookups (news/weather) are never remembered.
+            learned = [t for t, _ in
+                       ((f.read_text().splitlines()[0], f) for f in constants.NOTES_DIR.glob("*.md"))
+                       if t.startswith("# Learned:")]
+            assert learned == [], learned
     finally:
         web.web_search = real_search
     assert len(session.prompts_seen) == 2
     assert "Rain expected" in session.prompts_seen[1], session.prompts_seen[1]
     assert "Web search for 'latest news' succeeded" in session.prompts_seen[1]
     print("test_agent_loop_answers_from_search passed")
+
+
+def test_agent_loop_remembers_research():
+    real_search = web.web_search
+    web.web_search = lambda q, c, max_results=5: (True, "1. Jorn Utzon\n   https://example.com/opera\n   The Dane behind the sails.")
+    try:
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["Who designed the Sydney Opera House?", "/quit", "n"],
+                model_replies=[
+                    "<search>Sydney Opera House architect</search>",
+                    "The Sydney Opera House was designed by Jorn Utzon.",
+                ],
+            )
+            session.run()
+            notes = {f.name: f.read_text() for f in constants.NOTES_DIR.glob("*.md")}
+            learned = {n: b for n, b in notes.items() if b.startswith("# Learned:")}
+            assert len(learned) == 1, notes.keys()
+            body = next(iter(learned.values()))
+            assert "Who designed the Sydney Opera House?" in body, body
+            assert "Jorn Utzon" in body, body
+    finally:
+        web.web_search = real_search
+    print("test_agent_loop_remembers_research passed")
+
+
+def test_remember_research_filters():
+    config = app_config.load_config()
+    with scratch_notes_dir():
+        # Durable knowledge is saved.
+        p = learn.remember_research(
+            "Who designed the Sydney Opera House?",
+            "The Sydney Opera House was designed by Jorn Utzon.", config)
+        assert p is not None and p.read_text().startswith("# Learned:"), p
+        # Exact repeat is deduped.
+        assert learn.remember_research(
+            "Who designed the Sydney Opera House?",
+            "The Sydney Opera House was designed by Jorn Utzon.", config) is None
+        # Ephemeral topics and trivial answers are skipped.
+        assert learn.remember_research(
+            "What's the weather in Tokyo?", "It is raining heavily in Tokyo at the moment.", config) is None
+        assert learn.remember_research("Deep question?", "Yes.", config) is None
+        # Config kill-switch.
+        config["learn"]["remember_research"] = False
+        assert learn.remember_research(
+            "Who wrote Dune?", "Dune was written by Frank Herbert.", config) is None
+    print("test_remember_research_filters passed")
 
 
 @contextmanager
@@ -538,17 +591,22 @@ def test_agent_loop_browses():
     real_browser = chat.BrowserSession
     chat.BrowserSession = FakeBrowser
     try:
-        session = ScriptedSession(
-            user_inputs=["Look up the MLX docs yourself.", "/quit", "n"],
-            model_replies=[
-                "<browse>https://example.com/mlx</browse> Opening it.",
-                "The docs say: Fake page text about MLX.",
-            ],
-        )
-        session.run()
-        obs_prompt = session.prompts_seen[1]
-        assert "Opened browser at https://example.com/mlx" in obs_prompt, obs_prompt
-        assert "Fake page text about MLX" in obs_prompt, obs_prompt
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["Look up the MLX docs yourself.", "/quit", "n"],
+                model_replies=[
+                    "<browse>https://example.com/mlx</browse> Opening it.",
+                    "The docs say: Fake page text about MLX.",
+                ],
+            )
+            session.run()
+            obs_prompt = session.prompts_seen[1]
+            assert "Opened browser at https://example.com/mlx" in obs_prompt, obs_prompt
+            assert "Fake page text about MLX" in obs_prompt, obs_prompt
+            # A browse-backed answer is remembered as research.
+            learned = [f for f in constants.NOTES_DIR.glob("*.md")
+                       if f.read_text().startswith("# Learned:")]
+            assert len(learned) == 1, learned
     finally:
         chat.BrowserSession = real_browser
     print("test_agent_loop_browses passed")
@@ -813,6 +871,8 @@ def _run_all_inner():
         test_correction_detection_and_mining()
         test_mistake_digest_and_threshold_training()
         test_agent_loop_captures_correction()
+        test_remember_research_filters()
+        test_agent_loop_remembers_research()
         test_digest_includes_curated_stores()
         test_sandbox_blocks_dangerous_commands()
         test_sandbox_blocked_command_permission_prompt()

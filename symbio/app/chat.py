@@ -65,6 +65,13 @@ def _browser_peek(browser: BrowserSession) -> str:
 _QUIT = "quit"
 _HANDLED = "handled"
 
+# Tool names whose observations bring outside information into the turn;
+# a turn that used any of these is a research turn worth remembering.
+_WEB_TOOLS = {
+    "web_search", "read_page", "browser_open",
+    "browser_click", "browser_type", "browser_scroll",
+}
+
 
 class ChatSession:
     """One interactive chat session: model, stores, browser, cron thread."""
@@ -442,6 +449,8 @@ class ChatSession:
 
         max_rounds = self.config["agent"]["max_tool_rounds"]
         executed_calls: set[str] = set()
+        web_used = False
+        final_display = ""
         for _ in range(max_rounds):
             messages = [{"role": "system", "content": (
                 self.system_prompt + memory.curated_memory_block(self.config) + rag_block
@@ -474,6 +483,7 @@ class ChatSession:
             display = tooling.strip_tool_tags(reply)
 
             if display.strip():
+                final_display = display
                 print(f"{self.config['assistant_name']:8}: {display}")
                 self.logger.info(f"{self.config['assistant_name']}: {display}")
                 self.session_store.log("assistant", display)
@@ -499,6 +509,8 @@ class ChatSession:
             observations = []
             for name, params in fresh_tools:
                 print(f"  [Tool: {name}]")
+                if name in _WEB_TOOLS:
+                    web_used = True
                 observations.append(self._execute_tool(name, params))
 
             # Feed observations back as a system/user turn
@@ -510,6 +522,13 @@ class ChatSession:
         if is_correction:
             # The corrected answer is now in history; capture and maybe retrain.
             self._learn_from_correction()
+        elif web_used and final_display:
+            # Web research produced an answer: remember durable knowledge so
+            # it is retrievable later and trained into the weights on digest.
+            note = learn.remember_research(user_input, final_display, self.config)
+            if note:
+                self.retriever.invalidate_cache()
+                print(f"  [Learn] Remembered research: {note.name}")
 
     def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
         if name == "write_note":
