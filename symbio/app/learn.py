@@ -24,11 +24,31 @@ from symbio.app import memory, training
 from symbio.app.tooling import strip_tool_tags
 
 
+# Phrases that signal the model is answering from a gap in its knowledge.
+# A reply that sounds like this and used no tools triggers an automatic web
+# search so the model answers from results instead of guessing.
+_UNSURE_MARKERS = (
+    "i don't know", "i do not know", "i'm not sure", "i am not sure",
+    "i'm not certain", "i am not certain", "i'm uncertain", "not sure about",
+    "i don't have", "i do not have", "don't have access", "do not have access",
+    "i'm unable to", "i am unable to", "i cannot answer", "can't answer",
+    "no information", "not aware of", "i'm not familiar", "i am not familiar",
+    "knowledge cutoff", "my training data", "as an ai", "i might be wrong",
+    "i may be wrong", "hard to say", "can't say for sure", "cannot say for sure",
+)
+
+
+def sounds_unsure(text: str) -> bool:
+    """Does this reply sound like the model is guessing or lacks the fact?"""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _UNSURE_MARKERS)
+
+
 # Queries/answers about the current moment go stale immediately — training
 # them into weights would teach outdated facts, so they are never remembered.
 _EPHEMERAL_MARKERS = (
     "weather", "news", "headline", "today", "tonight", "tomorrow", "yesterday",
-    "right now", "currently", "latest", "price", "stock", "score", "forecast",
+    "right now", "currently", "latest", "price", "stock", "forecast",
 )
 
 

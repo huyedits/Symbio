@@ -251,6 +251,11 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             "What's the weather in Tokyo right now?",
             "<search>Tokyo weather now</search> Checking.",
         ),
+        # Unknown facts = search, never guess
+        (
+            "Who won the Tour de France in 2031?",
+            "I don't have that memorized — checking. <search>Tour de France 2031 winner</search>",
+        ),
         # Web/YouTube search = open a search URL in the browser
         (
             "Search YouTube for lofi beats.",
