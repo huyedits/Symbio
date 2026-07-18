@@ -67,6 +67,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "auto": True,
         "auto_train": True,
+        "remember_research": True,
         "mistake_threshold": 5,
         "batch_train_iters": 25,
         "boost_factor": 3,

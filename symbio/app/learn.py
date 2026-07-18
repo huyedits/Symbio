@@ -20,8 +20,43 @@ from pathlib import Path
 from typing import Any
 
 from symbio import constants
-from symbio.app import training
+from symbio.app import memory, training
 from symbio.app.tooling import strip_tool_tags
+
+
+# Queries/answers about the current moment go stale immediately — training
+# them into weights would teach outdated facts, so they are never remembered.
+_EPHEMERAL_MARKERS = (
+    "weather", "news", "headline", "today", "tonight", "tomorrow", "yesterday",
+    "right now", "currently", "latest", "price", "stock", "score", "forecast",
+)
+
+
+def remember_research(question: str, answer: str, config: dict[str, Any]) -> Path | None:
+    """Save a web-researched answer as a 'Learned:' note so it is retrievable
+    by RAG and trained into the weights on the next digest. Skips ephemeral
+    lookups, trivial answers, and questions already remembered."""
+    if not config.get("learn", {}).get("remember_research", True):
+        return None
+    question = question.strip()
+    answer = answer.strip()
+    if len(answer) < 20:
+        return None
+    text = f"{question} {answer}".lower()
+    if any(marker in text for marker in _EPHEMERAL_MARKERS):
+        return None
+
+    title = f"Learned: {question[:60]}{'...' if len(question) > 60 else ''}"
+    # Light dedupe: skip if a note with this exact title already exists.
+    for f in constants.NOTES_DIR.glob("*.md"):
+        try:
+            if f.read_text(encoding="utf-8").splitlines()[0] == f"# {title}":
+                return None
+        except (OSError, IndexError):
+            continue
+
+    body = f"**Question:** {question}\n\n**Answer (from web research):** {answer}"
+    return memory.save_note(title, body)
 
 
 def _is_system_observation(content: str) -> bool:
