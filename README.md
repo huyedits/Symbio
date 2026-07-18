@@ -1,7 +1,11 @@
 # Symbio
 Your machine, your way.
 
+[![Live Demo on Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Live%20Demo-Hugging%20Face%20Spaces-blue)](https://huggingface.co/spaces/HuyEdits/symbio-demo)
+
 Symbio develops as you tell it what to do in repeat.
+
+**Try the interactive demo** — the agent's real tag parser, self-correction miner, research memory, and RAG retriever running in your browser: https://huggingface.co/spaces/HuyEdits/symbio-demo
 
 ## What it does
 
