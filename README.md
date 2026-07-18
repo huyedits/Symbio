@@ -26,7 +26,8 @@ python main.py
 ```
 
 On first run, Symbio asks for your name and its name. These are saved to `config.json`.
-
+## Why custom?
+AI agents tend to forget and also not personalised to the work you want the agent to do, as well as the agent being in the cloud which brings on the costs and privacy risk. This repo helps you have access to a highly aggressive persoanlised model that does not leave your machine unless you ask it to.
 ## Configuration
 
 Edit `config.json` to change the model, LoRA settings, or agent behavior:
