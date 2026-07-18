@@ -85,12 +85,14 @@ class ChatSession:
 
         print(" Loading model...")
         self.adapter_config = constants.ADAPTER_DIR / "adapter_config.json"
+        self.adapter_loaded = False
         if self.adapter_config.exists():
             print(" Found existing adapter. Loading it...")
             try:
                 self.model, self.tokenizer = load(
                     config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
                 )
+                self.adapter_loaded = True
             except Exception as e:
                 print(f" Could not load adapter: {e}")
                 print(" Falling back to base model...")
@@ -145,6 +147,7 @@ class ChatSession:
             self.model, self.tokenizer = load(
                 self.config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
             )
+            self.adapter_loaded = True
             return None
         except Exception as e:
             return str(e)
@@ -238,7 +241,7 @@ class ChatSession:
             print(f"  Assistant: {self.config['assistant_name']} | User: {self.config['user_name']}")
             print(f"  Notes: {len(files)}")
             print(f"  Training data: {data_size:,} bytes")
-            print(f"  Adapter loaded: {'YES' if self.adapter_config.exists() else 'NO'}")
+            print(f"  Adapter loaded: {'YES' if self.adapter_loaded else 'NO'}")
             print(f"  Adapter files: {len(adapter_files)} ({adapter_kb:,} KB)")
 
         elif cmd.startswith("/config"):
@@ -266,7 +269,7 @@ class ChatSession:
 
         elif cmd in ("/help", "/h", "/?"):
             data_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0
-            print_banner(self.config, self.adapter_config.exists(), data_size)
+            print_banner(self.config, self.adapter_loaded, data_size)
 
         else:
             print("  Unknown command. Type /help for the command list.")
@@ -624,7 +627,7 @@ class ChatSession:
 
     def run(self):
         dataset_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0
-        print_banner(self.config, self.adapter_config.exists(), dataset_size)
+        print_banner(self.config, self.adapter_loaded, dataset_size)
 
         while True:
             try:
