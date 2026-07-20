@@ -14,7 +14,7 @@ from mlx_lm.sample_utils import make_sampler
 from rag import Retriever
 from symbio import constants
 from symbio.computer import BrowserSession
-from symbio.app import cron, learn, memory, prompts, sandbox, sessions, tooling, training, web
+from symbio.app import cron, golden, learn, memory, prompts, sandbox, sessions, tooling, training, web
 from symbio.app.config import config_show, set_config_value
 
 
@@ -45,7 +45,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"   Data   : {dataset_size:,} bytes")
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
-    output_fn("Commands: /quit  /save  /train  /learn  /forget_last  /status  /prune  /help")
+    output_fn("Commands: /quit  /save  /train  /golden  /learn  /forget_last  /status  /prune  /help")
     output_fn("         /run <cmd>  /note [title]  /notes  /skills  /digest  /cron  /config")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     output_fn("-" * 50)
@@ -151,6 +151,9 @@ class ChatSession:
         self.logger = _make_chat_logger()
         self.user_turns = 0
         self.auto_searches = 0
+        # Human-readable outcome of the last _guarded_train() call, surfaced
+        # verbatim as the train_adapter tool's observation.
+        self._last_train_note = ""
 
         # Background scheduler: fires due cron jobs, prints a notice
         # immediately, and queues the event for the model's next turn.
@@ -190,6 +193,84 @@ class ChatSession:
         except Exception as e:
             return str(e)
 
+    def _guarded_train(self, iters: int | None = None) -> bool:
+        """Run LoRA training, reload the adapter, then check it against the
+        golden set (a fixed battery of prompts covering identity and
+        tool-tag formatting — see symbio.app.golden). A regression, a case
+        that passed before this training round but fails after, rolls the
+        adapter back automatically so a bad fine-tune never silently ships
+        as the new default behavior. Mirrors training.run_training's bool
+        contract so it's a drop-in replacement everywhere training is
+        triggered (slash command, tool call, end-of-session, /learn)."""
+        learn_cfg = self.config.get("learn", {})
+        golden_on = learn_cfg.get("golden_set_enabled", True)
+
+        baseline = None
+        if golden_on:
+            baseline = golden.run_golden_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config, self.enabled_groups)
+        backup_dir = training.backup_adapter() if golden_on else None
+
+        try:
+            trained = training.run_training(self.config, iters=iters)
+            if not trained or not self.adapter_config.exists():
+                self._last_train_note = "Training skipped (no new data or failed)."
+                return trained
+
+            err = self._reload_model()
+            if err:
+                self.output_fn(f"  [Train] Adapter reload failed: {err}")
+                self._last_train_note = f"Training done but reload failed: {err}"
+                return True
+
+            if not golden_on or baseline is None:
+                self.output_fn("  [Train] Adapter reloaded.")
+                self._last_train_note = "Training complete. Adapter reloaded."
+                return True
+
+            after = golden.run_golden_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config, self.enabled_groups)
+            regressions = sorted(baseline.passing - after.passing)
+            threshold = int(learn_cfg.get("golden_regression_threshold", 0))
+
+            if len(regressions) > threshold:
+                self.output_fn(
+                    f"  [Golden] Regression: {len(regressions)} case(s) newly "
+                    f"failing ({', '.join(regressions)}).")
+                rolled_back = False
+                if not learn_cfg.get("golden_rollback_on_regression", True):
+                    self.output_fn("  [Golden] Rollback disabled in config; keeping the regressed adapter.")
+                elif backup_dir is None:
+                    self.output_fn("  [Golden] No prior adapter to roll back to; keeping the regressed adapter.")
+                else:
+                    training.restore_adapter(backup_dir)
+                    reload_err = self._reload_model()
+                    if reload_err:
+                        self.output_fn(f"  [Golden] Rollback reload failed: {reload_err}")
+                    else:
+                        self.output_fn("  [Golden] Rolled back to the previous adapter.")
+                        rolled_back = True
+                self._last_train_note = (
+                    f"Training complete but regressed on {len(regressions)} check(s) "
+                    f"({', '.join(regressions)}); " + (
+                        "rolled back to the previous adapter."
+                        if rolled_back else "kept the regressed adapter."
+                    )
+                )
+            else:
+                self.output_fn(
+                    f"  [Golden] {after.pass_count}/{after.total} checks passing "
+                    f"(baseline {baseline.pass_count}/{baseline.total}) — no regression.")
+                self._last_train_note = (
+                    f"Training complete. Adapter reloaded "
+                    f"({after.pass_count}/{after.total} golden checks passing, no regression)."
+                )
+            return True
+        finally:
+            training.discard_adapter_backup(backup_dir)
+
     def _trim_history(self):
         while len(self.history) > self.config["agent"]["history_limit"] + 8:
             self.history.pop(0)
@@ -228,11 +309,16 @@ class ChatSession:
                 self.output_fn(f" Saved {saved_count} exchange(s) to training data.")
 
         elif cmd == "/train":
-            trained = training.run_training(self.config)
-            if trained and self.adapter_config.exists():
-                self.output_fn("\n Reloading model with updated adapter...")
-                err = self._reload_model()
-                self.output_fn(f" Could not reload adapter: {err}" if err else "  Adapter reloaded.")
+            self._guarded_train()
+
+        elif cmd == "/golden":
+            result = golden.run_golden_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config, self.enabled_groups)
+            self.output_fn(f"  [Golden] {result.pass_count}/{result.total} checks passing:")
+            for case in golden.GOLDEN_CASES:
+                mark = "PASS" if result.results.get(case.id) else "FAIL"
+                self.output_fn(f"    [{mark}] {case.id} — {case.description}")
 
         elif cmd == "/digest":
             self._decay_stale_notes()
@@ -455,11 +541,8 @@ class ChatSession:
         severity = learn.correction_severity(sample[0], sample[2], self.config)
         path = learn.save_mistake_note(*sample, severity=severity)
         self.output_fn(f"  [Learn] Correction captured (severity {severity}): {path.name}")
-        trained = learn.maybe_train_on_mistakes(self.config, self.tokenizer, self.system_prompt)
-        if trained and self.adapter_config.exists():
-            err = self._reload_model()
-            self.output_fn(f"  [Learn] Adapter reload failed: {err}" if err
-                  else "  [Learn] Adapter updated and reloaded.")
+        learn.maybe_train_on_mistakes(
+            self.config, self.tokenizer, self.system_prompt, train_fn=self._guarded_train)
 
     def _decay_stale_notes(self) -> list[str]:
         """Archive expired 'Learned:' research notes and purge their training
@@ -755,13 +838,8 @@ class ChatSession:
                 return f"Could not schedule job: {e}"
 
         if name == "train_adapter":
-            trained = training.run_training(self.config)
-            if trained and self.adapter_config.exists():
-                err = self._reload_model()
-                if err:
-                    return f"Training done but reload failed: {err}"
-                return "Training complete. Adapter reloaded."
-            return "Training skipped (no new data or failed)."
+            self._guarded_train()
+            return self._last_train_note
 
         return f"Unknown tool: {name}"
 
@@ -822,12 +900,7 @@ class ChatSession:
                 self.output_fn(f"    Appended {saved_count} exchange(s) to {constants.TRAIN_FILE}")
 
                 if self.input_fn("  Train now? [y/N]: ").strip().lower() in ("y", "yes"):
-                    trained = training.run_training(self.config)
-                    if trained and self.adapter_config.exists():
-                        self.output_fn("\n Reloading model...")
-                        err = self._reload_model()
-                        if err:
-                            self.output_fn(f" Could not reload: {err}")
+                    self._guarded_train()
 
 
 def chat_loop(config: dict[str, Any]):

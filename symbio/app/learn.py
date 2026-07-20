@@ -352,9 +352,14 @@ def digest_mistakes_to_training(tokenizer, system_prompt: str, boost: int = 1) -
     return added, total_severity
 
 
-def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: str) -> bool:
+def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: str,
+                            train_fn=None) -> bool:
     """If enough mistake notes have accumulated, digest them and run a short
-    LoRA pass. Returns True when training completed (caller reloads model)."""
+    LoRA pass. Returns True when training completed (caller reloads model).
+    `train_fn(config, iters=...)` defaults to training.run_training; pass a
+    wrapper (e.g. one that golden-checks and rolls back a regression) to
+    guard this path the same way as manual /train."""
+    train_fn = train_fn or training.run_training
     learn_cfg = config.get("learn", {})
     if not learn_cfg.get("enabled", True):
         return False
@@ -387,7 +392,7 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
         print(f"  [Learn] Severity {total_severity} across {digested} note(s) "
               f"scales training from {base_iters} to {iters} iters.")
     print(f"  [Learn] Running LoRA update ({iters} iters)...")
-    trained = training.run_training(config, iters=iters)
+    trained = train_fn(config, iters=iters)
     if not trained:
         print("  [Learn] Training did not complete; the digested samples remain "
               "in training data for the next run.")

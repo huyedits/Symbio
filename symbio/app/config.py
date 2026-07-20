@@ -86,6 +86,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "severe_correction_phrases": [
             "wrong", "incorrect", "you misunderstood", "fix it", "not what",
         ],
+        "golden_set_enabled": True,
+        "golden_max_tokens": 150,
+        "golden_regression_threshold": 0,
+        "golden_rollback_on_regression": True,
         "correction_phrases": [
             "no,", "not quite", "that's wrong", "incorrect", "wrong",
             "you misunderstood", "try again", "actually", "i meant",
