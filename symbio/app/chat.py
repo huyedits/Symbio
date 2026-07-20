@@ -137,6 +137,8 @@ class ChatSession:
         else:
             self.model, self.tokenizer = load(config["model_name"])
 
+        self._check_idle_adapter()
+
         # Seed identity notes + clean training corpus on first run.
         memory.ensure_seed_notes(config)
         training.seed_training_data(self.tokenizer, self.system_prompt, config)
@@ -189,9 +191,55 @@ class ChatSession:
                 self.config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
             )
             self.adapter_loaded = True
+            training.mark_adapter_used()
             return None
         except Exception as e:
             return str(e)
+
+    def _check_idle_adapter(self):
+        """A saved adapter that exists on disk but wasn't loaded this session
+        (e.g. after switching to an incompatible model) sits there unused. If
+        it's been idle longer than learn.adapter_idle_days, ask whether to
+        remove it. Declining or asking to keep it both just reset the grace
+        period so the reminder does not repeat every session — nothing is
+        ever deleted unless the user explicitly agrees to remove it."""
+        if not self.adapter_config.exists():
+            return
+        if self.adapter_loaded:
+            # Actively in use this session; that alone counts as "used".
+            training.mark_adapter_used()
+            return
+
+        learn_cfg = self.config.get("learn", {})
+        if not learn_cfg.get("adapter_idle_reminder_enabled", True):
+            return
+
+        last_used = training.adapter_last_used()
+        if last_used is None:
+            # First time this adapter's idle state has been tracked.
+            training.mark_adapter_used()
+            return
+
+        idle_days = (datetime.now() - last_used).days
+        threshold = int(learn_cfg.get("adapter_idle_days", 30))
+        if idle_days < threshold:
+            return
+
+        try:
+            answer = self.input_fn(
+                f"  A saved LoRA adapter hasn't been used in {idle_days} day(s) "
+                f"(not loaded with the current model). Remove it to free up "
+                f"space? [y/N]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+
+        if answer in ("y", "yes", "remove"):
+            training.remove_adapter()
+            self.output_fn("  Removed the unused adapter.")
+        else:
+            training.mark_adapter_used()
+            self.output_fn("  Keeping the adapter.")
 
     def _guarded_train(self, iters: int | None = None) -> bool:
         """Run LoRA training, reload the adapter, then check it against the
@@ -368,6 +416,10 @@ class ChatSession:
             self.output_fn(f"  Training data: {data_size:,} bytes")
             self.output_fn(f"  Adapter loaded: {'YES' if self.adapter_loaded else 'NO'}")
             self.output_fn(f"  Adapter files: {len(adapter_files)} ({adapter_kb:,} KB)")
+            last_used = training.adapter_last_used()
+            if last_used is not None:
+                idle_days = (datetime.now() - last_used).days
+                self.output_fn(f"  Adapter last used: {idle_days} day(s) ago")
 
         elif cmd.startswith("/config"):
             parts = user_input.split(None, 3)[1:]

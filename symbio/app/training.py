@@ -454,6 +454,37 @@ def discard_adapter_backup(backup_dir: Path | None):
         shutil.rmtree(backup_dir, ignore_errors=True)
 
 
+_ADAPTER_LAST_USED_FILE_NAME = "last_used.json"
+
+
+def adapter_last_used() -> datetime | None:
+    """When was the current adapter last loaded into a session? None if it
+    has never been tracked (e.g. just trained, or from before this feature)."""
+    path = constants.ADAPTER_DIR / _ADAPTER_LAST_USED_FILE_NAME
+    if not path.exists():
+        return None
+    try:
+        return datetime.fromisoformat(json.loads(path.read_text(encoding="utf-8"))["last_used"])
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return None
+
+
+def mark_adapter_used():
+    """Record that the current adapter was just loaded into a session,
+    resetting the idle clock the reminder in ChatSession checks against."""
+    if not constants.ADAPTER_DIR.exists():
+        return
+    path = constants.ADAPTER_DIR / _ADAPTER_LAST_USED_FILE_NAME
+    path.write_text(json.dumps({"last_used": datetime.now().isoformat()}), encoding="utf-8")
+
+
+def remove_adapter():
+    """Delete the current adapter entirely, reverting to the base model."""
+    if constants.ADAPTER_DIR.exists():
+        shutil.rmtree(constants.ADAPTER_DIR)
+    constants.ADAPTER_DIR.mkdir(parents=True, exist_ok=True)
+
+
 def prune_adapters() -> dict[str, Any]:
     """Remove intermediate checkpoints and report adapter footprint."""
     removed = []

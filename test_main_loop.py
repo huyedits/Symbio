@@ -52,7 +52,11 @@ class ScriptedSession:
         chat.load = lambda *a, **k: (object(), FakeTokenizer())
         chat.generate = self.fake_generate
         try:
-            chat.chat_loop(self.config or app_config.load_config())
+            # ChatSession construction touches the real adapters/ directory
+            # (checks adapter_config.json, marks it used) even with load()
+            # faked out — guard it the same way training runs already are.
+            with preserve_training_state(adapters=True):
+                chat.chat_loop(self.config or app_config.load_config())
         finally:
             builtins.input = real_input
             chat.load = real_load
