@@ -2,6 +2,7 @@
 
 import copy
 import json
+import os
 from typing import Any
 
 from symbio import constants
@@ -37,11 +38,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "search_results": 5,
         "http_timeout": 15,
         "auto_search_when_unsure": True,
+        "auto_search_session_cap": 20,
     },
     "sandbox": {
         "blocked_commands": [
             "rm", "sudo", "su", "dd", "mkfs", "fdisk", "mount", "umount",
-            "chmod", "chown", "wget", "ssh", "scp", "bash", "sh", "zsh",
+            "chmod", "chown", "curl", "wget", "ssh", "scp", "bash", "sh", "zsh",
             "fish", "python", "python3", "perl", "ruby", "php", "node", "npm",
         ],
         "blocked_imports": [
@@ -50,6 +52,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "multiprocessing", "threading", "tempfile", "asyncio", "importlib",
             "pkgutil", "site", "builtins",
         ],
+    },
+    "telegram": {
+        "enabled": False,
+        "bot_token": "",
+        "allowed_chat_ids": [],
+        "confirm_dangerous": True,
     },
     "rag": {
         "enabled": True,
@@ -69,6 +77,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "auto": True,
         "auto_train": True,
         "remember_research": True,
+        "note_decay_days": 90,
         "mistake_threshold": 5,
         "batch_train_iters": 25,
         "boost_factor": 3,
@@ -77,6 +86,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "you misunderstood", "try again", "actually", "i meant",
             "i said", "i asked", "not what", "that's not", "you're wrong",
             "fix it", "correction", "rephrase",
+        ],
+    },
+    "tools": {
+        "enabled_groups": [
+            "memory", "notes", "terminal", "code", "web_search",
+            "browser", "digest", "train", "cron", "config",
         ],
     },
 }
@@ -94,7 +109,7 @@ def load_config() -> dict[str, Any]:
         try:
             user_config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
             config.update(user_config)
-            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn"):
+            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn", "telegram", "tools"):
                 if section in user_config:
                     config[section] = {**DEFAULT_CONFIG[section], **user_config[section]}
         except Exception as e:
@@ -103,7 +118,11 @@ def load_config() -> dict[str, Any]:
 
 
 def config_show(config: dict[str, Any]) -> str:
-    return json.dumps(config, indent=2)
+    """Return config as pretty JSON, with sensitive values redacted."""
+    safe = copy.deepcopy(config)
+    if safe.get("telegram", {}).get("bot_token"):
+        safe["telegram"]["bot_token"] = "***REDACTED***"
+    return json.dumps(safe, indent=2)
 
 
 def _coerce_like(current: Any, raw: str) -> Any:
@@ -166,3 +185,39 @@ def set_config_value(config: dict[str, Any], key: str, raw_value: str,
 
     note = " (takes effect after restart)" if parts[0] in _RESTART_KEYS else ""
     return f"Set {key} = {value!r}{note}."
+
+
+_TELEGRAM_TOKEN_ENV = "SYMBIO_TELEGRAM_TOKEN"
+
+
+def get_telegram_token(config: dict[str, Any], input_fn=input) -> str | None:
+    """Return the Telegram bot token, in order of preference:
+    1. SYMBIO_TELEGRAM_TOKEN environment variable
+    2. config["telegram"]["bot_token"]
+    3. Prompt the user and persist to config.json
+    Returns None if the user declines to provide a token.
+    """
+    token = os.environ.get(_TELEGRAM_TOKEN_ENV, "").strip()
+    if token:
+        return token
+    token = (config.get("telegram", {}) or {}).get("bot_token", "").strip()
+    if token:
+        return token
+    try:
+        token = input_fn(
+            "Enter your Telegram bot token from @BotFather (or press Enter to skip): "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not token:
+        return None
+    if not constants.CONFIG_FILE.exists():
+        constants.CONFIG_FILE.write_text("{}", encoding="utf-8")
+    try:
+        user_config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        user_config = {}
+    user_config.setdefault("telegram", {})["bot_token"] = token
+    constants.CONFIG_FILE.write_text(json.dumps(user_config, indent=2) + "\n", encoding="utf-8")
+    print("[Telegram] Token saved to config.json. Consider using SYMBIO_TELEGRAM_TOKEN instead.")
+    return token

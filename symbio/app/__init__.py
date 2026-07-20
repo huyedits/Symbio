@@ -10,3 +10,9 @@ from symbio.app.config import load_config
 from symbio.app.training import run_training
 
 __all__ = ["chat_loop", "load_config", "run_training"]
+
+try:
+    from symbio.app.telegram import TelegramBot  # noqa: F401
+    __all__.append("TelegramBot")
+except ImportError:
+    TelegramBot = None

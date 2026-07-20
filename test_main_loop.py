@@ -27,9 +27,10 @@ class FakeTokenizer:
 class ScriptedSession:
     """Run chat_loop with scripted user inputs and model replies."""
 
-    def __init__(self, user_inputs, model_replies):
+    def __init__(self, user_inputs, model_replies, config=None):
         self.user_inputs = list(user_inputs)
         self.model_replies = list(model_replies)
+        self.config = config
         self.prompts_seen = []
 
     def fake_input(self, prompt_text=""):
@@ -51,7 +52,7 @@ class ScriptedSession:
         chat.load = lambda *a, **k: (object(), FakeTokenizer())
         chat.generate = self.fake_generate
         try:
-            chat.chat_loop(app_config.load_config())
+            chat.chat_loop(self.config or app_config.load_config())
         finally:
             builtins.input = real_input
             chat.load = real_load
@@ -67,18 +68,79 @@ def test_system_prompt_substitutes_names():
 
 def test_system_prompt_seeds_missing_prompt_md():
     real_prompt = constants.PROMPT_FILE
+    real_default = constants.PROMPT_DEFAULT_FILE
     seeded = constants.PROJECT_DIR / "prompt.md.seedtest"
+    default_snapshot = constants.PROJECT_DIR / "prompt.md.default.seedtest"
     constants.PROMPT_FILE = seeded
+    constants.PROMPT_DEFAULT_FILE = default_snapshot
     try:
         sp = build_system_prompt("Caine", "Huy")
         assert seeded.exists(), "prompt file was not seeded"
+        # prompt.md stores the unformatted template; names are substituted at runtime.
         assert seeded.read_text(encoding="utf-8") == DEFAULT_SYSTEM_PROMPT
+        assert default_snapshot.exists(), "default snapshot was not written"
+        assert default_snapshot.read_text(encoding="utf-8") == DEFAULT_SYSTEM_PROMPT
     finally:
         constants.PROMPT_FILE = real_prompt
+        constants.PROMPT_DEFAULT_FILE = real_default
         seeded.unlink(missing_ok=True)
+        default_snapshot.unlink(missing_ok=True)
     assert "Caine" in sp and "Huy" in sp, sp
     assert "<cmd>" in sp, sp
+    assert "at most ONE tool tag" in sp, sp
     print("test_system_prompt_seeds_missing_prompt_md passed")
+
+
+def test_system_prompt_auto_updates_unchanged_prompt_md():
+    """prompt.md is refreshed when it still matches the last shipped default."""
+    real_prompt = constants.PROMPT_FILE
+    real_default = constants.PROMPT_DEFAULT_FILE
+    prompt_path = constants.PROJECT_DIR / "prompt.md.updatetest"
+    default_path = constants.PROJECT_DIR / "prompt.md.default.updatetest"
+    constants.PROMPT_FILE = prompt_path
+    constants.PROMPT_DEFAULT_FILE = default_path
+    try:
+        # Simulate an old default snapshot and a prompt.md that matches it.
+        old_default = "OLD PROMPT {assistant_name} {user_name}"
+        prompt_path.write_text(old_default, encoding="utf-8")
+        default_path.write_text(old_default, encoding="utf-8")
+
+        sp = build_system_prompt("Caine", "Huy")
+        assert prompt_path.read_text(encoding="utf-8") == DEFAULT_SYSTEM_PROMPT
+        assert default_path.read_text(encoding="utf-8") == DEFAULT_SYSTEM_PROMPT
+    finally:
+        constants.PROMPT_FILE = real_prompt
+        constants.PROMPT_DEFAULT_FILE = real_default
+        prompt_path.unlink(missing_ok=True)
+        default_path.unlink(missing_ok=True)
+    assert "Caine" in sp and "Huy" in sp, sp
+    print("test_system_prompt_auto_updates_unchanged_prompt_md passed")
+
+
+def test_system_prompt_preserves_customized_prompt_md():
+    """prompt.md is left alone when the user has edited it."""
+    real_prompt = constants.PROMPT_FILE
+    real_default = constants.PROMPT_DEFAULT_FILE
+    prompt_path = constants.PROJECT_DIR / "prompt.md.customtest"
+    default_path = constants.PROJECT_DIR / "prompt.md.default.customtest"
+    constants.PROMPT_FILE = prompt_path
+    constants.PROMPT_DEFAULT_FILE = default_path
+    try:
+        custom_text = "My custom prompt for {assistant_name} and {user_name}"
+        prompt_path.write_text(custom_text, encoding="utf-8")
+        default_path.write_text("SHIPPED DEFAULT", encoding="utf-8")
+
+        sp = build_system_prompt("Caine", "Huy")
+        assert prompt_path.read_text(encoding="utf-8") == custom_text
+        assert default_path.read_text(encoding="utf-8") == DEFAULT_SYSTEM_PROMPT
+    finally:
+        constants.PROMPT_FILE = real_prompt
+        constants.PROMPT_DEFAULT_FILE = real_default
+        prompt_path.unlink(missing_ok=True)
+        default_path.unlink(missing_ok=True)
+    assert sp.startswith("My custom prompt for Caine and Huy"), sp
+    assert "<tools>" in sp, sp
+    print("test_system_prompt_preserves_customized_prompt_md passed")
 
 
 def test_parse_and_strip_tool_tags():
@@ -100,6 +162,29 @@ def test_parse_and_strip_tool_tags():
     assert tools[5][1] == {"schedule": "at 2026-12-31 23:59", "text": "happy new year"}
     assert tooling.strip_tool_tags(reply) == "Sure.", repr(tooling.strip_tool_tags(reply))
     print("test_parse_and_strip_tool_tags passed")
+
+
+def test_parse_hermes_tool_calls():
+    reply = (
+        "I'll run that for you.\n"
+        '<tool_call>{"name": "terminal", "arguments": {"cmd": "ssh root@209.38.82.54"}}</tool_call>'
+    )
+    tools = tooling.parse_tools(reply)
+    assert tools == [("run_command", {"cmd": "ssh root@209.38.82.54"})], tools
+    assert tooling.strip_tool_tags(reply) == "I'll run that for you."
+    print("test_parse_hermes_tool_calls passed")
+
+
+def test_parse_mixed_hermes_and_legacy_tags():
+    reply = (
+        "Saving and searching.\n"
+        '<tool_call>{"name": "write_note", "arguments": {"title": "Test", "body": "body"}}</tool_call>'
+        "<search>news</search>"
+    )
+    tools = tooling.parse_tools(reply)
+    names = [n for n, _ in tools]
+    assert names == ["web_search", "write_note"], names
+    print("test_parse_mixed_hermes_and_legacy_tags passed")
 
 
 @contextmanager
@@ -219,6 +304,27 @@ def test_agent_loop_breaks_on_repeated_tool_call():
     # Round 1 executes the command; round 2 repeats it verbatim -> loop ends.
     assert len(session.prompts_seen) == 2, len(session.prompts_seen)
     print("test_agent_loop_breaks_on_repeated_tool_call passed")
+
+
+def test_agent_loop_executes_one_tool_per_response():
+    """A reply with multiple different tool tags must only run the first one."""
+    session = ScriptedSession(
+        user_inputs=["Run some stuff.", "/quit", "n"],
+        model_replies=[
+            "Starting. <cmd>echo first</cmd><cmd>echo second</cmd><cmd>echo third</cmd>",
+            "Done after the first command.",
+        ],
+    )
+    session.run()
+    # Only one tool executed, so only one observation round then the final answer.
+    assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+    observation = session.prompts_seen[1]
+    assert "Command 'echo first' exited ok" in observation, observation
+    assert "Output:\nfirst" in observation, observation
+    assert "Output:\nsecond" not in observation, observation
+    assert "Output:\nthird" not in observation, observation
+    assert "ignored" in observation, observation
+    print("test_agent_loop_executes_one_tool_per_response passed")
 
 
 def test_strip_unterminated_tag():
@@ -543,8 +649,9 @@ def test_rag_injects_saved_notes():
 class FakeBrowser:
     """Stands in for symbio.computer.BrowserSession in scripted sessions."""
 
-    def __init__(self):
+    def __init__(self, confirm_fn=None):
         self.actions = []
+        self.confirm_fn = confirm_fn
 
     def open(self, url):
         self.actions.append(("open", url))
@@ -645,6 +752,62 @@ def test_digest_includes_curated_stores():
          constants.DIGEST_MANIFEST, constants.TRAIN_FILE) = real
         shutil.rmtree(tmp, ignore_errors=True)
     print("test_digest_includes_curated_stores passed")
+
+
+def test_decay_research_notes():
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    config = app_config.load_config()
+    config["learn"]["note_decay_days"] = 90
+    real = (constants.NOTES_DIR, constants.NOTES_ARCHIVE_DIR,
+            constants.TRAIN_FILE, constants.VALID_FILE)
+    tmp = Path(tempfile.mkdtemp())
+    constants.NOTES_DIR = tmp / "notes"
+    constants.NOTES_ARCHIVE_DIR = constants.NOTES_DIR / "archive"
+    constants.NOTES_ARCHIVE_DIR.mkdir(parents=True)
+    constants.TRAIN_FILE = tmp / "train.jsonl"
+    constants.VALID_FILE = tmp / "valid.jsonl"
+    try:
+        # An expired research note (filename timestamp far past the cutoff),
+        # a fresh research note, and an old deliberate note.
+        old_title = "Learned: Who won the 2020 title?"
+        (constants.NOTES_DIR / "20200101_120000_old.md").write_text(
+            f"# {old_title}\n\n**Answer (from web research):** Team A won it.")
+        (constants.NOTES_DIR / f"{datetime.now():%Y%m%d_%H%M%S}_fresh.md").write_text(
+            "# Learned: Height of K2?\n\n**Answer (from web research):** 8,611 m.")
+        (constants.NOTES_DIR / "20200101_120000_evergreen.md").write_text(
+            "# Deploy checklist\n\n1. Run tests. 2. Tag the release.")
+        # Training data holds the old note's two digested samples + unrelated.
+        samples = [
+            {"text": f"Write a markdown note titled '{old_title}'. Team A won it."},
+            {"text": f"According to your notes, what do you know about '{old_title}'? Team A."},
+            {"text": "What is your name? I am Caine."},
+        ]
+        constants.TRAIN_FILE.write_text(
+            "\n".join(json.dumps(s) for s in samples) + "\n")
+
+        archived = training.decay_research_notes(config)
+        assert archived == ["20200101_120000_old.md"], archived
+        assert (constants.NOTES_ARCHIVE_DIR / "20200101_120000_old.md").exists()
+        remaining = sorted(f.name for f in constants.NOTES_DIR.glob("*.md"))
+        # Fresh research and deliberate notes survive.
+        assert len(remaining) == 2 and "20200101_120000_evergreen.md" in remaining, remaining
+        # The decayed note's samples are gone; unrelated samples survive.
+        data = constants.TRAIN_FILE.read_text()
+        assert "Team A" not in data and "I am Caine" in data, data
+        # Second run is a no-op; 0 disables decay entirely.
+        assert training.decay_research_notes(config) == []
+        config["learn"]["note_decay_days"] = 0
+        (constants.NOTES_DIR / "20200101_120000_old2.md").write_text(
+            "# Learned: something ancient\n\nAncient body text here.")
+        assert training.decay_research_notes(config) == []
+    finally:
+        (constants.NOTES_DIR, constants.NOTES_ARCHIVE_DIR,
+         constants.TRAIN_FILE, constants.VALID_FILE) = real
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("test_decay_research_notes passed")
 
 
 @contextmanager
@@ -847,6 +1010,64 @@ def test_agent_loop_auto_searches_when_unsure():
     print("test_agent_loop_auto_searches_when_unsure passed")
 
 
+def test_sounds_fabricated():
+    # Fires only when the question asks for a figure AND the reply hedges one.
+    for question, reply in [
+        ("How tall is the Eiffel Tower?", "It's around 300 meters, I think."),
+        ("How many moons does Saturn have?", "Probably about 80 or so."),
+        ("What year did the Berlin Wall fall?", "I believe it was 1989."),
+        ("What's the population of Iceland?", "Roughly 350,000 people live there."),
+        ("How far is the Moon?", "It's 380,000 km away, give or take."),
+    ]:
+        assert learn.sounds_fabricated(question, reply), (question, reply)
+    for question, reply in [
+        # Confident numbers never trigger; corrections handle wrong ones.
+        ("How tall is the Eiffel Tower?", "The Eiffel Tower is 330 metres tall."),
+        # Hedge without any number.
+        ("How many moons does Saturn have?", "I'd have to check, one moment."),
+        # Question doesn't ask for a figure — casual numbers are fine.
+        ("Can you set a timer?", "Sure, maybe 5 minutes?"),
+        ("hey how's it going", "Great! I'm about 100% ready to help."),
+    ]:
+        assert not learn.sounds_fabricated(question, reply), (question, reply)
+    print("test_sounds_fabricated passed")
+
+
+def test_agent_loop_auto_searches_on_fabricated_number():
+    real_search = web.web_search
+    web.web_search = lambda q, c, max_results=5: (
+        True, "1. Eiffel Tower - Wikipedia\n   https://example.com/eiffel\n   The tower is 330 metres tall.")
+    try:
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["How tall is the Eiffel Tower?", "/quit", "n"],
+                model_replies=[
+                    "It's around 300 meters, I think.",
+                    "The Eiffel Tower is 330 metres tall.",
+                ],
+            )
+            session.run()
+            # Hedged figure with no tool call -> automatic search -> second round.
+            assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+            obs = session.prompts_seen[1]
+            assert "ran automatically" in obs, obs
+            assert "330 metres" in obs, obs
+
+        # Moderation: the per-session cap stops auto-search entirely at 0.
+        capped_config = app_config.load_config()
+        capped_config["web"]["auto_search_session_cap"] = 0
+        session = ScriptedSession(
+            user_inputs=["How tall is the Eiffel Tower?", "/quit", "n"],
+            model_replies=["It's around 300 meters, I think."],
+            config=capped_config,
+        )
+        session.run()
+        assert len(session.prompts_seen) == 1, len(session.prompts_seen)
+    finally:
+        web.web_search = real_search
+    print("test_agent_loop_auto_searches_on_fabricated_number passed")
+
+
 def test_sandbox_blocks_dangerous_commands():
     config = app_config.load_config()
     ok, out = sandbox.run_sandboxed("rm -rf /", config, interactive=False)
@@ -930,6 +1151,9 @@ def _run_all_inner():
         test_agent_loop_remembers_research()
         test_sounds_unsure()
         test_agent_loop_auto_searches_when_unsure()
+        test_sounds_fabricated()
+        test_agent_loop_auto_searches_on_fabricated_number()
+        test_decay_research_notes()
         test_digest_includes_curated_stores()
         test_sandbox_blocks_dangerous_commands()
         test_sandbox_blocked_command_permission_prompt()

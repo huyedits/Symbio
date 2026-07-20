@@ -12,17 +12,25 @@ ADAPTER_DIR = PROJECT_DIR / "adapters"
 NOTES_DIR = PROJECT_DIR / "notes"
 MISTAKES_DIR = NOTES_DIR / "mistakes"
 MISTAKES_ARCHIVE_DIR = MISTAKES_DIR / "archive"
+# Decayed research notes go here instead of being deleted, mirroring how
+# digested mistake notes are archived. Subdirectory, so excluded from the
+# non-recursive *.md globs that feed RAG and digestion.
+NOTES_ARCHIVE_DIR = NOTES_DIR / "archive"
 SANDBOX_DIR = PROJECT_DIR / "sandbox"
 SCREENSHOTS_DIR = PROJECT_DIR / "screenshots"
 DIGEST_MANIFEST = DATA_DIR / "digest_manifest.json"
 CONFIG_FILE = PROJECT_DIR / "config.json"
 MODELS_FILE = PROJECT_DIR / "models.json"
+GATEWAY_PID_FILE = PROJECT_DIR / "gateway.pid"
 # Paths used by the tag-based agent in symbio.app.
 PROMPT_FILE = PROJECT_DIR / "prompt.md"
 CRON_FILE = PROJECT_DIR / "cron_jobs.json"
 MEMORY_FILE = PROJECT_DIR / "agent_memory.md"
 PROFILE_FILE = PROJECT_DIR / "user_profile.md"
 SESSIONS_DIR = PROJECT_DIR / "sessions"
+# Snapshot of the last shipped default prompt; used to auto-update prompt.md
+# when the user has not customized it.
+PROMPT_DEFAULT_FILE = PROJECT_DIR / "prompt.md.default"
 
 for d in (
     LOG_DIR,
@@ -31,6 +39,7 @@ for d in (
     NOTES_DIR,
     MISTAKES_DIR,
     MISTAKES_ARCHIVE_DIR,
+    NOTES_ARCHIVE_DIR,
     SANDBOX_DIR,
     SCREENSHOTS_DIR,
     SESSIONS_DIR,
@@ -118,6 +127,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "fix it",
             "correction",
             "rephrase",
+        ],
+    },
+    "tools": {
+        "enabled_groups": [
+            "memory", "notes", "terminal", "code", "web_search",
+            "browser", "digest", "train", "cron", "config",
         ],
     },
 }

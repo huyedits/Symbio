@@ -44,6 +44,45 @@ def sounds_unsure(text: str) -> bool:
     return any(marker in lowered for marker in _UNSURE_MARKERS)
 
 
+# The other way the model fills a knowledge gap: inventing a plausible-looking
+# figure instead of admitting it doesn't know. Detection is deliberately
+# two-sided so auto-search fires in moderation: the QUESTION must ask for a
+# specific figure or date, AND the REPLY must hedge right next to a number
+# ("around 300 metres, I think"). A confidently stated number never triggers —
+# if it's wrong, the correction pipeline handles it.
+_NUMERIC_QUESTION_MARKERS = (
+    "how many", "how much", "how tall", "how old", "how far", "how long",
+    "how fast", "how heavy", "how big", "how deep", "how high", "how wide",
+    "how often", "what year", "when did", "when was", "what date",
+    "population", "percent", "temperature", "elevation", "altitude",
+    "distance", "capacity", "net worth", "box office", "gdp", "market cap",
+    "record for", "the record", "how large", "what size",
+)
+
+_HEDGE_BEFORE_NUMBER_RE = re.compile(
+    r"(?:\babout|\baround|\bapproximately|\broughly|\bmaybe|\bperhaps|"
+    r"\bprobably|\blikely|\bi think|\bi believe|\bi'd guess|\bi would guess|"
+    r"\bif i recall|\bif i remember|\bestimated|\bsomewhere|\bpossibly|~)"
+    r"[^.!?\n]{0,40}?\d"
+)
+_HEDGE_AFTER_NUMBER_RE = re.compile(
+    r"\d[^.!?\n]{0,40}?"
+    r"(?:\bor so\b|\bgive or take\b|\bi think\b|\bi believe\b|"
+    r"\bif i recall\b|\bif i remember\b|\bbut i'm not sure\b|"
+    r"\bbut i am not sure\b|\bdon't quote me\b)"
+)
+
+
+def sounds_fabricated(question: str, reply: str) -> bool:
+    """Does this reply hedge a specific figure for a question that asked for
+    one? That pattern usually means the number is invented, not recalled."""
+    q = question.lower()
+    if not any(marker in q for marker in _NUMERIC_QUESTION_MARKERS):
+        return False
+    r = reply.lower()
+    return bool(_HEDGE_BEFORE_NUMBER_RE.search(r) or _HEDGE_AFTER_NUMBER_RE.search(r))
+
+
 # Queries/answers about the current moment go stale immediately — training
 # them into weights would teach outdated facts, so they are never remembered.
 _EPHEMERAL_MARKERS = (
