@@ -1,5 +1,6 @@
 """Scheduled jobs: 5-field cron expressions and one-shot reminders."""
 
+import shlex
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -94,11 +95,22 @@ def parse_one_shot(schedule: str) -> datetime | None:
     return target
 
 
-def add_cron_job(schedule: str, text: str) -> dict[str, Any]:
+def add_cron_job(schedule: str, text: str, blocked_commands: set[str] | None = None) -> dict[str, Any]:
     schedule = schedule.strip()
     text = text.strip()
     if not text:
         raise ValueError("Job text is empty.")
+    if text.startswith("cmd:"):
+        shell_cmd = text[4:].strip()
+        try:
+            args = shlex.split(shell_cmd)
+        except ValueError as e:
+            raise ValueError(f"Invalid command: {e}")
+        if blocked_commands and args and args[0] in blocked_commands:
+            raise ValueError(
+                f"Cannot schedule blocked command '{args[0]}' in cron — "
+                f"interactive approval is not possible when the job fires."
+            )
     one_shot = parse_one_shot(schedule)
     if one_shot:
         # Normalize to an absolute time so it fires exactly once.

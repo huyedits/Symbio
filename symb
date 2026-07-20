@@ -1,0 +1,3 @@
+#!/bin/sh
+# Local development wrapper: run the Symbio CLI without `pip install`.
+exec python -m symbio.app.cli "$@"

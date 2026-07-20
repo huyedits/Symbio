@@ -11,20 +11,28 @@ from typing import Any
 from symbio import constants
 
 
-def _ask_command_permission(command: str, binary: str) -> bool:
-    """Ask the user on the terminal to approve a normally-blocked command.
-    Any failure to read an answer (EOF, no tty, interrupt) means no."""
+def _ask_command_permission(command: str, binary: str, ask_fn=None) -> bool:
+    """Ask the user to approve a normally-blocked command.
+    Any failure to read an answer (EOF, no tty, interrupt) means no.
+    `ask_fn(prompt) -> bool` may be supplied by non-terminal front-ends."""
+    prompt = (
+        f"[Sandbox] '{binary}' is normally blocked. Allow once?\n"
+        f"  $ {command}"
+    )
+    if ask_fn is not None:
+        try:
+            return ask_fn(prompt)
+        except Exception:
+            return False
     try:
-        answer = input(
-            f"\n  [Sandbox] '{binary}' is normally blocked. Allow once?\n"
-            f"    $ {command}\n  [y/N]: "
-        ).strip().lower()
+        answer = input(f"\n  {prompt}\n  [y/N]: ").strip().lower()
     except (EOFError, KeyboardInterrupt, OSError):
         return False
     return answer in ("y", "yes")
 
 
-def run_sandboxed(command: str, config: dict[str, Any], interactive: bool = True):
+def run_sandboxed(command: str, config: dict[str, Any], interactive: bool = True,
+                  confirm_fn=None):
     command = command.strip()
     if not command:
         return False, "Empty command."
@@ -39,7 +47,7 @@ def run_sandboxed(command: str, config: dict[str, Any], interactive: bool = True
     if args[0] in blocked:
         # Blocked commands are not refused outright: the user can approve a
         # one-off run. Non-interactive callers (cron thread) never prompt.
-        if not interactive or not _ask_command_permission(command, args[0]):
+        if not interactive or not _ask_command_permission(command, args[0], ask_fn=confirm_fn):
             return False, f"'{args[0]}' is blocked in sandbox (user did not approve it)."
 
     try:

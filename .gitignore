@@ -27,7 +27,10 @@ training_data/tmp*.yaml
 # prompt.md is seeded from DEFAULT_SYSTEM_PROMPT in main.py on first run.
 config.json
 prompt.md
+prompt.md.default
+prompt.md.backup.*
 cron_jobs.json
+gateway.pid
 agent_memory.md
 user_profile.md
 sessions/

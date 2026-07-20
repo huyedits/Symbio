@@ -7,6 +7,8 @@ import platform
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -38,6 +40,79 @@ def append_chat_pair(user_msg: str, assistant_msg: str, tokenizer, system_prompt
         {"role": "assistant", "content": clean_response(assistant_msg)},
     ]
     append_training_text(build_chat_training_sample(messages, tokenizer))
+
+
+def _note_timestamp(f: Path) -> datetime:
+    """When was this note learned? Filenames carry a %Y%m%d_%H%M%S prefix;
+    fall back to mtime for notes that don't."""
+    try:
+        return datetime.strptime(f.name[:15], "%Y%m%d_%H%M%S")
+    except ValueError:
+        return datetime.fromtimestamp(f.stat().st_mtime)
+
+
+def drop_note_training_samples(title: str) -> int:
+    """Remove a digested note's samples from the training/validation data,
+    matched by the distinctive user-turn questions digestion writes. Sweeps
+    every digested version of the note, not just the latest."""
+    topic = title.replace("_", " ").replace("-", " ")
+    markers = (
+        f"Write a markdown note titled '{title}'.",
+        f"According to your notes, what do you know about '{topic}'?",
+    )
+    dropped = 0
+    for data_file in (constants.TRAIN_FILE, constants.VALID_FILE):
+        if not data_file.exists():
+            continue
+        kept, hit = [], 0
+        for line in data_file.read_text(encoding="utf-8").splitlines():
+            try:
+                text = json.loads(line).get("text", "") if line.strip() else ""
+            except (json.JSONDecodeError, AttributeError):
+                text = ""
+            if any(m in text for m in markers):
+                hit += 1
+                continue
+            kept.append(line)
+        if hit:
+            data_file.write_text("\n".join(kept) + ("\n" if kept else ""),
+                                 encoding="utf-8")
+            dropped += hit
+    return dropped
+
+
+def decay_research_notes(config: dict[str, Any]) -> list[str]:
+    """Archive auto-learned 'Learned:' notes older than learn.note_decay_days
+    and drop their digested samples from the training data, so stale web facts
+    stop being served by RAG and retrained into the weights on every digest.
+    Deliberate notes, skills, and curated memory never decay; a re-asked
+    question re-learns the fact fresh via auto-search. 0 disables decay.
+    Returns the archived filenames."""
+    days = int(config.get("learn", {}).get("note_decay_days", 90))
+    if days <= 0:
+        return []
+    cutoff = datetime.now() - timedelta(days=days)
+    archived = []
+    for f in sorted(constants.NOTES_DIR.glob("*.md")):
+        if not f.is_file():
+            continue
+        try:
+            first_line = f.read_text(encoding="utf-8").strip().splitlines()[0]
+        except (OSError, IndexError):
+            continue
+        if not first_line.startswith("# Learned:"):
+            continue
+        if _note_timestamp(f) > cutoff:
+            continue
+        drop_note_training_samples(first_line[2:].strip())
+        dest = constants.NOTES_ARCHIVE_DIR / f.name
+        counter = 1
+        while dest.exists():
+            dest = constants.NOTES_ARCHIVE_DIR / f"{f.stem}_{counter}{f.suffix}"
+            counter += 1
+        f.rename(dest)
+        archived.append(f.name)
+    return archived
 
 
 def digest_notes_to_training(tokenizer, system_prompt: str,

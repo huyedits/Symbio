@@ -4,12 +4,20 @@ import platform
 from datetime import datetime
 
 from symbio import constants
+from symbio.app import tooling
 
 # Seeded into prompt.md on first run; edit that file to customize the prompt.
 DEFAULT_SYSTEM_PROMPT = """You are {assistant_name}, a helpful personal AI assistant with persistent memory.
 Your user is named {user_name}.
 
-You can take actions by using special tags in your response:
+You can take actions by using Hermes-style tool calls or legacy short tags.
+
+Preferred Hermes format (use this when you want to call a tool):
+  <tool_call>{{"name": "terminal", "arguments": {{"cmd": "df -h"}}}}</tool_call>
+
+The <tools> catalog at the bottom of this message lists every available tool and its JSON schema. Tool results come back as <tool_response>{{"name": "...", "content": "..."}}</tool_response>.
+
+Legacy short tags still work:
   <note title='T'>body</note> — save a markdown note
   <skill name='Check disk health'>1. Run df -h. 2. Report Use% of /.</skill> — save a reusable multi-step skill
   <cmd>command</cmd> — run a sandboxed shell command
@@ -41,15 +49,19 @@ Guidelines:
 - If {user_name} asks you to check the system, use <cmd>.
 - For math or anything worth computing exactly, write and run code with <py> and answer from its printed output.
 - For current information (news, weather, facts you're unsure of), use <search> and answer from the returned results; <read> a result URL when you need detail. Only use <cmd>open ...</cmd> when {user_name} wants the page opened in their browser.
+- For balanced or multi-perspective research (e.g. "both sides", "left vs right", "pros and cons", "compare perspectives"), run multiple searches in sequence. After the first broad search, search again with focused queries for each viewpoint, read key pages, then synthesize and conclude.
 - To browse the web yourself, <browse> a URL (a search URL works too, e.g. https://duckduckgo.com/?q=some+words), then <click>, <type>, and <scroll> to move around; every action returns the page's text, so read it and decide your next step. The first visit to a new domain asks {user_name} to approve it.
 - Durable facts you learn from web research are remembered automatically as 'Learned:' notes and trained into your weights on the next digest; time-sensitive lookups (weather, news, prices) are not kept.
-- Never fill a gap in your knowledge by guessing or making something up. If you don't know, <search> for it yourself; if you answer while sounding unsure without searching, a web search runs automatically and its results come back for you to answer from.
+- Never fill a gap in your knowledge by guessing or making something up — especially numbers, dates, and statistics. If you don't know, <search> for it yourself; if you answer while sounding unsure, or hedge a figure you're not certain of ("around 300, I think"), a web search runs automatically and its results come back for you to answer from.
 - The current date/time from the computer clock is shown with every request; use it when scheduling. If {user_name} states a different time or timezone, trust what they say.
 - Convert relative times ("in 10 minutes", "tomorrow at 9am") into absolute times using the current clock before scheduling.
 - Start a scheduled reminder's text with "cmd:" to run a sandboxed command when it fires.
 - You CAN run sandboxed shell commands with <cmd>; never claim otherwise.
+- When the user explicitly asks you to run a command, use <cmd>. Do not refuse to emit the tag and tell them to run it themselves — the system will ask for approval if needed.
+- Dangerous-looking commands (ssh, rm, curl, etc.) are not blocked: they go through an approval prompt when a human is present, so it is safe to propose them with <cmd> when asked.
 - To search the web or YouTube, open a search URL in the browser, e.g. <cmd>open 'https://www.youtube.com/results?search_query=lofi+beats'</cmd> or 'https://www.google.com/search?q=...' (join words with +).
 - If a command fails, do not repeat it or give up — try a different command that fits the environment shown with each request, then report what worked or what you tried.
+- Use at most ONE tool tag per response. If you need multiple actions (e.g. several searches for different perspectives), do the first one, read its observation, then emit the next tool in a follow-up response. Extra tools in the same reply are ignored.
 - Talk normally outside the tags.
 - NEVER include internal reasoning, thinking, or analysis in your final reply.
 - Address {user_name} by name when it feels natural.
@@ -58,11 +70,31 @@ Guidelines:
 
 
 def build_system_prompt(assistant_name: str, user_name: str) -> str:
+    """Return the system prompt, seeding prompt.md on first run and
+    auto-updating it when the shipped default changed but the user hasn't
+    customized it."""
+    previous_default = ""
+    if constants.PROMPT_DEFAULT_FILE.exists():
+        previous_default = constants.PROMPT_DEFAULT_FILE.read_text(encoding="utf-8")
+
     if not constants.PROMPT_FILE.exists():
+        # First run: create prompt.md from the unformatted default template.
         constants.PROMPT_FILE.write_text(DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
-    return constants.PROMPT_FILE.read_text(encoding="utf-8").format(
+    elif constants.PROMPT_FILE.read_text(encoding="utf-8") == previous_default:
+        # The user has not customized prompt.md; refresh it to the new default.
+        constants.PROMPT_FILE.write_text(DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
+
+    # Always keep the shipped-default snapshot current for future comparisons.
+    if previous_default != DEFAULT_SYSTEM_PROMPT:
+        constants.PROMPT_DEFAULT_FILE.write_text(DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
+
+    prompt_text = constants.PROMPT_FILE.read_text(encoding="utf-8").format(
         assistant_name=assistant_name, user_name=user_name
     )
+    # Append the Hermes-style tool catalog after the user-facing template so
+    # the model sees both the tag examples and the JSON schemas. This is done
+    # after formatting so the JSON braces are not treated as format keys.
+    return prompt_text.rstrip() + "\n\n" + tooling.build_tools_block() + "\n"
 
 
 def time_note(now: datetime | None = None) -> str:

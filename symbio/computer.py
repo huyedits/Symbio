@@ -97,9 +97,16 @@ def _first_visible(locator: Any) -> tuple[Any | None, int]:
     return None, count
 
 
-def _confirm_domain(domain: str) -> bool:
-    """Prompt the user before opening a new domain."""
-    print(f"  [Computer] Allow browser to access '{domain}'? [y/N]:", end=" ", flush=True)
+def _confirm_domain(domain: str, ask_fn=None) -> bool:
+    """Prompt the user before opening a new domain.
+    `ask_fn(prompt) -> bool` may be supplied by non-terminal front-ends."""
+    prompt = f"Allow browser to access '{domain}'?"
+    if ask_fn is not None:
+        try:
+            return ask_fn(prompt)
+        except Exception:
+            return False
+    print(f"  [Computer] {prompt} [y/N]:", end=" ", flush=True)
     try:
         answer = input().strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -110,11 +117,12 @@ def _confirm_domain(domain: str) -> bool:
 class BrowserSession:
     """Manages a single Playwright browser/page session."""
 
-    def __init__(self):
+    def __init__(self, confirm_fn=None):
         self._playwright: Any | None = None
         self._browser: Any | None = None
         self._page: Any | None = None
         self._confirmed: set[str] = set(_DEFAULT_ALLOWLIST)
+        self._confirm_fn = confirm_fn
 
     def _init(self) -> tuple[Any, Any]:
         if self._page is not None:
@@ -182,7 +190,7 @@ class BrowserSession:
         if not domain:
             return False, f"Could not extract domain from URL: {url}"
         if domain not in self._confirmed:
-            if _confirm_domain(domain):
+            if _confirm_domain(domain, ask_fn=self._confirm_fn):
                 self._confirmed.add(domain)
             else:
                 return False, f"User denied access to '{domain}'."

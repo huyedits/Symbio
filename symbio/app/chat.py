@@ -34,20 +34,21 @@ def _make_chat_logger() -> logging.Logger:
     return logger
 
 
-def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int):
+def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int,
+                 output_fn=print):
     note_count = len(list(constants.NOTES_DIR.glob("*.md")))
-    print("\n" + "=" * 50)
-    print(f"  {config['assistant_name'].upper()} — PERSONAL CHAT-FINETUNE CLI")
-    print(f"   Model  : {config['model_name']}")
-    print(f"   User   : {config['user_name']}")
-    print(f"   LoRA   : {'YES' if adapter_loaded else 'None (base)'}")
-    print(f"   Data   : {dataset_size:,} bytes")
-    print(f"   Notes  : {note_count}")
-    print("-" * 50)
-    print("Commands: /quit  /save  /train  /learn  /forget_last  /status  /prune  /help")
-    print("         /run <cmd>  /note [title]  /notes  /skills  /digest  /cron  /config")
-    print("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
-    print("-" * 50)
+    output_fn("\n" + "=" * 50)
+    output_fn(f"  {config['assistant_name'].upper()} — PERSONAL CHAT-FINETUNE CLI")
+    output_fn(f"   Model  : {config['model_name']}")
+    output_fn(f"   User   : {config['user_name']}")
+    output_fn(f"   LoRA   : {'YES' if adapter_loaded else 'None (base)'}")
+    output_fn(f"   Data   : {dataset_size:,} bytes")
+    output_fn(f"   Notes  : {note_count}")
+    output_fn("-" * 50)
+    output_fn("Commands: /quit  /save  /train  /learn  /forget_last  /status  /prune  /help")
+    output_fn("         /run <cmd>  /note [title]  /notes  /skills  /digest  /cron  /config")
+    output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
+    output_fn("-" * 50)
 
 
 def _browser_peek(browser: BrowserSession) -> str:
@@ -72,30 +73,66 @@ _WEB_TOOLS = {
     "browser_click", "browser_type", "browser_scroll",
 }
 
+# Tools that require explicit approval when running from a non-terminal
+# front-end (e.g. Telegram) because they mutate state or run user-supplied code.
+_TELEGRAM_CONFIRM_TOOLS = frozenset({
+    "execute_code", "run_command", "digest_notes", "train_adapter", "schedule_job", "config_set",
+})
+
+# Map internal tool names back to Hermes-style names for <tool_response> labels.
+_INTERNAL_TO_HERMES_NAME: dict[str, str] = {
+    "run_command": "terminal",
+}
+
+
+def _internal_to_hermes_name(name: str) -> str:
+    return _INTERNAL_TO_HERMES_NAME.get(name, name)
+
 
 class ChatSession:
-    """One interactive chat session: model, stores, browser, cron thread."""
+    """One interactive chat session: model, stores, browser, cron thread.
 
-    def __init__(self, config: dict[str, Any]):
+    Non-terminal front-ends can supply:
+      - model/tokenizer/adapter_loaded to reuse a loaded model
+      - input_fn(prompt) -> str  to replace builtins.input
+      - output_fn(text)            to replace print for user-facing output
+      - confirm_fn(prompt) -> bool for yes/no gates (blocked commands, domains)
+    """
+
+    def __init__(self, config: dict[str, Any], model=None, tokenizer=None,
+                 adapter_loaded: bool | None = None,
+                 input_fn=None, output_fn=None, confirm_fn=None,
+                 generate_fn=None):
         self.config = config
+        self.input_fn = input_fn if input_fn is not None else input
+        self.output_fn = output_fn if output_fn is not None else print
+        self.confirm_fn = confirm_fn
+        self.generate_fn = generate_fn if generate_fn is not None else generate
+        self.enabled_groups: set[str] = set(
+            config.get("tools", {}).get("enabled_groups", [])
+        )
         self.system_prompt = prompts.build_system_prompt(
             config["assistant_name"], config["user_name"]
         )
         self._refresh_sampler()
 
-        print(" Loading model...")
+        self.output_fn(" Loading model...")
         self.adapter_config = constants.ADAPTER_DIR / "adapter_config.json"
-        self.adapter_loaded = False
-        if self.adapter_config.exists():
-            print(" Found existing adapter. Loading it...")
+        self.adapter_loaded = adapter_loaded if adapter_loaded is not None else False
+        if model is not None and tokenizer is not None:
+            self.model, self.tokenizer = model, tokenizer
+            if adapter_loaded is None:
+                self.adapter_loaded = self.adapter_config.exists()
+        elif self.adapter_config.exists():
+            self.output_fn(" Found existing adapter. Loading it...")
             try:
                 self.model, self.tokenizer = load(
                     config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
                 )
                 self.adapter_loaded = True
             except Exception as e:
-                print(f" Could not load adapter: {e}")
-                print(" Falling back to base model...")
+                self.output_fn(f" Could not load adapter: {e}")
+                self.output_fn(" Falling back to base model...")
                 self.model, self.tokenizer = load(config["model_name"])
         else:
             self.model, self.tokenizer = load(config["model_name"])
@@ -110,9 +147,10 @@ class ChatSession:
         # Past sessions are retrievable; the live one is excluded to avoid echo.
         self.retriever = Retriever(config, session_store=self.session_store,
                                    exclude_session_id=self.session_id)
-        self.browser = BrowserSession()
+        self.browser = BrowserSession(confirm_fn=self.confirm_fn)
         self.logger = _make_chat_logger()
         self.user_turns = 0
+        self.auto_searches = 0
 
         # Background scheduler: fires due cron jobs, prints a notice
         # immediately, and queues the event for the model's next turn.
@@ -139,7 +177,7 @@ class ChatSession:
                 with self.cron_lock:
                     self.cron_events.extend(fired)
                 for ev in fired:
-                    print(f"\n  [Cron] {ev.splitlines()[0]}")
+                    self.output_fn(f"\n  [Cron] {ev.splitlines()[0]}")
 
     def _reload_model(self) -> str | None:
         """Reload model+adapter after training; returns an error message or None."""
@@ -164,7 +202,7 @@ class ChatSession:
 
         if cmd in ("/quit", "/q", "/exit"):
             self._memory_flush()
-            print(" Exiting chat.")
+            self.output_fn(" Exiting chat.")
             return _QUIT
 
         if cmd == "/forget_last":
@@ -179,30 +217,31 @@ class ChatSession:
             ):
                 self.history.pop()
                 removed += 1
-            print("  Forgot last exchange." if removed else " Nothing to forget.")
+            self.output_fn("  Forgot last exchange." if removed else " Nothing to forget.")
 
         elif cmd == "/save":
             if not self.history:
-                print(" Nothing to save yet.")
+                self.output_fn(" Nothing to save yet.")
             else:
                 saved_count = training.save_history_pairs(
                     self.history, self.tokenizer, self.system_prompt)
-                print(f" Saved {saved_count} exchange(s) to training data.")
+                self.output_fn(f" Saved {saved_count} exchange(s) to training data.")
 
         elif cmd == "/train":
             trained = training.run_training(self.config)
             if trained and self.adapter_config.exists():
-                print("\n Reloading model with updated adapter...")
+                self.output_fn("\n Reloading model with updated adapter...")
                 err = self._reload_model()
-                print(f" Could not reload adapter: {err}" if err else "  Adapter reloaded.")
+                self.output_fn(f" Could not reload adapter: {err}" if err else "  Adapter reloaded.")
 
         elif cmd == "/digest":
+            self._decay_stale_notes()
             added = training.digest_notes_to_training(
                 self.tokenizer, self.system_prompt, self.config)
             if added:
-                print(f"  Digested {added} new note samples into training data.")
+                self.output_fn(f"  Digested {added} new note samples into training data.")
             else:
-                print("  No new or changed notes to digest.")
+                self.output_fn("  No new or changed notes to digest.")
 
         elif cmd.startswith("/run"):
             self._cmd_run(user_input[4:].strip())
@@ -216,20 +255,20 @@ class ChatSession:
         elif cmd == "/skills":
             skills = memory.list_skills()
             if not skills:
-                print("  No skills saved yet.")
+                self.output_fn("  No skills saved yet.")
             else:
-                print(f"  {len(skills)} skill(s):")
+                self.output_fn(f"  {len(skills)} skill(s):")
                 for title, path in skills:
-                    print(f"    - {title}  ({path.name})")
+                    self.output_fn(f"    - {title}  ({path.name})")
 
         elif cmd == "/notes":
             files = sorted(constants.NOTES_DIR.glob("*.md"))
             if not files:
-                print("  No notes yet.")
+                self.output_fn("  No notes yet.")
             else:
-                print(f"  {len(files)} note(s):")
+                self.output_fn(f"  {len(files)} note(s):")
                 for f in files:
-                    print(f"    - {f.name}")
+                    self.output_fn(f"    - {f.name}")
 
         elif cmd == "/status":
             files = sorted(constants.NOTES_DIR.glob("*.md"))
@@ -237,21 +276,21 @@ class ChatSession:
             adapter_files = list(constants.ADAPTER_DIR.glob("adapters.*"))
             adapter_kb = sum(
                 f.stat().st_size for f in constants.ADAPTER_DIR.iterdir() if f.is_file()) // 1024
-            print(f"  Model: {self.config['model_name']}")
-            print(f"  Assistant: {self.config['assistant_name']} | User: {self.config['user_name']}")
-            print(f"  Notes: {len(files)}")
-            print(f"  Training data: {data_size:,} bytes")
-            print(f"  Adapter loaded: {'YES' if self.adapter_loaded else 'NO'}")
-            print(f"  Adapter files: {len(adapter_files)} ({adapter_kb:,} KB)")
+            self.output_fn(f"  Model: {self.config['model_name']}")
+            self.output_fn(f"  Assistant: {self.config['assistant_name']} | User: {self.config['user_name']}")
+            self.output_fn(f"  Notes: {len(files)}")
+            self.output_fn(f"  Training data: {data_size:,} bytes")
+            self.output_fn(f"  Adapter loaded: {'YES' if self.adapter_loaded else 'NO'}")
+            self.output_fn(f"  Adapter files: {len(adapter_files)} ({adapter_kb:,} KB)")
 
         elif cmd.startswith("/config"):
             parts = user_input.split(None, 3)[1:]
             if not parts or parts[0].lower() == "show":
-                print(config_show(self.config))
+                self.output_fn(config_show(self.config))
             elif parts[0].lower() == "set" and len(parts) == 3:
-                print(f"  {set_config_value(self.config, parts[1], parts[2], allow_sandbox=True)}")
+                self.output_fn(f"  {set_config_value(self.config, parts[1], parts[2], allow_sandbox=True)}")
             else:
-                print("  Usage: /config [show] | /config set <dotted.key> <value>")
+                self.output_fn("  Usage: /config [show] | /config set <dotted.key> <value>")
 
         elif cmd.startswith("/cron"):
             self._cmd_cron(user_input)
@@ -259,91 +298,94 @@ class ChatSession:
         elif cmd == "/prune":
             info = training.prune_adapters()
             if info["removed"]:
-                print(f"  Removed {len(info['removed'])} stale checkpoint(s):")
+                self.output_fn(f"  Removed {len(info['removed'])} stale checkpoint(s):")
                 for name in info["removed"]:
-                    print(f"    - {name}")
+                    self.output_fn(f"    - {name}")
             else:
-                print("  No stale checkpoints to remove.")
-            print(f"  Current adapter footprint: {info['total_kb']:,} KB")
-            print("  Note: mlx_lm LoRA adapters do not support true weight pruning; keeping rank low and removing checkpoints is the practical way to stay small.")
+                self.output_fn("  No stale checkpoints to remove.")
+            self.output_fn(f"  Current adapter footprint: {info['total_kb']:,} KB")
+            self.output_fn("  Note: mlx_lm LoRA adapters do not support true weight pruning; keeping rank low and removing checkpoints is the practical way to stay small.")
 
         elif cmd in ("/help", "/h", "/?"):
             data_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0
-            print_banner(self.config, self.adapter_loaded, data_size)
+            print_banner(self.config, self.adapter_loaded, data_size, output_fn=self.output_fn)
 
         else:
-            print("  Unknown command. Type /help for the command list.")
+            self.output_fn("  Unknown command. Type /help for the command list.")
 
         return _HANDLED
 
     def _cmd_run(self, shell_cmd: str):
         if not shell_cmd:
-            print("  Usage: /run <command>")
+            self.output_fn("  Usage: /run <command>")
             return
-        print(f"\n  $ {shell_cmd}")
-        ok, output = sandbox.run_sandboxed(shell_cmd, self.config)
-        print(f"  [{'ok' if ok else 'err'}]")
+        self.output_fn(f"\n  $ {shell_cmd}")
+        ok, output = sandbox.run_sandboxed(shell_cmd, self.config, confirm_fn=self.confirm_fn)
+        self.output_fn(f"  [{'ok' if ok else 'err'}]")
         for line in output.splitlines():
-            print(f"  {line}")
+            self.output_fn(f"  {line}")
         training.append_chat_pair(
             user_msg=f"Run this sandbox command and show the output:\n{shell_cmd}",
             assistant_msg=output,
             tokenizer=self.tokenizer,
             system_prompt=self.system_prompt,
         )
-        print("  -> Logged to training data.\n")
+        self.output_fn("  -> Logged to training data.\n")
 
     def _cmd_note(self, title: str):
         if not title:
-            title = input("  Note title: ").strip()
+            title = self.input_fn("  Note title: ").strip()
         if not title:
-            print("  Cancelled.")
+            self.output_fn("  Cancelled.")
             return
         body = ""
-        print("  Content (empty line to finish):")
+        self.output_fn("  Content (empty line to finish):")
         try:
             while True:
-                line = input()
+                line = self.input_fn()
                 if line == "":
                     break
                 body += line + "\n"
         except (EOFError, KeyboardInterrupt):
             pass
         if not body.strip():
-            print("  Empty note, cancelled.")
+            self.output_fn("  Empty note, cancelled.")
             return
         path = memory.save_note(title, body.strip())
         self.retriever.invalidate_cache()
-        print(f"  Saved: {path.name}")
+        self.output_fn(f"  Saved: {path.name}")
 
     def _cmd_cron(self, user_input: str):
         import shlex
         try:
             parts = shlex.split(user_input)[1:]
         except ValueError as e:
-            print(f"  Parse error: {e}")
+            self.output_fn(f"  Parse error: {e}")
             return
         sub = parts[0].lower() if parts else "list"
         if sub == "list":
             jobs = cron.load_cron_jobs()
             if not jobs:
-                print("  No scheduled jobs.")
+                self.output_fn("  No scheduled jobs.")
             for j in jobs:
-                print(f"  [{j['id']}] {j['schedule']} — {j['text']}")
+                self.output_fn(f"  [{j['id']}] {j['schedule']} — {j['text']}")
         elif sub == "add" and len(parts) >= 3:
             try:
-                job = cron.add_cron_job(parts[1], " ".join(parts[2:]))
-                print(f"  Added job {job['id']}: {job['schedule']} — {job['text']}")
+                job = cron.add_cron_job(
+                    parts[1], " ".join(parts[2:]),
+                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", []))
+                )
+                self.output_fn(f"  Added job {job['id']}: {job['schedule']} — {job['text']}")
             except ValueError as e:
-                print(f"  {e}")
+                self.output_fn(f"  {e}")
         elif sub == "rm" and len(parts) == 2:
             jobs = cron.load_cron_jobs()
             kept = [j for j in jobs if str(j["id"]) != parts[1]]
             cron.save_cron_jobs(kept)
-            print(f"  Removed job {parts[1]}." if len(kept) < len(jobs)
+            self.output_fn(f"  Removed job {parts[1]}." if len(kept) < len(jobs)
                   else f"  No job with id {parts[1]}.")
         else:
-            print('  Usage: /cron [list] | /cron add "<cron expr | at YYYY-MM-DD HH:MM>" <text> | /cron rm <id>')
+            self.output_fn('  Usage: /cron [list] | /cron add "<cron expr | at YYYY-MM-DD HH:MM>" <text> | /cron rm <id>')
 
     # ---- Growth loop ----
 
@@ -353,7 +395,7 @@ class ChatSession:
         if not (self.config["memory"]["enabled"] and flush_min
                 and self.user_turns >= flush_min and self.history):
             return
-        print(" Letting the model save memories before exit...")
+        self.output_fn(" Letting the model save memories before exit...")
         flush_messages = [{"role": "system", "content": (
             self.system_prompt + memory.curated_memory_block(self.config)
             + prompts.env_note() + prompts.time_note()
@@ -370,22 +412,22 @@ class ChatSession:
                 flush_messages, tokenize=False,
                 add_generation_prompt=True, enable_thinking=False,
             )
-            flush_reply = generate(
+            flush_reply = self.generate_fn(
                 self.model, self.tokenizer, prompt=flush_prompt, sampler=self.sampler,
                 max_tokens=int(self.config["agent"]["max_reply_tokens"]), verbose=False,
             )
-            for name, params in tooling.parse_tools(flush_reply):
+            for name, params in tooling.parse_tools(flush_reply, self.enabled_groups):
                 if name == "save_memory":
                     msg = memory.save_memory(params["store"], params["content"], self.config,
                                              replace=params.get("replace", False))
-                    print(f"  [Memory] {msg}")
+                    self.output_fn(f"  [Memory] {msg}")
                 elif name == "write_note":
                     p = memory.save_note(params["title"], params["body"])
-                    print(f"  [Memory] Saved note: {p.name}")
+                    self.output_fn(f"  [Memory] Saved note: {p.name}")
         except KeyboardInterrupt:
-            print("\n  [Memory flush interrupted — exiting without saving.]")
+            self.output_fn("\n  [Memory flush interrupted — exiting without saving.]")
         except Exception as e:
-            print(f"  [Memory flush skipped: {e}]")
+            self.output_fn(f"  [Memory flush skipped: {e}]")
 
     def _nudge_block(self) -> str:
         nudge_every = self.config["memory"]["nudge_interval"]
@@ -404,16 +446,29 @@ class ChatSession:
         sample = learn.find_correction_sample(self.history, self.config)
         if sample is None:
             if verbose:
-                print("  No recent correction detected. Say something like "
+                self.output_fn("  No recent correction detected. Say something like "
                       "\"No, the answer is ...\" first, then run /learn.")
             return
         path = learn.save_mistake_note(*sample)
-        print(f"  [Learn] Correction captured: {path.name}")
+        self.output_fn(f"  [Learn] Correction captured: {path.name}")
         trained = learn.maybe_train_on_mistakes(self.config, self.tokenizer, self.system_prompt)
         if trained and self.adapter_config.exists():
             err = self._reload_model()
-            print(f"  [Learn] Adapter reload failed: {err}" if err
+            self.output_fn(f"  [Learn] Adapter reload failed: {err}" if err
                   else "  [Learn] Adapter updated and reloaded.")
+
+    def _decay_stale_notes(self) -> list[str]:
+        """Archive expired 'Learned:' research notes and purge their training
+        samples before digesting, so stale web facts are neither retrained
+        nor served by RAG."""
+        decayed = training.decay_research_notes(self.config)
+        if decayed:
+            self.retriever.invalidate_cache()
+            days = self.config["learn"].get("note_decay_days", 90)
+            self.output_fn(
+                f"  [Decay] Archived {len(decayed)} research note(s) older than "
+                f"{days} days: " + ", ".join(decayed))
+        return decayed
 
     # ---- The autonomous agent loop ----
 
@@ -455,6 +510,7 @@ class ChatSession:
         web_used = False
         auto_searched = False
         final_display = ""
+        consecutive_tool_rounds = 0
         for _ in range(max_rounds):
             messages = [{"role": "system", "content": (
                 self.system_prompt + memory.curated_memory_block(self.config) + rag_block
@@ -470,25 +526,25 @@ class ChatSession:
             )
 
             try:
-                raw_reply = generate(
+                raw_reply = self.generate_fn(
                     self.model, self.tokenizer, prompt=prompt, sampler=self.sampler,
                     max_tokens=int(self.config["agent"]["max_reply_tokens"]), verbose=False,
                 )
                 reply = raw_reply.strip()
             except KeyboardInterrupt:
                 # Ctrl-C during a slow generation abandons the turn, not the app.
-                print("\n  [Generation interrupted.]")
+                self.output_fn("\n  [Generation interrupted.]")
                 break
             except Exception as e:
-                print(f"[MLX Error: {e}]")
+                self.output_fn(f"[MLX Error: {e}]")
                 break
 
-            tools = tooling.parse_tools(reply)
+            tools = tooling.parse_tools(reply, self.enabled_groups)
             display = tooling.strip_tool_tags(reply)
 
             if display.strip():
                 final_display = display
-                print(f"{self.config['assistant_name']:8}: {display}")
+                self.output_fn(f"{self.config['assistant_name']:8}: {display}")
                 self.logger.info(f"{self.config['assistant_name']}: {display}")
                 self.session_store.log("assistant", display)
 
@@ -503,44 +559,81 @@ class ChatSession:
                 self.history.append({"role": "assistant", "content": reply})
                 self._trim_history()
                 # Don't let the model fill knowledge gaps by guessing: an
-                # unsure-sounding answer with no tool call triggers one
-                # automatic web search so it can answer from results.
+                # unsure-sounding answer, or a hedged made-up figure for a
+                # numeric question, with no tool call triggers one automatic
+                # web search so it can answer from results. Moderation: once
+                # per turn, never after real web use, never when the user
+                # already asked to search, and capped per session so a
+                # runaway loop can't hammer the search engine.
+                user_asked_web_search = any(
+                    marker in user_input.lower() for marker in
+                    ("news", "search", "look up", "lookup", "find", "latest", "current",
+                     "both sides", "perspective", "balanced", "compare", "conclude")
+                )
+                unsure = bool(display.strip()) and learn.sounds_unsure(display)
+                fabricated = (not unsure and bool(display.strip())
+                              and learn.sounds_fabricated(user_input, display))
+                session_cap = int(self.config["web"].get("auto_search_session_cap", 20))
                 if (self.config["web"].get("auto_search_when_unsure", True)
                         and not auto_searched and not web_used
-                        and display.strip() and learn.sounds_unsure(display)):
+                        and not user_asked_web_search
+                        and self.auto_searches < session_cap
+                        and (unsure or fabricated)):
                     auto_searched = True
                     web_used = True
-                    print("  [Auto-search] Reply sounded unsure — searching the web...")
+                    self.auto_searches += 1
+                    reason = ("hedged a made-up-sounding figure" if fabricated
+                              else "sounded unsure")
+                    self.output_fn(f"  [Auto-search] Reply {reason} — searching the web...")
                     ok, out = web.web_search(user_input, self.config)
                     self.history.append({"role": "user", "content": (
-                        f"[System observation: Your answer sounded unsure, so a web "
+                        f"[System observation: Your answer {reason}, so a web "
                         f"search for '{user_input}' ran automatically "
                         f"({'succeeded' if ok else 'failed'}).\nResults:\n{out}\n"
-                        f"Answer from these results. If they don't help, say plainly "
-                        f"that you could not find it — do not guess.]"
+                        f"Answer from these results, citing the exact figure they "
+                        f"give. If they don't help, say plainly that you could not "
+                        f"find it — do not guess.]"
                     )})
                     self._trim_history()
                     continue
                 # Normal turn (or pure repetition): stop.
                 break
-            for n, p in fresh_tools:
-                executed_calls.add(json.dumps([n, p], sort_keys=True))
+
+            # Only execute the first fresh tool per response. Multiple tools in
+            # one reply cause bursts (e.g. five <search> tags at once) and can
+            # overwhelm the model with parallel observations.
+            name, params = fresh_tools[0]
+            tool_key = json.dumps([name, params], sort_keys=True)
+            executed_calls.add(tool_key)
+            extra = fresh_tools[1:]
 
             # There are tools to execute
             self.history.append({"role": "assistant", "content": reply})
+            consecutive_tool_rounds += 1
 
-            observations = []
-            for name, params in fresh_tools:
-                print(f"  [Tool: {name}]")
-                if name in _WEB_TOOLS:
-                    web_used = True
-                observations.append(self._execute_tool(name, params))
+            self.output_fn(f"  [Tool: {name}]")
+            if name in _WEB_TOOLS:
+                web_used = True
+            observation = self._execute_tool(name, params)
+            if extra:
+                ignored = ", ".join(n for n, _ in extra)
+                observation += (
+                    f"\n[Note: {ignored} were also requested in the same reply but "
+                    f"ignored — use at most one tool tag per response.]"
+                )
 
-            # Feed observations back as a system/user turn
-            obs_text = "\n".join(observations)
-            print(f"  [Observation] {obs_text.replace(chr(10), chr(10) + '  ')}")
-            self.history.append({"role": "user", "content": f"[System observation: {obs_text}]"})
+            self.output_fn(f"  [Observation] {observation.replace(chr(10), chr(10) + '  ')}")
+            # Present results in Hermes-style <tool_response> JSON so the model
+            # learns the structured format, while keeping a plain-text fallback
+            # for models that have not switched to Hermes calls yet.
+            hermes_name = _internal_to_hermes_name(name)
+            response_json = json.dumps({"name": hermes_name, "content": observation}, ensure_ascii=False)
+            self.history.append({"role": "user", "content": (
+                f"[System observation: {observation}]\n"
+                f"<tool_response>{response_json}</tool_response>"
+            )})
             self._trim_history()
+
 
         if is_correction:
             # The corrected answer is now in history; capture and maybe retrain.
@@ -551,9 +644,21 @@ class ChatSession:
             note = learn.remember_research(user_input, final_display, self.config)
             if note:
                 self.retriever.invalidate_cache()
-                print(f"  [Learn] Remembered research: {note.name}")
+                self.output_fn(f"  [Learn] Remembered research: {note.name}")
 
     def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
+        # Respect tool-group enable/disable settings.
+        group = tooling.tool_group(name)
+        enabled_groups = getattr(self, "enabled_groups", None)
+        if group is not None and enabled_groups is not None and group not in enabled_groups:
+            return f"Tool '{name}' is disabled."
+
+        # Non-terminal front-ends (Telegram) ask before state-mutating tools.
+        if self.confirm_fn is not None and name in _TELEGRAM_CONFIRM_TOOLS:
+            prompt = self._tool_confirm_prompt(name, params)
+            if not self.confirm_fn(prompt):
+                return f"Tool '{name}' was not approved."
+
         if name == "write_note":
             try:
                 p = memory.save_note(params["title"], params["body"])
@@ -571,7 +676,7 @@ class ChatSession:
                 return f"Failed to save skill: {e}"
 
         if name == "run_command":
-            ok, out = sandbox.run_sandboxed(params["cmd"], self.config)
+            ok, out = sandbox.run_sandboxed(params["cmd"], self.config, confirm_fn=self.confirm_fn)
             return f"Command '{params['cmd']}' exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
         if name == "execute_code":
@@ -619,15 +724,23 @@ class ChatSession:
 
         if name == "digest_notes":
             try:
+                decayed = self._decay_stale_notes()
                 cnt = training.digest_notes_to_training(
                     self.tokenizer, self.system_prompt, self.config)
-                return f"Digested {cnt} new training samples from notes."
+                msg = f"Digested {cnt} new training samples from notes."
+                if decayed:
+                    msg += (f" Archived {len(decayed)} stale research note(s) "
+                            f"past their decay age.")
+                return msg
             except Exception as e:
                 return f"Digest error: {e}"
 
         if name == "schedule_job":
             try:
-                job = cron.add_cron_job(params["schedule"], params["text"])
+                job = cron.add_cron_job(
+                    params["schedule"], params["text"],
+                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", []))
+                )
                 return f"Scheduled job {job['id']}: {job['schedule']} — {job['text']}"
             except ValueError as e:
                 return f"Could not schedule job: {e}"
@@ -643,17 +756,37 @@ class ChatSession:
 
         return f"Unknown tool: {name}"
 
+    @staticmethod
+    def _tool_confirm_prompt(name: str, params: dict[str, Any]) -> str:
+        """User-friendly prompt shown by non-terminal front-ends before
+        state-mutating tools."""
+        if name == "execute_code":
+            code = params.get("code", "").replace("\n", " ")[:200]
+            return f"Run the following Python code?\n{code}"
+        if name == "run_command":
+            cmd = params.get("cmd", "").replace("\n", " ")[:200]
+            return f"Run this shell command?\n{cmd}"
+        if name == "config_set":
+            return f"Change config '{params.get('key')}' to '{params.get('value')}'?"
+        if name == "schedule_job":
+            return f"Schedule job '{params.get('schedule')}' with text '{params.get('text')}'?"
+        if name == "digest_notes":
+            return "Digest all notes into training data?"
+        if name == "train_adapter":
+            return "Start LoRA training? This may take a while."
+        return f"Allow tool '{name}'?"
+
     # ---- Main loop ----
 
     def run(self):
         dataset_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0
-        print_banner(self.config, self.adapter_loaded, dataset_size)
+        print_banner(self.config, self.adapter_loaded, dataset_size, output_fn=self.output_fn)
 
         while True:
             try:
-                user_input = input(f"{self.config['user_name']:8}: ").strip()
+                user_input = self.input_fn(f"{self.config['user_name']:8}: ").strip()
             except (EOFError, KeyboardInterrupt):
-                print()
+                self.output_fn("")
                 user_input = "/quit"
 
             if user_input.startswith("/"):
@@ -673,19 +806,19 @@ class ChatSession:
 
         # ---- End of Session ----
         if self.history:
-            save = input("\n Save conversation for training? [y/N]: ").strip().lower()
+            save = self.input_fn("\n Save conversation for training? [y/N]: ").strip().lower()
             if save in ("y", "yes"):
                 saved_count = training.save_history_pairs(
                     self.history, self.tokenizer, self.system_prompt)
-                print(f"    Appended {saved_count} exchange(s) to {constants.TRAIN_FILE}")
+                self.output_fn(f"    Appended {saved_count} exchange(s) to {constants.TRAIN_FILE}")
 
-                if input("  Train now? [y/N]: ").strip().lower() in ("y", "yes"):
+                if self.input_fn("  Train now? [y/N]: ").strip().lower() in ("y", "yes"):
                     trained = training.run_training(self.config)
                     if trained and self.adapter_config.exists():
-                        print("\n Reloading model...")
+                        self.output_fn("\n Reloading model...")
                         err = self._reload_model()
                         if err:
-                            print(f" Could not reload: {err}")
+                            self.output_fn(f" Could not reload: {err}")
 
 
 def chat_loop(config: dict[str, Any]):

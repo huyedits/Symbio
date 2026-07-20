@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "symbio"
+version = "0.1.0"
+description = "Personal, autonomous, self-finetuning local MLX agent."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mlx-lm>=0.21.0",
+    "transformers>=4.40.0",
+    "torch",
+    "safetensors>=0.4.0",
+    "pyyaml>=6.0",
+    "playwright>=1.45.0",
+    "PyAutoGUI>=0.9.54",
+    "Pillow>=10.0.0",
+    "python-telegram-bot>=20.0",
+]
+
+[project.scripts]
+symbio = "symbio.app.cli:main"
+symb = "symbio.app.cli:main"
+
+[tool.setuptools]
+py-modules = ["rag", "computer"]
+
+[tool.setuptools.packages.find]
+include = ["symbio*"]
