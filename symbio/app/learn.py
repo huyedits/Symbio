@@ -212,6 +212,55 @@ def find_correction_sample(history: list[dict[str, str]], config: dict[str, Any]
     return original_query, wrong_answer, correction_text, correct_answer
 
 
+# How hard did the user push back? Severity scales both the per-note training
+# boost and the LoRA iteration count, so worse mistakes are trained harder.
+# Levels: 1 = mild correction ("actually, I meant..."), 2 = the user says
+# outright the answer is wrong, 3 = the model repeats a mistake it was
+# already corrected for.
+_SEVERE_CORRECTION_DEFAULTS = [
+    "wrong", "incorrect", "you misunderstood", "fix it", "not what",
+]
+
+
+def _norm_question(text: str) -> str:
+    return re.sub(r"[^\w]", "", text.lower())
+
+
+def _was_corrected_before(original_query: str) -> bool:
+    """Does a mistake note (pending or archived) already exist for this same
+    question? If so the model is repeating a corrected mistake."""
+    target = _norm_question(original_query)
+    if not target:
+        return False
+    for directory in (constants.MISTAKES_DIR, constants.MISTAKES_ARCHIVE_DIR):
+        if not directory.exists():
+            continue
+        for f in directory.glob("*.md"):
+            try:
+                content = f.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for line in content.splitlines():
+                if line.startswith("**Original question:**"):
+                    if _norm_question(line.split("**Original question:**", 1)[1]) == target:
+                        return True
+                    break
+    return False
+
+
+def correction_severity(original_query: str, correction_text: str,
+                        config: dict[str, Any]) -> int:
+    """Grade a correction 1-3. Call BEFORE saving the new mistake note, or
+    the repeat check will match the note being saved."""
+    if _was_corrected_before(original_query):
+        return 3
+    phrases = config.get("learn", {}).get(
+        "severe_correction_phrases", _SEVERE_CORRECTION_DEFAULTS)
+    if _is_correction(correction_text, phrases):
+        return 2
+    return 1
+
+
 def _safe_mistake_filename(query: str) -> str:
     slug = "".join(c if c.isalnum() or c in (" ", "-", "_") else "_" for c in query)
     slug = slug.strip().replace(" ", "_")[:40].strip("_") or "correction"
@@ -220,11 +269,13 @@ def _safe_mistake_filename(query: str) -> str:
 
 
 def save_mistake_note(original_query: str, wrong_answer: str,
-                      correction: str, correct_answer: str) -> Path:
+                      correction: str, correct_answer: str,
+                      severity: int = 1) -> Path:
     """Persist a correction as a markdown note in notes/mistakes/."""
     title = f"Correction: {original_query[:60]}{'...' if len(original_query) > 60 else ''}"
     body = (
         f"# {title}\n\n"
+        f"**Severity:** {max(1, int(severity))}\n\n"
         f"**Original question:** {original_query}\n\n"
         f"**Wrong answer:** {wrong_answer}\n\n"
         f"**Correction:** {correction}\n\n"
@@ -262,33 +313,43 @@ def archive_mistake_notes() -> int:
     return archived
 
 
-def digest_mistakes_to_training(tokenizer, system_prompt: str, boost: int = 1) -> int:
+def digest_mistakes_to_training(tokenizer, system_prompt: str, boost: int = 1) -> tuple[int, int]:
     """Convert unarchived mistake notes into (boosted) training samples that
-    pair the original question with the corrected answer, then archive them."""
+    pair the original question with the corrected answer, then archive them.
+    Severity multiplies the per-note boost so worse mistakes are repeated
+    harder. Returns (notes digested, summed severity)."""
     files = sorted(constants.MISTAKES_DIR.glob("*.md"))
     if not files:
-        return 0
+        return 0, 0
 
     added = 0
+    total_severity = 0
     for f in files:
         content = f.read_text(encoding="utf-8").strip()
         if not content:
             continue
         original_query = ""
         correct_answer = ""
+        severity = 1
         for line in content.splitlines():
             if line.startswith("**Original question:**"):
                 original_query = line.split("**Original question:**", 1)[1].strip()
             elif line.startswith("**Correct answer:**"):
                 correct_answer = line.split("**Correct answer:**", 1)[1].strip()
+            elif line.startswith("**Severity:**"):
+                try:
+                    severity = max(1, int(line.split("**Severity:**", 1)[1].strip()))
+                except ValueError:
+                    pass
         if not original_query or not correct_answer:
             continue
-        for _ in range(max(1, boost)):
+        for _ in range(max(1, boost) * severity):
             training.append_chat_pair(original_query, correct_answer, tokenizer, system_prompt)
         added += 1
+        total_severity += severity
 
     archive_mistake_notes()
-    return added
+    return added, total_severity
 
 
 def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: str) -> bool:
@@ -307,14 +368,24 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
 
     print(f"\n  [Learn] {count} mistake note(s) reached. Digesting into training data...")
     boost = max(1, int(learn_cfg.get("boost_factor", 3)))
-    digested = digest_mistakes_to_training(tokenizer, system_prompt, boost=boost)
-    print(f"  [Learn] Digested {digested} mistake note(s) (boost={boost}).")
+    digested, total_severity = digest_mistakes_to_training(tokenizer, system_prompt, boost=boost)
+    print(f"  [Learn] Digested {digested} mistake note(s) "
+          f"(boost={boost}, total severity={total_severity}).")
 
     if not learn_cfg.get("auto_train", True):
         print("  [Learn] Auto-train is disabled. Run /train to fine-tune now.")
         return False
 
-    iters = int(learn_cfg.get("batch_train_iters", 25))
+    # Scale iterations with severity above the mild baseline: an all-mild
+    # batch trains at exactly batch_train_iters; each severity point beyond
+    # that adds iters_per_severity, capped so a harsh backlog can't run away.
+    base_iters = int(learn_cfg.get("batch_train_iters", 25))
+    per_severity = int(learn_cfg.get("iters_per_severity", 5))
+    cap = max(base_iters, int(learn_cfg.get("max_batch_train_iters", 100)))
+    iters = min(cap, base_iters + per_severity * max(0, total_severity - digested))
+    if iters != base_iters:
+        print(f"  [Learn] Severity {total_severity} across {digested} note(s) "
+              f"scales training from {base_iters} to {iters} iters.")
     print(f"  [Learn] Running LoRA update ({iters} iters)...")
     trained = training.run_training(config, iters=iters)
     if not trained:

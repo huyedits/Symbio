@@ -80,7 +80,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "note_decay_days": 90,
         "mistake_threshold": 5,
         "batch_train_iters": 25,
+        "iters_per_severity": 5,
+        "max_batch_train_iters": 100,
         "boost_factor": 3,
+        "severe_correction_phrases": [
+            "wrong", "incorrect", "you misunderstood", "fix it", "not what",
+        ],
         "correction_phrases": [
             "no,", "not quite", "that's wrong", "incorrect", "wrong",
             "you misunderstood", "try again", "actually", "i meant",
