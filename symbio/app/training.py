@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -427,6 +428,30 @@ def run_training(config: dict[str, Any], iters: int | None = None) -> bool:
     adapter_kb = sum(f.stat().st_size for f in constants.ADAPTER_DIR.iterdir() if f.is_file()) // 1024
     print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB")
     return True
+
+
+def backup_adapter() -> Path | None:
+    """Snapshot the current adapter before a training run, so a regression
+    caught by the golden set can be rolled back. Returns None when there is
+    no existing adapter to protect (e.g. the very first training run)."""
+    if not constants.ADAPTER_DIR.exists() or not any(constants.ADAPTER_DIR.iterdir()):
+        return None
+    backup_dir = constants.ADAPTER_DIR.parent / f"adapters.bak.{datetime.now():%Y%m%d_%H%M%S_%f}"
+    shutil.copytree(constants.ADAPTER_DIR, backup_dir)
+    return backup_dir
+
+
+def restore_adapter(backup_dir: Path):
+    """Replace the current adapter with a previously backed-up one."""
+    if constants.ADAPTER_DIR.exists():
+        shutil.rmtree(constants.ADAPTER_DIR)
+    shutil.copytree(backup_dir, constants.ADAPTER_DIR)
+
+
+def discard_adapter_backup(backup_dir: Path | None):
+    """Remove a backup once it is no longer needed (training kept)."""
+    if backup_dir and backup_dir.exists():
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
 
 def prune_adapters() -> dict[str, Any]:

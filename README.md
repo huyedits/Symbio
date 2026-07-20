@@ -207,6 +207,26 @@ The resulting adapter is saved to `adapters/` and loaded automatically on the ne
 | `lora.max_seq_length` | `2048` | Training context length |
 | `lora.save_every` | `50` | Checkpoint frequency |
 
+### Golden set: catching a fine-tune that silently breaks things
+
+Every LoRA update (`/train`, the `train_adapter` tool, the auto-training that follows enough corrections, or the end-of-session prompt) is checked against a small, fixed **golden set** — prompts that exercise behavior baked into every install's seed training data: stating its own name, not confusing itself with the user, emitting the right tool tag for code/notes/reminders/search, and not degenerating into repeated phrases. Each check is single-turn and side-effect-free (no tool is actually executed), so it's safe to run automatically.
+
+Symbio grades the golden set before training (the baseline) and again after reloading the new adapter. If a case that passed before now fails, it's a **regression**, and the previous adapter is restored automatically:
+
+```
+  [Golden] Regression: 2 case(s) newly failing (run_code_for_math, web_search_unknown).
+  [Golden] Rolled back to the previous adapter.
+```
+
+Run it manually anytime with `/golden` to see the current pass/fail breakdown without training.
+
+| Key | Default | Note |
+|---|---|---|
+| `learn.golden_set_enabled` | `true` | Grade every LoRA update against the golden set |
+| `learn.golden_rollback_on_regression` | `true` | Automatically restore the previous adapter on a regression |
+| `learn.golden_regression_threshold` | `0` | Newly-failing cases allowed before it counts as a regression |
+| `learn.golden_max_tokens` | `150` | Max tokens generated per golden-set case |
+
 ## Dynamic names
 
 ### Supported user-name phrasings
@@ -265,6 +285,7 @@ The project is organized as a `symbio/` Python package with a thin `main.py` wra
 │   │   ├── config.py      # Defaults, loading, redaction, token prompt
 │   │   ├── training.py    # Training data and LoRA fine-tuning via mlx_lm
 │   │   ├── learn.py       # Correction detection and batch learning
+│   │   ├── golden.py      # Golden set: regression checks around every LoRA update
 │   │   ├── memory.py      # Notes, memory, profile management
 │   │   ├── sandbox.py     # Sandboxed commands and Python execution
 │   │   ├── computer.py    # Browser automation helpers
