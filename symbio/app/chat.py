@@ -405,6 +405,8 @@ class ChatSession:
             "[Session ending. If this conversation contained anything durable "
             "worth keeping — facts about the user, lessons learned, procedures "
             "that worked — save it now with <memory>, <profile>, or <note>. "
+            "Record only what was actually said or observed in this session; "
+            "never add inferred, assumed, or invented details. "
             "Reply with just the tags, or 'nothing to save'.]"
         )})
         try:
@@ -437,7 +439,8 @@ class ChatSession:
         return (
             f"\n\n[Reminder: if this session taught you anything durable about "
             f"{self.config['user_name']} or how to do your job, save it now with "
-            f"<memory> or <profile>. Skip if nothing is worth keeping.]"
+            f"<memory> or <profile> — only what was actually said, with no "
+            f"inferred or invented details. Skip if nothing is worth keeping.]"
         )
 
     def _learn_from_correction(self, verbose: bool = False):
@@ -573,17 +576,22 @@ class ChatSession:
                 unsure = bool(display.strip()) and learn.sounds_unsure(display)
                 fabricated = (not unsure and bool(display.strip())
                               and learn.sounds_fabricated(user_input, display))
+                # A turn that ends with no visible answer at all is the model
+                # blanking out entirely — always search then, even when the
+                # user's wording asked for one (they asked and got nothing).
+                blanked = not final_display.strip()
                 session_cap = int(self.config["web"].get("auto_search_session_cap", 20))
                 if (self.config["web"].get("auto_search_when_unsure", True)
                         and not auto_searched and not web_used
-                        and not user_asked_web_search
+                        and (blanked or not user_asked_web_search)
                         and self.auto_searches < session_cap
-                        and (unsure or fabricated)):
+                        and (unsure or fabricated or blanked)):
                     auto_searched = True
                     web_used = True
                     self.auto_searches += 1
                     reason = ("hedged a made-up-sounding figure" if fabricated
-                              else "sounded unsure")
+                              else "sounded unsure" if unsure
+                              else "came back blank")
                     self.output_fn(f"  [Auto-search] Reply {reason} — searching the web...")
                     ok, out = web.web_search(user_input, self.config)
                     self.history.append({"role": "user", "content": (

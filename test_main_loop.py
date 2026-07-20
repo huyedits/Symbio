@@ -1068,6 +1068,32 @@ def test_agent_loop_auto_searches_on_fabricated_number():
     print("test_agent_loop_auto_searches_on_fabricated_number passed")
 
 
+def test_agent_loop_auto_searches_on_blank_reply():
+    real_search = web.web_search
+    web.web_search = lambda q, c, max_results=5: (
+        True, "1. 2026 World Cup final\n   https://example.com/final\n   Spain won the 2026 World Cup.")
+    try:
+        with scratch_notes_dir():
+            # "Look up" would normally suppress auto-search (the user already
+            # asked for one), but a fully blank reply always searches anyway.
+            session = ScriptedSession(
+                user_inputs=["Look up who won the 2026 World Cup", "/quit", "n"],
+                model_replies=[
+                    "",
+                    "Spain won the 2026 World Cup.",
+                ],
+            )
+            session.run()
+            assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+            obs = session.prompts_seen[1]
+            assert "ran automatically" in obs, obs
+            assert "came back blank" in obs, obs
+            assert "Spain" in obs, obs
+    finally:
+        web.web_search = real_search
+    print("test_agent_loop_auto_searches_on_blank_reply passed")
+
+
 def test_sandbox_blocks_dangerous_commands():
     config = app_config.load_config()
     ok, out = sandbox.run_sandboxed("rm -rf /", config, interactive=False)
@@ -1153,6 +1179,7 @@ def _run_all_inner():
         test_agent_loop_auto_searches_when_unsure()
         test_sounds_fabricated()
         test_agent_loop_auto_searches_on_fabricated_number()
+        test_agent_loop_auto_searches_on_blank_reply()
         test_decay_research_notes()
         test_digest_includes_curated_stores()
         test_sandbox_blocks_dangerous_commands()
