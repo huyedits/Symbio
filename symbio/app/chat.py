@@ -452,8 +452,9 @@ class ChatSession:
                 self.output_fn("  No recent correction detected. Say something like "
                       "\"No, the answer is ...\" first, then run /learn.")
             return
-        path = learn.save_mistake_note(*sample)
-        self.output_fn(f"  [Learn] Correction captured: {path.name}")
+        severity = learn.correction_severity(sample[0], sample[2], self.config)
+        path = learn.save_mistake_note(*sample, severity=severity)
+        self.output_fn(f"  [Learn] Correction captured (severity {severity}): {path.name}")
         trained = learn.maybe_train_on_mistakes(self.config, self.tokenizer, self.system_prompt)
         if trained and self.adapter_config.exists():
             err = self._reload_model()

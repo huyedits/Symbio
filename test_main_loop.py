@@ -933,6 +933,72 @@ def test_mistake_digest_and_threshold_training():
     print("test_mistake_digest_and_threshold_training passed")
 
 
+def test_correction_severity_grading():
+    config = app_config.load_config()
+    with scratch_mistakes_dir():
+        # Mild rephrase.
+        assert learn.correction_severity(
+            "What is my name?", "actually, I meant the other one", config) == 1
+        # Explicit "that's wrong".
+        assert learn.correction_severity(
+            "What is my name?", "No, that's wrong — it's Canberra.", config) == 2
+        # Repeat offense: the same question was corrected before, pending...
+        learn.save_mistake_note("What is my name?", "Bob", "no, it's Huy", "Huy", severity=2)
+        assert learn.correction_severity(
+            "What is my name?", "actually it's Huy", config) == 3
+        # ...or already archived (punctuation/case don't matter).
+        learn.archive_mistake_notes()
+        assert learn.correction_severity(
+            "what is my name", "actually it's Huy", config) == 3
+        # A different question is not a repeat.
+        assert learn.correction_severity(
+            "What is your name?", "actually it's Caine", config) == 1
+    print("test_correction_severity_grading passed")
+
+
+def test_severity_scales_training_iters():
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    config = app_config.load_config()
+    config["learn"]["mistake_threshold"] = 2
+    config["learn"]["boost_factor"] = 1
+    config["learn"]["batch_train_iters"] = 25
+    config["learn"]["iters_per_severity"] = 5
+    config["learn"]["max_batch_train_iters"] = 100
+
+    tmp = Path(tempfile.mkdtemp())
+    real_train = constants.TRAIN_FILE
+    constants.TRAIN_FILE = tmp / "train.jsonl"
+    trained_with: list[int | None] = []
+    real_run_training = training.run_training
+    training.run_training = lambda cfg, iters=None: trained_with.append(iters) or True
+    try:
+        with scratch_mistakes_dir():
+            learn.save_mistake_note("Q-a?", "wrong-a", "that's wrong", "right-a", severity=2)
+            learn.save_mistake_note("Q-b?", "wrong-b", "wrong again", "right-b", severity=3)
+            assert learn.maybe_train_on_mistakes(config, FakeTokenizer(), "SYS")
+            # Total severity 5 over 2 notes -> 25 + 5*(5-2) = 40 iters.
+            assert trained_with == [40], trained_with
+            # Severity multiplies the boost: the severity-3 answer appears 3x.
+            data = constants.TRAIN_FILE.read_text()
+            assert data.count("right-a") == 2 and data.count("right-b") == 3, data
+
+        with scratch_mistakes_dir():
+            # The cap stops a severe backlog from training forever.
+            config["learn"]["max_batch_train_iters"] = 30
+            learn.save_mistake_note("Q-c?", "w", "wrong", "right-c", severity=3)
+            learn.save_mistake_note("Q-d?", "w", "wrong", "right-d", severity=3)
+            assert learn.maybe_train_on_mistakes(config, FakeTokenizer(), "SYS")
+            assert trained_with[-1] == 30, trained_with
+    finally:
+        training.run_training = real_run_training
+        constants.TRAIN_FILE = real_train
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("test_severity_scales_training_iters passed")
+
+
 def test_agent_loop_captures_correction():
     with scratch_mistakes_dir():
         session = ScriptedSession(
@@ -1172,6 +1238,8 @@ def _run_all_inner():
         test_agent_loop_saves_skill()
         test_correction_detection_and_mining()
         test_mistake_digest_and_threshold_training()
+        test_correction_severity_grading()
+        test_severity_scales_training_iters()
         test_agent_loop_captures_correction()
         test_remember_research_filters()
         test_agent_loop_remembers_research()
