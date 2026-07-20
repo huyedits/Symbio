@@ -90,6 +90,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "golden_max_tokens": 150,
         "golden_regression_threshold": 0,
         "golden_rollback_on_regression": True,
+        "adapter_idle_reminder_enabled": True,
+        "adapter_idle_days": 30,
         "correction_phrases": [
             "no,", "not quite", "that's wrong", "incorrect", "wrong",
             "you misunderstood", "try again", "actually", "i meant",

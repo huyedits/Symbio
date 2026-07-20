@@ -227,6 +227,22 @@ Run it manually anytime with `/golden` to see the current pass/fail breakdown wi
 | `learn.golden_regression_threshold` | `0` | Newly-failing cases allowed before it counts as a regression |
 | `learn.golden_max_tokens` | `150` | Max tokens generated per golden-set case |
 
+### Idle-adapter reminders
+
+If a trained adapter exists on disk but the current session isn't using it (most commonly after switching `model_name` to something the adapter isn't compatible with), Symbio tracks how long it's sat unused. Past `learn.adapter_idle_days`, it asks once whether to remove it:
+
+```
+  A saved LoRA adapter hasn't been used in 45 day(s) (not loaded with the
+  current model). Remove it to free up space? [y/N]:
+```
+
+Answering yes deletes it; declining or saying "keep" both just leave it alone and reset the grace period, so the reminder won't repeat until it's been idle that long again. Nothing is ever removed without an explicit yes. Check the current status anytime with `/status`.
+
+| Key | Default | Note |
+|---|---|---|
+| `learn.adapter_idle_reminder_enabled` | `true` | Ask about removing an adapter that's gone unused |
+| `learn.adapter_idle_days` | `30` | Days unused before the reminder fires |
+
 ## Dynamic names
 
 ### Supported user-name phrasings
