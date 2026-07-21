@@ -44,6 +44,33 @@ def sounds_unsure(text: str) -> bool:
     return any(marker in lowered for marker in _UNSURE_MARKERS)
 
 
+# Every failure phrasing used across _execute_tool's branches and
+# sandbox.py/computer.py: "Command 'X' exited error", "Web search ... X
+# failed", "Tool 'X' is disabled", "Failed to save note: ...", "Could not
+# schedule job: ...", "Browser click error: ...", "Click failed: ...",
+# domain-approval "blocked", worker delegation "unrecognized action" /
+# "did not finish". Deliberately anchored (line-start, or a marker word
+# immediately followed by ':'/'.') rather than a bare substring check: a
+# *successful* search for something like "database error fixes" or "how to
+# fix blocked drains" would otherwise falsely look like a failure just
+# because the user-controlled query text happens to contain that word.
+_TOOL_ERROR_RE = re.compile(
+    r"^(?:failed|could not|no worker configured|browser \w+ (?:error|blocked))"
+    r"|\b(?:exited error|is disabled|unrecognized action|did not finish)\b"
+    r"|\b(?:error|failed|blocked)[:.]",
+    re.IGNORECASE,
+)
+
+
+def sounds_like_tool_error(observation: str) -> bool:
+    """Did a tool observation's status indicate failure? Checked against
+    just the status line (before the first newline/section) so a genuine
+    success whose CONTENT happens to mention "error" — a search result
+    about a bug, say — is never mistaken for a failed call."""
+    status_line = observation.split("\n", 1)[0]
+    return bool(_TOOL_ERROR_RE.search(status_line))
+
+
 # The other way the model fills a knowledge gap: inventing a plausible-looking
 # figure instead of admitting it doesn't know. Detection is deliberately
 # two-sided so auto-search fires in moderation: the QUESTION must ask for a
@@ -272,6 +299,14 @@ def save_mistake_note(original_query: str, wrong_answer: str,
                       correction: str, correct_answer: str,
                       severity: int = 1) -> Path:
     """Persist a correction as a markdown note in notes/mistakes/."""
+    # digest_mistakes_to_training parses "**Original question:**"/"**Correct
+    # answer:**" as single lines; a value with embedded newlines (e.g. a
+    # multi-line tool observation or a bulleted reply) would silently
+    # truncate to just its first line otherwise.
+    original_query = original_query.replace("\n", " ")
+    wrong_answer = wrong_answer.replace("\n", " ")
+    correction = correction.replace("\n", " ")
+    correct_answer = correct_answer.replace("\n", " ")
     title = f"Correction: {original_query[:60]}{'...' if len(original_query) > 60 else ''}"
     body = (
         f"# {title}\n\n"
