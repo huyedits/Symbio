@@ -1131,6 +1131,90 @@ def test_sounds_unsure():
     print("test_sounds_unsure passed")
 
 
+def test_sounds_like_tool_error():
+    for observation in [
+        "Command 'chrome' exited error.\nOutput:\nCommand not found: chrome",
+        "Web search for 'X' failed.\nResults:\nNone",
+        "Tool 'delegate_task' is disabled.",
+        "Failed to save note: disk full",
+        "Could not schedule job: bad cron expression",
+        "Browser click error: the browser session broke and was reset.",
+        "Click failed: no visible element with text 'Sign in'.",
+        "Browser open blocked: example.com not yet approved.",
+        "Worker gave an unrecognized action and stopped: maybe click something",
+        "Worker did not finish within 4 round(s). Last action: scroll",
+    ]:
+        assert learn.sounds_like_tool_error(observation), observation
+    for observation in [
+        "Command 'echo hi' exited ok.\nOutput:\nhi",
+        "Web search for 'database error fixes' succeeded.\nResults:\n"
+        "1. How to fix a database error\n   https://example.com\n   Check the error logs.",
+        "Scheduled job 1: 0 9 * * * — stretch",
+        "Clicked element containing text 'Sign in'.",
+        "Typed 'hello' and pressed Enter.",
+    ]:
+        assert not learn.sounds_like_tool_error(observation), observation
+    print("test_sounds_like_tool_error passed")
+
+
+def test_save_mistake_note_flattens_embedded_newlines():
+    with scratch_mistakes_dir():
+        original_query = "[System observation: Command 'chrome' exited error.\nOutput:\nCommand not found: chrome]"
+        correct_answer = "'chrome' isn't a command here. <cmd>open -a 'Google Chrome'</cmd>"
+        path = learn.save_mistake_note(
+            original_query=original_query,
+            wrong_answer="(a prior tool call failed; see the observation above)",
+            correction="(automatic: the next tool call succeeded)",
+            correct_answer=correct_answer,
+        )
+        body = path.read_text()
+        # No line break survives inside a field, so digest_mistakes_to_training's
+        # line-based parser captures the FULL value, not just its first line.
+        for line in body.splitlines():
+            if line.startswith("**Original question:**"):
+                assert "Command not found: chrome" in line, line
+            if line.startswith("**Correct answer:**"):
+                assert "<cmd>open -a 'Google Chrome'</cmd>" in line, line
+    print("test_save_mistake_note_flattens_embedded_newlines passed")
+
+
+def test_agent_loop_captures_tool_mistake_and_fix():
+    """A tool call that fails, followed by one that works, is captured as a
+    mistake note automatically — the model learns from its own tool
+    mistakes without needing the user to notice and correct anything."""
+    with scratch_mistakes_dir():
+        session = ScriptedSession(
+            user_inputs=["Open Chrome.", "/quit", "n"],
+            model_replies=[
+                "<cmd>chrome</cmd>",
+                "'chrome' isn't a command here — trying the native way. <cmd>open -a 'Google Chrome'</cmd>",
+                "Done, opened Chrome for you.",
+            ],
+        )
+        session.run()
+        notes = [f for f in constants.MISTAKES_DIR.glob("*.md") if f.is_file()]
+        assert len(notes) == 1, notes
+        body = notes[0].read_text()
+        assert "Command not found" in body, body
+        assert "open -a 'Google Chrome'" in body, body
+    print("test_agent_loop_captures_tool_mistake_and_fix passed")
+
+
+def test_agent_loop_does_not_capture_when_error_never_gets_fixed():
+    """If every attempt this turn keeps failing, there is no confirmed fix
+    to learn from, so nothing should be saved."""
+    with scratch_mistakes_dir():
+        session = ScriptedSession(
+            user_inputs=["Open Chrome.", "/quit", "n"],
+            model_replies=["<cmd>chrome</cmd>", "<cmd>chromebrowser</cmd>",
+                           "<cmd>chrome-app</cmd>", "<cmd>launch-chrome</cmd>", "<cmd>chrome-x</cmd>"],
+        )
+        session.run()
+        notes = [f for f in constants.MISTAKES_DIR.glob("*.md") if f.is_file()]
+        assert notes == [], notes
+    print("test_agent_loop_does_not_capture_when_error_never_gets_fixed passed")
+
+
 def test_agent_loop_auto_searches_when_unsure():
     real_search = web.web_search
     web.web_search = lambda q, c, max_results=5: (
@@ -1335,6 +1419,10 @@ def _run_all_inner():
         test_agent_loop_captures_correction()
         test_remember_research_filters()
         test_agent_loop_remembers_research()
+        test_sounds_like_tool_error()
+        test_save_mistake_note_flattens_embedded_newlines()
+        test_agent_loop_captures_tool_mistake_and_fix()
+        test_agent_loop_does_not_capture_when_error_never_gets_fixed()
         test_sounds_unsure()
         test_agent_loop_auto_searches_when_unsure()
         test_sounds_fabricated()

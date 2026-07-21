@@ -794,6 +794,12 @@ class ChatSession:
         self_corrected = False
         final_display = ""
         consecutive_tool_rounds = 0
+        # The exact "[System observation: ...]" text of the most recent
+        # tool failure this turn, if any — used to capture (saw this error
+        # -> did this instead, which worked) as a mistake-note training
+        # sample the moment a later tool call actually succeeds. Cleared on
+        # any success so only a confirmed fix gets saved, not a mere retry.
+        pending_tool_error: str | None = None
         for _ in range(max_rounds):
             messages = [{"role": "system", "content": (
                 self.system_prompt + memory.curated_memory_block(self.config) + rag_block
@@ -918,6 +924,28 @@ class ChatSession:
                     f"\n[Note: {ignored} were also requested in the same reply but "
                     f"ignored — use at most one tool tag per response.]"
                 )
+
+            # A tool call that fails and is then followed by one that works
+            # is exactly the "made a mistake, then fixed it" pattern already
+            # hand-seeded in seed_training_data — capture it automatically
+            # from real usage too, via the same mistake-note pipeline that
+            # already threshold-batches and golden-checks conversational
+            # corrections, so the model learns from its own tool mistakes
+            # without needing the user to notice and correct it.
+            if pending_tool_error is not None and not learn.sounds_like_tool_error(observation):
+                path = learn.save_mistake_note(
+                    original_query=pending_tool_error,
+                    wrong_answer="(a prior tool call failed; see the observation above)",
+                    correction="(automatic: the next tool call succeeded)",
+                    correct_answer=reply,
+                )
+                self.output_fn(f"  [Learn] Tool mistake captured: {path.name}")
+                learn.maybe_train_on_mistakes(
+                    self.config, self.tokenizer, self.system_prompt, train_fn=self._guarded_train)
+            pending_tool_error = (
+                f"[System observation: {observation}]" if learn.sounds_like_tool_error(observation)
+                else None
+            )
 
             self.output_fn(f"  [Observation] {observation.replace(chr(10), chr(10) + '  ')}")
             # Present results in Hermes-style <tool_response> JSON so the model

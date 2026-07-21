@@ -174,6 +174,23 @@ Symbio will:
 
 The `/learn` command is still available to force a mistake note from the last correction, but it is no longer required.
 
+### Learning from its own tool mistakes
+
+The same mistake-note pipeline also captures a second, fully automatic pattern that needs no user involvement at all: a tool call that fails, immediately followed by one that works. This is exactly the "wrong command, try the right one" pattern already hand-seeded into every install's base training data —
+
+```
+You:      Open Chrome.
+Symbio:   <cmd>chrome</cmd>
+          [Tool: run_command]
+          [Observation] Command 'chrome' exited error.
+                        Output:
+                        Command not found: chrome
+Symbio:   'chrome' isn't a command here — trying the native way. <cmd>open -a 'Google Chrome'</cmd>
+          [Learn] Tool mistake captured: 20260721_213045_System_observation_Command_chrome.md
+```
+
+— except now it's learned from real usage, not just the seed examples. It feeds into the exact same `notes/mistakes/` → threshold → digest → guarded-training pipeline as conversational corrections above, so both count toward the same `learn.mistake_threshold`. Nothing is saved if the model keeps failing without ever finding a working alternative within the turn — only a confirmed fix gets captured.
+
 Tune the behaviour in `config.json`:
 
 | Key | Default | Note |
