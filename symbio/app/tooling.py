@@ -27,6 +27,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "digest_notes": "digest",
     "train_adapter": "train",
     "schedule_job": "cron",
+    "delegate_task": "delegate",
 }
 
 # Hermes-style tool registry: JSON schemas for the system prompt <tools> block.
@@ -114,6 +115,23 @@ _TOOLS: list[dict[str, Any]] = [
         "name": "config_show",
         "description": "Show the current configuration.",
         "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "delegate_task",
+        "description": (
+            "Hand a bounded sub-task off to a smaller, faster worker model "
+            "instead of doing it yourself — use for narrow, repetitive "
+            "decisions (e.g. summarizing a page, picking the next browser "
+            "click) where a lightweight specialist is enough."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "role": {"type": "string", "description": "Which worker to use, e.g. 'summarize' or 'browser'."},
+                "task": {"type": "string", "description": "The sub-task text to hand to the worker."},
+            },
+            "required": ["role", "task"],
+        },
     },
 ]
 
@@ -259,6 +277,14 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
             "text": m.group(2).strip(),
         }))
 
+    for m in re.finditer(
+        r'<delegate\s+role=[\'"]([^\'"]*?)[\'"]>(.*?)</delegate>', reply, re.DOTALL
+    ):
+        tools.append(("delegate_task", {
+            "role": m.group(1).strip(),
+            "task": m.group(2).strip(),
+        }))
+
     # Hermes-style JSON-in-XML tool calls.
     for m in re.finditer(r'<tool_call>\s*(.*?)\s*</tool_call>', reply, re.DOTALL):
         try:
@@ -307,6 +333,7 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
     r'<train\s*/>',
     r'<train></train>',
     r'<cron\s+[^>]*?>(.*?)</cron>',
+    r'<delegate\s+role=[\'"][^\'"]*?[\'"]>(.*?)</delegate>',
     r'<tool_call>\s*.*?\s*</tool_call>',
 ]
 
@@ -315,7 +342,7 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
 _KNOWN_TAG_NAMES: tuple[str, ...] = (
     "cmd", "py", "search", "read", "browse", "click", "type", "scroll",
     "note", "skill", "cron", "digest", "train", "memory", "profile",
-    "config", "tool_call",
+    "config", "tool_call", "delegate",
 )
 
 # A reply cut off mid-tag leaves an unterminated tag; never show it.

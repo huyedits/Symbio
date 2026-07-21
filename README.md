@@ -243,6 +243,46 @@ Answering yes deletes it; declining or saying "keep" both just leave it alone an
 | `learn.adapter_idle_reminder_enabled` | `true` | Ask about removing an adapter that's gone unused |
 | `learn.adapter_idle_days` | `30` | Days unused before the reminder fires |
 
+## Mixture of agents: delegating to smaller worker models
+
+One model doing everything — from picking a browser click to answering a factual question — means every micro-decision pays the cost of the headmaster's full system prompt and persona. Symbio can instead hand a bounded sub-task off to a smaller, faster **worker** model, and each worker can be fine-tuned independently on its own narrow task, with its own adapter, separate from the headmaster's.
+
+This is off by default (`dispatch.enabled: false`) — it loads and runs additional models on your machine, a bigger resource commitment than anything else here, so it's opt-in.
+
+### How it works
+
+The headmaster requests delegation the same way it requests any other tool:
+
+```
+<delegate role='summarize'>the full text to condense</delegate>
+```
+
+or the Hermes form: `<tool_call>{"name": "delegate_task", "arguments": {"role": "summarize", "task": "..."}}</tool_call>`.
+
+`symbio/app/worker_models.json` is the catalog of available workers — model, role, description, rough memory footprint. Ships with two roles:
+
+| Role | What it does |
+|---|---|
+| `summarize` | Condenses page/document text handed off by the headmaster |
+| `browser` | Picks the next click/type/scroll action from the current page text, in a bounded loop, using the same `BrowserSession` the headmaster's own browser tools drive |
+
+Workers load lazily on first use and are evicted LRU-style once `dispatch.max_resident_workers` is exceeded, or after sitting idle past `dispatch.worker_idle_unload_minutes` — sequential by default (one resident worker) to fit alongside the headmaster on a typical machine, but this is a real, working setting: raise `max_resident_workers` if you have the RAM to keep several loaded at once.
+
+### Fine-tuning a worker
+
+Every delegated task's (input, output) pair is recorded as a training sample under that worker's own data directory (`training_data/workers/<role>/`) — real usage builds the corpus. Training a worker reuses the exact golden-set-guarded-rollback machinery the headmaster's own `/train` uses: a small, role-scoped golden set (e.g. "does the browser worker still reply with a known action verb") is checked before and after training, and a regression rolls the worker's adapter back automatically, the same way `_guarded_train` protects the headmaster's. Worker adapters live under `adapters/workers/<role>/`, fully separate from the headmaster's own `adapters/`.
+
+| Key | Default | Note |
+|---|---|---|
+| `dispatch.enabled` | `false` | Turn on delegation |
+| `dispatch.max_resident_workers` | `1` | How many worker models can be loaded at once |
+| `dispatch.worker_idle_unload_minutes` | `10` | Unload a worker after this long unused |
+| `dispatch.max_worker_rounds` | `4` | Round cap for a multi-step worker task (e.g. browser) |
+| `dispatch.worker_golden_set_enabled` | `true` | Golden-check a worker's adapter around training |
+| `dispatch.worker_golden_rollback_on_regression` | `true` | Auto-rollback a worker's adapter on regression |
+
+Enabling dispatch also needs `"delegate"` in `tools.enabled_groups` — it's included by default going forward, but an existing `config.json` written before this feature won't have picked it up automatically; add it with `/config set tools.enabled_groups '[...]'` if delegation seems to silently do nothing.
+
 ## Dynamic names
 
 ### Supported user-name phrasings
@@ -302,6 +342,8 @@ The project is organized as a `symbio/` Python package with a thin `main.py` wra
 │   │   ├── training.py    # Training data and LoRA fine-tuning via mlx_lm
 │   │   ├── learn.py       # Correction detection and batch learning
 │   │   ├── golden.py      # Golden set: regression checks around every LoRA update
+│   │   ├── dispatch.py    # MoA: WorkerPool, delegated tasks, worker fine-tuning
+│   │   ├── worker_models.json  # Catalog of available worker models/roles
 │   │   ├── memory.py      # Notes, memory, profile management
 │   │   ├── sandbox.py     # Sandboxed commands and Python execution
 │   │   ├── computer.py    # Browser automation helpers
@@ -311,11 +353,13 @@ The project is organized as a `symbio/` Python package with a thin `main.py` wra
 │   └── utils.py         # Shared helpers
 ├── rag.py               # Lightweight keyword-based RAG
 ├── README.md
+├── docs/
+│   └── adapter-marketplace.md  # Design doc, not yet implemented
 ├── config.json          # User configuration
 ├── models.json          # Model presets
 ├── notes/               # Markdown notes / memory
-├── training_data/       # train.jsonl and valid.jsonl
-├── adapters/            # LoRA adapter weights
+├── training_data/       # train.jsonl and valid.jsonl (workers/<role>/ for MoA workers)
+├── adapters/            # LoRA adapter weights (workers/<role>/ for MoA workers)
 ├── logs/                # Session logs
 ├── sessions/            # Session stores
 ├── screenshots/         # Browser screenshots
@@ -342,6 +386,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and how to open issue
 - [x] **Be able to learn new skills on the fly**
 - [x] **Remember new info found from web research** — auto-saved as `Learned:` notes, trained in on digest
 - [x] **Add Telegram bot** — full tool loop with inline-keyboard approval for dangerous actions
+- [x] **Mixture of agents** — headmaster delegates bounded sub-tasks to smaller, independently fine-tunable worker models (`dispatch.enabled`, off by default)
+- [ ] **Adapter marketplace** — design doc: [docs/adapter-marketplace.md](docs/adapter-marketplace.md); not yet implemented
 - [ ] **Add Other Messaging Platforms**
 - [ ] **Prune Old Weights (Future Milestone)**
 

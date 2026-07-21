@@ -9,6 +9,12 @@ DATA_DIR = PROJECT_DIR / "training_data"
 TRAIN_FILE = DATA_DIR / "train.jsonl"
 VALID_FILE = DATA_DIR / "valid.jsonl"
 ADAPTER_DIR = PROJECT_DIR / "adapters"
+# Worker-model adapters (see symbio/app/dispatch.py) live under the same
+# adapters/ tree — one subdirectory per role — so they're covered by the
+# existing "adapters/" .gitignore entry and by any tooling that already
+# treats ADAPTER_DIR's contents as disposable/local-only.
+WORKER_ADAPTERS_DIR = ADAPTER_DIR / "workers"
+WORKER_MODELS_FILE = PROJECT_DIR / "symbio" / "app" / "worker_models.json"
 NOTES_DIR = PROJECT_DIR / "notes"
 MISTAKES_DIR = NOTES_DIR / "mistakes"
 MISTAKES_ARCHIVE_DIR = MISTAKES_DIR / "archive"
@@ -45,6 +51,25 @@ for d in (
     SESSIONS_DIR,
 ):
     d.mkdir(parents=True, exist_ok=True)
+
+
+def adapter_dir_for(role: str | None = None) -> Path:
+    """Path to the adapter directory for a worker role, or the headmaster's
+    own single adapter when role is None — unchanged from before per-role
+    adapters existed, so every existing call site (chat.py, training.py)
+    keeps working with zero changes as long as it doesn't pass a role."""
+    if role is None:
+        return ADAPTER_DIR
+    return WORKER_ADAPTERS_DIR / role
+
+
+def data_dir_for(role: str | None = None) -> Path:
+    """Training-data directory for a worker role, or the headmaster's own
+    shared corpus when role is None. A worker trains on its own narrow
+    task data, not the headmaster's general conversation corpus."""
+    if role is None:
+        return DATA_DIR
+    return DATA_DIR / "workers" / role
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "model_name": "mlx-community/Qwen2.5-3B-Instruct-4bit",

@@ -1,0 +1,16 @@
+{
+  "summarize_worker": {
+    "model_name": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+    "role": "summarize",
+    "description": "Condense page/document text handed off by the headmaster into a short summary.",
+    "adapter_compatible": true,
+    "memory_note": "~1 GB on disk, ~2-3 GB RAM at runtime"
+  },
+  "browser_worker": {
+    "model_name": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+    "role": "browser",
+    "description": "Decide the next click/type/scroll action from the current page text.",
+    "adapter_compatible": true,
+    "memory_note": "~1 GB on disk, ~2-3 GB RAM at runtime"
+  }
+}

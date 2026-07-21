@@ -34,8 +34,8 @@ def test_looks_degenerate():
 
 
 def test_sane_reply_rejects_leaked_tags():
-    assert golden._sane_reply("All good here.")
-    assert not golden._sane_reply('Oops <tool_call>{"name": "x"}</tool_call> leaked.')
+    assert golden.sane_reply("All good here.")
+    assert not golden.sane_reply('Oops <tool_call>{"name": "x"}</tool_call> leaked.')
 
 
 _IDEAL_REPLIES = {

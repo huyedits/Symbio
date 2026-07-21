@@ -104,8 +104,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "tools": {
         "enabled_groups": [
             "memory", "notes", "terminal", "code", "web_search",
-            "browser", "digest", "train", "cron", "config",
+            "browser", "digest", "train", "cron", "config", "delegate",
         ],
+    },
+    "dispatch": {
+        # Off by default: MoA delegation loads and runs additional models
+        # on your machine, which is a bigger behavior/resource change than
+        # anything else here — opt in deliberately.
+        "enabled": False,
+        "max_resident_workers": 1,
+        "worker_idle_unload_minutes": 10,
+        "max_worker_rounds": 4,
+        "worker_golden_set_enabled": True,
+        "worker_golden_regression_threshold": 0,
+        "worker_golden_rollback_on_regression": True,
     },
 }
 
@@ -122,7 +134,7 @@ def load_config() -> dict[str, Any]:
         try:
             user_config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
             config.update(user_config)
-            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn", "telegram", "tools"):
+            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn", "telegram", "tools", "dispatch"):
                 if section in user_config:
                     config[section] = {**DEFAULT_CONFIG[section], **user_config[section]}
         except Exception as e:

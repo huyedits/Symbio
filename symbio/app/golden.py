@@ -33,7 +33,7 @@ def _looks_degenerate(text: str) -> bool:
     return max(Counter(trigrams).values(), default=0) >= 4
 
 
-def _sane_reply(display: str) -> bool:
+def sane_reply(display: str) -> bool:
     """Baseline every case requires: no runaway repetition, and no tool tag
     that leaked through stripping (a sign the parser and the model's output
     format have drifted apart)."""
@@ -54,40 +54,40 @@ class GoldenCase(NamedTuple):
 
 
 def _check_greeting(display: str, tools: list, config: dict) -> bool:
-    return bool(display.strip()) and _sane_reply(display)
+    return bool(display.strip()) and sane_reply(display)
 
 
 def _check_identity_self(display: str, tools: list, config: dict) -> bool:
-    return _sane_reply(display) and config["assistant_name"].lower() in display.lower()
+    return sane_reply(display) and config["assistant_name"].lower() in display.lower()
 
 
 def _check_identity_not_user(display: str, tools: list, config: dict) -> bool:
     lowered = display.strip().lower()
     return (
-        _sane_reply(display)
+        sane_reply(display)
         and config["assistant_name"].lower() in lowered
         and not lowered.startswith(("yes", "yeah", "yep", "correct"))
     )
 
 
 def _check_save_note(display: str, tools: list, config: dict) -> bool:
-    return _sane_reply(display) and (_has_tool(tools, "write_note") or _has_tool(tools, "save_memory"))
+    return sane_reply(display) and (_has_tool(tools, "write_note") or _has_tool(tools, "save_memory"))
 
 
 def _check_schedule(display: str, tools: list, config: dict) -> bool:
-    return _sane_reply(display) and _has_tool(tools, "schedule_job")
+    return sane_reply(display) and _has_tool(tools, "schedule_job")
 
 
 def _check_run_code(display: str, tools: list, config: dict) -> bool:
-    return _sane_reply(display) and _has_tool(tools, "execute_code")
+    return sane_reply(display) and _has_tool(tools, "execute_code")
 
 
 def _check_web_search(display: str, tools: list, config: dict) -> bool:
-    return _sane_reply(display) and _has_tool(tools, "web_search")
+    return sane_reply(display) and _has_tool(tools, "web_search")
 
 
 def _check_open_app(display: str, tools: list, config: dict) -> bool:
-    return _sane_reply(display) and _has_tool(tools, "run_command")
+    return sane_reply(display) and _has_tool(tools, "run_command")
 
 
 # Prompts and expected behavior mirror pairs baked into seed_training_data,
@@ -159,17 +159,20 @@ class GoldenResult:
 def run_golden_set(
     model, tokenizer, generate_fn, sampler, system_prompt: str,
     config: dict[str, Any], enabled_groups: set[str] | None = None,
-    max_tokens: int | None = None,
+    max_tokens: int | None = None, cases: list[GoldenCase] | None = None,
 ) -> GoldenResult:
     """Run every golden case as a single-turn, tool-free generation and
     grade it. Never executes a tool — only parses the reply — so it is safe
-    to run automatically around every LoRA update."""
+    to run automatically around every LoRA update. `cases` defaults to the
+    headmaster's identity/tool-tag battery (GOLDEN_CASES); a worker role
+    passes its own smaller, task-scoped list (see dispatch.WORKER_GOLDEN_CASES)."""
+    cases = cases if cases is not None else GOLDEN_CASES
     max_tokens = max_tokens or int(config.get("learn", {}).get("golden_max_tokens", 150))
     context = system_prompt + prompts.env_note() + prompts.time_note()
 
     results: dict[str, bool] = {}
     replies: dict[str, str] = {}
-    for case in GOLDEN_CASES:
+    for case in cases:
         messages = [
             {"role": "system", "content": context},
             {"role": "user", "content": case.prompt_fn(config)},
