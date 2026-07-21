@@ -212,8 +212,8 @@ class BrowserSession:
         return self.open(url)
 
     def get_text(self) -> str:
-        page = self._ensure_open()
         try:
+            page = self._ensure_open()
             text = page.inner_text("body", timeout=10000)
             # Collapse whitespace.
             text = re.sub(r"\n{3,}", "\n\n", text)
@@ -223,8 +223,8 @@ class BrowserSession:
             return self._fail("get_text", e)
 
     def get_html(self) -> str:
-        page = self._ensure_open()
         try:
+            page = self._ensure_open()
             html = page.content()
             return _truncated(html.strip(), 4000)
         except Exception as e:
@@ -233,8 +233,8 @@ class BrowserSession:
     _TIMEOUT_MS = 4000
 
     def click(self, selector: str = "", text: str = "") -> str:
-        page = self._ensure_open()
         try:
+            page = self._ensure_open()
             if selector:
                 # Generic selectors often match dozens of elements, many
                 # hidden; click the first *visible* match instead of the
@@ -270,8 +270,8 @@ class BrowserSession:
             return self._fail("click", e)
 
     def type_text(self, text: str, selector: str = "", press_enter: bool = False) -> str:
-        page = self._ensure_open()
         try:
+            page = self._ensure_open()
             if selector:
                 target, count = _first_visible(page.locator(selector))
                 if target is None:
@@ -289,8 +289,8 @@ class BrowserSession:
             return self._fail("type", e)
 
     def press(self, key: str) -> str:
-        page = self._ensure_open()
         try:
+            page = self._ensure_open()
             normalized = _normalize_key(key)
             page.keyboard.press(normalized)
             return f"Pressed '{normalized}'."
@@ -298,8 +298,8 @@ class BrowserSession:
             return self._fail("press", e)
 
     def scroll(self, direction: str = "down", amount: int = 0) -> str:
-        page = self._ensure_open()
         try:
+            page = self._ensure_open()
             if direction not in ("down", "up"):
                 return "Error: direction must be 'down' or 'up'."
             dy = amount if amount > 0 else 800
@@ -312,16 +312,16 @@ class BrowserSession:
             return self._fail("scroll", e)
 
     def evaluate(self, script: str) -> str:
-        page = self._ensure_open()
         try:
+            page = self._ensure_open()
             result = page.evaluate(script)
             return json.dumps(result, ensure_ascii=False, default=str)[:4000]
         except Exception as e:
             return self._fail("evaluate", e)
 
     def screenshot(self) -> str:
-        page = self._ensure_open()
         try:
+            page = self._ensure_open()
             path = _screenshot_path()
             page.screenshot(path=str(path), full_page=True)
             return f"Saved browser screenshot: {path.name}"

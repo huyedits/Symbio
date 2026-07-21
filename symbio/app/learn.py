@@ -49,14 +49,16 @@ def sounds_unsure(text: str) -> bool:
 # failed", "Tool 'X' is disabled", "Failed to save note: ...", "Could not
 # schedule job: ...", "Browser click error: ...", "Click failed: ...",
 # domain-approval "blocked", worker delegation "unrecognized action" /
-# "did not finish". Deliberately anchored (line-start, or a marker word
-# immediately followed by ':'/'.') rather than a bare substring check: a
-# *successful* search for something like "database error fixes" or "how to
-# fix blocked drains" would otherwise falsely look like a failure just
-# because the user-controlled query text happens to contain that word.
+# "did not finish", and _execute_tool's own catch-all "failed
+# unexpectedly" backstop for anything a tool didn't handle itself.
+# Deliberately anchored (line-start, or a marker word immediately followed
+# by ':'/'.') rather than a bare substring check: a *successful* search for
+# something like "database error fixes" or "how to fix blocked drains"
+# would otherwise falsely look like a failure just because the
+# user-controlled query text happens to contain that word.
 _TOOL_ERROR_RE = re.compile(
     r"^(?:failed|could not|no worker configured|browser \w+ (?:error|blocked))"
-    r"|\b(?:exited error|is disabled|unrecognized action|did not finish)\b"
+    r"|\b(?:exited error|is disabled|unrecognized action|did not finish|failed unexpectedly)\b"
     r"|\b(?:error|failed|blocked)[:.]",
     re.IGNORECASE,
 )
