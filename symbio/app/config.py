@@ -33,6 +33,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "temperature": 0.7,
         "top_p": 0.9,
         "cron_poll_seconds": 20,
+        "stream_output": True,
+        "prompt_cache_enabled": True,
     },
     "web": {
         "search_results": 5,

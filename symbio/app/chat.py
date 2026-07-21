@@ -9,6 +9,8 @@ from datetime import datetime
 from typing import Any
 
 from mlx_lm import load, generate
+from mlx_lm.generate import stream_generate
+from mlx_lm.models.cache import can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache
 from mlx_lm.sample_utils import make_sampler
 
 from rag import Retriever
@@ -89,6 +91,22 @@ def _internal_to_hermes_name(name: str) -> str:
     return _INTERNAL_TO_HERMES_NAME.get(name, name)
 
 
+def _common_prefix_len(a: list[int] | None, b: list[int]) -> int:
+    """Length of the exact matching prefix of two token-id lists. Token
+    level, not string level: chat templates concatenate per-turn, but
+    re-encoding a string *substring* independently is not guaranteed to
+    match the tokenization of encoding the whole string and slicing (BPE
+    merges can cross the cut boundary) — comparing already-encoded ids
+    sidesteps that entirely."""
+    if not a:
+        return 0
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
+
+
 class ChatSession:
     """One interactive chat session: model, stores, browser, cron thread.
 
@@ -102,12 +120,23 @@ class ChatSession:
     def __init__(self, config: dict[str, Any], model=None, tokenizer=None,
                  adapter_loaded: bool | None = None,
                  input_fn=None, output_fn=None, confirm_fn=None,
-                 generate_fn=None):
+                 generate_fn=None, stream_fn=None, stream_chunk_fn=None):
         self.config = config
         self.input_fn = input_fn if input_fn is not None else input
         self.output_fn = output_fn if output_fn is not None else print
         self.confirm_fn = confirm_fn
         self.generate_fn = generate_fn if generate_fn is not None else generate
+        self.stream_fn = stream_fn if stream_fn is not None else stream_generate
+        # Called with each safe chunk of text as a reply streams in (e.g.
+        # incremental terminal printing or a throttled Telegram message
+        # edit). None means no live output — replies are shown once
+        # complete, same as before streaming existed.
+        self.stream_chunk_fn = stream_chunk_fn
+        # KV-cache reuse across generate calls (see _generate_reply);
+        # invalidated whenever the prompt's actual prefix changes out from
+        # under it (adapter reload, a generation that errored mid-stream).
+        self._prompt_cache: list | None = None
+        self._cached_prompt_ids: list[int] | None = None
         self.enabled_groups: set[str] = set(
             config.get("tools", {}).get("enabled_groups", [])
         )
@@ -186,6 +215,9 @@ class ChatSession:
 
     def _reload_model(self) -> str | None:
         """Reload model+adapter after training; returns an error message or None."""
+        # New weights make any existing KV cache meaningless.
+        self._prompt_cache = None
+        self._cached_prompt_ids = None
         try:
             self.model, self.tokenizer = load(
                 self.config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
@@ -195,6 +227,98 @@ class ChatSession:
             return None
         except Exception as e:
             return str(e)
+
+    def _generate_reply(self, messages: list[dict[str, str]], chunk_prefix: str = "") -> tuple[str, bool]:
+        """Generate the next reply for `messages`.
+
+        When agent.prompt_cache_enabled, reuses the model's KV cache across
+        calls: only the token-level suffix that's new since the last call
+        (an exact longest-common-prefix diff, not a string heuristic) is
+        actually prefilled — the system prompt and unchanged history are
+        served from cache instead of reprocessed every round. This is what
+        makes multi-round tool loops (e.g. a browser click sequence) and
+        ordinary turn-to-turn chat fast; see _common_prefix_len.
+
+        When self.stream_chunk_fn is set (and agent.stream_output), also
+        streams tag-stripped text to it live via tooling.StreamingStripper,
+        prefixed with `chunk_prefix` on the first visible chunk.
+
+        Returns (raw_reply, streamed_live) — streamed_live is True iff
+        something was actually shown via stream_chunk_fn this call, so the
+        caller knows whether the final consolidated print is still needed.
+        """
+        agent_cfg = self.config["agent"]
+        prompt_text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+        )
+        max_tokens = int(agent_cfg["max_reply_tokens"])
+
+        if not agent_cfg.get("prompt_cache_enabled", True):
+            # Caching off: the exact original call, unchanged.
+            text = self.generate_fn(
+                self.model, self.tokenizer, prompt=prompt_text, sampler=self.sampler,
+                max_tokens=max_tokens, verbose=False,
+            )
+            return text, False
+
+        ids = self.tokenizer.encode(prompt_text)
+        reused = _common_prefix_len(self._cached_prompt_ids, ids)
+        if self._prompt_cache is None or reused == 0:
+            self._prompt_cache = make_prompt_cache(self.model)
+            feed = ids
+        else:
+            stale = len(self._cached_prompt_ids) - reused
+            if stale and can_trim_prompt_cache(self._prompt_cache):
+                trim_prompt_cache(self._prompt_cache, stale)
+            elif stale:
+                self._prompt_cache = make_prompt_cache(self.model)
+                reused = 0
+            feed = ids[reused:] if reused else ids
+        if not feed:
+            feed = ids[-1:]
+
+        use_stream = self.stream_chunk_fn is not None and agent_cfg.get("stream_output", True)
+        stripper = tooling.StreamingStripper() if use_stream else None
+        shown = False
+
+        def _emit(text: str):
+            nonlocal shown
+            if not shown:
+                shown = True
+                if chunk_prefix:
+                    self.stream_chunk_fn(chunk_prefix)
+            self.stream_chunk_fn(text)
+
+        text_parts: list[str] = []
+        gen_ids: list[int] = []
+        try:
+            for response in self.stream_fn(
+                self.model, self.tokenizer, feed, max_tokens=max_tokens,
+                sampler=self.sampler, prompt_cache=self._prompt_cache,
+            ):
+                text_parts.append(response.text)
+                gen_ids.append(response.token)
+                if stripper is not None:
+                    safe = stripper.feed(response.text)
+                    if safe:
+                        _emit(safe)
+        except BaseException:
+            # The real MLX cache may already be mutated beyond what our
+            # bookkeeping reflects (interrupted mid-token) — never trust a
+            # stale cache after this; the next call rebuilds it from zero.
+            self._prompt_cache = None
+            self._cached_prompt_ids = None
+            raise
+
+        if stripper is not None:
+            tail = stripper.finish()
+            if tail:
+                _emit(tail)
+        if shown:
+            self.stream_chunk_fn("\n")
+
+        self._cached_prompt_ids = ids + gen_ids
+        return "".join(text_parts), shown
 
     def _check_idle_adapter(self):
         """A saved adapter that exists on disk but wasn't loaded this session
@@ -648,6 +772,7 @@ class ChatSession:
         executed_calls: set[str] = set()
         web_used = False
         auto_searched = False
+        self_corrected = False
         final_display = ""
         consecutive_tool_rounds = 0
         for _ in range(max_rounds):
@@ -657,18 +782,9 @@ class ChatSession:
             )}]
             messages.extend(self.history[-self.config["agent"]["history_limit"]:])
 
-            prompt = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-
             try:
-                raw_reply = self.generate_fn(
-                    self.model, self.tokenizer, prompt=prompt, sampler=self.sampler,
-                    max_tokens=int(self.config["agent"]["max_reply_tokens"]), verbose=False,
-                )
+                raw_reply, streamed_live = self._generate_reply(
+                    messages, chunk_prefix=f"{self.config['assistant_name']:8}: ")
                 reply = raw_reply.strip()
             except KeyboardInterrupt:
                 # Ctrl-C during a slow generation abandons the turn, not the app.
@@ -683,7 +799,8 @@ class ChatSession:
 
             if display.strip():
                 final_display = display
-                self.output_fn(f"{self.config['assistant_name']:8}: {display}")
+                if not streamed_live:
+                    self.output_fn(f"{self.config['assistant_name']:8}: {display}")
                 self.logger.info(f"{self.config['assistant_name']}: {display}")
                 self.session_store.log("assistant", display)
 
@@ -697,6 +814,23 @@ class ChatSession:
             if not fresh_tools:
                 self.history.append({"role": "assistant", "content": reply})
                 self._trim_history()
+                # A tag that looked like a tool call but never resolved
+                # (unterminated, or invalid JSON) is a formatting mistake,
+                # not a normal reply — surface it as an observation so the
+                # model can notice and retry, instead of silently treating
+                # the mangled leftovers as the final answer. Once per turn.
+                malformed = tooling.detect_malformed_tag(reply)
+                if malformed and not self_corrected:
+                    self_corrected = True
+                    self.output_fn(f"  [Format] {malformed}")
+                    self.history.append({"role": "user", "content": (
+                        f"[System observation: {malformed} Check your tag "
+                        f"syntax (matching open/close tags, valid JSON "
+                        f"inside <tool_call>) and try again, or continue "
+                        f"without it.]"
+                    )})
+                    self._trim_history()
+                    continue
                 # Don't let the model fill knowledge gaps by guessing: an
                 # unsure-sounding answer, or a hedged made-up figure for a
                 # numeric question, with no tool call triggers one automatic
@@ -956,4 +1090,4 @@ class ChatSession:
 
 
 def chat_loop(config: dict[str, Any]):
-    ChatSession(config).run()
+    ChatSession(config, stream_chunk_fn=lambda s: print(s, end="", flush=True)).run()

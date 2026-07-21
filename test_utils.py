@@ -1,5 +1,6 @@
 """Shared helpers to keep tests from polluting real runtime data."""
 import shutil
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -13,6 +14,11 @@ def preserve_training_state(adapters: bool = False):
     Tests that mine corrections or run LoRA updates write to the real
     training_data/ files and adapters/ directory; without this guard, test
     junk ("Alice", "Q1") ends up in the user's fine-tune corpus.
+
+    Safe to nest (e.g. a suite-wide session fixture wrapping individual
+    tests that also use this): each call gets its own uniquely-named
+    backup directory, so an inner call's cleanup can never delete an
+    outer call's still-pending backup.
     """
     backups: dict[Path, bytes | None] = {}
     for f in (TRAIN_FILE, VALID_FILE):
@@ -20,9 +26,9 @@ def preserve_training_state(adapters: bool = False):
 
     adapter_bak: Path | None = None
     if adapters and ADAPTER_DIR.exists():
-        adapter_bak = ADAPTER_DIR.with_name(ADAPTER_DIR.name + ".testbak")
-        if adapter_bak.exists():
-            shutil.rmtree(adapter_bak)
+        adapter_bak = Path(tempfile.mkdtemp(
+            dir=ADAPTER_DIR.parent, prefix=ADAPTER_DIR.name + ".testbak."))
+        shutil.rmtree(adapter_bak)  # mkdtemp creates it; copytree needs the target absent
         shutil.copytree(ADAPTER_DIR, adapter_bak)
 
     try:

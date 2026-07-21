@@ -23,6 +23,21 @@ class FakeTokenizer:
             text += "\nassistant:"
         return text
 
+    def encode(self, text, add_special_tokens=True):
+        # "Tokens" are just words. _generate_reply only ever compares,
+        # slices, and measures len() on these — never inspects the actual
+        # int values — so a list[str] is a fully valid stand-in and lets
+        # the fake stream_generate below reconstruct readable text.
+        return text.split(" ")
+
+
+class _FakeResponse:
+    __slots__ = ("text", "token")
+
+    def __init__(self, text, token):
+        self.text = text
+        self.token = token
+
 
 class ScriptedSession:
     """Run chat_loop with scripted user inputs and model replies."""
@@ -32,6 +47,9 @@ class ScriptedSession:
         self.model_replies = list(model_replies)
         self.config = config
         self.prompts_seen = []
+        # What a real KV cache would represent: everything fed across every
+        # call so far, cache-aware callers may only feed the new suffix.
+        self._fed_so_far: list[str] = []
 
     def fake_input(self, prompt_text=""):
         if not self.user_inputs:
@@ -39,18 +57,37 @@ class ScriptedSession:
         return self.user_inputs.pop(0)
 
     def fake_generate(self, model, tokenizer, prompt="", sampler=None, verbose=False, **kwargs):
+        # Legacy blocking path — used when agent.prompt_cache_enabled=False.
         self.prompts_seen.append(prompt)
         if not self.model_replies:
             return "Nothing more to say."
         return self.model_replies.pop(0)
 
+    def fake_stream_generate(self, model, tokenizer, prompt, max_tokens=256,
+                             sampler=None, prompt_cache=None, **kwargs):
+        self._fed_so_far.extend(prompt)
+        self.prompts_seen.append(" ".join(self._fed_so_far))
+        reply = self.model_replies.pop(0) if self.model_replies else "Nothing more to say."
+        for i, word in enumerate(reply.split(" ")):
+            text = word if i == 0 else " " + word
+            self._fed_so_far.append(word)
+            yield _FakeResponse(text, hash(word) & 0xFFFF)
+
     def run(self):
         real_input = builtins.input
         real_load = chat.load
         real_generate = chat.generate
+        real_stream_generate = chat.stream_generate
+        real_make_cache = chat.make_prompt_cache
+        real_can_trim = chat.can_trim_prompt_cache
+        real_trim = chat.trim_prompt_cache
         builtins.input = self.fake_input
         chat.load = lambda *a, **k: (object(), FakeTokenizer())
         chat.generate = self.fake_generate
+        chat.stream_generate = self.fake_stream_generate
+        chat.make_prompt_cache = lambda model: []
+        chat.can_trim_prompt_cache = lambda cache: True
+        chat.trim_prompt_cache = lambda cache, n: cache
         try:
             # ChatSession construction touches the real adapters/ directory
             # (checks adapter_config.json, marks it used) even with load()
@@ -61,6 +98,10 @@ class ScriptedSession:
             builtins.input = real_input
             chat.load = real_load
             chat.generate = real_generate
+            chat.stream_generate = real_stream_generate
+            chat.make_prompt_cache = real_make_cache
+            chat.can_trim_prompt_cache = real_can_trim
+            chat.trim_prompt_cache = real_trim
 
 
 def test_system_prompt_substitutes_names():
@@ -308,6 +349,53 @@ def test_agent_loop_breaks_on_repeated_tool_call():
     # Round 1 executes the command; round 2 repeats it verbatim -> loop ends.
     assert len(session.prompts_seen) == 2, len(session.prompts_seen)
     print("test_agent_loop_breaks_on_repeated_tool_call passed")
+
+
+def test_agent_loop_self_corrects_malformed_tag():
+    """An unterminated tag (e.g. truncated by max_tokens) isn't silently
+    treated as the final answer — it's fed back as an observation so the
+    model can notice and retry, same spirit as a failed tool call."""
+    real_search = web.web_search
+    web.web_search = lambda q, c, max_results=5: (True, "1. Some result\n   https://example.com\n   Info.")
+    try:
+        session = ScriptedSession(
+            user_inputs=["Search for something.", "/quit", "n"],
+            model_replies=[
+                "Let me check that. <search>who won the",  # truncated, no close
+                "<search>who won the 2031 prize</search> Checking now.",  # retried, well-formed
+                "It was won by nobody in particular.",  # final answer after the search executes
+            ],
+        )
+        session.run()
+    finally:
+        web.web_search = real_search
+    # Round 1: malformed -> self-correct. Round 2: well-formed <search> ->
+    # executes as a real tool call. Round 3: final answer from the results.
+    assert len(session.prompts_seen) == 3, len(session.prompts_seen)
+    obs = session.prompts_seen[1]
+    assert "unterminated" in obs.lower(), obs
+    assert "try again" in obs.lower(), obs
+    print("test_agent_loop_self_corrects_malformed_tag passed")
+
+
+def test_agent_loop_self_corrects_only_once_per_turn():
+    """A persistently malformed reply doesn't burn every round on retries —
+    self-correction fires once, then normal end-of-turn handling resumes."""
+    session = ScriptedSession(
+        user_inputs=["Search for something.", "/quit", "n"],
+        model_replies=[
+            "<search>always truncated",
+            # Still malformed, but with visible prose this time so the
+            # (unrelated) blank-reply auto-search fallback doesn't also
+            # kick in and add a third round — isolates just this behavior.
+            "I couldn't complete that search. <search>still truncated",
+        ],
+    )
+    session.run()
+    # One self-correction retry, then the second (still-malformed) reply
+    # ends the turn normally rather than retrying forever.
+    assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+    print("test_agent_loop_self_corrects_only_once_per_turn passed")
 
 
 def test_agent_loop_executes_one_tool_per_response():
@@ -1259,6 +1347,8 @@ def _run_all_inner():
         test_agent_loop_feeds_observation_back()
         test_agent_loop_stops_at_max_rounds()
         test_agent_loop_breaks_on_repeated_tool_call()
+        test_agent_loop_self_corrects_malformed_tag()
+        test_agent_loop_self_corrects_only_once_per_turn()
         test_strip_unterminated_tag()
         test_agent_loop_schedules_job_from_tag()
     print("\nAll agent-loop tests passed.")
