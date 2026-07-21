@@ -283,31 +283,119 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     return tools
 
 
+# Each pattern matches only a COMPLETE tag pair (open...close, or a
+# self-closing tag) — never a truncated/unterminated one. Shared by
+# strip_tool_tags (full replies) and StreamingStripper (incremental chunks),
+# so both agree on what "safe to remove" means.
+_COMPLETE_TAG_PATTERNS: list[str] = [
+    r'<note\s+title=[\'"][^\'"]*?[\'"]>(.*?)</note>',
+    r'<cmd>(.*?)</cmd>',
+    r'<py>(.*?)</py>',
+    r'<search>(.*?)</search>',
+    r'<read>(.*?)</read>',
+    r'<browse>(.*?)</browse>',
+    r'<click>(.*?)</click>',
+    r'<type[^>]*>(.*?)</type>',
+    r'<scroll[^>]*/>',
+    r'<skill\s+name=[\'"][^\'"]*?[\'"]>(.*?)</skill>',
+    r'<memory[^>]*>(.*?)</memory>',
+    r'<profile[^>]*>(.*?)</profile>',
+    r'<config\s+show\s*/>',
+    r'<config\s+set=[\'"][^\'"]+[\'"]>(.*?)</config>',
+    r'<digest\s*/>',
+    r'<digest></digest>',
+    r'<train\s*/>',
+    r'<train></train>',
+    r'<cron\s+[^>]*?>(.*?)</cron>',
+    r'<tool_call>\s*.*?\s*</tool_call>',
+]
+
+# Tag names recognized by the unterminated-tag cutoff below and by the
+# streaming stripper's "might this become a tag" check.
+_KNOWN_TAG_NAMES: tuple[str, ...] = (
+    "cmd", "py", "search", "read", "browse", "click", "type", "scroll",
+    "note", "skill", "cron", "digest", "train", "memory", "profile",
+    "config", "tool_call",
+)
+
+# A reply cut off mid-tag leaves an unterminated tag; never show it.
+_UNTERMINATED_TAG_RE = re.compile(
+    r'<(?:' + '|'.join(_KNOWN_TAG_NAMES) + r')\b[^>]*>[^<]*$', re.DOTALL,
+)
+
+
+def _strip_complete_tag_pairs(text: str) -> str:
+    for pattern in _COMPLETE_TAG_PATTERNS:
+        text = re.sub(pattern, '', text, flags=re.DOTALL)
+    return text
+
+
 def strip_tool_tags(reply: str) -> str:
-    display = reply
-    display = re.sub(r'<note\s+title=[\'"][^\'"]*?[\'"]>(.*?)</note>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<cmd>(.*?)</cmd>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<py>(.*?)</py>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<search>(.*?)</search>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<read>(.*?)</read>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<browse>(.*?)</browse>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<click>(.*?)</click>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<type[^>]*>(.*?)</type>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<scroll[^>]*/>', '', display)
-    display = re.sub(r'<skill\s+name=[\'"][^\'"]*?[\'"]>(.*?)</skill>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<memory[^>]*>(.*?)</memory>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<profile[^>]*>(.*?)</profile>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<config\s+show\s*/>', '', display)
-    display = re.sub(r'<config\s+set=[\'"][^\'"]+[\'"]>(.*?)</config>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<digest\s*/>', '', display)
-    display = re.sub(r'<digest></digest>', '', display)
-    display = re.sub(r'<train\s*/>', '', display)
-    display = re.sub(r'<train></train>', '', display)
-    display = re.sub(r'<cron\s+[^>]*?>(.*?)</cron>', '', display, flags=re.DOTALL)
-    display = re.sub(r'<tool_call>\s*.*?\s*</tool_call>', '', display, flags=re.DOTALL)
-    # A reply cut off mid-tag leaves an unterminated tag; never show it.
-    display = re.sub(
-        r'<(?:cmd|py|search|read|browse|click|type|scroll|note|skill|cron|digest|train|memory|profile|config|tool_call)\b[^>]*>[^<]*$',
-        '', display, flags=re.DOTALL,
-    )
+    display = _strip_complete_tag_pairs(reply)
+    display = _UNTERMINATED_TAG_RE.sub('', display)
     return clean_response(display)
+
+
+def detect_malformed_tag(reply: str) -> str | None:
+    """Did this reply contain something that looked like a tool call but
+    never resolved into one — an unterminated tag (likely truncated by
+    max_tokens, or just missing its close) or a <tool_call> whose content
+    isn't valid JSON? Returns a short description for the model to see and
+    self-correct on next round, or None if the reply was clean. Checked
+    against the ORIGINAL reply, not stripped text — a syntactically
+    complete but JSON-invalid <tool_call> is already removed by
+    strip_tool_tags, so it must be caught here instead."""
+    unterminated = _UNTERMINATED_TAG_RE.search(_strip_complete_tag_pairs(reply))
+    if unterminated:
+        return f"An unterminated tag was left open and unusable: {unterminated.group(0)[:120]!r}"
+    for m in re.finditer(r'<tool_call>\s*(.*?)\s*</tool_call>', reply, re.DOTALL):
+        try:
+            json.loads(m.group(1).strip())
+        except json.JSONDecodeError as e:
+            return f"A <tool_call> contained invalid JSON and could not be used: {e}"
+    return None
+
+
+class StreamingStripper:
+    """Incremental, best-effort view of a reply as it streams token-by-
+    token: known tool tags are held back and dropped once confirmed closed
+    (same rule as strip_tool_tags), so raw tag syntax never flashes on
+    screen. This is a UX layer only — the authoritative parsed reply is
+    still computed from the complete text with strip_tool_tags/parse_tools
+    once generation finishes, so a quirk here can never change what the
+    agent actually does, only how the in-progress text looks."""
+
+    def __init__(self):
+        self._buffer = ""
+
+    def feed(self, chunk: str) -> str:
+        """Add newly generated text; return the text now safe to display."""
+        self._buffer = _strip_complete_tag_pairs(self._buffer + chunk)
+        cut = self._first_ambiguous_lt()
+        if cut == -1:
+            safe, self._buffer = self._buffer, ""
+        else:
+            safe, self._buffer = self._buffer[:cut], self._buffer[cut:]
+        return safe
+
+    def finish(self) -> str:
+        """Call once generation ends; returns any remaining safe text —
+        plain prose with a stray '<' that never became a tag, or a
+        genuinely truncated tag, either way handled by strip_tool_tags."""
+        remaining = strip_tool_tags(self._buffer)
+        self._buffer = ""
+        return remaining
+
+    def _first_ambiguous_lt(self) -> int:
+        """Index of a '<' that might still be starting a known tag and
+        can't be ruled out yet, or -1 if the buffer is unambiguously safe
+        to show as-is (no '<', or every '<' has already diverged from
+        every known tag name — e.g. "x < 5" is never held back)."""
+        for m in re.finditer('<', self._buffer):
+            tail = self._buffer[m.start() + 1:]
+            if tail == "" or any(
+                name.startswith(tail) or tail.startswith(name)
+                for name in _KNOWN_TAG_NAMES
+            ):
+                return m.start()
+        return -1
