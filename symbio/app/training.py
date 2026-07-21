@@ -19,8 +19,21 @@ from symbio.app import config as app_config
 from symbio.app.tooling import clean_response
 
 
-def append_training_text(text: str):
-    with open(constants.TRAIN_FILE, "a", encoding="utf-8") as f:
+def _train_file_for(role: str | None) -> Path:
+    # role=None reads constants.TRAIN_FILE directly (not re-derived from
+    # constants.DATA_DIR) so code/tests that monkeypatch TRAIN_FILE alone
+    # — the pre-existing, still-common pattern — keep working unchanged.
+    return constants.TRAIN_FILE if role is None else constants.data_dir_for(role) / "train.jsonl"
+
+
+def _valid_file_for(role: str | None) -> Path:
+    return constants.VALID_FILE if role is None else constants.data_dir_for(role) / "valid.jsonl"
+
+
+def append_training_text(text: str, role: str | None = None):
+    train_file = _train_file_for(role)
+    train_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(train_file, "a", encoding="utf-8") as f:
         json.dump({"text": text}, f)
         f.write("\n")
 
@@ -34,13 +47,14 @@ def build_chat_training_sample(messages: list[dict[str, str]], tokenizer) -> str
     )
 
 
-def append_chat_pair(user_msg: str, assistant_msg: str, tokenizer, system_prompt: str):
+def append_chat_pair(user_msg: str, assistant_msg: str, tokenizer, system_prompt: str,
+                     role: str | None = None):
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
         {"role": "assistant", "content": clean_response(assistant_msg)},
     ]
-    append_training_text(build_chat_training_sample(messages, tokenizer))
+    append_training_text(build_chat_training_sample(messages, tokenizer), role=role)
 
 
 def _note_timestamp(f: Path) -> datetime:
@@ -349,27 +363,36 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         append_chat_pair(user_msg, assistant_msg, tokenizer, system_prompt)
 
 
-def ensure_validation_split(every_nth: int = 10, max_samples: int = 24):
+def ensure_validation_split(every_nth: int = 10, max_samples: int = 24,
+                            role: str | None = None):
     """mlx_lm silently skips evaluation when valid.jsonl is missing, which
     makes steps_per_eval meaningless. Sample a small validation set from the
     training data so eval loss is always reported."""
-    if constants.VALID_FILE.exists() and constants.VALID_FILE.stat().st_size > 0:
+    train_file = _train_file_for(role)
+    valid_file = _valid_file_for(role)
+    if valid_file.exists() and valid_file.stat().st_size > 0:
         return
-    lines = [l for l in constants.TRAIN_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
+    lines = [l for l in train_file.read_text(encoding="utf-8").splitlines() if l.strip()]
     sample = lines[::every_nth][:max_samples] or lines[:1]
-    constants.VALID_FILE.write_text("\n".join(sample) + "\n", encoding="utf-8")
+    valid_file.write_text("\n".join(sample) + "\n", encoding="utf-8")
 
 
-def run_training(config: dict[str, Any], iters: int | None = None) -> bool:
+def run_training(config: dict[str, Any], iters: int | None = None,
+                 role: str | None = None, model_name: str | None = None) -> bool:
     """Run a LoRA fine-tune. `iters` overrides lora.iters for short passes
-    (e.g. the correction-learning batches)."""
-    if not constants.TRAIN_FILE.exists() or constants.TRAIN_FILE.stat().st_size == 0:
+    (e.g. the correction-learning batches). `role`/`model_name` train a
+    worker's own adapter against its own data directory instead of the
+    headmaster's — role is None everywhere except symbio.app.dispatch."""
+    train_file = _train_file_for(role)
+    data_dir = train_file.parent
+    adapter_dir = constants.adapter_dir_for(role)
+    if not train_file.exists() or train_file.stat().st_size == 0:
         print("  [System] No training data available.")
         return False
-    ensure_validation_split()
+    ensure_validation_split(role=role)
 
     # Sweep temp LoRA config files left behind by previous crashed runs.
-    for stale in constants.DATA_DIR.glob("tmp*.yaml"):
+    for stale in data_dir.glob("tmp*.yaml"):
         try:
             stale.unlink()
         except OSError:
@@ -386,22 +409,22 @@ def run_training(config: dict[str, Any], iters: int | None = None) -> bool:
             "scale": lora["scale"],
         }
     }
-    config_fd, config_path = tempfile.mkstemp(suffix=".yaml", dir=str(constants.DATA_DIR))
+    config_fd, config_path = tempfile.mkstemp(suffix=".yaml", dir=str(data_dir))
     with os.fdopen(config_fd, "w") as f:
         yaml.dump(lora_config, f)
 
     cmd = [
         sys.executable, "-m", "mlx_lm", "lora",
-        "--model", config["model_name"],
+        "--model", model_name or config["model_name"],
         "--train",
-        "--data", str(constants.DATA_DIR),
+        "--data", str(data_dir),
         "--batch-size", str(lora["batch_size"]),
         "--num-layers", str(lora["num_layers"]),
         "--iters", str(iters if iters is not None else lora["iters"]),
         "--learning-rate", str(lora["learning_rate"]),
         "--steps-per-eval", str(lora["steps_per_eval"]),
         "--max-seq-length", str(lora["max_seq_length"]),
-        "--adapter-path", str(constants.ADAPTER_DIR),
+        "--adapter-path", str(adapter_dir),
         "--save-every", str(lora["save_every"]),
         "--config", config_path,
     ]
@@ -419,33 +442,35 @@ def run_training(config: dict[str, Any], iters: int | None = None) -> bool:
         except OSError:
             pass
 
-    config_file = constants.ADAPTER_DIR / "adapter_config.json"
-    weight_files = list(constants.ADAPTER_DIR.glob("adapters.*"))
+    config_file = adapter_dir / "adapter_config.json"
+    weight_files = list(adapter_dir.glob("adapters.*"))
     if not config_file.exists() or not weight_files:
         print("  [System] Adapter files missing after training.")
         return False
 
-    adapter_kb = sum(f.stat().st_size for f in constants.ADAPTER_DIR.iterdir() if f.is_file()) // 1024
+    adapter_kb = sum(f.stat().st_size for f in adapter_dir.iterdir() if f.is_file()) // 1024
     print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB")
     return True
 
 
-def backup_adapter() -> Path | None:
+def backup_adapter(role: str | None = None) -> Path | None:
     """Snapshot the current adapter before a training run, so a regression
     caught by the golden set can be rolled back. Returns None when there is
     no existing adapter to protect (e.g. the very first training run)."""
-    if not constants.ADAPTER_DIR.exists() or not any(constants.ADAPTER_DIR.iterdir()):
+    adapter_dir = constants.adapter_dir_for(role)
+    if not adapter_dir.exists() or not any(adapter_dir.iterdir()):
         return None
-    backup_dir = constants.ADAPTER_DIR.parent / f"adapters.bak.{datetime.now():%Y%m%d_%H%M%S_%f}"
-    shutil.copytree(constants.ADAPTER_DIR, backup_dir)
+    backup_dir = adapter_dir.parent / f"{adapter_dir.name}.bak.{datetime.now():%Y%m%d_%H%M%S_%f}"
+    shutil.copytree(adapter_dir, backup_dir)
     return backup_dir
 
 
-def restore_adapter(backup_dir: Path):
+def restore_adapter(backup_dir: Path, role: str | None = None):
     """Replace the current adapter with a previously backed-up one."""
-    if constants.ADAPTER_DIR.exists():
-        shutil.rmtree(constants.ADAPTER_DIR)
-    shutil.copytree(backup_dir, constants.ADAPTER_DIR)
+    adapter_dir = constants.adapter_dir_for(role)
+    if adapter_dir.exists():
+        shutil.rmtree(adapter_dir)
+    shutil.copytree(backup_dir, adapter_dir)
 
 
 def discard_adapter_backup(backup_dir: Path | None):
@@ -457,10 +482,10 @@ def discard_adapter_backup(backup_dir: Path | None):
 _ADAPTER_LAST_USED_FILE_NAME = "last_used.json"
 
 
-def adapter_last_used() -> datetime | None:
-    """When was the current adapter last loaded into a session? None if it
-    has never been tracked (e.g. just trained, or from before this feature)."""
-    path = constants.ADAPTER_DIR / _ADAPTER_LAST_USED_FILE_NAME
+def adapter_last_used(role: str | None = None) -> datetime | None:
+    """When was this adapter last loaded into a session? None if it has
+    never been tracked (e.g. just trained, or from before this feature)."""
+    path = constants.adapter_dir_for(role) / _ADAPTER_LAST_USED_FILE_NAME
     if not path.exists():
         return None
     try:
@@ -469,34 +494,37 @@ def adapter_last_used() -> datetime | None:
         return None
 
 
-def mark_adapter_used():
-    """Record that the current adapter was just loaded into a session,
-    resetting the idle clock the reminder in ChatSession checks against."""
-    if not constants.ADAPTER_DIR.exists():
+def mark_adapter_used(role: str | None = None):
+    """Record that this adapter was just loaded into a session, resetting
+    the idle clock the reminder in ChatSession checks against."""
+    adapter_dir = constants.adapter_dir_for(role)
+    if not adapter_dir.exists():
         return
-    path = constants.ADAPTER_DIR / _ADAPTER_LAST_USED_FILE_NAME
+    path = adapter_dir / _ADAPTER_LAST_USED_FILE_NAME
     path.write_text(json.dumps({"last_used": datetime.now().isoformat()}), encoding="utf-8")
 
 
-def remove_adapter():
-    """Delete the current adapter entirely, reverting to the base model."""
-    if constants.ADAPTER_DIR.exists():
-        shutil.rmtree(constants.ADAPTER_DIR)
-    constants.ADAPTER_DIR.mkdir(parents=True, exist_ok=True)
+def remove_adapter(role: str | None = None):
+    """Delete this adapter entirely, reverting to the base model."""
+    adapter_dir = constants.adapter_dir_for(role)
+    if adapter_dir.exists():
+        shutil.rmtree(adapter_dir)
+    adapter_dir.mkdir(parents=True, exist_ok=True)
 
 
-def prune_adapters() -> dict[str, Any]:
+def prune_adapters(role: str | None = None) -> dict[str, Any]:
     """Remove intermediate checkpoints and report adapter footprint."""
+    adapter_dir = constants.adapter_dir_for(role)
     removed = []
-    for cp in constants.ADAPTER_DIR.glob("[0-9]*_adapters.*"):
+    for cp in adapter_dir.glob("[0-9]*_adapters.*"):
         cp.unlink()
         removed.append(cp.name)
 
-    total_bytes = sum(f.stat().st_size for f in constants.ADAPTER_DIR.iterdir() if f.is_file())
+    total_bytes = sum(f.stat().st_size for f in adapter_dir.iterdir() if f.is_file())
     return {
         "removed": removed,
         "total_kb": total_bytes // 1024,
-        "files": [f.name for f in constants.ADAPTER_DIR.iterdir() if f.is_file()],
+        "files": [f.name for f in adapter_dir.iterdir() if f.is_file()],
     }
 
 

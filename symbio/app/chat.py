@@ -16,7 +16,7 @@ from mlx_lm.sample_utils import make_sampler
 from rag import Retriever
 from symbio import constants
 from symbio.computer import BrowserSession
-from symbio.app import cron, golden, learn, memory, prompts, sandbox, sessions, tooling, training, web
+from symbio.app import cron, dispatch, golden, learn, memory, prompts, sandbox, sessions, tooling, training, web
 from symbio.app.config import config_show, set_config_value
 
 
@@ -47,7 +47,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"   Data   : {dataset_size:,} bytes")
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
-    output_fn("Commands: /quit  /save  /train  /golden  /learn  /forget_last  /status  /prune  /help")
+    output_fn("Commands: /quit  /save  /train  /train_worker  /golden  /learn  /forget_last  /status  /prune  /help")
     output_fn("         /run <cmd>  /note [title]  /notes  /skills  /digest  /cron  /config")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     output_fn("-" * 50)
@@ -179,6 +179,10 @@ class ChatSession:
         self.retriever = Retriever(config, session_store=self.session_store,
                                    exclude_session_id=self.session_id)
         self.browser = BrowserSession(confirm_fn=self.confirm_fn)
+        # Worker models are loaded lazily on first delegated task — this
+        # just holds the (empty) pool, no extra RAM until dispatch.enabled
+        # and something actually delegates.
+        self.dispatch = dispatch.WorkerPool(config)
         self.logger = _make_chat_logger()
         self.user_turns = 0
         self.auto_searches = 0
@@ -483,6 +487,15 @@ class ChatSession:
         elif cmd == "/train":
             self._guarded_train()
 
+        elif cmd.startswith("/train_worker"):
+            parts = user_input.split(None, 1)
+            role = parts[1].strip() if len(parts) == 2 else ""
+            if not role:
+                self.output_fn("  Usage: /train_worker <role>  (e.g. /train_worker summarize)")
+            else:
+                trained, msg = dispatch.guarded_train_worker(role, self.config)
+                self.output_fn(f"  [Worker] {msg}")
+
         elif cmd == "/golden":
             result = golden.run_golden_set(
                 self.model, self.tokenizer, self.generate_fn, self.sampler,
@@ -544,6 +557,12 @@ class ChatSession:
             if last_used is not None:
                 idle_days = (datetime.now() - last_used).days
                 self.output_fn(f"  Adapter last used: {idle_days} day(s) ago")
+            dispatch_on = self.config.get("dispatch", {}).get("enabled", False)
+            loaded_workers = self.dispatch.loaded_roles()
+            self.output_fn(
+                f"  Dispatch: {'ON' if dispatch_on else 'off'}"
+                + (f" — loaded worker(s): {', '.join(loaded_workers)}" if loaded_workers else "")
+            )
 
         elif cmd.startswith("/config"):
             parts = user_input.split(None, 3)[1:]
@@ -1026,6 +1045,12 @@ class ChatSession:
         if name == "train_adapter":
             self._guarded_train()
             return self._last_train_note
+
+        if name == "delegate_task":
+            if not self.config.get("dispatch", {}).get("enabled", False):
+                return "Delegation is disabled (dispatch.enabled is off)."
+            return self.dispatch.run_delegated_task(
+                params["role"], params["task"], browser=self.browser)
 
         return f"Unknown tool: {name}"
 
