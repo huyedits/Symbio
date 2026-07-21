@@ -984,6 +984,18 @@ class ChatSession:
             if not self.confirm_fn(prompt):
                 return f"Tool '{name}' was not approved."
 
+        # A tool failing outright (e.g. clicking before the browser was ever
+        # opened) must never crash the whole session — every branch below
+        # already tries to catch its own likely failures, but this is the
+        # backstop for anything that slips through. It becomes an
+        # observation the model — and the tool-mistake-learning pipeline in
+        # _agent_turn — can react to, same as any other tool failure.
+        try:
+            return self._dispatch_tool(name, params)
+        except Exception as e:
+            return f"Tool '{name}' failed unexpectedly: {e}"
+
+    def _dispatch_tool(self, name: str, params: dict[str, Any]) -> str:
         if name == "write_note":
             try:
                 p = memory.save_note(params["title"], params["body"])

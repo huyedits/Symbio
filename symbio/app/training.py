@@ -346,7 +346,8 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             "Who won the Tour de France in 2031?",
             "I don't have that memorized — checking. <search>Tour de France 2031 winner</search>",
         ),
-        # Web/YouTube search = open a search URL in the browser
+        # Just opening a search for the user to look at themselves = <cmd>open>,
+        # since nothing more is needed from the agent afterward.
         (
             "Search YouTube for lofi beats.",
             f"<cmd>{url_opener} 'https://www.youtube.com/results?search_query=lofi+beats'</cmd> "
@@ -356,6 +357,22 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             "Search the web for the weather in Sydney.",
             f"<cmd>{url_opener} 'https://www.google.com/search?q=weather+in+Sydney'</cmd> "
             "Here's a web search for Sydney weather.",
+        ),
+        # But interacting with the results (clicking one) needs the agent's
+        # OWN controllable browser, not the user's — <cmd>open> hands the
+        # page to the user's browser with no way back, so <browse>+<click>
+        # is the only tag pair that can actually finish this request.
+        (
+            "Open YouTube, search for nuclear power plant, and click the first video you see.",
+            "<browse>https://www.youtube.com/results?search_query=nuclear+power+plant</browse> "
+            "Opening the search now — I'll click the first video once it loads.",
+        ),
+        (
+            "[System observation: Opened browser at https://www.youtube.com/results?"
+            "search_query=nuclear+power+plant. Page title: nuclear power plant - YouTube\n\n"
+            "Page text now:\nNuclear Power Plant Explained\nHow Nuclear Reactors Work\n"
+            "Inside a Nuclear Power Station]",
+            "<click>Nuclear Power Plant Explained</click> Clicking the first video.",
         ),
     ]
 

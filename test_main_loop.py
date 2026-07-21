@@ -811,6 +811,43 @@ def test_agent_loop_browses():
     print("test_agent_loop_browses passed")
 
 
+def test_agent_loop_survives_tool_exception():
+    """Reproduces a real crash: the model opened a page with <cmd>open ...
+    (the system browser, not Symbio's own) then tried <click>, which raised
+    RuntimeError uncaught all the way out of the process. Any tool
+    unexpectedly raising must become an observation, never crash the turn."""
+    real_browser = chat.BrowserSession
+    chat.BrowserSession = FakeBrowser
+    try:
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["Open youtube and click the first video.", "/quit", "n"],
+                model_replies=[
+                    "<cmd>open 'https://www.youtube.com/results?search_query=x'</cmd> Opening it.",
+                    "<click>first video</click> Clicking it.",
+                    "Sorry, I couldn't click that — let me try browsing it myself instead.",
+                ],
+            )
+            real_click = FakeBrowser.click
+
+            def raising_click(self, selector="", text=""):
+                raise RuntimeError(
+                    "Browser is not open. Call browser_open with the target URL yourself, then retry.")
+
+            FakeBrowser.click = raising_click
+            try:
+                session.run()  # must not raise
+            finally:
+                FakeBrowser.click = real_click
+            assert len(session.prompts_seen) == 3, len(session.prompts_seen)
+            obs = session.prompts_seen[2]
+            assert "failed unexpectedly" in obs.lower(), obs
+            assert "not open" in obs.lower(), obs
+    finally:
+        chat.BrowserSession = real_browser
+    print("test_agent_loop_survives_tool_exception passed")
+
+
 def test_digest_includes_curated_stores():
     import shutil
     import tempfile
@@ -1143,6 +1180,8 @@ def test_sounds_like_tool_error():
         "Browser open blocked: example.com not yet approved.",
         "Worker gave an unrecognized action and stopped: maybe click something",
         "Worker did not finish within 4 round(s). Last action: scroll",
+        "Tool 'browser_click' failed unexpectedly: Browser is not open. "
+        "Call browser_open with the target URL yourself, then retry.",
     ]:
         assert learn.sounds_like_tool_error(observation), observation
     for observation in [
@@ -1410,6 +1449,7 @@ def _run_all_inner():
         test_rag_injects_saved_notes()
         test_parse_browser_tags()
         test_agent_loop_browses()
+        test_agent_loop_survives_tool_exception()
         test_parse_skill_tag()
         test_agent_loop_saves_skill()
         test_correction_detection_and_mining()
