@@ -38,7 +38,15 @@ from symbio.utils import (
 )
 
 from rag import Retriever
-from planner import TrainingPlanner
+
+try:
+    from planner import TrainingPlanner
+except ImportError:
+    # planner.py lives at the project root; ensure the project root is on
+    # sys.path when symbio is installed as a package (e.g. the `symb` console
+    # entry point does not add the CWD to sys.path in some environments).
+    sys.path.insert(0, str(PROJECT_DIR))
+    from planner import TrainingPlanner
 
 # Browser / desktop automation helpers (lazy-imported inside runners if missing).
 try:

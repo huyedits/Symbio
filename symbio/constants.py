@@ -157,7 +157,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "tools": {
         "enabled_groups": [
             "memory", "notes", "terminal", "code", "web_search",
-            "browser", "digest", "train", "cron", "config",
+            "browser", "digest", "train", "cron", "config", "frontier",
         ],
     },
 }

@@ -8,9 +8,9 @@ from typing import Any
 from symbio import constants
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "model_name": "Qwen/Qwen3-0.6B",
-    "assistant_name": "Caine",
-    "user_name": "Huy",
+    "model_name": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+    "assistant_name": "",
+    "user_name": "",
     "lora": {
         "rank": 8,
         "dropout": 0.0,
@@ -35,6 +35,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "cron_poll_seconds": 20,
         "stream_output": True,
         "prompt_cache_enabled": True,
+        # How long a chat front-end should wait before showing a "thinking…"
+        # placeholder if the model has not emitted a visible token yet.
+        "first_chunk_timeout_ms": 1500,
+        # Maximum character budget for the retained conversation window. One
+        # giant observation (e.g. a full web page) can otherwise bloat every
+        # later turn even with a turn-count history limit.
+        "max_history_chars": 12000,
+        # Lower temperature during tool-use rounds makes the model follow the
+        # prompt's tag rules (browse vs cmd, press vs fake keydown) more
+        # strictly instead of drifting into prose or hallucinated commands.
+        "tool_use_temperature": 0.35,
+    },
+    "browser": {
+        # Browser automation is off by default. When enabled, the agent launches
+        # its own isolated Google Chrome / Chromium via Playwright, not the
+        # user's personal browser profile. It must still ask for confirmation
+        # the first time it visits a new domain.
+        "enabled": False,
     },
     "web": {
         "search_results": 5,
@@ -104,7 +122,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "tools": {
         "enabled_groups": [
             "memory", "notes", "terminal", "code", "web_search",
-            "browser", "digest", "train", "cron", "config", "delegate",
+            "digest", "train", "cron", "config", "delegate",
         ],
     },
     "dispatch": {
@@ -125,8 +143,40 @@ DEFAULT_CONFIG: dict[str, Any] = {
 _RESTART_KEYS = {"model_name"}
 
 
+def _env_list(key: str) -> list[str] | None:
+    """Parse a comma-separated env var into a list, or None if unset/empty."""
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return None
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _apply_env_overrides(config: dict[str, Any]) -> None:
+    """Let environment variables override key identity/model/secret settings."""
+    if os.environ.get("SYMBIO_MODEL_NAME", "").strip():
+        config["model_name"] = os.environ["SYMBIO_MODEL_NAME"].strip()
+    if os.environ.get("SYMBIO_ASSISTANT_NAME", "").strip():
+        config["assistant_name"] = os.environ["SYMBIO_ASSISTANT_NAME"].strip()
+    if os.environ.get("SYMBIO_USER_NAME", "").strip():
+        config["user_name"] = os.environ["SYMBIO_USER_NAME"].strip()
+
+    token = os.environ.get("SYMBIO_TELEGRAM_TOKEN", "").strip()
+    if token:
+        config.setdefault("telegram", {})
+        config["telegram"]["bot_token"] = token
+        config["telegram"]["enabled"] = True
+
+    allowed = _env_list("SYMBIO_TELEGRAM_ALLOWED_CHAT_IDS")
+    if allowed:
+        config.setdefault("telegram", {})
+        try:
+            config["telegram"]["allowed_chat_ids"] = [int(x) for x in allowed]
+        except ValueError:
+            print("[Config warning] SYMBIO_TELEGRAM_ALLOWED_CHAT_IDS contains non-integer values; ignored.")
+
+
 def load_config() -> dict[str, Any]:
-    """Load config.json if present; merge with sensible defaults."""
+    """Load config.json if present; merge with sensible defaults and env overrides."""
     # Deep copy: callers (e.g. set_config_value) mutate nested sections, and a
     # shallow copy would poison DEFAULT_CONFIG for every later load.
     config = copy.deepcopy(DEFAULT_CONFIG)
@@ -139,6 +189,7 @@ def load_config() -> dict[str, Any]:
                     config[section] = {**DEFAULT_CONFIG[section], **user_config[section]}
         except Exception as e:
             print(f"[Config warning] Could not read {constants.CONFIG_FILE}: {e}")
+    _apply_env_overrides(config)
     return config
 
 

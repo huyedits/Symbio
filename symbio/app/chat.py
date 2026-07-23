@@ -3,6 +3,7 @@ and the growth loop (memory nudges, exit flush, cron surfacing)."""
 
 import json
 import logging
+import sys
 import threading
 import time
 from datetime import datetime
@@ -16,7 +17,7 @@ from mlx_lm.sample_utils import make_sampler
 from rag import Retriever
 from symbio import constants
 from symbio.computer import BrowserSession
-from symbio.app import cron, dispatch, golden, learn, memory, prompts, sandbox, sessions, tooling, training, web
+from symbio.app import cron, dispatch, golden, learn, memory, mcp_bridge, prompts, sandbox, sessions, tooling, training, web
 from symbio.app.config import config_show, set_config_value
 
 
@@ -34,6 +35,55 @@ def _make_chat_logger() -> logging.Logger:
     fh.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
     logger.addHandler(fh)
     return logger
+
+
+class _Spinner:
+    """Terminal spinner shown while waiting for visible model output.
+
+    Runs on a daemon thread and anchors itself with carriage returns; stop()
+    erases the line so streamed text can take its place. No-op when stdout
+    is not a TTY (tests, pipes, or non-terminal front-ends).
+    """
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, label: str = "thinking…"):
+        self.label = label
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.active = sys.stdout.isatty()
+        self._start_time: float | None = None
+
+    def start(self):
+        if not self.active or self._thread is not None:
+            return
+        self._stop_event.clear()
+        self._start_time = time.perf_counter()
+
+        def _spin():
+            i = 0
+            while not self._stop_event.wait(0.08):
+                elapsed = time.perf_counter() - self._start_time
+                frame = self._FRAMES[i % len(self._FRAMES)]
+                if elapsed >= 5:
+                    label = f"{self.label} ({int(elapsed)}s)"
+                else:
+                    label = self.label
+                sys.stdout.write(f"\r{frame} {label}")
+                sys.stdout.flush()
+                i += 1
+
+        self._thread = threading.Thread(target=_spin, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._thread is None:
+            return
+        self._stop_event.set()
+        self._thread.join()
+        self._thread = None
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
 
 
 def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int,
@@ -79,6 +129,7 @@ _WEB_TOOLS = {
 # front-end (e.g. Telegram) because they mutate state or run user-supplied code.
 _TELEGRAM_CONFIRM_TOOLS = frozenset({
     "execute_code", "run_command", "digest_notes", "train_adapter", "schedule_job", "config_set",
+    "delete_cron_job", "update_cron_job",
 })
 
 # Map internal tool names back to Hermes-style names for <tool_response> labels.
@@ -120,7 +171,12 @@ class ChatSession:
     def __init__(self, config: dict[str, Any], model=None, tokenizer=None,
                  adapter_loaded: bool | None = None,
                  input_fn=None, output_fn=None, confirm_fn=None,
-                 generate_fn=None, stream_fn=None, stream_chunk_fn=None):
+                 generate_fn=None, stream_fn=None, stream_chunk_fn=None,
+                 stream_prefix: bool = True):
+        # Last URL successfully opened in the controllable browser; used to
+        # auto-recover when a later click/type/scroll/press finds the browser
+        # session was reset or never opened.
+        self._last_browsed_url: str = ""
         self.config = config
         self.input_fn = input_fn if input_fn is not None else input
         self.output_fn = output_fn if output_fn is not None else print
@@ -132,6 +188,10 @@ class ChatSession:
         # edit). None means no live output — replies are shown once
         # complete, same as before streaming existed.
         self.stream_chunk_fn = stream_chunk_fn
+        # Whether to prepend the assistant-name prefix to streamed chunks.
+        # Terminal front-ends want it for alignment; chat front-ends like
+        # Telegram supply their own sender context, so the prefix is noise.
+        self.stream_prefix = stream_prefix
         # KV-cache reuse across generate calls (see _generate_reply);
         # invalidated whenever the prompt's actual prefix changes out from
         # under it (adapter reload, a generation that errored mid-stream).
@@ -140,6 +200,9 @@ class ChatSession:
         self.enabled_groups: set[str] = set(
             config.get("tools", {}).get("enabled_groups", [])
         )
+        # Simple timing record for the most recent turn; surfaced in /status
+        # and used by front-ends to report latency.
+        self.last_turn_timings: dict[str, float | None] = {}
         self.system_prompt = prompts.build_system_prompt(
             config["assistant_name"], config["user_name"]
         )
@@ -181,8 +244,10 @@ class ChatSession:
         self.browser = BrowserSession(confirm_fn=self.confirm_fn)
         # Worker models are loaded lazily on first delegated task — this
         # just holds the (empty) pool, no extra RAM until dispatch.enabled
-        # and something actually delegates.
-        self.dispatch = dispatch.WorkerPool(config)
+        # and something actually delegates. Status messages go through the
+        # same output channel as tool observations so you can see workers
+        # loading and tasks delegating.
+        self.dispatch = dispatch.WorkerPool(config, status_fn=self.output_fn)
         self.logger = _make_chat_logger()
         self.user_turns = 0
         self.auto_searches = 0
@@ -198,9 +263,12 @@ class ChatSession:
 
     # ---- Infrastructure ----
 
-    def _refresh_sampler(self):
+    def _refresh_sampler(self, tool_use: bool = False):
+        temp = self.config["agent"].get("tool_use_temperature") if tool_use else None
+        if temp is None:
+            temp = self.config["agent"]["temperature"]
         self.sampler = make_sampler(
-            temp=self.config["agent"]["temperature"],
+            temp=temp,
             top_p=self.config["agent"]["top_p"],
         )
 
@@ -232,7 +300,12 @@ class ChatSession:
         except Exception as e:
             return str(e)
 
-    def _generate_reply(self, messages: list[dict[str, str]], chunk_prefix: str = "") -> tuple[str, bool]:
+    def _generate_reply(
+        self,
+        messages: list[dict[str, str]],
+        chunk_prefix: str = "",
+        timings: dict[str, float | None] | None = None,
+    ) -> tuple[str, bool]:
         """Generate the next reply for `messages`.
 
         When agent.prompt_cache_enabled, reuses the model's KV cache across
@@ -255,18 +328,34 @@ class ChatSession:
         prompt_text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
         )
+        prompt_tokens = len(self.tokenizer.encode(prompt_text))
+        if timings is not None:
+            timings["prompt_tokens"] = prompt_tokens
+            timings["prompt_chars"] = len(prompt_text)
         max_tokens = int(agent_cfg["max_reply_tokens"])
 
         if not agent_cfg.get("prompt_cache_enabled", True):
             # Caching off: the exact original call, unchanged.
-            text = self.generate_fn(
-                self.model, self.tokenizer, prompt=prompt_text, sampler=self.sampler,
-                max_tokens=max_tokens, verbose=False,
-            )
+            spinner = _Spinner()
+            spinner.start()
+            gen_start = time.perf_counter()
+            try:
+                text = self.generate_fn(
+                    self.model, self.tokenizer, prompt=prompt_text, sampler=self.sampler,
+                    max_tokens=max_tokens, verbose=False,
+                )
+            finally:
+                spinner.stop()
+            if timings is not None:
+                timings["gen_ms"] = (time.perf_counter() - gen_start) * 1000
+                timings["ttft_ms"] = timings["gen_ms"]
             return text, False
 
         ids = self.tokenizer.encode(prompt_text)
         reused = _common_prefix_len(self._cached_prompt_ids, ids)
+        if timings is not None:
+            timings["cached_tokens"] = reused
+            timings["new_tokens"] = len(ids) - reused
         if self._prompt_cache is None or reused == 0:
             self._prompt_cache = make_prompt_cache(self.model)
             feed = ids
@@ -284,11 +373,19 @@ class ChatSession:
         use_stream = self.stream_chunk_fn is not None and agent_cfg.get("stream_output", True)
         stripper = tooling.StreamingStripper() if use_stream else None
         shown = False
+        first_token_time: float | None = None
+        gen_start = time.perf_counter()
+        spinner = _Spinner()
+        spinner.start()
 
         def _emit(text: str):
-            nonlocal shown
+            nonlocal shown, first_token_time
             if not shown:
                 shown = True
+                first_token_time = time.perf_counter()
+                if timings is not None:
+                    timings["ttft_ms"] = (first_token_time - gen_start) * 1000
+                spinner.stop()
                 if chunk_prefix:
                     self.stream_chunk_fn(chunk_prefix)
             self.stream_chunk_fn(text)
@@ -313,6 +410,8 @@ class ChatSession:
             self._prompt_cache = None
             self._cached_prompt_ids = None
             raise
+        finally:
+            spinner.stop()
 
         if stripper is not None:
             tail = stripper.finish()
@@ -320,6 +419,11 @@ class ChatSession:
                 _emit(tail)
         if shown:
             self.stream_chunk_fn("\n")
+
+        if timings is not None:
+            timings["gen_ms"] = (time.perf_counter() - gen_start) * 1000
+            if timings.get("ttft_ms") is None:
+                timings["ttft_ms"] = timings["gen_ms"]
 
         self._cached_prompt_ids = ids + gen_ids
         return "".join(text_parts), shown
@@ -381,11 +485,17 @@ class ChatSession:
         learn_cfg = self.config.get("learn", {})
         golden_on = learn_cfg.get("golden_set_enabled", True)
 
+        self.output_fn("  [Train] Running pre-train golden checks...")
         baseline = None
         if golden_on:
             baseline = golden.run_golden_set(
                 self.model, self.tokenizer, self.generate_fn, self.sampler,
                 self.system_prompt, self.config, self.enabled_groups)
+            self.output_fn(
+                f"  [Train] Baseline golden checks: "
+                f"{baseline.pass_count}/{baseline.total} passing."
+            )
+        self.output_fn("  [Train] Backing up current adapter before training...")
         backup_dir = training.backup_adapter() if golden_on else None
 
         try:
@@ -394,6 +504,7 @@ class ChatSession:
                 self._last_train_note = "Training skipped (no new data or failed)."
                 return trained
 
+            self.output_fn("  [Train] Adapter trained. Reloading model...")
             err = self._reload_model()
             if err:
                 self.output_fn(f"  [Train] Adapter reload failed: {err}")
@@ -405,9 +516,14 @@ class ChatSession:
                 self._last_train_note = "Training complete. Adapter reloaded."
                 return True
 
+            self.output_fn("  [Train] Running post-train golden checks...")
             after = golden.run_golden_set(
                 self.model, self.tokenizer, self.generate_fn, self.sampler,
                 self.system_prompt, self.config, self.enabled_groups)
+            self.output_fn(
+                f"  [Train] Post-train golden checks: "
+                f"{after.pass_count}/{after.total} passing."
+            )
             regressions = sorted(baseline.passing - after.passing)
             threshold = int(learn_cfg.get("golden_regression_threshold", 0))
 
@@ -448,7 +564,26 @@ class ChatSession:
             training.discard_adapter_backup(backup_dir)
 
     def _trim_history(self):
-        while len(self.history) > self.config["agent"]["history_limit"] + 8:
+        """Keep the most recent messages, but also cap the total token
+        budget of the retained window so one giant observation (e.g. a full
+        web page dumped by a browser action) cannot bloat every later turn.
+        """
+        limit = self.config["agent"]["history_limit"]
+        while len(self.history) > limit + 8:
+            self.history.pop(0)
+        # Hard token budget: drop oldest messages until the retained window is
+        # under roughly half the model's typical context budget. This is a
+        # cheap safety valve; exact token counts are computed later in
+        # _generate_reply, but dropping by message count avoids repeatedly
+        # tokenizing here.
+        max_history_chars = int(self.config["agent"].get("max_history_chars", 12000))
+        while len(self.history) > 2:
+            window = [
+                m.get("content", "") for m in self.history[-limit:]
+                if isinstance(m.get("content"), str)
+            ]
+            if sum(len(c) for c in window) <= max_history_chars:
+                break
             self.history.pop(0)
 
     # ---- Slash commands ----
@@ -563,6 +698,23 @@ class ChatSession:
                 f"  Dispatch: {'ON' if dispatch_on else 'off'}"
                 + (f" — loaded worker(s): {', '.join(loaded_workers)}" if loaded_workers else "")
             )
+            timings = getattr(self, "last_turn_timings", {}) or {}
+            if timings.get("total_ms"):
+                self.output_fn("  Last turn latency:")
+                for key in ("rag_ms", "prompt_ms", "ttft_ms", "gen_ms", "tools_ms", "total_ms"):
+                    val = timings.get(key)
+                    label = key.replace("_ms", "").upper()
+                    self.output_fn(
+                        f"    {label}: {val:.0f}ms" if val is not None else f"    {label}: —"
+                    )
+                prompt_tokens = timings.get("prompt_tokens")
+                cached = timings.get("cached_tokens")
+                new = timings.get("new_tokens")
+                if prompt_tokens is not None:
+                    self.output_fn(
+                        f"    Prompt: {prompt_tokens} tokens "
+                        f"(cached {cached or 0}, new {new or 0})"
+                    )
 
         elif cmd.startswith("/config"):
             parts = user_input.split(None, 3)[1:]
@@ -757,6 +909,15 @@ class ChatSession:
     def _agent_turn(self, user_input: str):
         self.logger.info(f"User: {user_input}")
         self.session_store.log("user", user_input)
+        turn_start = time.perf_counter()
+        timings: dict[str, float | None] = {
+            "rag_ms": None,
+            "prompt_ms": None,
+            "ttft_ms": None,
+            "gen_ms": None,
+            "tools_ms": None,
+            "total_ms": None,
+        }
 
         # Detect corrections against the pre-append history: the last real
         # user turn is still the question the assistant just answered.
@@ -777,12 +938,14 @@ class ChatSession:
         # context. Retrieval text never enters history or training data.
         rag_context = self.retriever.build_context(user_input)
         rag_block = f"\n\n{rag_context}" if rag_context else ""
+        timings["rag_ms"] = (time.perf_counter() - turn_start) * 1000
 
         # Live-reload: config changes and prompt.md edits apply on the next turn.
         self._refresh_sampler()
         self.system_prompt = prompts.build_system_prompt(
             self.config["assistant_name"], self.config["user_name"]
         )
+        timings["prompt_ms"] = (time.perf_counter() - turn_start) * 1000
 
         self.user_turns += 1
         nudge_block = self._nudge_block()
@@ -801,15 +964,22 @@ class ChatSession:
         # any success so only a confirmed fix gets saved, not a mere retry.
         pending_tool_error: str | None = None
         for _ in range(max_rounds):
+            # Once we are inside a tool-followup round, lower the temperature
+            # so the model sticks to the tag grammar instead of drifting into
+            # prose or inventing fake commands.
+            if consecutive_tool_rounds:
+                self._refresh_sampler(tool_use=True)
+            gen_start = time.perf_counter()
             messages = [{"role": "system", "content": (
                 self.system_prompt + memory.curated_memory_block(self.config) + rag_block
                 + prompts.env_note() + prompts.time_note() + nudge_block
             )}]
             messages.extend(self.history[-self.config["agent"]["history_limit"]:])
 
+            chunk_prefix = f"{self.config['assistant_name']:8}: " if self.stream_prefix else ""
             try:
                 raw_reply, streamed_live = self._generate_reply(
-                    messages, chunk_prefix=f"{self.config['assistant_name']:8}: ")
+                    messages, chunk_prefix=chunk_prefix, timings=timings)
                 reply = raw_reply.strip()
             except KeyboardInterrupt:
                 # Ctrl-C during a slow generation abandons the turn, not the app.
@@ -948,6 +1118,7 @@ class ChatSession:
             )
 
             self.output_fn(f"  [Observation] {observation.replace(chr(10), chr(10) + '  ')}")
+            timings["tools_ms"] = (time.perf_counter() - gen_start) * 1000
             # Present results in Hermes-style <tool_response> JSON so the model
             # learns the structured format, while keeping a plain-text fallback
             # for models that have not switched to Hermes calls yet.
@@ -959,6 +1130,9 @@ class ChatSession:
             )})
             self._trim_history()
 
+        timings["total_ms"] = (time.perf_counter() - turn_start) * 1000
+        self.last_turn_timings = timings
+        self.logger.info(f"Timings: {timings}")
 
         if is_correction:
             # The corrected answer is now in history; capture and maybe retrain.
@@ -1029,25 +1203,42 @@ class ChatSession:
             return f"Reading {params['url']} {'succeeded' if ok else 'failed'}.\nContent:\n{out}"
 
         if name == "browser_open":
+            if not self.config.get("browser", {}).get("enabled", False):
+                return (
+                    "Browser automation is disabled. If you want me to open my "
+                    "own Google Chrome window, enable it with "
+                    "<config set=\"browser.enabled\">true</config>."
+                )
             out = self.browser.open(params["url"])
             if "blocked" not in out and "error" not in out.lower():
+                self._last_browsed_url = params["url"]
                 out += _browser_peek(self.browser)
             return out
 
-        if name == "browser_click":
-            target = params["target"]
-            if target.startswith(("#", ".", "//", "[")):
-                out = self.browser.click(selector=target)
-            else:
-                out = self.browser.click(text=target)
-            return out + _browser_peek(self.browser)
+        browser_action_tools = {
+            "browser_click": lambda: self.browser.click(
+                selector=params["target"] if params["target"].startswith(("#", ".", "//", "[")) else "",
+                text=params["target"] if not params["target"].startswith(("#", ".", "//", "[")) else "",
+            ),
+            "browser_type": lambda: self.browser.type_text(params["text"], press_enter=params["enter"]),
+            "browser_scroll": lambda: self.browser.scroll(params["direction"]),
+            "browser_press": lambda: self.browser.press(params["key"]),
+        }
 
-        if name == "browser_type":
-            out = self.browser.type_text(params["text"], press_enter=params["enter"])
+        if name in browser_action_tools:
+            if not self.config.get("browser", {}).get("enabled", False):
+                return (
+                    "Browser automation is disabled. Enable it with "
+                    "<config set=\"browser.enabled\">true</config> so I can use "
+                    "my own Chrome window."
+                )
+            out = browser_action_tools[name]()
+            if "Browser is not open" in out:
+                out = (
+                    f"{out} Use <browse>https://...</browse> to load a page first, "
+                    "then retry the action."
+                )
             return out + _browser_peek(self.browser)
-
-        if name == "browser_scroll":
-            return self.browser.scroll(params["direction"]) + _browser_peek(self.browser)
 
         if name == "save_memory":
             return memory.save_memory(params["store"], params["content"], self.config,
@@ -1082,6 +1273,47 @@ class ChatSession:
             except ValueError as e:
                 return f"Could not schedule job: {e}"
 
+        if name == "list_cron_jobs":
+            jobs = cron.list_cron_jobs()
+            if not jobs:
+                return "No scheduled jobs."
+            lines = ["Scheduled jobs:"]
+            for job in jobs:
+                lines.append(f"  {job['id']}: {job['schedule']} — {job['text']}")
+            return "\n".join(lines)
+
+        if name == "delete_cron_job":
+            try:
+                job = cron.delete_cron_job(int(params["job_id"]))
+                return f"Deleted job {job['id']}: {job['schedule']} — {job['text']}"
+            except (ValueError, KeyError) as e:
+                return f"Could not delete job: {e}"
+
+        if name == "update_cron_job":
+            try:
+                job = cron.update_cron_job(
+                    int(params["job_id"]),
+                    schedule=params.get("schedule"),
+                    text=params.get("text"),
+                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", []))
+                )
+                return f"Updated job {job['id']}: {job['schedule']} — {job['text']}"
+            except (ValueError, KeyError) as e:
+                return f"Could not update job: {e}"
+
+        if name == "brain_solve":
+            prompt = params.get("prompt", "").strip()
+            if not prompt:
+                return "No prompt provided to brain_solve."
+            use_frontier = bool(params.get("use_frontier", False))
+            result = mcp_bridge.brain_solve(prompt, use_frontier=use_frontier)
+            if not result.get("success"):
+                err = result.get("error", "unknown error")
+                return f"brain_solve failed: {err}"
+            source = result.get("source", "unknown")
+            fallback = " (frontier fallback)" if result.get("fallback") else ""
+            return f"[{source}{fallback}] {result['output']}"
+
         if name == "train_adapter":
             self._guarded_train()
             return self._last_train_note
@@ -1108,6 +1340,11 @@ class ChatSession:
             return f"Change config '{params.get('key')}' to '{params.get('value')}'?"
         if name == "schedule_job":
             return f"Schedule job '{params.get('schedule')}' with text '{params.get('text')}'?"
+        if name == "delete_cron_job":
+            return f"Delete scheduled job {params.get('job_id')}?"
+        if name == "update_cron_job":
+            return (f"Update scheduled job {params.get('job_id')} to "
+                    f"'{params.get('schedule')}' with text '{params.get('text')}'?")
         if name == "digest_notes":
             return "Digest all notes into training data?"
         if name == "train_adapter":

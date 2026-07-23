@@ -14,6 +14,7 @@ import concurrent.futures
 import queue
 import re
 import threading
+import time
 import uuid
 from typing import Any
 
@@ -75,6 +76,157 @@ class _ConfirmRequest:
         self.value: bool = False
 
 
+class _StreamSender:
+    """Deliver a streaming assistant reply to Telegram with throttled edits.
+
+    The model emits text token-by-token. Known tool tags are stripped live,
+    and safe text is sent as soon as possible. If no visible text arrives
+    within `first_chunk_timeout_ms`, a "thinking…" placeholder is sent so the
+    user knows the bot is alive; real text then replaces it.
+    """
+
+    _PLACEHOLDER = "thinking…"
+    _EDIT_INTERVAL = 0.6
+    _BATCH_SIZE = 300
+    _MESSAGE_LIMIT = 3800
+    _SENTENCE_END = frozenset(".!?\n")
+
+    def __init__(self, chat_id: int, bot, loop: asyncio.AbstractEventLoop,
+                 first_chunk_timeout_ms: float = 1500.0):
+        self.chat_id = chat_id
+        self.bot = bot
+        self.loop = loop
+        self.timeout_ms = first_chunk_timeout_ms
+        self.stripper = tooling.StreamingStripper()
+        self.buffer = ""
+        self.sent_text = ""
+        self.message_id: int | None = None
+        self._placeholder_timer: threading.Timer | None = None
+        self._last_edit_time = 0.0
+        self._lock = threading.Lock()
+        self._maybe_start_placeholder()
+
+    def feed(self, text: str) -> None:
+        """Consume a chunk of generated text."""
+        if not text:
+            return
+        with self._lock:
+            safe = self.stripper.feed(text)
+            if not safe:
+                self._maybe_start_placeholder()
+                return
+            self.buffer += safe
+            self._cancel_placeholder()
+            self._ensure_message()
+            self._flush_if_ready()
+
+    def finish(self) -> None:
+        """Finalize the streamed message. Call after generation ends."""
+        with self._lock:
+            self._cancel_placeholder()
+            tail = self.stripper.finish()
+            if tail:
+                self.buffer += tail
+            self._flush(force=True)
+            # Reset so a later tool round starts a fresh message.
+            self.message_id = None
+            self.sent_text = ""
+
+    def _maybe_start_placeholder(self) -> None:
+        if self.message_id is not None or self._placeholder_timer is not None:
+            return
+        self._placeholder_timer = threading.Timer(
+            self.timeout_ms / 1000.0, self._send_placeholder)
+        self._placeholder_timer.daemon = True
+        self._placeholder_timer.start()
+
+    def _send_placeholder(self) -> None:
+        with self._lock:
+            if self.message_id is not None:
+                return
+            self._placeholder_timer = None
+        self._send_message(self._PLACEHOLDER)
+
+    def _cancel_placeholder(self) -> None:
+        timer = self._placeholder_timer
+        if timer is not None:
+            self._placeholder_timer = None
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+    def _ensure_message(self) -> None:
+        if self.message_id is None:
+            text = self.buffer
+            self.buffer = ""
+            self._send_message(text)
+
+    def _flush_if_ready(self) -> None:
+        now = time.monotonic()
+        if len(self.buffer) > self._BATCH_SIZE:
+            self._flush(force=True)
+        elif self.buffer and (now - self._last_edit_time) > self._EDIT_INTERVAL:
+            if len(self.buffer) > 80 or self.buffer[-1] in self._SENTENCE_END:
+                self._flush(force=False)
+
+    def _flush(self, force: bool) -> None:
+        if not self.buffer:
+            return
+        text = self.sent_text + self.buffer
+        if self.message_id is None:
+            self._send_message(text)
+        else:
+            self._edit_message(text)
+        self.sent_text = text
+        self.buffer = ""
+        self._last_edit_time = time.monotonic()
+
+    def _send_message(self, text: str) -> None:
+        text = _prepare_for_telegram(text)
+        if not text:
+            return
+        if self.loop is None or self.loop.is_closed():
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self.bot.send_message(chat_id=self.chat_id, text=text[:4096]),
+                self.loop,
+            )
+            msg = future.result(timeout=10)
+            self.message_id = msg.message_id
+            self.sent_text = text
+        except Exception as e:
+            print(f"[Telegram] Failed to send stream message to {self.chat_id}: {e}")
+
+    def _edit_message(self, text: str) -> None:
+        if self.message_id is None:
+            return
+        text = _prepare_for_telegram(text)
+        if not text:
+            return
+        if self.loop is None or self.loop.is_closed():
+            return
+        # If the message has grown very long, start a new one instead of
+        # editing a giant block.
+        if len(text) > self._MESSAGE_LIMIT and len(self.sent_text) < self._MESSAGE_LIMIT:
+            overflow = text[self._MESSAGE_LIMIT:]
+            text = text[:self._MESSAGE_LIMIT]
+            self._send_message(overflow)
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self.bot.edit_message_text(
+                    chat_id=self.chat_id,
+                    message_id=self.message_id,
+                    text=text[:4096],
+                ),
+                self.loop,
+            )
+            future.result(timeout=10)
+        except Exception as e:
+            print(f"[Telegram] Failed to edit stream message {self.message_id}: {e}")
+
+
 class TelegramBot:
     """Telegram long-polling wrapper around a shared ChatSession model."""
 
@@ -134,8 +286,13 @@ class TelegramBot:
         return future.result()
 
     def _chat_config(self, chat_id: int) -> dict[str, Any]:
-        """Return a shallow config copy with per-chat tool groups applied."""
+        """Return a shallow config copy with per-chat tool groups applied.
+
+        Telegram replies are bounded more tightly than CLI replies so the
+        worst-case time-to-first-byte stays under the sub-2-second target.
+        """
         cfg = dict(self.config)
+        cfg["agent"] = {**cfg.get("agent", {}), "max_reply_tokens": 256}
         with _chat_tool_lock:
             groups = _chat_tool_groups.get(chat_id)
         if groups is not None:
@@ -154,6 +311,7 @@ class TelegramBot:
                     output_fn=lambda text: self._telegram_output(chat_id, text),
                     confirm_fn=lambda prompt: self._telegram_confirm(chat_id, prompt),
                     generate_fn=self._generate_on_infer_thread,
+                    stream_prefix=False,
                 )
             return _sessions[chat_id]
 
@@ -297,9 +455,26 @@ class TelegramBot:
             "dangerous actions ask for approval first.\n\n"
             "/start — show welcome\n"
             "/help — show this help\n"
+            "/ping — last-turn latency breakdown\n"
             "/tools — enable or disable tool groups\n"
             "/cancel — stop the current turn"
         )
+
+    async def _cmd_ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not self._is_allowed(chat_id):
+            return
+        session = self._get_or_create_session(chat_id)
+        timings = getattr(session, "last_turn_timings", {}) or {}
+        if not timings.get("total_ms"):
+            await update.message.reply_text("No turns measured yet.")
+            return
+        lines = ["Last turn latency:"]
+        for key in ("rag_ms", "prompt_ms", "ttft_ms", "gen_ms", "tools_ms", "total_ms"):
+            val = timings.get(key)
+            label = key.replace("_ms", "").upper()
+            lines.append(f"  {label}: {val:.0f}ms" if val is not None else f"  {label}: —")
+        await update.message.reply_text("\n".join(lines))
 
     async def _cmd_tools(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
@@ -423,6 +598,17 @@ class TelegramBot:
 
     def _process_message(self, chat_id: int, text: str):
         session = self._get_or_create_session(chat_id)
+        # Only normal chat turns stream; slash commands return synchronously
+        # and should never show a "thinking…" placeholder.
+        sender = None
+        if not text.startswith("/"):
+            sender = _StreamSender(
+                chat_id,
+                self.application.bot,
+                self._loop,
+                first_chunk_timeout_ms=session.config["agent"].get("first_chunk_timeout_ms", 1500),
+            )
+            session.stream_chunk_fn = sender.feed
         try:
             if text.startswith("/"):
                 result = session._handle_command(text)
@@ -434,6 +620,9 @@ class TelegramBot:
             session._agent_turn(text)
         except Exception as e:
             self._send_text(chat_id, f"Error: {e}")
+        finally:
+            if sender is not None:
+                sender.finish()
 
     def run(self):
         """Start long-polling. Blocks until the process is interrupted."""
@@ -457,6 +646,7 @@ class TelegramBot:
         self.application = Application.builder().token(token).build()
         self.application.add_handler(CommandHandler("start", self._cmd_start))
         self.application.add_handler(CommandHandler("help", self._cmd_help))
+        self.application.add_handler(CommandHandler("ping", self._cmd_ping))
         self.application.add_handler(CommandHandler("tools", self._cmd_tools))
         self.application.add_handler(CommandHandler("cancel", self._cmd_cancel))
         self.application.add_handler(CallbackQueryHandler(self._on_callback))

@@ -135,6 +135,15 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             "Find all Python files in the project.",
             '<tool_call>{"name": "search_files", "arguments": {"query": "\\.py$", "glob": "*.py"}}</tool_call>Here are the Python files I found.',
         ),
+        # --- Config ---
+        (
+            "Enable browser automation.",
+            '<tool_call>{"name": "config_set", "arguments": {"key": "browser.enabled", "value": "true"}}</tool_call>Browser automation enabled.',
+        ),
+        (
+            "Show my config.",
+            '<tool_call>{"name": "config_show", "arguments": {}}</tool_call>Here is your current configuration.',
+        ),
         # --- Terminal ---
         (
             "Check the current date.",
@@ -151,8 +160,53 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             '<tool_call>{"name": "browser_open", "arguments": {"url": "https://example.com"}}</tool_call>Opening example.com.',
         ),
         (
+            "Open apple.com in Chrome and click the first button.",
+            '<tool_call>{"name": "browser_open", "arguments": {"url": "https://www.apple.com"}}</tool_call>Opening apple.com in the controllable browser.',
+        ),
+        (
+            "Click the first button on apple.com.",
+            '<tool_call>{"name": "browser_click", "arguments": {"target": "first button"}}</tool_call>Clicking the first button.',
+        ),
+        (
+            "Read what apple.com says.",
+            '<tool_call>{"name": "browser_open", "arguments": {"url": "https://www.apple.com"}}</tool_call>Opening apple.com so I can read its contents.',
+        ),
+        (
+            "What does apple.com say?",
+            '<tool_call>{"name": "browser_open", "arguments": {"url": "https://www.apple.com"}}</tool_call>Opening apple.com to read its contents.',
+        ),
+        (
+            "Open cloudflare.com in Chrome and click the first button.",
+            '<tool_call>{"name": "browser_open", "arguments": {"url": "https://www.cloudflare.com"}}</tool_call>Opening Cloudflare in the controllable browser.',
+        ),
+        (
+            "Open YouTube Shorts in Chrome.",
+            '<tool_call>{"name": "browser_open", "arguments": {"url": "https://www.youtube.com/shorts"}}</tool_call>Opening YouTube Shorts in the controllable browser.',
+        ),
+        (
             "Scroll down to the next short.",
             '<tool_call>{"name": "browser_scroll", "arguments": {"direction": "down"}}</tool_call>Scrolling down.',
+        ),
+        (
+            "Go to the next video.",
+            '<tool_call>{"name": "browser_scroll", "arguments": {"direction": "down"}}</tool_call>Scrolling to the next video.',
+        ),
+        (
+            "Click the first button on example.com.",
+            '<tool_call>{"name": "browser_click", "arguments": {"target": "first button"}}</tool_call>Clicking the first button.',
+        ),
+        # --- Native app opener (no follow-up automation) ---
+        (
+            "Open Chrome.",
+            '<tool_call>{"name": "terminal", "arguments": {"cmd": "open -a \'Google Chrome\'"}}</tool_call>Opening Google Chrome.',
+        ),
+        (
+            "Open Spotify.",
+            '<tool_call>{"name": "terminal", "arguments": {"cmd": "open -a Spotify"}}</tool_call>Opening Spotify.',
+        ),
+        (
+            "Open my browser.",
+            '<tool_call>{"name": "terminal", "arguments": {"cmd": "open -a \'Google Chrome\'"}}</tool_call>Opening Google Chrome.',
         ),
         # --- Email Q&A ---
         (

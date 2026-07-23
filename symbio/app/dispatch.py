@@ -94,10 +94,14 @@ class WorkerPool:
     a typical machine; raise max_resident_workers if you have the RAM to
     keep more loaded at once — it's genuinely respected, not just a stub."""
 
-    def __init__(self, config: dict[str, Any]):
+    def __init__(self, config: dict[str, Any], status_fn=None):
         self.config = config
         # role -> (model, tokenizer, last_used_ts)
         self._resident: dict[str, tuple[Any, Any, float]] = {}
+        # Optional status callback: status_fn(message) is called with
+        # user-facing progress lines so a chat front-end can show when workers
+        # load and when tasks are delegated.
+        self.status_fn = status_fn
 
     def _dispatch_cfg(self) -> dict[str, Any]:
         return self.config.get("dispatch", {})
@@ -119,6 +123,10 @@ class WorkerPool:
     def loaded_roles(self) -> list[str]:
         return list(self._resident)
 
+    def _status(self, message: str):
+        if self.status_fn is not None:
+            self.status_fn(message)
+
     def get(self, role: str) -> tuple[Any, Any, dict[str, Any]] | None:
         """Return (model, tokenizer, catalog_entry) for `role`, loading it
         (with its own adapter, if trained) if not already resident. None if
@@ -136,12 +144,14 @@ class WorkerPool:
         self._evict_lru_if_needed()
         adapter_dir = constants.adapter_dir_for(role)
         adapter_config = adapter_dir / "adapter_config.json"
+        self._status(f"  [Dispatch] Loading worker '{role}' ({entry['model_name']})...")
         if adapter_config.exists():
             model, tokenizer = load(entry["model_name"], adapter_path=str(adapter_dir))
         else:
             model, tokenizer = load(entry["model_name"])
         self._resident[role] = (model, tokenizer, time.time())
         training.mark_adapter_used(role=role)
+        self._status(f"  [Dispatch] Worker '{role}' ready.")
         return model, tokenizer, entry
 
     def run_delegated_task(self, role: str, task: str, max_tokens: int = 300,
@@ -163,6 +173,7 @@ class WorkerPool:
             known = sorted({e.get("role") for e in load_catalog().values() if e.get("role")})
             return f"No worker configured for role '{role}'. Known roles: {', '.join(known) or 'none'}."
         model, tokenizer, entry = loaded
+        self._status(f"  [Dispatch] Delegating to '{role}': {task[:80]}{'...' if len(task) > 80 else ''}")
         system_prompt = ROLE_SYSTEM_PROMPTS.get(
             role, "Complete the following task concisely and directly.")
         messages = [
@@ -179,8 +190,10 @@ class WorkerPool:
                 max_tokens=max_tokens, verbose=False,
             ).strip()
         except Exception as e:
+            self._status(f"  [Dispatch] Worker '{role}' failed: {e}")
             return f"Worker '{role}' failed: {e}"
 
+        self._status(f"  [Dispatch] Worker '{role}' returned {len(reply.split())} word(s).")
         if reply:
             training.append_chat_pair(task, reply, tokenizer, system_prompt, role=role)
         return reply or f"Worker '{role}' returned nothing."

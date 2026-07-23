@@ -1,8 +1,14 @@
 {
+  "dense_7b": {
+    "model_name": "mlx-community/Qwen3-8B-4bit",
+    "description": "Dense 8B — best balance of quality, speed, and LoRA compatibility",
+    "adapter_compatible": true,
+    "memory_note": "~4.6 GB on disk, ~6-8 GB RAM at runtime"
+  },
   "dense_3b": {
     "model_name": "mlx-community/Qwen2.5-3B-Instruct-4bit",
-    "description": "Dense 3B — best tool-use accuracy, matches the trained LoRA adapter",
-    "adapter_compatible": true,
+    "description": "Dense 3B — smaller fallback, does not match the current LoRA adapter",
+    "adapter_compatible": false,
     "memory_note": "~2 GB on disk, ~4-6 GB RAM at runtime"
   },
   "moe_a27b": {
