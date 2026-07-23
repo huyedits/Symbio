@@ -7,7 +7,7 @@ Symbio develops as you tell it what to do in repeat.
 
 **Try the interactive demo** — the agent's real tag parser, self-correction miner, research memory, and RAG retriever running in your browser: https://huggingface.co/spaces/HuyEdits/symbio-demo
 
-Symbio works with a feature called **MOA**, MOA is a mixture of agents. Instaid of one big model to fine tune instaid the big model calls for smaller models to act on the task via tool call, the small model executes and if it fails then will return back to the big model to consult then the big model tries untill it works then a .md file is made for both sides. IF they make the same mistake over five times or whatever you set it to then the smaller model and big model gets fine tuned, for the smaller model it would be how to execute it and how it did it well and the big model will fine tune its response to the smaller model to efficently use tokens.
+Symbio works with a feature called MOA, MOA is a mixture of agents. In staid of one big model to fine tune in staid the big model calls for smaller models to act on the task via tool call, the small model executes and if it fails then will return back to the big model to consult then the big model tries until it works then a .md file is made for both sides. IF they make the same mistake over five times or whatever you set it to then the smaller model and big model gets fine tuned, for the smaller model it would be how to execute it and how it did it well and the big model will fine tune its response to the smaller model to efficiently use tokens.
 ## What it does
 
 - Chat through a local CLI or a Telegram bot.
