@@ -87,7 +87,27 @@ def _check_web_search(display: str, tools: list, config: dict) -> bool:
 
 
 def _check_open_app(display: str, tools: list, config: dict) -> bool:
-    return sane_reply(display) and _has_tool(tools, "run_command")
+    """Opening an app by name must use a native GUI opener command via the
+    terminal tool: macOS `open -a 'App Name'`, Windows `start app`, or
+    Linux `xdg-open app`."""
+    if not sane_reply(display):
+        return False
+    for _, params in tools:
+        cmd = params.get("cmd", "")
+        if cmd.startswith("open -a") or cmd.startswith("start ") or cmd.startswith("xdg-open "):
+            return True
+    return False
+
+
+def _check_browse_for_interaction(display: str, tools: list, config: dict) -> bool:
+    """Opening a named site 'in Chrome' with a follow-up click must use the
+    controllable browser, not the user's default browser via <cmd>open."""
+    return sane_reply(display) and _has_tool(tools, "browser_open")
+
+
+def _check_browser_press(display: str, tools: list, config: dict) -> bool:
+    """Pressing a key in the browser must use <press>, not a fake shell command."""
+    return sane_reply(display) and _has_tool(tools, "browser_press")
 
 
 # Prompts and expected behavior mirror pairs baked into seed_training_data,
@@ -135,6 +155,16 @@ GOLDEN_CASES: list[GoldenCase] = [
         lambda cfg: "Open Chrome.",
         _check_open_app,
     ),
+    GoldenCase(
+        "browse_to_interact", "Uses the controllable browser when asked to open a site and click",
+        lambda cfg: "Open cloudflare.com in Chrome and click the first button.",
+        _check_browse_for_interaction,
+    ),
+    GoldenCase(
+        "browser_press_key", "Presses a browser key instead of inventing a shell command",
+        lambda cfg: "Press the down arrow key.",
+        _check_browser_press,
+    ),
 ]
 
 
@@ -172,7 +202,9 @@ def run_golden_set(
 
     results: dict[str, bool] = {}
     replies: dict[str, str] = {}
-    for case in cases:
+    print(f"  [Golden] Running {len(cases)} pre/post-train checks...")
+    for i, case in enumerate(cases, 1):
+        print(f"  [Golden] {i}/{len(cases)} {case.id}...", end=" ", flush=True)
         messages = [
             {"role": "system", "content": context},
             {"role": "user", "content": case.prompt_fn(config)},
@@ -188,14 +220,20 @@ def run_golden_set(
         except Exception as e:
             results[case.id] = False
             replies[case.id] = f"[generation error: {e}]"
+            print("ERROR")
             continue
 
         tools = tooling.parse_tools(raw_reply, enabled_groups)
         display = tooling.strip_tool_tags(raw_reply)
         replies[case.id] = raw_reply
         try:
-            results[case.id] = bool(case.check(display, tools, config))
+            ok = bool(case.check(display, tools, config))
+            results[case.id] = ok
+            print("PASS" if ok else "FAIL")
         except Exception:
             results[case.id] = False
+            print("FAIL")
 
+    passing = sum(results.values())
+    print(f"  [Golden] {passing}/{len(cases)} checks passed.")
     return GoldenResult(results, replies)

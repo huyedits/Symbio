@@ -1,14 +1,17 @@
 """Tests for the Telegram bot front-end."""
 
 import asyncio
+import threading
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from symbio.app import config as app_config
+from symbio.app import config as app_config, tooling
 from symbio.app.chat import ChatSession
 from symbio.app.telegram import (
     TelegramBot,
+    _StreamSender,
     _chat_tool_groups,
     _chat_tool_lock,
     _prepare_for_telegram,
@@ -226,3 +229,92 @@ async def test_handle_tools_callback_close(base_config):
     await bot._handle_tools_callback(query, "tools:close")
     text = query.edit_message_text.await_args[0][0]
     assert text == "Tool settings closed."
+
+
+def _run_loop_in_thread(loop: asyncio.AbstractEventLoop) -> threading.Thread:
+    t = threading.Thread(target=loop.run_forever, daemon=True)
+    t.start()
+    return t
+
+
+@pytest.fixture
+def stream_loop():
+    loop = asyncio.new_event_loop()
+    t = _run_loop_in_thread(loop)
+    yield loop
+    loop.call_soon_threadsafe(loop.stop)
+    t.join(timeout=2)
+    if not loop.is_closed():
+        loop.close()
+
+
+def test_stream_sender_sends_first_visible_chunk_immediately(stream_loop):
+    """The first safe text is sent as a new message before generation ends."""
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=7))
+    bot.edit_message_text = AsyncMock()
+
+    sender = _StreamSender(123, bot, stream_loop, first_chunk_timeout_ms=5000)
+    sender.feed("Hello")
+    sender.feed(" world")
+    sender.finish()
+
+    assert bot.send_message.await_count == 1
+    assert "Hello" in bot.send_message.await_args.kwargs["text"]
+    # The second chunk should edit the same message.
+    assert bot.edit_message_text.await_count >= 1
+    assert "Hello world" in bot.edit_message_text.await_args.kwargs["text"]
+
+
+def test_stream_sender_sends_placeholder_on_slow_first_chunk(stream_loop):
+    """If no visible text arrives within the timeout, a placeholder is shown."""
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=8))
+    bot.edit_message_text = AsyncMock()
+
+    sender = _StreamSender(123, bot, stream_loop, first_chunk_timeout_ms=50)
+    time.sleep(0.15)  # Wait longer than the placeholder timeout.
+    assert bot.send_message.await_count == 1
+    assert bot.send_message.await_args.kwargs["text"] == _StreamSender._PLACEHOLDER
+
+    # Real text then replaces the placeholder.
+    sender.feed("Here is the answer")
+    sender.finish()
+    assert bot.edit_message_text.await_count >= 1
+    assert "Here is the answer" in bot.edit_message_text.await_args.kwargs["text"]
+
+
+def test_stream_sender_strips_tool_tags_from_stream(stream_loop):
+    """Tool tags are held back and never shown as raw markup."""
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=MagicMock(message_id=9))
+    bot.edit_message_text = AsyncMock()
+
+    sender = _StreamSender(123, bot, stream_loop, first_chunk_timeout_ms=5000)
+    sender.feed("Checking <cmd>date</cmd> now.")
+    sender.finish()
+
+    text = bot.send_message.await_args.kwargs["text"]
+    assert "Checking" in text
+    assert "<cmd>" not in text
+    assert "date" not in text
+
+
+def test_parse_tools_open_chrome_command():
+    """The agent can emit a macOS open-app command when asked to launch Chrome."""
+    reply = "<cmd>open -a 'Google Chrome'</cmd> Opening Chrome for you, Huy."
+    tools = tooling.parse_tools(reply)
+    assert len(tools) == 1
+    name, params = tools[0]
+    assert name == "run_command"
+    assert params["cmd"] == "open -a 'Google Chrome'"
+
+
+def test_parse_tools_browser_press():
+    """The agent can press a key in the browser instead of inventing a shell command."""
+    reply = "<press>down</press> Pressing the down arrow key."
+    tools = tooling.parse_tools(reply)
+    assert len(tools) == 1
+    name, params = tools[0]
+    assert name == "browser_press"
+    assert params["key"] == "down"

@@ -23,6 +23,66 @@ def save_cron_jobs(jobs: list[dict[str, Any]]):
     constants.CRON_FILE.write_text(json.dumps(jobs, indent=2), encoding="utf-8")
 
 
+def list_cron_jobs() -> list[dict[str, Any]]:
+    """Return all scheduled jobs sorted by id."""
+    jobs = load_cron_jobs()
+    jobs.sort(key=lambda j: j.get("id", 0))
+    return jobs
+
+
+def delete_cron_job(job_id: int) -> dict[str, Any]:
+    """Remove the job with the given id. Return the deleted job or raise ValueError."""
+    jobs = load_cron_jobs()
+    for i, job in enumerate(jobs):
+        if job.get("id") == job_id:
+            removed = jobs.pop(i)
+            save_cron_jobs(jobs)
+            return removed
+    raise ValueError(f"No job with id {job_id}.")
+
+
+def update_cron_job(
+    job_id: int,
+    schedule: str | None = None,
+    text: str | None = None,
+    blocked_commands: set[str] | None = None,
+) -> dict[str, Any]:
+    """Edit an existing job's schedule and/or text."""
+    jobs = load_cron_jobs()
+    job = next((j for j in jobs if j.get("id") == job_id), None)
+    if job is None:
+        raise ValueError(f"No job with id {job_id}.")
+
+    new_schedule = (schedule or job.get("schedule", "")).strip()
+    new_text = (text or job.get("text", "")).strip()
+    if not new_text:
+        raise ValueError("Job text is empty.")
+    if new_text.startswith("cmd:"):
+        shell_cmd = new_text[4:].strip()
+        try:
+            args = shlex.split(shell_cmd)
+        except ValueError as e:
+            raise ValueError(f"Invalid command: {e}")
+        if blocked_commands and args and args[0] in blocked_commands:
+            raise ValueError(
+                f"Cannot schedule blocked command '{args[0]}' in cron — "
+                f"interactive approval is not possible when the job fires."
+            )
+
+    one_shot = parse_one_shot(new_schedule)
+    if one_shot:
+        new_schedule = f"at {one_shot:%Y-%m-%d %H:%M}"
+    else:
+        error = validate_cron_expr(new_schedule)
+        if error:
+            raise ValueError(error)
+
+    job["schedule"] = new_schedule
+    job["text"] = new_text
+    save_cron_jobs(jobs)
+    return job
+
+
 def _cron_field_matches(field: str, value: int, lo: int, hi: int) -> bool:
     for part in field.split(","):
         part = part.strip()

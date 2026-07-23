@@ -289,6 +289,30 @@ def test_cron_jobs_fire_and_expire():
     print("test_cron_jobs_fire_and_expire passed")
 
 
+def test_cron_job_management():
+    with scratch_cron_file():
+        job = cron.add_cron_job("0 9 * * *", "stretch")
+        assert job["id"] == 1
+
+        jobs = cron.list_cron_jobs()
+        assert len(jobs) == 1 and jobs[0]["text"] == "stretch", jobs
+
+        updated = cron.update_cron_job(1, schedule="0 10 * * *", text="walk")
+        assert updated["schedule"] == "0 10 * * *", updated
+        assert updated["text"] == "walk", updated
+
+        removed = cron.delete_cron_job(1)
+        assert removed["id"] == 1, removed
+        assert cron.list_cron_jobs() == []
+
+        try:
+            cron.delete_cron_job(99)
+            raise AssertionError("expected ValueError for missing job")
+        except ValueError:
+            pass
+    print("test_cron_job_management passed")
+
+
 def test_agent_loop_schedules_job_from_tag():
     with scratch_cron_file():
         session = ScriptedSession(
@@ -791,12 +815,15 @@ def test_agent_loop_browses():
     chat.BrowserSession = FakeBrowser
     try:
         with scratch_notes_dir():
+            config = app_config.load_config()
+            config["browser"]["enabled"] = True
             session = ScriptedSession(
                 user_inputs=["Look up the MLX docs yourself.", "/quit", "n"],
                 model_replies=[
                     "<browse>https://example.com/mlx</browse> Opening it.",
                     "The docs say: Fake page text about MLX.",
                 ],
+                config=config,
             )
             session.run()
             obs_prompt = session.prompts_seen[1]
@@ -820,6 +847,8 @@ def test_agent_loop_survives_tool_exception():
     chat.BrowserSession = FakeBrowser
     try:
         with scratch_notes_dir():
+            config = app_config.load_config()
+            config["browser"]["enabled"] = True
             session = ScriptedSession(
                 user_inputs=["Open youtube and click the first video.", "/quit", "n"],
                 model_replies=[
@@ -827,6 +856,7 @@ def test_agent_loop_survives_tool_exception():
                     "<click>first video</click> Clicking it.",
                     "Sorry, I couldn't click that — let me try browsing it myself instead.",
                 ],
+                config=config,
             )
             real_click = FakeBrowser.click
 
@@ -1437,6 +1467,7 @@ def _run_all_inner():
         test_parse_and_strip_tool_tags()
         test_cron_matching()
         test_cron_jobs_fire_and_expire()
+        test_cron_job_management()
         test_execute_code_tool()
         test_agent_loop_runs_python()
         test_web_tools()

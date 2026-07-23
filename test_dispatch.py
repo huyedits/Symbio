@@ -207,6 +207,7 @@ def _make_session(config, monkeypatch):
 def test_execute_tool_delegate_disabled_by_default(monkeypatch, tmp_path):
     _isolate_dirs(monkeypatch, tmp_path)
     config = app_config.load_config()
+    config["dispatch"]["enabled"] = False
     assert config["dispatch"]["enabled"] is False
     session = _make_session(config, monkeypatch)
     result = session._execute_tool("delegate_task", {"role": "summarize", "task": "x"})

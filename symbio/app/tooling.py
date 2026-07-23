@@ -21,13 +21,18 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_click": "browser",
     "browser_type": "browser",
     "browser_scroll": "browser",
+    "browser_press": "browser",
     "save_memory": "memory",
     "config_show": "config",
     "config_set": "config",
     "digest_notes": "digest",
     "train_adapter": "train",
     "schedule_job": "cron",
+    "list_cron_jobs": "cron",
+    "delete_cron_job": "cron",
+    "update_cron_job": "cron",
     "delegate_task": "delegate",
+    "brain_solve": "frontier",
 }
 
 # Hermes-style tool registry: JSON schemas for the system prompt <tools> block.
@@ -78,6 +83,15 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "browser_press",
+        "description": "Press a keyboard key in the open browser (e.g. 'down', 'up', 'enter', 'esc', 'space'). Use for keyboard navigation; do not invent shell commands for key presses.",
+        "parameters": {
+            "type": "object",
+            "properties": {"key": {"type": "string", "description": "Key name such as 'down', 'up', 'enter', 'esc', 'space', 'tab', 'home', 'end'."}},
+            "required": ["key"],
+        },
+    },
+    {
         "name": "write_note",
         "description": "Save a markdown note in notes/.",
         "parameters": {
@@ -115,6 +129,86 @@ _TOOLS: list[dict[str, Any]] = [
         "name": "config_show",
         "description": "Show the current configuration.",
         "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "schedule_job",
+        "description": (
+            "Create a new scheduled reminder or command. Always creates a new job; "
+            "use delete_cron_job/update_cron_job to change existing jobs. "
+            "Use a 5-field cron expression for recurring jobs or 'at YYYY-MM-DD HH:MM' for one-time jobs."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "schedule": {
+                    "type": "string",
+                    "description": "5-field cron expression (minute hour day month weekday) or 'at YYYY-MM-DD HH:MM' for one-time.",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "Reminder text, or 'cmd:<shell command>' to run a command when the job fires.",
+                },
+            },
+            "required": ["schedule", "text"],
+        },
+    },
+    {
+        "name": "list_cron_jobs",
+        "description": "Show all scheduled reminders and commands with their ids and schedules.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "delete_cron_job",
+        "description": "Delete a scheduled job by its id (use list_cron_jobs to find the id).",
+        "parameters": {
+            "type": "object",
+            "properties": {"job_id": {"type": "integer", "description": "The numeric id of the job to delete."}},
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "update_cron_job",
+        "description": (
+            "Edit an existing scheduled job by id. Use list_cron_jobs to find the id. "
+            "Only the schedule and/or text you provide are changed; omitted fields are kept."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "integer", "description": "The numeric id of the job to edit."},
+                "schedule": {
+                    "type": "string",
+                    "description": "New 5-field cron expression or 'at YYYY-MM-DD HH:MM'.",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "New reminder text or 'cmd:<shell command>'.",
+                },
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "brain_solve",
+        "description": (
+            "Delegate a difficult reasoning or coding problem to a stronger model "
+            "(local Ollama brain first, then frontier fallback). Use when the answer "
+            "requires deep reasoning, exact code, or facts beyond your weights."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "The full task or question to hand to the stronger model.",
+                },
+                "use_frontier": {
+                    "type": "boolean",
+                    "description": "If true, skip the local Ollama brain and call the frontier model directly.",
+                },
+            },
+            "required": ["prompt"],
+        },
     },
     {
         "name": "delegate_task",
@@ -222,6 +316,9 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     for m in re.finditer(r'<scroll(?:\s+dir=[\'"](up|down)[\'"])?\s*/>', reply):
         tools.append(("browser_scroll", {"direction": m.group(1) or "down"}))
 
+    for m in re.finditer(r'<press>(.*?)</press>', reply, re.DOTALL):
+        tools.append(("browser_press", {"key": m.group(1).strip()}))
+
     for m in re.finditer(
         r'<skill\s+name=[\'"]([^\'"]*?)[\'"]>(.*?)</skill>', reply, re.DOTALL
     ):
@@ -323,6 +420,7 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
     r'<click>(.*?)</click>',
     r'<type[^>]*>(.*?)</type>',
     r'<scroll[^>]*/>',
+    r'<press>(.*?)</press>',
     r'<skill\s+name=[\'"][^\'"]*?[\'"]>(.*?)</skill>',
     r'<memory[^>]*>(.*?)</memory>',
     r'<profile[^>]*>(.*?)</profile>',
@@ -341,6 +439,7 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
 # streaming stripper's "might this become a tag" check.
 _KNOWN_TAG_NAMES: tuple[str, ...] = (
     "cmd", "py", "search", "read", "browse", "click", "type", "scroll",
+    "press",
     "note", "skill", "cron", "digest", "train", "memory", "profile",
     "config", "tool_call", "delegate",
 )

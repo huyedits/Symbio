@@ -71,6 +71,55 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("train", help="Run LoRA training")
 
+    retrain_parser = sub.add_parser("retrain", help="Rebuild the LoRA adapter from scratch after switching models")
+    retrain_parser.add_argument(
+        "--no-digest",
+        action="store_true",
+        help="Skip re-digesting notes and memory",
+    )
+    retrain_parser.add_argument(
+        "--no-seed",
+        action="store_true",
+        help="Skip seeding baseline training data",
+    )
+
+    mcp_parser = sub.add_parser("mcp", help="Start the local-brain MCP server")
+    mcp_parser.add_argument(
+        "--transport",
+        type=str,
+        default="stdio",
+        choices=["stdio", "sse"],
+        help="MCP transport (stdio or sse)",
+    )
+
+    benchmark_parser = sub.add_parser("benchmark", help="Benchmark Ollama models as local brains")
+    benchmark_parser.add_argument(
+        "--models",
+        type=str,
+        default=None,
+        help="Comma-separated list of Ollama models to test",
+    )
+    benchmark_parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Path to write a JSON benchmark report",
+    )
+
+    benchmark_mlx_parser = sub.add_parser("benchmark-mlx", help="Benchmark MLX/HuggingFace models as local brains")
+    benchmark_mlx_parser.add_argument(
+        "--models",
+        type=str,
+        default=None,
+        help="Comma-separated list of MLX/HF models to test",
+    )
+    benchmark_mlx_parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Path to write a JSON benchmark report",
+    )
+
     return parser
 
 
@@ -498,6 +547,30 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_config(config, args)
     if command == "train":
         return _cmd_train(config)
+    if command == "retrain":
+        from symbio.app.retrain import retrain_model
+
+        ok = retrain_model(config, digest=not args.no_digest, seed=not args.no_seed)
+        return 0 if ok else 1
+    if command == "mcp":
+        from symbio.mcp.server import mcp
+
+        mcp.run(transport=args.transport)
+        return 0
+    if command == "benchmark":
+        import asyncio
+
+        from symbio.mcp.benchmark import main as benchmark_main
+
+        models = [m.strip() for m in args.models.split(",")] if args.models else None
+        asyncio.run(benchmark_main(models=models, output_path=args.output))
+        return 0
+    if command == "benchmark-mlx":
+        from symbio.mcp.benchmark_mlx import main as benchmark_mlx_main
+
+        models = [m.strip() for m in args.models.split(",")] if args.models else None
+        benchmark_mlx_main(models=models, output_path=args.output)
+        return 0
     if command == "gateway":
         sub = getattr(args, "gateway_command", None) or "start"
         if sub == "start":
