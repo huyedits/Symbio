@@ -47,6 +47,8 @@ _IDEAL_REPLIES = {
     "run_code_for_math": "<py>import math\nprint(math.factorial(7))</py> Running that now.",
     "web_search_unknown": "<search>latest news</search> Searching now.",
     "open_app_command": "<cmd>open -a 'Google Chrome'</cmd> Opening Chrome.",
+    "browse_to_interact": "<browse>https://www.cloudflare.com</browse> Opening cloudflare.com so I can click the first button.",
+    "browser_press_key": "<press>down</press> Pressing the down arrow key.",
 }
 
 

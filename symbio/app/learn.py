@@ -123,12 +123,20 @@ _EPHEMERAL_MARKERS = (
 def remember_research(question: str, answer: str, config: dict[str, Any]) -> Path | None:
     """Save a web-researched answer as a 'Learned:' note so it is retrievable
     by RAG and trained into the weights on the next digest. Skips ephemeral
-    lookups, trivial answers, and questions already remembered."""
+    lookups, trivial answers, short/acknowledgment questions, and already
+    remembered topics."""
     if not config.get("learn", {}).get("remember_research", True):
         return None
     question = question.strip()
     answer = answer.strip()
     if len(answer) < 20:
+        return None
+    # Never remember research triggered by trivial acknowledgments like "ok".
+    q_lower = question.lower()
+    if len(question.split()) <= 2 and any(
+        marker in q_lower for marker in
+        ("ok", "okay", "yes", "sure", "go on", "go ahead", "continue", "proceed")
+    ):
         return None
     text = f"{question} {answer}".lower()
     if any(marker in text for marker in _EPHEMERAL_MARKERS):

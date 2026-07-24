@@ -18,6 +18,11 @@ dependencies = [
     "PyAutoGUI>=0.9.54",
     "Pillow>=10.0.0",
     "python-telegram-bot>=20.0",
+    "fastmcp>=2.2.0",
+    "httpx>=0.27",
+    "anthropic>=0.49",
+    "pydantic-settings>=2.0",
+    "jsonschema>=4.0",
 ]
 
 [project.scripts]

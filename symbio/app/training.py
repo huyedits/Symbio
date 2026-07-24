@@ -214,14 +214,49 @@ def digest_notes_to_training(tokenizer, system_prompt: str,
     return added
 
 
-def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
+def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) -> int:
     """Seed a minimal clean corpus so the model has correct identity/tool examples
-    even before any real conversation is saved."""
-    if constants.TRAIN_FILE.exists() and constants.TRAIN_FILE.stat().st_size > 0:
-        return
+    even before any real conversation is saved.
 
+    Appends seed samples to the existing training file. A manifest keyed by the
+    rendered sample text prevents duplicates, so improved seed examples are
+    added on upgrade while existing samples are not re-written.
+    """
+    seed_manifest_path = constants.DATA_DIR / "seed_manifest.json"
+    try:
+        manifest = json.loads(seed_manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        manifest = {}
+
+    # If assistant/user/system prompt changed, wipe the manifest so the fresh
+    # seed corpus is fully re-injected.
     assistant = config["assistant_name"]
     user = config["user_name"]
+    run_key = hashlib.sha256(
+        f"{assistant}:{user}:{system_prompt}".encode("utf-8")
+    ).hexdigest()[:16]
+    if manifest.get("run_key") != run_key:
+        manifest = {"run_key": run_key, "samples": {}}
+
+    seen: dict[str, set[str]] = {
+        k: set(v) for k, v in manifest.get("samples", {}).items()
+    }
+
+    # Bootstrap the seen set from the existing training file so we never
+    # duplicate samples when the manifest is empty or was written by an older
+    # version that only tracked the run_key.
+    if constants.TRAIN_FILE.exists():
+        path_str = str(constants.TRAIN_FILE)
+        existing = seen.setdefault(path_str, set())
+        for line in constants.TRAIN_FILE.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                text = json.loads(line).get("text", "")
+            except Exception:
+                continue
+            if text:
+                existing.add(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16])
 
     samples = [
         # Identity
@@ -292,6 +327,22 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         (
             "Open Chrome.",
             f"<cmd>{open_chrome}</cmd> Opening Chrome for you, {user}.",
+        ),
+        (
+            "Open Google Chrome.",
+            f"<cmd>{open_chrome}</cmd> Opening Google Chrome for you, {user}.",
+        ),
+        (
+            "Open google chrome.",
+            f"<cmd>{open_chrome}</cmd> Opening Google Chrome for you, {user}.",
+        ),
+        (
+            "Launch Chrome.",
+            f"<cmd>{open_chrome}</cmd> Launching Chrome for you, {user}.",
+        ),
+        (
+            "Start Google Chrome for me.",
+            f"<cmd>{open_chrome}</cmd> Starting Google Chrome for you, {user}.",
         ),
         (
             "[System observation: Command 'chrome' exited error.\nOutput:\nCommand not found: chrome]",
@@ -374,10 +425,147 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
             "Inside a Nuclear Power Station]",
             "<click>Nuclear Power Plant Explained</click> Clicking the first video.",
         ),
+        # "Open X in Chrome" still means the agent's controllable browser,
+        # because the user may ask to click/scroll next. Use <browse>, not <cmd>open>.
+        # The native macOS opener with a URL opens the user's browser and leaves
+        # the agent unable to click, so this is a mistake pattern to recover from.
+        (
+            "Open apple.com in Chrome and click the first button.",
+            "<browse>https://www.apple.com</browse> Opening apple.com in the controllable browser — I'll click the first button once it loads.",
+        ),
+        (
+            "Open cloudflare.com in Chrome and click the first button.",
+            "<browse>https://www.cloudflare.com</browse> Opening Cloudflare in the controllable browser — I'll click the first button once it loads.",
+        ),
+        (
+            "Read what apple.com says.",
+            "<browse>https://www.apple.com</browse> Opening apple.com so I can read its contents.",
+        ),
+        (
+            "What does apple.com say?",
+            "<browse>https://www.apple.com</browse> Opening apple.com to read its contents.",
+        ),
+        (
+            "[System observation: Opened browser at https://www.cloudflare.com. "
+            "Page title: Cloudflare – The Web Performance & Security Company\n\n"
+            "Page text now:\nStart building for free\nContact Sales]",
+            "<click>Start building for free</click> Clicking the first button.",
+        ),
+        (
+            "[System observation: Opened browser at https://www.cloudflare.com. "
+            "Page title: Cloudflare – The Web Performance & Security Company]",
+            "<scroll /> Scrolling to the bottom.",
+        ),
+        (
+            "[System observation: Browser click error: Browser is not open. "
+            "Use <browse>https://...</browse> to load a page first, then retry the action.]",
+            "The browser isn't open. Let me load the page first. "
+            "<browse>https://www.cloudflare.com</browse> Reopening Cloudflare so I can click.",
+        ),
+        (
+            "[System observation: Command 'open -a 'Google Chrome' \'https://www.cloudflare.com'' exited ok.\n"
+            "Output:]",
+            "That opened Cloudflare in your default browser, which I can't click. "
+            "Let me use my controllable browser instead. "
+            "<browse>https://www.cloudflare.com</browse> Opening Cloudflare so I can click for you.",
+        ),
+        # Keyboard navigation inside the browser uses <press>, never a shell command.
+        (
+            "[System observation: Opened browser at https://www.youtube.com/shorts. "
+            "Page title: YouTube Shorts]",
+            "<press>down</press> Pressing the down arrow key to scroll to the next Short.",
+        ),
+        (
+            "Press the down arrow key.",
+            "<press>down</press> Pressing the down arrow key.",
+        ),
+        (
+            "Press enter.",
+            "<press>enter</press> Pressing Enter.",
+        ),
+        (
+            "Hit space to play.",
+            "<press>space</press> Pressing Space to play/pause.",
+        ),
+        (
+            "[System observation: Command 'keydown --arrow down' exited error.\n"
+            "Output:\nCommand not found: keydown]",
+            "There is no `keydown` shell command — I'll press the key directly in the browser instead. "
+            "<press>down</press> Pressing the down arrow key.",
+        ),
+        # Don't just talk about a URL — open it. If the user names a site, browse there.
+        (
+            "Open the EPA privacy page.",
+            "<browse>https://www.epa.gov/privacy</browse> Opening the EPA privacy page now.",
+        ),
+        (
+            "Can you open https://www.epa.gov/privacy?",
+            "<browse>https://www.epa.gov/privacy</browse> Opening the EPA privacy page now.",
+        ),
+        (
+            "Go to epa.gov/privacy.",
+            "<browse>https://www.epa.gov/privacy</browse> Going to the EPA privacy page now.",
+        ),
+        # Stop asking the user to open pages; the agent should perform the action.
+        (
+            "Here is the link: <https://www.epa.gov/privacy>. Would you like to open this page now?",
+            "I should just open it for you. <browse>https://www.epa.gov/privacy</browse> Opening the EPA privacy page.",
+        ),
+        # If a command with a URL opens the user's default browser, recover by browsing.
+        (
+            "[System observation: Command 'open -a 'Google Chrome' \'https://www.epa.gov/privacy'' exited ok.\n"
+            "Output:]",
+            "That opened the page in your default browser, which I can't control. "
+            "<browse>https://www.epa.gov/privacy</browse> Opening it in my browser instead.",
+        ),
+        # If the user only wants a search result handed to them (nothing to do after),
+        # <cmd>open> is fine — but as soon as interaction is possible, switch to <browse>.
+        (
+            "Search the web for 'start building for free' so I can read it myself.",
+            "<cmd>open 'https://www.google.com/search?q=start+building+for+free'</cmd> "
+            "Here's a Google search for that phrase.",
+        ),
     ]
 
+    # General resilience: don't give up or ask the user to do the work.
+    # If a tool fails, recover by using a working tool instead.
+    samples += [
+        (
+            "[System observation: Browser open error: Only http/https URLs are allowed. Got: epa.gov/privacy]",
+            "I need the full URL. <browse>https://www.epa.gov/privacy</browse> Opening the EPA privacy page with https.",
+        ),
+        (
+            "Click the first button.",
+            "<browse>https://www.cloudflare.com</browse> I need to open the page first before I can click.",
+        ),
+        (
+            "[System observation: Browser click error: nothing matches selector '#submit'.]",
+            "That selector didn't match anything visible. Let me try clicking by text instead. "
+            "<click>Submit</click> Clicking the Submit button by its visible text.",
+        ),
+    ]
+
+    added = 0
     for user_msg, assistant_msg in samples:
-        append_chat_pair(user_msg, assistant_msg, tokenizer, system_prompt)
+        text = build_chat_training_sample([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": clean_response(assistant_msg)},
+        ], tokenizer)
+        h = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        path_str = str(constants.TRAIN_FILE)
+        if h in seen.get(path_str, set()):
+            continue
+        append_training_text(text)
+        seen.setdefault(path_str, set()).add(h)
+        added += 1
+
+    manifest = {
+        "run_key": run_key,
+        "samples": {k: list(v) for k, v in seen.items()},
+    }
+    seed_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return added
 
 
 def ensure_validation_split(every_nth: int = 10, max_samples: int = 24,

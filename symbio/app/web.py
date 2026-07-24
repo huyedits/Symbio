@@ -160,7 +160,7 @@ def read_page(url: str, config: dict[str, Any]) -> tuple[bool, str]:
         return False, f"Could not read {url}: {e}"
     if not text:
         return False, f"No readable text found at {url}."
-    max_len = config["agent"]["max_output_len"]
+    max_len = int(config["agent"].get("max_output_len", 4000))
     if len(text) > max_len:
         text = text[:max_len] + "\n... (truncated)"
     return True, text
