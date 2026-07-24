@@ -18,7 +18,8 @@ class Settings(BaseSettings):
     )
 
     # Local (Ollama) brain
-    ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
+    ollama_base_url: str = Field(default="http://127.0.0.1:11434", alias="OLLAMA_BASE_URL")
+    ollama_api_key: str | None = Field(default=None, alias="OLLAMA_API_KEY")
     local_model: str = Field(default="llama3.2", alias="LOCAL_MODEL")
     local_temperature: float = Field(default=0.2, alias="LOCAL_TEMPERATURE")
     local_max_tokens: int = Field(default=2048, alias="LOCAL_MAX_TOKENS")

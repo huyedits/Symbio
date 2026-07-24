@@ -53,6 +53,12 @@ class _Spinner:
         self._thread: threading.Thread | None = None
         self.active = sys.stdout.isatty()
         self._start_time: float | None = None
+        self._gen_tokens = 0
+        self._lock = threading.Lock()
+
+    def set_gen_tokens(self, n: int):
+        with self._lock:
+            self._gen_tokens = n
 
     def start(self):
         if not self.active or self._thread is not None:
@@ -65,10 +71,13 @@ class _Spinner:
             while not self._stop_event.wait(0.08):
                 elapsed = time.perf_counter() - self._start_time
                 frame = self._FRAMES[i % len(self._FRAMES)]
+                with self._lock:
+                    gen_tokens = self._gen_tokens
+                tok_info = f" | generated {gen_tokens} tokens" if gen_tokens else ""
                 if elapsed >= 5:
-                    label = f"{self.label} ({int(elapsed)}s)"
+                    label = f"{self.label} ({int(elapsed)}s){tok_info}"
                 else:
-                    label = self.label
+                    label = f"{self.label}{tok_info}"
                 sys.stdout.write(f"\r{frame} {label}")
                 sys.stdout.flush()
                 i += 1
@@ -86,6 +95,7 @@ class _Spinner:
         sys.stdout.flush()
 
 
+
 def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int,
                  output_fn=print):
     note_count = len(list(constants.NOTES_DIR.glob("*.md")))
@@ -97,7 +107,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"   Data   : {dataset_size:,} bytes")
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
-    output_fn("Commands: /quit  /save  /train  /train_worker  /golden  /learn  /forget_last  /status  /prune  /help")
+    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /golden  /learn  /forget_last  /status  /prune  /help")
     output_fn("         /run <cmd>  /note [title]  /notes  /skills  /digest  /cron  /config")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     output_fn("-" * 50)
@@ -121,8 +131,11 @@ _HANDLED = "handled"
 # Tool names whose observations bring outside information into the turn;
 # a turn that used any of these is a research turn worth remembering.
 _WEB_TOOLS = {
-    "web_search", "read_page", "browser_open",
-    "browser_click", "browser_type", "browser_scroll",
+    "web_search", "read_page",
+}
+
+_BROWSER_TOOLS = {
+    "browser_open", "browser_click", "browser_type", "browser_scroll", "browser_press",
 }
 
 # Tools that require explicit approval when running from a non-terminal
@@ -247,7 +260,12 @@ class ChatSession:
         # and something actually delegates. Status messages go through the
         # same output channel as tool observations so you can see workers
         # loading and tasks delegating.
-        self.dispatch = dispatch.WorkerPool(config, status_fn=self.output_fn)
+        self.dispatch = dispatch.WorkerPool(
+            config,
+            status_fn=self.output_fn,
+            before_worker_fn=self._sleep_headmaster,
+            after_worker_fn=self._wake_headmaster,
+        )
         self.logger = _make_chat_logger()
         self.user_turns = 0
         self.auto_searches = 0
@@ -299,6 +317,53 @@ class ChatSession:
             return None
         except Exception as e:
             return str(e)
+
+    def _sleep_headmaster(self):
+        """Unload the headmaster model from RAM so a worker can run alone.
+
+        The model is reloaded on the next generation. We only do this when
+        dispatch.headmaster_deep_sleep_while_workers is true.
+        """
+        if not getattr(self, "model", None):
+            return
+        self._status("  [Dispatch] Headmaster going to sleep (unloading 8B model)...")
+        self._prompt_cache = None
+        self._cached_prompt_ids = None
+        # Drop the MLX model reference. Garbage collection / metal cache
+        # cleanup happens automatically once nothing references the arrays.
+        del self.model
+        self.model = None
+        self.tokenizer = None
+        import gc
+        gc.collect()
+        try:
+            import mlx.core as mx
+            mx.clear_cache()
+        except Exception:
+            pass
+        self._status("  [Dispatch] Headmaster asleep.")
+
+    def _wake_headmaster(self):
+        """Reload the headmaster model after a worker finishes."""
+        if getattr(self, "model", None) is not None:
+            return
+        self._status("  [Dispatch] Headmaster waking up (reloading 8B model)...")
+        try:
+            if self.adapter_config.exists():
+                self.model, self.tokenizer = load(
+                    self.config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
+                )
+                self.adapter_loaded = True
+            else:
+                self.model, self.tokenizer = load(self.config["model_name"])
+                self.adapter_loaded = False
+            training.mark_adapter_used()
+            self._status("  [Dispatch] Headmaster awake.")
+        except Exception as e:
+            self._status(f"  [Dispatch] Headmaster reload failed: {e}")
+
+    def _status(self, message: str):
+        self.output_fn(message)
 
     def _generate_reply(
         self,
@@ -375,23 +440,25 @@ class ChatSession:
         shown = False
         first_token_time: float | None = None
         gen_start = time.perf_counter()
-        spinner = _Spinner()
+        prompt_tokens = len(ids)
+        cached_tokens = reused
+        new_tokens = prompt_tokens - cached_tokens
+        spinner_label = (
+            f"thinking…  [prompt {prompt_tokens} | cached {cached_tokens} | new {new_tokens}]"
+        )
+        spinner = _Spinner(spinner_label)
         spinner.start()
 
         def _emit(text: str):
-            nonlocal shown, first_token_time
+            if self.stream_chunk_fn is None:
+                return
             if not shown:
-                shown = True
-                first_token_time = time.perf_counter()
-                if timings is not None:
-                    timings["ttft_ms"] = (first_token_time - gen_start) * 1000
-                spinner.stop()
-                if chunk_prefix:
-                    self.stream_chunk_fn(chunk_prefix)
+                return
             self.stream_chunk_fn(text)
 
         text_parts: list[str] = []
         gen_ids: list[int] = []
+        gen_tokens = 0
         try:
             for response in self.stream_fn(
                 self.model, self.tokenizer, feed, max_tokens=max_tokens,
@@ -399,10 +466,14 @@ class ChatSession:
             ):
                 text_parts.append(response.text)
                 gen_ids.append(response.token)
+                gen_tokens += 1
+                spinner.set_gen_tokens(gen_tokens)
                 if stripper is not None:
                     safe = stripper.feed(response.text)
                     if safe:
                         _emit(safe)
+                else:
+                    _emit(response.text)
         except BaseException:
             # The real MLX cache may already be mutated beyond what our
             # bookkeeping reflects (interrupted mid-token) — never trust a
@@ -417,8 +488,8 @@ class ChatSession:
             tail = stripper.finish()
             if tail:
                 _emit(tail)
-        if shown:
-            self.stream_chunk_fn("\n")
+            if self.stream_chunk_fn is not None:
+                self.stream_chunk_fn("\n")
 
         if timings is not None:
             timings["gen_ms"] = (time.perf_counter() - gen_start) * 1000
@@ -622,6 +693,9 @@ class ChatSession:
         elif cmd == "/train":
             self._guarded_train()
 
+        elif cmd == "/retrain":
+            self._cmd_retrain()
+
         elif cmd.startswith("/train_worker"):
             parts = user_input.split(None, 1)
             role = parts[1].strip() if len(parts) == 2 else ""
@@ -748,6 +822,23 @@ class ChatSession:
 
         return _HANDLED
 
+    def _cmd_retrain(self):
+        """Run a full adapter rebuild from scratch inside the chat session."""
+        from symbio.app.retrain import retrain_model
+
+        self.output_fn("  [Retrain] Rebuilding adapter from scratch...")
+        # Sleep the headmaster to free RAM before loading the base model for retraining.
+        self._sleep_headmaster()
+        try:
+            ok = retrain_model(self.config, digest=True, seed=True)
+        finally:
+            self._wake_headmaster()
+        if ok:
+            self.adapter_loaded = (constants.ADAPTER_DIR / "adapter_config.json").exists()
+            self.output_fn("  [Retrain] Done. Reloaded headmaster.")
+        else:
+            self.output_fn("  [Retrain] Failed — see output above.")
+
     def _cmd_run(self, shell_cmd: str):
         if not shell_cmd:
             self.output_fn("  Usage: /run <command>")
@@ -811,6 +902,15 @@ class ChatSession:
                 self.output_fn(f"  Added job {job['id']}: {job['schedule']} — {job['text']}")
             except ValueError as e:
                 self.output_fn(f"  {e}")
+        elif sub in ("update", "edit") and len(parts) >= 4:
+            try:
+                job = cron.update_cron_job(
+                    int(parts[1]), parts[2], " ".join(parts[3:]),
+                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", []))
+                )
+                self.output_fn(f"  Updated job {job['id']}: {job['schedule']} — {job['text']}")
+            except ValueError as e:
+                self.output_fn(f"  {e}")
         elif sub == "rm" and len(parts) == 2:
             jobs = cron.load_cron_jobs()
             kept = [j for j in jobs if str(j["id"]) != parts[1]]
@@ -818,7 +918,7 @@ class ChatSession:
             self.output_fn(f"  Removed job {parts[1]}." if len(kept) < len(jobs)
                   else f"  No job with id {parts[1]}.")
         else:
-            self.output_fn('  Usage: /cron [list] | /cron add "<cron expr | at YYYY-MM-DD HH:MM>" <text> | /cron rm <id>')
+            self.output_fn('  Usage: /cron [list] | /cron add "<cron expr | at YYYY-MM-DD HH:MM>" <text> | /cron update <id> "<schedule>" <text> | /cron rm <id>')
 
     # ---- Growth loop ----
 
@@ -970,11 +1070,28 @@ class ChatSession:
             if consecutive_tool_rounds:
                 self._refresh_sampler(tool_use=True)
             gen_start = time.perf_counter()
-            messages = [{"role": "system", "content": (
-                self.system_prompt + memory.curated_memory_block(self.config) + rag_block
+            # Keep the system message fixed so the KV cache survives across turns.
+            # Per-turn context (RAG, memory, env, time, nudges) is prepended to
+            # the latest real user message, so the fixed system prompt stays
+            # identical and chat-template role alternation remains strict.
+            messages = [{"role": "system", "content": self.system_prompt}]
+            context_block = (
+                memory.curated_memory_block(self.config) + rag_block
                 + prompts.env_note() + prompts.time_note() + nudge_block
-            )}]
-            messages.extend(self.history[-self.config["agent"]["history_limit"]:])
+            ).lstrip()
+            working_history = list(self.history[-self.config["agent"]["history_limit"]:])
+            if context_block:
+                for i in range(len(working_history) - 1, -1, -1):
+                    if (
+                        working_history[i]["role"] == "user"
+                        and not str(working_history[i]["content"]).startswith("[System observation:")
+                    ):
+                        working_history[i] = {
+                            "role": "user",
+                            "content": context_block + "\n\n" + working_history[i]["content"],
+                        }
+                        break
+            messages.extend(working_history)
 
             chunk_prefix = f"{self.config['assistant_name']:8}: " if self.stream_prefix else ""
             try:
@@ -1038,6 +1155,16 @@ class ChatSession:
                     ("news", "search", "look up", "lookup", "find", "latest", "current",
                      "both sides", "perspective", "balanced", "compare", "conclude")
                 )
+                # Browser follow-ups (click/scroll/type/press/browse) are never
+                # knowledge-gap searches; auto-searching them wastes a turn and
+                # creates bogus research notes.
+                browser_followup = any(
+                    marker in user_input.lower() for marker in
+                    ("click", "scroll", "type ", "press ", "browse ", "open ", "go to ")
+                ) and not any(
+                    marker in user_input.lower() for marker in
+                    ("search", "news", "weather", "look up", "find online")
+                )
                 unsure = bool(display.strip()) and learn.sounds_unsure(display)
                 fabricated = (not unsure and bool(display.strip())
                               and learn.sounds_fabricated(user_input, display))
@@ -1045,9 +1172,16 @@ class ChatSession:
                 # blanking out entirely — always search then, even when the
                 # user's wording asked for one (they asked and got nothing).
                 blanked = not final_display.strip()
+                # Trivial acknowledgments ("ok", "yes", "go on", "continue") are
+                # never a reason to auto-search; just ask the user to clarify.
+                trivial_ack = bool(user_input.strip()) and len(user_input.strip().split()) <= 2 and any(
+                    marker in user_input.lower() for marker in
+                    ("ok", "okay", "yes", "sure", "go on", "go ahead", "continue", "proceed")
+                )
                 session_cap = int(self.config["web"].get("auto_search_session_cap", 20))
                 if (self.config["web"].get("auto_search_when_unsure", True)
-                        and not auto_searched and not web_used
+                        and not auto_searched and not web_used and not browser_followup
+                        and not trivial_ack
                         and (blanked or not user_asked_web_search)
                         and self.auto_searches < session_cap
                         and (unsure or fabricated or blanked)):
@@ -1316,6 +1450,10 @@ class ChatSession:
 
         if name == "train_adapter":
             self._guarded_train()
+            return self._last_train_note
+
+        if name == "retrain_adapter":
+            self._cmd_retrain()
             return self._last_train_note
 
         if name == "delegate_task":

@@ -24,12 +24,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "save_every": 100,
     },
     "agent": {
-        "max_tool_rounds": 5,
+        "max_tool_rounds": 3,
         "history_limit": 40,
         "sandbox_timeout": 30,
         "code_timeout": 60,
         "max_output_len": 4000,
-        "max_reply_tokens": 600,
+        # 256 is enough for a tag reply + short prose; higher values make every
+        # turn wait for token generation even when the answer is obvious.
+        "max_reply_tokens": 256,
         "temperature": 0.7,
         "top_p": 0.9,
         "cron_poll_seconds": 20,
@@ -41,11 +43,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Maximum character budget for the retained conversation window. One
         # giant observation (e.g. a full web page) can otherwise bloat every
         # later turn even with a turn-count history limit.
-        "max_history_chars": 12000,
+        "max_history_chars": 8000,
         # Lower temperature during tool-use rounds makes the model follow the
         # prompt's tag rules (browse vs cmd, press vs fake keydown) more
         # strictly instead of drifting into prose or hallucinated commands.
-        "tool_use_temperature": 0.35,
+        "tool_use_temperature": 0.2,
     },
     "browser": {
         # Browser automation is off by default. When enabled, the agent launches
@@ -81,8 +83,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "rag": {
         "enabled": True,
-        "top_k": 5,
-        "max_context_tokens": 1500,
+        # Fewer, shorter chunks keep the prompt tight and the model fast.
+        "top_k": 3,
+        "max_context_tokens": 800,
         "sources": ["notes", "sessions"],
     },
     "memory": {

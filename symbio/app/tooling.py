@@ -27,6 +27,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "config_set": "config",
     "digest_notes": "digest",
     "train_adapter": "train",
+    "retrain_adapter": "train",
     "schedule_job": "cron",
     "list_cron_jobs": "cron",
     "delete_cron_job": "cron",
@@ -122,7 +123,12 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "train_adapter",
-        "description": "Fine-tune the LoRA adapter on accumulated training data.",
+        "description": "Fine-tune the LoRA adapter on accumulated training data (incremental).",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "retrain_adapter",
+        "description": "Rebuild the LoRA adapter from scratch: remove old weights, re-seed baseline data, re-digest notes, and train fresh weights. Use when the user says 'retrain yourself' or after switching models.",
         "parameters": {"type": "object", "properties": {}},
     },
     {
@@ -262,9 +268,16 @@ def tool_group(name: str) -> str | None:
     return _TOOL_GROUPS.get(name)
 
 
-def build_tools_block() -> str:
-    """Return the Hermes-style <tools> JSON block for the system prompt."""
-    return "<tools>" + json.dumps(_TOOLS, indent=2, ensure_ascii=False) + "</tools>"
+def build_tools_block(groups: set[str] | None = None) -> str:
+    """Return the Hermes-style <tools> JSON block for the system prompt.
+
+    If `groups` is given, only tools whose group is in the set are included.
+    The JSON is emitted compactly (no indentation) to keep prompt length down.
+    """
+    tools = _TOOLS
+    if groups is not None:
+        tools = [t for t in _TOOLS if _TOOL_GROUPS.get(t["name"]) in groups]
+    return "<tools>" + json.dumps(tools, ensure_ascii=False, separators=(",", ":")) + "</tools>"
 
 
 def tool_schemas() -> list[dict[str, Any]]:
@@ -362,6 +375,9 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     if re.search(r'<train\s*/>', reply) or re.search(r'<train></train>', reply):
         tools.append(("train_adapter", {}))
 
+    if re.search(r'<retrain\s*/>', reply) or re.search(r'<retrain></retrain>', reply):
+        tools.append(("retrain_adapter", {}))
+
     for m in re.finditer(r'<cron\s+expr=[\'"]([^\'"]*?)[\'"]>(.*?)</cron>', reply, re.DOTALL):
         tools.append(("schedule_job", {
             "schedule": m.group(1).strip(),
@@ -430,6 +446,8 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
     r'<digest></digest>',
     r'<train\s*/>',
     r'<train></train>',
+    r'<retrain\s*/>',
+    r'<retrain></retrain>',
     r'<cron\s+[^>]*?>(.*?)</cron>',
     r'<delegate\s+role=[\'"][^\'"]*?[\'"]>(.*?)</delegate>',
     r'<tool_call>\s*.*?\s*</tool_call>',
@@ -440,7 +458,7 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
 _KNOWN_TAG_NAMES: tuple[str, ...] = (
     "cmd", "py", "search", "read", "browse", "click", "type", "scroll",
     "press",
-    "note", "skill", "cron", "digest", "train", "memory", "profile",
+    "note", "skill", "cron", "digest", "train", "retrain", "memory", "profile",
     "config", "tool_call", "delegate",
 )
 
