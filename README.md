@@ -260,6 +260,10 @@ Answering yes deletes it; declining or saying "keep" both just leave it alone an
 |---|---|---|
 | `learn.adapter_idle_reminder_enabled` | `true` | Ask about removing an adapter that's gone unused |
 | `learn.adapter_idle_days` | `30` | Days unused before the reminder fires |
+Exmaple:
+<img width="1300" height="89" alt="Screenshot 2026-07-23 at 11 23 21 am" src="https://github.com/user-attachments/assets/c4e02593-f527-44dc-9bcb-181f329360ad" />
+<img width="272" height="475" alt="Screenshot 2026-07-23 at 11 22 52 am" src="https://github.com/user-attachments/assets/e8e7475a-aac8-455b-b978-3996f1d4d3fd" />
+
 
 ## Mixture of agents: delegating to smaller worker models
 
