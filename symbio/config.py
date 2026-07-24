@@ -1,6 +1,7 @@
 """Configuration loading, saving, and model preset helpers for Symbio."""
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -8,8 +9,38 @@ from typing import Any
 from symbio.constants import ADAPTER_DIR, CONFIG_FILE, DEFAULT_CONFIG, MODELS_FILE, NOTES_DIR
 
 
+def _env_list(key: str) -> list[str] | None:
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return None
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _apply_env_overrides(config: dict[str, Any]) -> None:
+    if os.environ.get("SYMBIO_MODEL_NAME", "").strip():
+        config["model_name"] = os.environ["SYMBIO_MODEL_NAME"].strip()
+    if os.environ.get("SYMBIO_ASSISTANT_NAME", "").strip():
+        config["assistant_name"] = os.environ["SYMBIO_ASSISTANT_NAME"].strip()
+    if os.environ.get("SYMBIO_USER_NAME", "").strip():
+        config["user_name"] = os.environ["SYMBIO_USER_NAME"].strip()
+
+    token = os.environ.get("SYMBIO_TELEGRAM_TOKEN", "").strip()
+    if token:
+        config.setdefault("telegram", {})
+        config["telegram"]["bot_token"] = token
+        config["telegram"]["enabled"] = True
+
+    allowed = _env_list("SYMBIO_TELEGRAM_ALLOWED_CHAT_IDS")
+    if allowed:
+        config.setdefault("telegram", {})
+        try:
+            config["telegram"]["allowed_chat_ids"] = [int(x) for x in allowed]
+        except ValueError:
+            print("[Config warning] SYMBIO_TELEGRAM_ALLOWED_CHAT_IDS contains non-integer values; ignored.")
+
+
 def load_config() -> dict[str, Any]:
-    """Load config.json if present; merge with sensible defaults."""
+    """Load config.json if present; merge with sensible defaults and env overrides."""
     config = DEFAULT_CONFIG.copy()
     if CONFIG_FILE.exists():
         try:
@@ -20,6 +51,7 @@ def load_config() -> dict[str, Any]:
                     config[nested_key] = {**DEFAULT_CONFIG.get(nested_key, {}), **user_config[nested_key]}
         except Exception as e:
             print(f"[Config warning] Could not read {CONFIG_FILE}: {e}")
+    _apply_env_overrides(config)
     return config
 
 

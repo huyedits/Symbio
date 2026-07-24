@@ -123,16 +123,27 @@ class BrowserSession:
         self._page: Any | None = None
         self._confirmed: set[str] = set(_DEFAULT_ALLOWLIST)
         self._confirm_fn = confirm_fn
+        self._channel: str = ""
 
-    def _init(self) -> tuple[Any, Any]:
+    def _init(self, channel: str = "") -> tuple[Any, Any]:
         if self._page is not None:
             return self._browser, self._page
 
         from playwright.sync_api import sync_playwright
 
         self._playwright = sync_playwright().start()
-        # Default to bundled Chromium; user can override via browser channel.
-        self._browser = self._playwright.chromium.launch(headless=False)
+        # Prefer Google Chrome when available; fall back to bundled Chromium.
+        # A specific channel request overrides the stored default.
+        preferred = channel or self._channel or "chrome"
+        try:
+            self._browser = self._playwright.chromium.launch(
+                headless=False, channel=preferred
+            )
+            self._channel = preferred
+        except Exception:
+            # Chrome not installed or channel unknown — use bundled Chromium.
+            self._browser = self._playwright.chromium.launch(headless=False)
+            self._channel = ""
         context = self._browser.new_context(
             viewport={"width": 1280, "height": 800},
             accept_downloads=False,
@@ -143,7 +154,7 @@ class BrowserSession:
     def _ensure_open(self) -> Any:
         if self._page is None:
             raise RuntimeError(
-                "Browser is not open. Call browser_open with the target URL yourself, then retry."
+                "Browser is not open. Use browser_open to load the target URL first, then retry the action."
             )
         return self._page
 
@@ -201,7 +212,7 @@ class BrowserSession:
         if not ok:
             return f"Browser open blocked: {msg}"
         try:
-            _, page = self._init()
+            _, page = self._init(channel=channel)
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             title = page.title()
             return f"Opened browser at {url}. Page title: {title}"

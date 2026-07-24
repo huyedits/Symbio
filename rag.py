@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,11 @@ PROJECT_DIR = Path(__file__).parent.resolve()
 NOTES_DIR = PROJECT_DIR / "notes"
 DATA_DIR = PROJECT_DIR / "training_data"
 TRAIN_FILE = DATA_DIR / "train.jsonl"
+
+# Cap how much of train.jsonl is scanned per query. Most relevant samples are
+# near the recent end of the file; scanning the whole file is a common latency
+# cliff for long-running bots.
+_TRAIN_SCAN_MAX_BYTES = 2_000_000
 
 
 def _token_count_approx(text: str) -> int:
@@ -46,6 +52,11 @@ class Retriever:
         # again just echoes the current question back into the prompt.
         self.exclude_session_id = exclude_session_id
         self._note_cache: dict[str, str] | None = None
+        # LRU-ish cache for build_context so repeated or rephrased questions
+        # do not re-scan notes/sessions/training data every turn.
+        self._context_cache: dict[str, tuple[str, float]] = {}
+        self._context_cache_ttl = float(self.rag_cfg.get("context_cache_ttl_seconds", 30))
+        self._context_cache_max = int(self.rag_cfg.get("context_cache_max_entries", 32))
 
     def _enabled_sources(self) -> list[str]:
         return list(self.rag_cfg.get("sources", ["notes", "sessions"]))
@@ -72,6 +83,12 @@ class Retriever:
     def invalidate_cache(self):
         """Call after notes are written or removed."""
         self._note_cache = None
+        self._context_cache.clear()
+
+    @staticmethod
+    def _context_cache_key(query: str) -> str:
+        """Stable key for repeated/rephrased queries."""
+        return " ".join(sorted(_normalize(query)))
 
     def _score(self, query_terms: list[str], text: str) -> float:
         terms = _normalize(text)
@@ -143,6 +160,14 @@ class Retriever:
         scored = []
         try:
             with open(TRAIN_FILE, "r", encoding="utf-8", errors="replace") as f:
+                # Recent samples are usually more relevant; read from the end
+                # up to a byte cap to avoid scanning multi-megabyte files.
+                f.seek(0, 2)
+                size = f.tell()
+                start = max(0, size - _TRAIN_SCAN_MAX_BYTES)
+                f.seek(start)
+                if start > 0:
+                    f.readline()  # discard the possibly partial line
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -178,6 +203,15 @@ class Retriever:
         if not self.rag_cfg.get("enabled", True):
             return ""
 
+        key = self._context_cache_key(query)
+        now = time.monotonic()
+        cached = self._context_cache.get(key)
+        if cached is not None:
+            text, expires = cached
+            if now < expires:
+                return text
+            self._context_cache.pop(key, None)
+
         results = self.retrieve(query)
         if not results:
             return ""
@@ -204,4 +238,10 @@ class Retriever:
             lines.append(snippet)
             used_tokens += tokens
 
-        return "\n\n".join(lines)
+        text = "\n\n".join(lines)
+        # Keep the cache small and fresh; stale entries expire via TTL checks.
+        if len(self._context_cache) >= self._context_cache_max:
+            oldest = min(self._context_cache, key=lambda k: self._context_cache[k][1])
+            self._context_cache.pop(oldest, None)
+        self._context_cache[key] = (text, now + self._context_cache_ttl)
+        return text
