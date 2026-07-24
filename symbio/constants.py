@@ -72,7 +72,7 @@ def data_dir_for(role: str | None = None) -> Path:
     return DATA_DIR / "workers" / role
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "model_name": "mlx-community/Qwen2.5-3B-Instruct-4bit",
+    "model_name": "mlx-community/Qwen3-8B-4bit",
     "assistant_name": "Symbio",
     # Empty by default so the first run triggers interactive name setup and
     # every install seeds its own identity and training data.
@@ -107,6 +107,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "temperature": 0.1,
         "top_p": 0.9,
         "repetition_penalty": 1.15,
+        "max_reply_tokens": 256,
+        "prompt_cache_enabled": True,
+        "stream_output": True,
+        "max_tool_rounds": 3,
     },
     "model": {
         "allow_lora": True,
@@ -115,8 +119,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "rag": {
         "enabled": True,
-        "top_k": 5,
-        "max_context_tokens": 1500,
+        "top_k": 3,
+        "max_context_tokens": 800,
         "sources": ["notes", "sessions"],
     },
     "training_planner": {

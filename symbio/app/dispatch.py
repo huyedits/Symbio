@@ -94,7 +94,13 @@ class WorkerPool:
     a typical machine; raise max_resident_workers if you have the RAM to
     keep more loaded at once — it's genuinely respected, not just a stub."""
 
-    def __init__(self, config: dict[str, Any], status_fn=None):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        status_fn=None,
+        before_worker_fn=None,
+        after_worker_fn=None,
+    ):
         self.config = config
         # role -> (model, tokenizer, last_used_ts)
         self._resident: dict[str, tuple[Any, Any, float]] = {}
@@ -102,6 +108,11 @@ class WorkerPool:
         # user-facing progress lines so a chat front-end can show when workers
         # load and when tasks are delegated.
         self.status_fn = status_fn
+        # Optional callbacks so the headmaster can unload itself before a
+        # worker runs and reload itself afterwards — saves RAM on modest machines
+        # by keeping only the active model resident.
+        self.before_worker_fn = before_worker_fn
+        self.after_worker_fn = after_worker_fn
 
     def _dispatch_cfg(self) -> dict[str, Any]:
         return self.config.get("dispatch", {})
@@ -168,35 +179,45 @@ class WorkerPool:
             max_rounds = int(self._dispatch_cfg().get("max_worker_rounds", 4))
             return self._run_browser_delegation(task, browser, max_rounds)
 
-        loaded = self.get(role)
-        if loaded is None:
-            known = sorted({e.get("role") for e in load_catalog().values() if e.get("role")})
-            return f"No worker configured for role '{role}'. Known roles: {', '.join(known) or 'none'}."
-        model, tokenizer, entry = loaded
-        self._status(f"  [Dispatch] Delegating to '{role}': {task[:80]}{'...' if len(task) > 80 else ''}")
-        system_prompt = ROLE_SYSTEM_PROMPTS.get(
-            role, "Complete the following task concisely and directly.")
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": task},
-        ]
-        prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
-        )
-        try:
-            reply = generate(
-                model, tokenizer, prompt=prompt,
-                sampler=make_sampler(temp=0.2, top_p=0.9),
-                max_tokens=max_tokens, verbose=False,
-            ).strip()
-        except Exception as e:
-            self._status(f"  [Dispatch] Worker '{role}' failed: {e}")
-            return f"Worker '{role}' failed: {e}"
+        deep_sleep = bool(self._dispatch_cfg().get("headmaster_deep_sleep_while_workers", False))
+        if deep_sleep and self.before_worker_fn is not None:
+            self._status("  [Dispatch] Putting headmaster to sleep before loading worker...")
+            self.before_worker_fn()
 
-        self._status(f"  [Dispatch] Worker '{role}' returned {len(reply.split())} word(s).")
-        if reply:
-            training.append_chat_pair(task, reply, tokenizer, system_prompt, role=role)
-        return reply or f"Worker '{role}' returned nothing."
+        try:
+            loaded = self.get(role)
+            if loaded is None:
+                known = sorted({e.get("role") for e in load_catalog().values() if e.get("role")})
+                return f"No worker configured for role '{role}'. Known roles: {', '.join(known) or 'none'}."
+            model, tokenizer, entry = loaded
+            self._status(f"  [Dispatch] Delegating to '{role}': {task[:80]}{'...' if len(task) > 80 else ''}")
+            system_prompt = ROLE_SYSTEM_PROMPTS.get(
+                role, "Complete the following task concisely and directly.")
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": task},
+            ]
+            prompt = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            )
+            try:
+                reply = generate(
+                    model, tokenizer, prompt=prompt,
+                    sampler=make_sampler(temp=0.2, top_p=0.9),
+                    max_tokens=max_tokens, verbose=False,
+                ).strip()
+            except Exception as e:
+                self._status(f"  [Dispatch] Worker '{role}' failed: {e}")
+                return f"Worker '{role}' failed: {e}"
+
+            self._status(f"  [Dispatch] Worker '{role}' returned {len(reply.split())} word(s).")
+            if reply:
+                training.append_chat_pair(task, reply, tokenizer, system_prompt, role=role)
+            return reply or f"Worker '{role}' returned nothing."
+        finally:
+            if deep_sleep and self.after_worker_fn is not None:
+                self._status("  [Dispatch] Waking headmaster back up...")
+                self.after_worker_fn()
 
     def _run_browser_delegation(self, task: str, browser: Any, max_rounds: int) -> str:
         """Drive a bounded click/type/scroll loop on the 'browser' worker

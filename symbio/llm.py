@@ -55,22 +55,72 @@ def append_chat_pair(user_msg: str, assistant_msg: str, tokenizer, system_prompt
 
 
 def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
-    """Seed clean, balanced corpus for identity, greetings, and tool use."""
-    if TRAIN_FILE.exists() and TRAIN_FILE.stat().st_size > 0:
-        return
+    """Seed clean, balanced corpus for identity, greetings, and tool use.
 
+    Appends seed samples to the existing training file. A small manifest
+    (hashed by assistant/user name and the rendered sample text) prevents
+    re-adding the same seed examples on every restart, while still letting
+    an install with existing conversation data benefit from improved seed
+    examples as the shipped corpus evolves.
+    """
     assistant = config["assistant_name"]
     user = config["user_name"]
 
-    def write(samples: list[tuple[str, str]], path: Path):
-        with open(path, "w", encoding="utf-8") as f:
+    seed_manifest_path = DATA_DIR / "seed_manifest.json"
+    try:
+        manifest = json.loads(seed_manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        manifest = {}
+
+    # Identity of this seed run: if assistant/user/system prompt changed,
+    # wipe the manifest so the fresh seed corpus is fully re-injected.
+    run_key = hashlib.sha256(
+        f"{assistant}:{user}:{system_prompt}".encode("utf-8")
+    ).hexdigest()[:16]
+    if manifest.get("run_key") != run_key:
+        manifest = {"run_key": run_key, "samples": {}}
+
+    seen: dict[str, set[str]] = {
+        k: set(v) for k, v in manifest.get("samples", {}).items()
+    }
+
+    # Bootstrap the seen set from existing files so we never duplicate samples
+    # when the manifest is empty or was written by an older version.
+    for data_path in (TRAIN_FILE, VALID_FILE):
+        if data_path.exists():
+            path_str = str(data_path)
+            existing = seen.setdefault(path_str, set())
+            for line in data_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    text = json.loads(line).get("text", "")
+                except Exception:
+                    continue
+                if text:
+                    existing.add(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16])
+
+    def render_sample(user_msg: str, assistant_msg: str) -> str:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": assistant_msg},
+        ]
+        return build_chat_training_sample(messages, tokenizer)
+
+    def append(samples: list[tuple[str, str]], path: Path) -> int:
+        added = 0
+        path_str = str(path)
+        with open(path, "a", encoding="utf-8") as f:
             for user_msg, assistant_msg in samples:
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_msg},
-                    {"role": "assistant", "content": assistant_msg},
-                ]
-                f.write(json.dumps({"text": build_chat_training_sample(messages, tokenizer)}) + "\n")
+                text = render_sample(user_msg, assistant_msg)
+                h = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+                if h in seen.get(path_str, set()):
+                    continue
+                f.write(json.dumps({"text": text}) + "\n")
+                seen.setdefault(path_str, set()).add(h)
+                added += 1
+        return added
 
     train_samples = [
         # --- Greetings & chitchat ---
@@ -234,8 +284,14 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         ),
     ]
 
-    write(train_samples, TRAIN_FILE)
-    write(valid_samples, VALID_FILE)
+    train_added = append(train_samples, TRAIN_FILE)
+    valid_added = append(valid_samples, VALID_FILE)
+    manifest = {
+        "run_key": run_key,
+        "samples": {k: list(v) for k, v in seen.items()},
+    }
+    seed_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return train_added + valid_added
 
 
 def _run_lora_chunk(cmd: list[str]) -> tuple[bool, float | None]:

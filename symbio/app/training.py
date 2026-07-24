@@ -214,14 +214,49 @@ def digest_notes_to_training(tokenizer, system_prompt: str,
     return added
 
 
-def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
+def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) -> int:
     """Seed a minimal clean corpus so the model has correct identity/tool examples
-    even before any real conversation is saved."""
-    if constants.TRAIN_FILE.exists() and constants.TRAIN_FILE.stat().st_size > 0:
-        return
+    even before any real conversation is saved.
 
+    Appends seed samples to the existing training file. A manifest keyed by the
+    rendered sample text prevents duplicates, so improved seed examples are
+    added on upgrade while existing samples are not re-written.
+    """
+    seed_manifest_path = constants.DATA_DIR / "seed_manifest.json"
+    try:
+        manifest = json.loads(seed_manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        manifest = {}
+
+    # If assistant/user/system prompt changed, wipe the manifest so the fresh
+    # seed corpus is fully re-injected.
     assistant = config["assistant_name"]
     user = config["user_name"]
+    run_key = hashlib.sha256(
+        f"{assistant}:{user}:{system_prompt}".encode("utf-8")
+    ).hexdigest()[:16]
+    if manifest.get("run_key") != run_key:
+        manifest = {"run_key": run_key, "samples": {}}
+
+    seen: dict[str, set[str]] = {
+        k: set(v) for k, v in manifest.get("samples", {}).items()
+    }
+
+    # Bootstrap the seen set from the existing training file so we never
+    # duplicate samples when the manifest is empty or was written by an older
+    # version that only tracked the run_key.
+    if constants.TRAIN_FILE.exists():
+        path_str = str(constants.TRAIN_FILE)
+        existing = seen.setdefault(path_str, set())
+        for line in constants.TRAIN_FILE.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                text = json.loads(line).get("text", "")
+            except Exception:
+                continue
+            if text:
+                existing.add(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16])
 
     samples = [
         # Identity
@@ -395,8 +430,20 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         # The native macOS opener with a URL opens the user's browser and leaves
         # the agent unable to click, so this is a mistake pattern to recover from.
         (
+            "Open apple.com in Chrome and click the first button.",
+            "<browse>https://www.apple.com</browse> Opening apple.com in the controllable browser — I'll click the first button once it loads.",
+        ),
+        (
             "Open cloudflare.com in Chrome and click the first button.",
             "<browse>https://www.cloudflare.com</browse> Opening Cloudflare in the controllable browser — I'll click the first button once it loads.",
+        ),
+        (
+            "Read what apple.com says.",
+            "<browse>https://www.apple.com</browse> Opening apple.com so I can read its contents.",
+        ),
+        (
+            "What does apple.com say?",
+            "<browse>https://www.apple.com</browse> Opening apple.com to read its contents.",
         ),
         (
             "[System observation: Opened browser at https://www.cloudflare.com. "
@@ -498,8 +545,27 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         ),
     ]
 
+    added = 0
     for user_msg, assistant_msg in samples:
-        append_chat_pair(user_msg, assistant_msg, tokenizer, system_prompt)
+        text = build_chat_training_sample([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": clean_response(assistant_msg)},
+        ], tokenizer)
+        h = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        path_str = str(constants.TRAIN_FILE)
+        if h in seen.get(path_str, set()):
+            continue
+        append_training_text(text)
+        seen.setdefault(path_str, set()).add(h)
+        added += 1
+
+    manifest = {
+        "run_key": run_key,
+        "samples": {k: list(v) for k, v in seen.items()},
+    }
+    seed_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return added
 
 
 def ensure_validation_split(every_nth: int = 10, max_samples: int = 24,

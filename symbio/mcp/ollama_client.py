@@ -16,9 +16,13 @@ def _strip_thinking(text: str) -> str:
 
 async def run_local(prompt: str) -> str:
     """Call the configured Ollama model and return cleaned text."""
+    headers = {}
+    if settings.ollama_api_key:
+        headers["Authorization"] = f"Bearer {settings.ollama_api_key}"
     async with httpx.AsyncClient(timeout=settings.local_timeout) as client:
         response = await client.post(
             f"{settings.ollama_base_url}/api/generate",
+            headers=headers,
             json={
                 "model": settings.local_model,
                 "prompt": prompt,

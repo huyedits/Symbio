@@ -161,6 +161,11 @@ GOLDEN_CASES: list[GoldenCase] = [
         _check_browse_for_interaction,
     ),
     GoldenCase(
+        "browse_apple", "Uses the controllable browser to read apple.com",
+        lambda cfg: "Read what apple.com says.",
+        _check_browse_for_interaction,
+    ),
+    GoldenCase(
         "browser_press_key", "Presses a browser key instead of inventing a shell command",
         lambda cfg: "Press the down arrow key.",
         _check_browser_press,
