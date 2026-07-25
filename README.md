@@ -432,7 +432,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and how to open issue
 - [ ] **Adapter marketplace** — design doc: [docs/adapter-marketplace.md](docs/adapter-marketplace.md); not yet implemented
 - [ ] **Add Other Messaging Platforms**
 - [ ] **Prune Old Weights (Future Milestone)**
-
+## Licence
+Apache 2.0
 
 ## Star History
 
