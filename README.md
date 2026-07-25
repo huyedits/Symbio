@@ -1,7 +1,12 @@
 # Symbio
-Your machine, your way.
 
-[![Live Demo on Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Live%20Demo-Hugging%20Face%20Spaces-blue)](https://huggingface.co/spaces/HuyEdits/symbio-demo)
+*** Local Ai that learns from your corrections. No Cloud, No subscriptions. ***
+
+Symbio takes notes and can construct it into training data to fine-tune itself - so you can stop repeating yourself.
+
+[![Live Demo on Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Live%20Demo-Hugging%20Face%20Spaces-blue)](https://huggingface.co/spaces/HuyEdits/symbio-demo)| [GitHub](https://github.com/huyedits/Symbio) | [Try it now](#quick-start)
+
+
 
 Symbio develops as you tell it what to do in repeat.
 
@@ -35,6 +40,18 @@ symbio
 # Or the short alias:
 #   symb
 ```
+## How it works
+
+1. **You talk to the AI** — Ask it anything
+2. **It makes mistakes** — Sometimes gets it wrong
+3. **You correct it** — "No, it's actually..."
+4. **It learns** — Saves the correction
+5. **After 5+ corrections, it fine-tunes itself**
+6. **Next time: it gets it right** :)))
+
+That's it. No manual training. No API calls. All local.
+
+[See it in action](#example-screenshot)
 
 If you prefer an isolated, non-editable install (e.g. with `pipx`):
 
@@ -49,6 +66,7 @@ Make sure `~/.local/bin` (or your pip/pipx bin directory) is on your `PATH`.
 On first run, Symbio asks for your name and its name. These are saved to `config.json`.
 ## Why custom?
 AI agents tend to forget and also not personalised to the work you want the agent to do, as well as the agent being in the cloud which brings on the costs and privacy risk. This repo helps you have access to a highly aggressive persoanlised model that does not leave your machine unless you ask it to.
+
 ## Configuration
 
 Edit `config.json` to change the model, LoRA settings, or agent behavior. You can also use the CLI:
