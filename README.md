@@ -1,6 +1,6 @@
 # Symbio
 
-*** Local Ai that learns from your corrections. No Cloud, No subscriptions. ***
+***Local Ai that learns from your corrections. No Cloud, No subscriptions.***
 
 Symbio takes notes and can construct it into training data to fine-tune itself - so you can stop repeating yourself.
 
