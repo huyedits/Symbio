@@ -24,6 +24,11 @@ Symbio works with a feature called **MOA**, MOA is a mixture of agents. In staid
 - Persist every conversation turn to JSONL and an SQLite store.
 
 Please star this project too. It would help me out SO SO much. :3 <3
+## Hardware prerequisites 
+Symbio (for now) runs on Apple Silicon using MLX and Metal performance shaders
+- ** Recommended Unified RAM requirements ** 16gb (the program itself takes 8 but overhead and expansion so comfortably would be 16)
+- **Minimum architecture** any m-series chip ideally. (if you can leme know if it works for m1,m2,m3,m5 and the pro and max variants)
+
 ## Quick start
 
 ```bash
