@@ -23,6 +23,7 @@ Symbio works with a feature called **MOA**, MOA is a mixture of agents. In staid
 - Digest notes into training data and fine-tune a LoRA adapter on the fly.
 - Persist every conversation turn to JSONL and an SQLite store.
 
+Please star this project too. It would help me out SO SO much. :3 <3
 ## Quick start
 
 ```bash
