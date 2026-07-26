@@ -829,10 +829,11 @@ def test_agent_loop_browses():
             obs_prompt = session.prompts_seen[1]
             assert "Opened browser at https://example.com/mlx" in obs_prompt, obs_prompt
             assert "Fake page text about MLX" in obs_prompt, obs_prompt
-            # A browse-backed answer is remembered as research.
+            # Browser automation is intentionally not auto-remembered as
+            # research, to avoid polluting notes with UI-action confirmations.
             learned = [f for f in constants.NOTES_DIR.glob("*.md")
                        if f.read_text().startswith("# Learned:")]
-            assert len(learned) == 1, learned
+            assert len(learned) == 0, learned
     finally:
         chat.BrowserSession = real_browser
     print("test_agent_loop_browses passed")
