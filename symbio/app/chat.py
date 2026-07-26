@@ -185,12 +185,13 @@ class ChatSession:
                  adapter_loaded: bool | None = None,
                  input_fn=None, output_fn=None, confirm_fn=None,
                  generate_fn=None, stream_fn=None, stream_chunk_fn=None,
-                 stream_prefix: bool = True):
+                 stream_prefix: bool = True, owner: str | None = None):
         # Last URL successfully opened in the controllable browser; used to
         # auto-recover when a later click/type/scroll/press finds the browser
         # session was reset or never opened.
         self._last_browsed_url: str = ""
         self.config = config
+        self.owner = owner
         self.input_fn = input_fn if input_fn is not None else input
         self.output_fn = output_fn if output_fn is not None else print
         self.confirm_fn = confirm_fn
@@ -826,6 +827,14 @@ class ChatSession:
         """Run a full adapter rebuild from scratch inside the chat session."""
         from symbio.app.retrain import retrain_model
 
+        # CLI convenience: require explicit confirmation because this deletes the adapter.
+        if self.input_fn(
+            "  [Retrain] This will DELETE the current LoRA adapter and retrain from scratch. "
+            "Type 'retrain' to continue: "
+        ).strip().lower() != "retrain":
+            self.output_fn("  [Retrain] Cancelled.")
+            return
+
         self.output_fn("  [Retrain] Rebuilding adapter from scratch...")
         # Sleep the headmaster to free RAM before loading the base model for retraining.
         self._sleep_headmaster()
@@ -897,7 +906,8 @@ class ChatSession:
             try:
                 job = cron.add_cron_job(
                     parts[1], " ".join(parts[2:]),
-                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", []))
+                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", [])),
+                    owner=self.owner,
                 )
                 self.output_fn(f"  Added job {job['id']}: {job['schedule']} — {job['text']}")
             except ValueError as e:
@@ -906,17 +916,18 @@ class ChatSession:
             try:
                 job = cron.update_cron_job(
                     int(parts[1]), parts[2], " ".join(parts[3:]),
-                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", []))
+                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", [])),
+                    owner=self.owner,
                 )
                 self.output_fn(f"  Updated job {job['id']}: {job['schedule']} — {job['text']}")
             except ValueError as e:
                 self.output_fn(f"  {e}")
         elif sub == "rm" and len(parts) == 2:
-            jobs = cron.load_cron_jobs()
-            kept = [j for j in jobs if str(j["id"]) != parts[1]]
-            cron.save_cron_jobs(kept)
-            self.output_fn(f"  Removed job {parts[1]}." if len(kept) < len(jobs)
-                  else f"  No job with id {parts[1]}.")
+            try:
+                cron.delete_cron_job(int(parts[1]), owner=self.owner)
+                self.output_fn(f"  Removed job {parts[1]}.")
+            except ValueError as e:
+                self.output_fn(f"  {e}")
         else:
             self.output_fn('  Usage: /cron [list] | /cron add "<cron expr | at YYYY-MM-DD HH:MM>" <text> | /cron update <id> "<schedule>" <text> | /cron rm <id>')
 
@@ -1401,7 +1412,8 @@ class ChatSession:
             try:
                 job = cron.add_cron_job(
                     params["schedule"], params["text"],
-                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", []))
+                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", [])),
+                    owner=self.owner,
                 )
                 return f"Scheduled job {job['id']}: {job['schedule']} — {job['text']}"
             except ValueError as e:
@@ -1413,12 +1425,13 @@ class ChatSession:
                 return "No scheduled jobs."
             lines = ["Scheduled jobs:"]
             for job in jobs:
-                lines.append(f"  {job['id']}: {job['schedule']} — {job['text']}")
+                owner_tag = f" (owner: {job['owner']})" if job.get("owner") else ""
+                lines.append(f"  {job['id']}: {job['schedule']} — {job['text']}{owner_tag}")
             return "\n".join(lines)
 
         if name == "delete_cron_job":
             try:
-                job = cron.delete_cron_job(int(params["job_id"]))
+                job = cron.delete_cron_job(int(params["job_id"]), owner=self.owner)
                 return f"Deleted job {job['id']}: {job['schedule']} — {job['text']}"
             except (ValueError, KeyError) as e:
                 return f"Could not delete job: {e}"
@@ -1429,7 +1442,8 @@ class ChatSession:
                     int(params["job_id"]),
                     schedule=params.get("schedule"),
                     text=params.get("text"),
-                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", []))
+                    blocked_commands=set(self.config["sandbox"].get("blocked_commands", [])),
+                    owner=self.owner,
                 )
                 return f"Updated job {job['id']}: {job['schedule']} — {job['text']}"
             except (ValueError, KeyError) as e:
@@ -1487,6 +1501,11 @@ class ChatSession:
             return "Digest all notes into training data?"
         if name == "train_adapter":
             return "Start LoRA training? This may take a while."
+        if name == "retrain_adapter":
+            return (
+                "⚠️  Start a FULL adapter rebuild? This will DELETE the current LoRA "
+                "adapter and retrain from scratch. This cannot be undone."
+            )
         return f"Allow tool '{name}'?"
 
     # ---- Main loop ----
@@ -1530,4 +1549,5 @@ class ChatSession:
 
 
 def chat_loop(config: dict[str, Any]):
-    ChatSession(config, stream_chunk_fn=lambda s: print(s, end="", flush=True)).run()
+    ChatSession(config, stream_chunk_fn=lambda s: print(s, end="", flush=True),
+                owner="cli").run()
