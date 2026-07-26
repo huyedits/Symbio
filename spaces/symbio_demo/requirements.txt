@@ -1,0 +1,9 @@
+# Minimal dependencies for the Hugging Face golden-set demo tab.
+# Add these to the existing Space's requirements.txt.
+gradio>=5.0
+
+# Symbio itself. Only symbio.app.golden and symbio.app.tooling are imported,
+# so MLX/Playwright/etc. are not exercised at runtime, but pip will still try to
+# install the package's declared dependencies. If that is too heavy for the
+# Space, vendor the two modules instead of installing the full package.
+-e git+https://github.com/HuyEdits/symbio.git@main#egg=symbio

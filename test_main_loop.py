@@ -794,18 +794,20 @@ def test_parse_browser_tags():
     reply = (
         "<browse>https://a.b/c</browse><click>Sign in</click>"
         "<type enter='true'>lofi</type><scroll dir='up' /><scroll />"
+        "<browser_close />"
     )
     tools = tooling.parse_tools(reply)
     names = [n for n, _ in tools]
     assert names == [
         "browser_open", "browser_click", "browser_type",
-        "browser_scroll", "browser_scroll",
+        "browser_scroll", "browser_scroll", "browser_close",
     ], names
     assert tools[0][1] == {"url": "https://a.b/c"}
     assert tools[1][1] == {"target": "Sign in"}
     assert tools[2][1] == {"text": "lofi", "enter": True}
     assert tools[3][1] == {"direction": "up"}
     assert tools[4][1] == {"direction": "down"}
+    assert tools[5][1] == {}
     assert tooling.strip_tool_tags(reply) == "", repr(tooling.strip_tool_tags(reply))
     print("test_parse_browser_tags passed")
 

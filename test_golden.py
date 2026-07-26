@@ -3,6 +3,8 @@
 silently breaks tool-tag formatting, identity, or degenerates into
 repetition gets caught and rolled back instead of shipping quietly."""
 
+import json
+
 from symbio import constants
 from symbio.app import chat, golden, training
 from symbio.app import config as app_config
@@ -50,6 +52,7 @@ _IDEAL_REPLIES = {
     "browse_to_interact": "<browse>https://www.cloudflare.com</browse> Opening cloudflare.com so I can click the first button.",
     "browse_apple": "<browse>https://www.apple.com</browse> Opening apple.com to read it.",
     "browser_press_key": "<press>down</press> Pressing the down arrow key.",
+    "run_health_check": "<tool_call>{\"name\": \"system_check\", \"arguments\": {}}</tool_call> Running a self-diagnostic now.",
 }
 
 
@@ -172,6 +175,7 @@ def test_guarded_train_regression_rolls_back(tmp_path, monkeypatch):
     config = _base_config()
     config["learn"]["golden_set_enabled"] = True
     config["learn"]["golden_rollback_on_regression"] = True
+    config["learn"]["golden_retry_enabled"] = False  # test pure rollback path
 
     monkeypatch.setattr(training, "run_training",
                         lambda cfg, iters=None: _write_adapter("regressed") or True)
@@ -206,6 +210,7 @@ def test_guarded_train_rollback_disabled_keeps_regressed_adapter(tmp_path, monke
     config = _base_config()
     config["learn"]["golden_set_enabled"] = True
     config["learn"]["golden_rollback_on_regression"] = False
+    config["learn"]["golden_retry_enabled"] = False  # test pure keep path
 
     monkeypatch.setattr(training, "run_training",
                         lambda cfg, iters=None: _write_adapter("regressed") or True)
@@ -276,3 +281,160 @@ def test_guarded_train_no_op_when_training_produces_nothing(tmp_path, monkeypatc
     assert len(golden_calls) == 1  # baseline only; training failed before the recheck
     assert len(load_calls) == 0  # never reloads on failed training
     assert session._last_train_note == "Training skipped (no new data or failed)."
+
+
+# ---- Golden retry + remedy helpers ----
+
+
+def test_append_golden_remedy_samples(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants, "TRAIN_FILE", tmp_path / "train.jsonl")
+    config = _base_config()
+    tokenizer = FakeTokenizer()
+    system_prompt = "SYSTEM PROMPT"
+
+    added = golden.append_golden_remedy_samples(
+        ["identity_self", "save_note"], tokenizer, system_prompt, config, copies=2)
+
+    assert added == 4
+    lines = constants.TRAIN_FILE.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 4
+    texts = [json.loads(line)["text"] for line in lines]
+    # Two copies of each case's user prompt appear.
+    assert sum("What is your name?" in t for t in texts) == 2
+    assert sum("Please remember that I prefer concise replies." in t for t in texts) == 2
+    # Ideal replies contain the expected tags/identity.
+    assert sum("I am Caine, your personal AI assistant." in t for t in texts) == 2
+    assert sum("<note title='Pref'>Prefers concise replies.</note>" in t for t in texts) == 2
+
+
+def test_run_golden_set_retry_identifies_consistent_failures():
+    config = _base_config()
+
+    def make_toggling_generate(first_replies, second_replies):
+        calls = [0]
+        n = len(golden.GOLDEN_CASES)
+
+        def fake_generate(model, tokenizer, prompt="", sampler=None, max_tokens=0, verbose=False):
+            calls[0] += 1
+            idx = (calls[0] - 1) % n
+            case_id = golden.GOLDEN_CASES[idx].id
+            run = 1 if calls[0] <= n else 2
+            value = (first_replies if run == 1 else second_replies).get(case_id, "")
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        return fake_generate
+
+    # First run: identity_self fails; second run: identity_self passes (flaky).
+    # run_code_for_math fails both times (consistent).
+    first = dict(_IDEAL_REPLIES)
+    first["identity_self"] = "I'm not sure, I don't have a name."
+    first["run_code_for_math"] = "I think it's 5040."
+    second = dict(_IDEAL_REPLIES)
+    second["run_code_for_math"] = "I think it's 5040."
+
+    result, consistent = golden.run_golden_set_retry(
+        object(), FakeTokenizer(), make_toggling_generate(first, second), None,
+        "SYSTEM PROMPT", config)
+
+    assert "run_code_for_math" in consistent
+    assert "identity_self" not in consistent
+    assert result.results["identity_self"] is True
+    assert result.results["run_code_for_math"] is False
+
+
+def test_guarded_train_retries_and_retrains_on_consistent_regression(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants, "ADAPTER_DIR", tmp_path / "adapters")
+    monkeypatch.setattr(constants, "TRAIN_FILE", tmp_path / "train.jsonl")
+    _write_adapter("original")
+
+    config = _base_config()
+    config["learn"]["golden_set_enabled"] = True
+    config["learn"]["golden_retry_enabled"] = True
+    config["learn"]["golden_rollback_on_regression"] = True
+
+    train_calls = []
+
+    def fake_run_training(cfg, iters=None):
+        train_calls.append(iters)
+        if len(train_calls) == 1:
+            _write_adapter("regressed")
+        else:
+            _write_adapter("remedied-ok")
+        return True
+
+    monkeypatch.setattr(training, "run_training", fake_run_training)
+
+    golden_calls = []
+
+    _PASSING = {"greeting": True, "identity_self": True, "save_note": True}
+    _REGRESSED = {"greeting": True, "identity_self": False, "save_note": False}
+
+    def fake_golden(*a, **k):
+        golden_calls.append(1)
+        if len(golden_calls) in (1, 5):
+            return golden.GoldenResult(_PASSING, {})
+        # Calls 2 (post-train), 3 (retry first), and 4 (retry second): identity_self and save_note regress.
+        return golden.GoldenResult(_REGRESSED, {})
+
+    monkeypatch.setattr(golden, "run_golden_set", fake_golden)
+
+    load_calls: list[int] = []
+    session = _make_session(config, monkeypatch, load_calls)
+
+    trained = session._guarded_train()
+
+    assert trained is True
+    assert len(train_calls) == 2
+    assert train_calls[1] == config["learn"]["golden_retry_max_extra_iters"]
+    assert len(golden_calls) == 5  # baseline + post-train + retry first + retry second + post-remedy
+    assert len(load_calls) == 2  # initial reload + remedy reload
+    assert (constants.ADAPTER_DIR / "adapter_config.json").read_text() == "remedied-ok"
+    # Remedy samples for the consistently failing cases were added to training data.
+    train_text = constants.TRAIN_FILE.read_text(encoding="utf-8")
+    copies = config["learn"]["golden_retry_samples_per_case"]
+    assert train_text.count("What is your name?") >= 1 + copies
+    assert train_text.count("Please remember that I prefer concise replies.") >= 1 + copies
+    assert "no regression" in session._last_train_note, session._last_train_note
+
+
+def test_guarded_train_ignores_flaky_regression(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants, "ADAPTER_DIR", tmp_path / "adapters")
+    monkeypatch.setattr(constants, "TRAIN_FILE", tmp_path / "train.jsonl")
+    _write_adapter("original")
+
+    config = _base_config()
+    config["learn"]["golden_set_enabled"] = True
+    config["learn"]["golden_retry_enabled"] = True
+
+    train_calls = []
+
+    def fake_run_training(cfg, iters=None):
+        train_calls.append(iters)
+        _write_adapter("trained-ok")
+        return True
+
+    monkeypatch.setattr(training, "run_training", fake_run_training)
+
+    golden_calls = []
+
+    def fake_golden(*a, **k):
+        golden_calls.append(1)
+        if len(golden_calls) in (1, 3):
+            return golden.GoldenResult({"a": True, "b": True, "c": True}, {})
+        # golden_calls == 2: b fails once, then recovers.
+        return golden.GoldenResult({"a": True, "b": False, "c": True}, {})
+
+    monkeypatch.setattr(golden, "run_golden_set", fake_golden)
+
+    load_calls: list[int] = []
+    session = _make_session(config, monkeypatch, load_calls)
+
+    trained = session._guarded_train()
+
+    assert trained is True
+    assert len(train_calls) == 1  # no remedy training
+    assert len(golden_calls) == 3  # baseline + first post + retry second
+    assert len(load_calls) == 1
+    assert (constants.ADAPTER_DIR / "adapter_config.json").read_text() == "trained-ok"

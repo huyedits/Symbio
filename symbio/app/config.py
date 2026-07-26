@@ -113,6 +113,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "golden_max_tokens": 150,
         "golden_regression_threshold": 0,
         "golden_rollback_on_regression": True,
+        "golden_retry_enabled": True,
+        "golden_retry_max_extra_iters": 50,
+        "golden_retry_samples_per_case": 3,
         "adapter_idle_reminder_enabled": True,
         "adapter_idle_days": 30,
         "correction_phrases": [
@@ -125,7 +128,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "tools": {
         "enabled_groups": [
             "memory", "notes", "terminal", "code", "web_search",
-            "digest", "train", "cron", "config", "delegate",
+            "digest", "train", "cron", "config", "delegate", "system",
         ],
     },
     "dispatch": {
