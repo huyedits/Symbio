@@ -14,11 +14,12 @@ surfacing later as a silently worse assistant.
 
 from __future__ import annotations
 
+import platform as platform_module
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple
 
-from symbio.app import prompts, tooling
+from symbio.app import prompts, tooling, training
 
 _LEAKED_TAG_MARKERS = ("<tool_call", "</tool_call>", "<tool_response")
 
@@ -110,6 +111,11 @@ def _check_browser_press(display: str, tools: list, config: dict) -> bool:
     return sane_reply(display) and _has_tool(tools, "browser_press")
 
 
+def _check_system_check(display: str, tools: list, config: dict) -> bool:
+    """A request to check health should call the system_check tool."""
+    return sane_reply(display) and _has_tool(tools, "system_check")
+
+
 # Prompts and expected behavior mirror pairs baked into seed_training_data,
 # so every install can learn them fresh even before any real conversation —
 # a case failing means fine-tuning eroded a contract that was demonstrably
@@ -170,7 +176,69 @@ GOLDEN_CASES: list[GoldenCase] = [
         lambda cfg: "Press the down arrow key.",
         _check_browser_press,
     ),
+    GoldenCase(
+        "run_health_check", "Calls the self-diagnostic tool when asked to check health",
+        lambda cfg: "Run a health check.",
+        _check_system_check,
+    ),
 ]
+
+
+def _golden_ideal_replies(config: dict[str, Any]) -> dict[str, str]:
+    """The canonical assistant reply for each golden case, used to build
+    remedy training samples when a case consistently fails after a LoRA
+    update. Values mirror the seed corpus so the remedy reinforces the
+    same contract, but are name/platform-aware."""
+    assistant = config.get("assistant_name", "Assistant")
+    user = config.get("user_name", "User")
+    platform = platform_module.system()
+    if platform == "Darwin":
+        open_chrome = "open -a 'Google Chrome'"
+    elif platform == "Windows":
+        open_chrome = "start chrome"
+    else:
+        open_chrome = "xdg-open https://www.google.com"
+    return {
+        "greeting": "Hey! What can I help with?",
+        "identity_self": f"I am {assistant}, your personal AI assistant.",
+        "identity_not_user": f"No — I'm {assistant}, your assistant. You're {user}.",
+        "save_note": "Got it. <note title='Pref'>Prefers concise replies.</note>",
+        "schedule_reminder": f"Will do, {user}. <cron expr='0 9 * * *'>stretch</cron>",
+        "run_code_for_math": "<py>import math\nprint(math.factorial(7))</py> Running that now.",
+        "web_search_unknown": "<search>latest news</search> Searching now.",
+        "open_app_command": f"<cmd>{open_chrome}</cmd> Opening Chrome.",
+        "browse_to_interact": "<browse>https://www.cloudflare.com</browse> Opening cloudflare.com so I can click the first button.",
+        "browse_apple": "<browse>https://www.apple.com</browse> Opening apple.com to read it.",
+        "browser_press_key": "<press>down</press> Pressing the down arrow key.",
+        "run_health_check": '<tool_call>{"name": "system_check", "arguments": {}}</tool_call> Running a self-diagnostic now.',
+    }
+
+
+def append_golden_remedy_samples(
+    failing_case_ids: list[str],
+    tokenizer,
+    system_prompt: str,
+    config: dict[str, Any],
+    role: str | None = None,
+    copies: int = 3,
+) -> int:
+    """Write boosted (prompt, ideal-reply) training samples for golden cases
+    that consistently fail. Returns the number of samples appended."""
+    ideal = _golden_ideal_replies(config)
+    case_by_id = {case.id: case for case in GOLDEN_CASES}
+    added = 0
+    for case_id in failing_case_ids:
+        case = case_by_id.get(case_id)
+        if case is None:
+            continue
+        target = ideal.get(case_id)
+        if target is None:
+            continue
+        user_msg = case.prompt_fn(config)
+        for _ in range(max(1, copies)):
+            training.append_chat_pair(user_msg, target, tokenizer, system_prompt, role=role)
+            added += 1
+    return added
 
 
 @dataclass
@@ -242,3 +310,29 @@ def run_golden_set(
     passing = sum(results.values())
     print(f"  [Golden] {passing}/{len(cases)} checks passed.")
     return GoldenResult(results, replies)
+
+
+def run_golden_set_retry(
+    model, tokenizer, generate_fn, sampler, system_prompt: str,
+    config: dict[str, Any], enabled_groups: set[str] | None = None,
+    max_tokens: int | None = None, cases: list[GoldenCase] | None = None,
+) -> tuple[GoldenResult, set[str]]:
+    """Run the golden set and, if any cases fail, run it a second time.
+    Returns the second (or only) result plus the set of case ids that failed
+    on both runs. Callers use the consistent-failure set to ignore flaky
+    generation noise."""
+    first = run_golden_set(
+        model, tokenizer, generate_fn, sampler, system_prompt,
+        config, enabled_groups, max_tokens, cases,
+    )
+    failing_first = {case_id for case_id, ok in first.results.items() if not ok}
+    if not failing_first:
+        return first, set()
+
+    print(f"  [Golden] Re-checking {len(failing_first)} failing case(s)...")
+    second = run_golden_set(
+        model, tokenizer, generate_fn, sampler, system_prompt,
+        config, enabled_groups, max_tokens, cases,
+    )
+    consistent = {case_id for case_id in failing_first if not second.results.get(case_id, True)}
+    return second, consistent

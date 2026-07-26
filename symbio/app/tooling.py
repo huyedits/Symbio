@@ -22,6 +22,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_type": "browser",
     "browser_scroll": "browser",
     "browser_press": "browser",
+    "browser_close": "browser",
     "save_memory": "memory",
     "config_show": "config",
     "config_set": "config",
@@ -34,6 +35,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "update_cron_job": "cron",
     "delegate_task": "delegate",
     "brain_solve": "frontier",
+    "system_check": "system",
 }
 
 # Hermes-style tool registry: JSON schemas for the system prompt <tools> block.
@@ -81,6 +83,14 @@ _TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {"url": {"type": "string", "description": "The URL to open."}},
             "required": ["url"],
+        },
+    },
+    {
+        "name": "browser_close",
+        "description": "Close the controllable browser session.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
         },
     },
     {
@@ -233,6 +243,18 @@ _TOOLS: list[dict[str, Any]] = [
             "required": ["role", "task"],
         },
     },
+    {
+        "name": "system_check",
+        "description": (
+            "Run a self-diagnostic of the Symbio runtime environment. Use this "
+            "when the user asks why something isn't working, before a retrain, "
+            "or when you suspect a configuration or environment problem. "
+            "Reports adapter status, training data, prompt files, browser "
+            "availability, Ollama reachability, frontier API key, disk space, "
+            "and recent log errors."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
 ]
 
 # Hermes name -> internal name (most are already the same).
@@ -331,6 +353,9 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
 
     for m in re.finditer(r'<press>(.*?)</press>', reply, re.DOTALL):
         tools.append(("browser_press", {"key": m.group(1).strip()}))
+
+    if re.search(r'<browser_close\s*/>', reply) or re.search(r'<browser_close></browser_close>', reply):
+        tools.append(("browser_close", {}))
 
     for m in re.finditer(
         r'<skill\s+name=[\'"]([^\'"]*?)[\'"]>(.*?)</skill>', reply, re.DOTALL
@@ -437,6 +462,8 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
     r'<type[^>]*>(.*?)</type>',
     r'<scroll[^>]*/>',
     r'<press>(.*?)</press>',
+    r'<browser_close[^>]*/>',
+    r'<browser_close>(.*?)</browser_close>',
     r'<skill\s+name=[\'"][^\'"]*?[\'"]>(.*?)</skill>',
     r'<memory[^>]*>(.*?)</memory>',
     r'<profile[^>]*>(.*?)</profile>',
@@ -457,7 +484,7 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
 # streaming stripper's "might this become a tag" check.
 _KNOWN_TAG_NAMES: tuple[str, ...] = (
     "cmd", "py", "search", "read", "browse", "click", "type", "scroll",
-    "press",
+    "press", "browser_close",
     "note", "skill", "cron", "digest", "train", "retrain", "memory", "profile",
     "config", "tool_call", "delegate",
 )

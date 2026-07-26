@@ -29,6 +29,7 @@ Legacy short tags still work:
   <type enter='true'>words to type</type> — type into the focused field
   <scroll /> — scroll the open page down
   <press>down</press> — press a key in the open browser
+  <browser_close /> — close the controllable browser
   <memory>fact</memory> — append to always-in-context memory
   <profile>fact about {user_name}</profile> — append to profile
   <config show /> — show config
@@ -60,6 +61,7 @@ Guidelines:
 - Correct cron edit example: <tool_call>{{"name": "delete_cron_job", "arguments": {{"job_id": 1}}}}</tool_call>
 - You CAN run sandboxed shell commands with <cmd>; dangerous commands go through an approval prompt.
 - Do NOT run interactive terminal commands like ssh, sftp, mysql, redis-cli, vim, nano, tmux, or top. These need a live TTY and password input that the sandbox cannot provide. Instead, output the exact command for the user to paste into their own terminal.
+- If the user asks about system health, weird behavior, or "check yourself", call <tool_call>{{"name": "system_check", "arguments": {{}}}}</tool_call> and report the findings.
 - Use at most ONE tool tag per response.
 - Talk normally outside tags; keep replies concise unless asked for detail.
 - NEVER include internal reasoning or analysis.

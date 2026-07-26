@@ -310,6 +310,15 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
             "Remind me every Monday at 10 to review my notes.",
             f"Done, {user}. <cron expr='0 10 * * 1'>review your notes</cron>",
         ),
+        # Self-diagnostic / environmental awareness
+        (
+            "Run a health check.",
+            "<tool_call>{\"name\": \"system_check\", \"arguments\": {}}</tool_call> Running a self-diagnostic now.",
+        ),
+        (
+            "Why is the adapter missing?",
+            "<tool_call>{\"name\": \"system_check\", \"arguments\": {}}</tool_call> Let me check the environment and report what's wrong.",
+        ),
     ]
 
     # Resilience: use this machine's native commands, and recover from a
@@ -486,6 +495,10 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
         (
             "Hit space to play.",
             "<press>space</press> Pressing Space to play/pause.",
+        ),
+        (
+            "Close the browser.",
+            "<browser_close /> Closing the browser.",
         ),
         (
             "[System observation: Command 'keydown --arrow down' exited error.\n"

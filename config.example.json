@@ -1,0 +1,100 @@
+{
+  "model_name": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+  "assistant_name": "",
+  "user_name": "",
+  "lora": {
+    "rank": 8,
+    "dropout": 0.1,
+    "scale": 5.0,
+    "num_layers": 8,
+    "batch_size": 1,
+    "learning_rate": 0.0001,
+    "iters": 50,
+    "adaptive": true,
+    "max_iters": 200,
+    "target_val_loss": 0.05,
+    "min_improvement": 0.02,
+    "max_seq_length": 2048,
+    "steps_per_eval": 25,
+    "save_every": 50
+  },
+  "agent": {
+    "max_turns": 5,
+    "history_limit": 40,
+    "sandbox_timeout": 30,
+    "code_timeout": 300,
+    "max_output_len": 4000,
+    "temperature": 0.1,
+    "top_p": 0.9,
+    "repetition_penalty": 1.15
+  },
+  "model": {
+    "allow_lora": true,
+    "allow_moe_lora": false,
+    "moe_fine_tuning_mode": "rag_only"
+  },
+  "rag": {
+    "enabled": true,
+    "top_k": 5,
+    "max_context_tokens": 1500,
+    "sources": ["notes", "sessions"]
+  },
+  "training_planner": {
+    "enabled": true,
+    "min_turns": 200,
+    "min_repetitions": 3,
+    "neutrality_review": true,
+    "auto_train": false
+  },
+  "learn": {
+    "enabled": true,
+    "auto": true,
+    "auto_train": true,
+    "mistake_threshold": 5,
+    "batch_train_iters": 25,
+    "boost_factor": 3,
+    "short_train_iters": 10,
+    "correction_phrases": [
+      "no,",
+      "not quite",
+      "that's wrong",
+      "incorrect",
+      "wrong",
+      "you misunderstood",
+      "try again",
+      "actually",
+      "i meant",
+      "i said",
+      "i asked",
+      "not what",
+      "that's not",
+      "you're wrong",
+      "fix it",
+      "correction",
+      "rephrase"
+    ]
+  },
+  "tools": {
+    "enabled_groups": [
+      "memory",
+      "notes",
+      "terminal",
+      "code",
+      "web_search",
+      "browser",
+      "digest",
+      "train",
+      "cron",
+      "config"
+    ]
+  },
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "allowed_chat_ids": [],
+    "confirm_dangerous": true
+  },
+  "dispatch": {
+    "enabled": true
+  }
+}
