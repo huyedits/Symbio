@@ -19,6 +19,17 @@ def load_cron_jobs() -> list[dict[str, Any]]:
         return []
 
 
+def _require_ownership(job: dict[str, Any], owner: str | None):
+    """Raise if the caller does not own the job. Jobs with no owner are
+    treated as legacy/unowned and can be managed by any caller (backwards
+    compatibility)."""
+    if owner is None:
+        return
+    job_owner = job.get("owner")
+    if job_owner is not None and job_owner != owner:
+        raise ValueError(f"Job {job.get('id')} is owned by another session.")
+
+
 def save_cron_jobs(jobs: list[dict[str, Any]]):
     constants.CRON_FILE.write_text(json.dumps(jobs, indent=2), encoding="utf-8")
 
@@ -30,11 +41,13 @@ def list_cron_jobs() -> list[dict[str, Any]]:
     return jobs
 
 
-def delete_cron_job(job_id: int) -> dict[str, Any]:
-    """Remove the job with the given id. Return the deleted job or raise ValueError."""
+def delete_cron_job(job_id: int, owner: str | None = None) -> dict[str, Any]:
+    """Remove the job with the given id. Return the deleted job or raise ValueError.
+    If `owner` is provided, only jobs owned by that owner can be deleted."""
     jobs = load_cron_jobs()
     for i, job in enumerate(jobs):
         if job.get("id") == job_id:
+            _require_ownership(job, owner)
             removed = jobs.pop(i)
             save_cron_jobs(jobs)
             return removed
@@ -46,12 +59,15 @@ def update_cron_job(
     schedule: str | None = None,
     text: str | None = None,
     blocked_commands: set[str] | None = None,
+    owner: str | None = None,
 ) -> dict[str, Any]:
-    """Edit an existing job's schedule and/or text."""
+    """Edit an existing job's schedule and/or text.
+    If `owner` is provided, only jobs owned by that owner can be updated."""
     jobs = load_cron_jobs()
     job = next((j for j in jobs if j.get("id") == job_id), None)
     if job is None:
         raise ValueError(f"No job with id {job_id}.")
+    _require_ownership(job, owner)
 
     new_schedule = (schedule or job.get("schedule", "")).strip()
     new_text = (text or job.get("text", "")).strip()
@@ -155,7 +171,12 @@ def parse_one_shot(schedule: str) -> datetime | None:
     return target
 
 
-def add_cron_job(schedule: str, text: str, blocked_commands: set[str] | None = None) -> dict[str, Any]:
+def add_cron_job(
+    schedule: str,
+    text: str,
+    blocked_commands: set[str] | None = None,
+    owner: str | None = None,
+) -> dict[str, Any]:
     schedule = schedule.strip()
     text = text.strip()
     if not text:
@@ -185,6 +206,7 @@ def add_cron_job(schedule: str, text: str, blocked_commands: set[str] | None = N
         "schedule": schedule,
         "text": text,
         "last_fired": None,
+        "owner": owner,
     }
     jobs.append(job)
     save_cron_jobs(jobs)

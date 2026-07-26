@@ -312,6 +312,7 @@ class TelegramBot:
                     confirm_fn=lambda prompt: self._telegram_confirm(chat_id, prompt),
                     generate_fn=self._generate_on_infer_thread,
                     stream_prefix=False,
+                    owner=f"telegram:{chat_id}",
                 )
             return _sessions[chat_id]
 

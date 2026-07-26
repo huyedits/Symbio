@@ -48,6 +48,7 @@ _IDEAL_REPLIES = {
     "web_search_unknown": "<search>latest news</search> Searching now.",
     "open_app_command": "<cmd>open -a 'Google Chrome'</cmd> Opening Chrome.",
     "browse_to_interact": "<browse>https://www.cloudflare.com</browse> Opening cloudflare.com so I can click the first button.",
+    "browse_apple": "<browse>https://www.apple.com</browse> Opening apple.com to read it.",
     "browser_press_key": "<press>down</press> Pressing the down arrow key.",
 }
 
