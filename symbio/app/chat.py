@@ -17,7 +17,7 @@ from mlx_lm.sample_utils import make_sampler
 from rag import Retriever
 from symbio import constants
 from symbio.computer import BrowserSession
-from symbio.app import cron, dispatch, golden, learn, memory, mcp_bridge, prompts, sandbox, sessions, tooling, training, web
+from symbio.app import cron, dispatch, golden, health, learn, memory, mcp_bridge, prompts, sandbox, sessions, tooling, training, web
 from symbio.app.config import config_show, set_config_value
 
 
@@ -599,6 +599,55 @@ class ChatSession:
             regressions = sorted(baseline.passing - after.passing)
             threshold = int(learn_cfg.get("golden_regression_threshold", 0))
 
+            if len(regressions) > threshold and learn_cfg.get("golden_retry_enabled", True):
+                self.output_fn(
+                    f"  [Golden] Double-checking {len(regressions)} regression(s)...")
+                recheck, consistent = golden.run_golden_set_retry(
+                    self.model, self.tokenizer, self.generate_fn, self.sampler,
+                    self.system_prompt, self.config, self.enabled_groups)
+                flaky = sorted(set(regressions) - consistent)
+                if flaky:
+                    self.output_fn(
+                        f"  [Golden] {len(flaky)} regression(s) passed on recheck: "
+                        f"{', '.join(flaky)}")
+                if not consistent:
+                    self.output_fn(
+                        "  [Golden] All regressions were flaky; using recheck result.")
+                    after = recheck
+                    regressions = sorted(baseline.passing - after.passing)
+                else:
+                    self.output_fn(
+                        f"  [Golden] {len(consistent)} case(s) consistently failing: "
+                        f"{', '.join(sorted(consistent))}")
+                    extra_iters = int(learn_cfg.get("golden_retry_max_extra_iters", 50))
+                    copies = int(learn_cfg.get("golden_retry_samples_per_case", 3))
+                    added = golden.append_golden_remedy_samples(
+                        sorted(consistent), self.tokenizer, self.system_prompt,
+                        self.config, copies=copies)
+                    if added:
+                        self.output_fn(
+                            f"  [Train] Injected {added} remedy sample(s) for consistent failures.")
+                        self.output_fn(
+                            f"  [Train] Running targeted remedy training ({extra_iters} iters)...")
+                        trained2 = training.run_training(self.config, iters=extra_iters)
+                        if trained2:
+                            reload_err2 = self._reload_model()
+                            if reload_err2:
+                                self.output_fn(
+                                    f"  [Train] Remedy reload failed: {reload_err2}")
+                            else:
+                                self.output_fn(
+                                    "  [Train] Remedy adapter reloaded. Re-checking golden set...")
+                                after = golden.run_golden_set(
+                                    self.model, self.tokenizer, self.generate_fn, self.sampler,
+                                    self.system_prompt, self.config, self.enabled_groups)
+                                self.output_fn(
+                                    f"  [Golden] Post-remedy checks: "
+                                    f"{after.pass_count}/{after.total} passing.")
+                                regressions = sorted(baseline.passing - after.passing)
+                    else:
+                        self.output_fn("  [Train] No remedy samples could be generated.")
+
             if len(regressions) > threshold:
                 self.output_fn(
                     f"  [Golden] Regression: {len(regressions)} case(s) newly "
@@ -750,6 +799,11 @@ class ChatSession:
                 self.output_fn(f"  {len(files)} note(s):")
                 for f in files:
                     self.output_fn(f"    - {f.name}")
+
+        elif cmd == "/health":
+            report = health.system_check(self.config)
+            self.output_fn("  [Health check]")
+            self.output_fn(json.dumps(report, indent=2, default=str))
 
         elif cmd == "/status":
             files = sorted(constants.NOTES_DIR.glob("*.md"))
@@ -1368,6 +1422,7 @@ class ChatSession:
             "browser_type": lambda: self.browser.type_text(params["text"], press_enter=params["enter"]),
             "browser_scroll": lambda: self.browser.scroll(params["direction"]),
             "browser_press": lambda: self.browser.press(params["key"]),
+            "browser_close": lambda: self.browser.close(),
         }
 
         if name in browser_action_tools:
@@ -1469,6 +1524,10 @@ class ChatSession:
         if name == "retrain_adapter":
             self._cmd_retrain()
             return self._last_train_note
+
+        if name == "system_check":
+            report = health.system_check(self.config)
+            return json.dumps(report, indent=2, default=str)
 
         if name == "delegate_task":
             if not self.config.get("dispatch", {}).get("enabled", False):
