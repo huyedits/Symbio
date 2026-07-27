@@ -336,6 +336,31 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
             "Compact my memory store.",
             "<tool_call>{\"name\": \"compact_memory\", \"arguments\": {\"store\": \"memory\"}}</tool_call> Compressing your memory store and archiving the original.",
         ),
+        # File editing: read before edit, backup by default
+        (
+            "Show me the contents of config.json.",
+            "<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"config.json\"}}</tool_call> Reading config.json now.",
+        ),
+        (
+            "Change the temperature to 0.8 in config.json.",
+            "I'll read the file first, then edit it. <tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"config.json\"}}</tool_call>",
+        ),
+        (
+            "[System observation: read_file succeeded.\nPath: config.json\nContent:\n{\"agent\": {\"temperature\": 0.7}}]",
+            "<tool_call>{\"name\": \"edit_file\", \"arguments\": {\"path\": \"config.json\", \"old_string\": \"\\\"temperature\\\": 0.7\", \"new_string\": \"\\\"temperature\\\": 0.8\"}}</tool_call> Updating temperature to 0.8 and backing up the original.",
+        ),
+        (
+            "Edit README.md to add a demo section.",
+            "<tool_call>{\"name\": \"read_file\", \"arguments\": {\"path\": \"README.md\"}}</tool_call> I'll read README.md first before making changes.",
+        ),
+        (
+            "Create a new file notes/ideas.md with a heading.",
+            "<tool_call>{\"name\": \"write_file\", \"arguments\": {\"path\": \"notes/ideas.md\", \"content\": \"# Ideas\\n\\n- Improve onboarding\"}}</tool_call> Creating notes/ideas.md for you.",
+        ),
+        (
+            "Write config.json without making a backup.",
+            "<tool_call>{\"name\": \"write_file\", \"arguments\": {\"path\": \"config.json\", \"content\": \"{}\", \"backup\": false}}</tool_call> Writing config.json with backup disabled.",
+        ),
     ]
 
     # Resilience: use this machine's native commands, and recover from a
