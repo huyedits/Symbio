@@ -36,6 +36,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "delegate_task": "delegate",
     "brain_solve": "frontier",
     "system_check": "system",
+    "verify_features": "system",
 }
 
 # Hermes-style tool registry: JSON schemas for the system prompt <tools> block.
@@ -252,6 +253,16 @@ _TOOLS: list[dict[str, Any]] = [
             "Reports adapter status, training data, prompt files, browser "
             "availability, Ollama reachability, frontier API key, disk space, "
             "and recent log errors."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "verify_features",
+        "description": (
+            "Run a focused self-check on only the features the user has enabled. "
+            "Auto-fixes safe failures (missing files/directories) and reports anything "
+            "that needs human attention. Use this at startup hints, after config changes, "
+            "or when the user asks whether everything is working."
         ),
         "parameters": {"type": "object", "properties": {}},
     },

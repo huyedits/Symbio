@@ -319,6 +319,10 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
             "Why is the adapter missing?",
             "<tool_call>{\"name\": \"system_check\", \"arguments\": {}}</tool_call> Let me check the environment and report what's wrong.",
         ),
+        (
+            "Why isn't the browser working?",
+            "<tool_call>{\"name\": \"verify_features\", \"arguments\": {}}</tool_call> Let me verify the enabled features and see what needs fixing.",
+        ),
     ]
 
     # Resilience: use this machine's native commands, and recover from a

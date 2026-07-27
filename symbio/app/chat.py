@@ -107,7 +107,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"   Data   : {dataset_size:,} bytes")
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
-    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /golden  /learn  /forget_last  /status  /prune  /help")
+    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /help")
     output_fn("         /run <cmd>  /note [title]  /notes  /skills  /digest  /cron  /config")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     output_fn("-" * 50)
@@ -250,6 +250,19 @@ class ChatSession:
         # Seed identity notes + clean training corpus on first run.
         memory.ensure_seed_notes(config)
         training.seed_training_data(self.tokenizer, self.system_prompt, config)
+
+        # AI-driven feature verification: run only the checks that match
+        # enabled features, auto-fix safe failures, and store the report for
+        # later tool access / user surfacing.
+        try:
+            self._health_report = health.verify_enabled_features(
+                self.config, verbose=True, output_fn=self.output_fn
+            )
+        except Exception as e:
+            self._health_report = {
+                "healthy": False,
+                "errors": [{"name": "self_check", "message": f"Self-check crashed: {e}"}],
+            }
 
         self.history: list[dict[str, str]] = []
         self.session_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S-%f}"
@@ -844,6 +857,10 @@ class ChatSession:
             self.output_fn("  [Health check]")
             self.output_fn(json.dumps(report, indent=2, default=str))
 
+        elif cmd == "/selfcheck":
+            report = health.verify_enabled_features(self.config, verbose=True, output_fn=self.output_fn)
+            self._health_report = report
+
         elif cmd == "/status":
             files = sorted(constants.NOTES_DIR.glob("*.md"))
             data_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0
@@ -889,7 +906,16 @@ class ChatSession:
             if not parts or parts[0].lower() == "show":
                 self.output_fn(config_show(self.config))
             elif parts[0].lower() == "set" and len(parts) == 3:
-                self.output_fn(f"  {set_config_value(self.config, parts[1], parts[2], allow_sandbox=True)}")
+                msg = set_config_value(self.config, parts[1], parts[2], allow_sandbox=True)
+                self.output_fn(f"  {msg}")
+                # Re-run feature verification after a config change so the AI
+                # immediately notices if the new value broke something.
+                if not msg.startswith("Unknown") and not msg.startswith("Bad"):
+                    self.output_fn("  [Re-checking enabled features...]")
+                    report = health.verify_enabled_features(
+                        self.config, verbose=True, output_fn=self.output_fn
+                    )
+                    self._health_report = report
             else:
                 self.output_fn("  Usage: /config [show] | /config set <dotted.key> <value>")
 
@@ -1566,6 +1592,11 @@ class ChatSession:
 
         if name == "system_check":
             report = health.system_check(self.config)
+            return json.dumps(report, indent=2, default=str)
+
+        if name == "verify_features":
+            report = health.verify_enabled_features(self.config, verbose=False)
+            self._health_report = report
             return json.dumps(report, indent=2, default=str)
 
         if name == "delegate_task":
