@@ -8,7 +8,7 @@ from typing import Any
 from symbio import constants
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "model_name": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+    "model_name": "Qwen/Qwen3-0.6B",
     "assistant_name": "",
     "user_name": "",
     "lora": {
@@ -25,13 +25,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "agent": {
         "max_tool_rounds": 3,
-        "history_limit": 40,
+        "history_limit": 20,
         "sandbox_timeout": 30,
         "code_timeout": 60,
         "max_output_len": 4000,
-        # 256 is enough for a tag reply + short prose; higher values make every
-        # turn wait for token generation even when the answer is obvious.
-        "max_reply_tokens": 256,
+        # Short replies keep the model fast: tags + short prose fit easily;
+        # long answers can still be requested explicitly. 128 is a sweet spot
+        # for quick chat on local MLX.
+        "max_reply_tokens": 128,
         "temperature": 0.7,
         "top_p": 0.9,
         "cron_poll_seconds": 20,
@@ -39,15 +40,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "prompt_cache_enabled": True,
         # How long a chat front-end should wait before showing a "thinking…"
         # placeholder if the model has not emitted a visible token yet.
-        "first_chunk_timeout_ms": 1500,
+        "first_chunk_timeout_ms": 600,
         # Maximum character budget for the retained conversation window. One
         # giant observation (e.g. a full web page) can otherwise bloat every
         # later turn even with a turn-count history limit.
-        "max_history_chars": 8000,
+        "max_history_chars": 4000,
         # Lower temperature during tool-use rounds makes the model follow the
         # prompt's tag rules (browse vs cmd, press vs fake keydown) more
         # strictly instead of drifting into prose or hallucinated commands.
         "tool_use_temperature": 0.2,
+        # Speed preset: "balanced" (default) or "fast". "fast" trades context
+        # length and RAG budget for snappier turns.
+        "speed_mode": "balanced",
     },
     "browser": {
         # Browser automation is off by default. When enabled, the agent launches
@@ -83,7 +87,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "rag": {
         "enabled": True,
-        # Fewer, shorter chunks keep the prompt tight and the model fast.
+        # Tight retrieval budget: small top-k and low token cap keep prompt
+        # prefill fast while still giving the model relevant notes/sessions.
         "top_k": 3,
         "max_context_tokens": 800,
         "sources": ["notes", "sessions"],
@@ -196,7 +201,61 @@ def load_config() -> dict[str, Any]:
         except Exception as e:
             print(f"[Config warning] Could not read {constants.CONFIG_FILE}: {e}")
     _apply_env_overrides(config)
+    _apply_speed_mode(config)
     return config
+
+
+# Speed preset: applied after user config/env overrides so the user can still
+# override individual keys, but flipping one switch retunes the whole agent.
+_SPEED_PRESETS: dict[str, dict[str, Any]] = {
+    "balanced": {
+        "agent": {
+            "max_reply_tokens": 128,
+            "history_limit": 20,
+            "max_history_chars": 4000,
+            "first_chunk_timeout_ms": 600,
+            "tool_use_temperature": 0.2,
+        },
+        "rag": {"top_k": 3, "max_context_tokens": 800},
+    },
+    "fast": {
+        "agent": {
+            "max_reply_tokens": 64,
+            "history_limit": 12,
+            "max_history_chars": 2500,
+            "first_chunk_timeout_ms": 400,
+            "tool_use_temperature": 0.1,
+        },
+        "rag": {"top_k": 2, "max_context_tokens": 400},
+    },
+}
+
+
+def _apply_speed_mode(config: dict[str, Any]) -> None:
+    """If agent.speed_mode is set to a known preset, apply the preset values
+    unless the user explicitly overrode a specific key in config.json/env."""
+    mode = config.get("agent", {}).get("speed_mode", "balanced")
+    preset = _SPEED_PRESETS.get(mode)
+    if preset is None:
+        return
+
+    # Capture which keys the user actually supplied so we don't clobber them.
+    user_supplied: set[str] = set()
+    if constants.CONFIG_FILE.exists():
+        try:
+            user = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
+            if "agent" in user:
+                user_supplied.update(f"agent.{k}" for k in user["agent"].keys())
+            if "rag" in user:
+                user_supplied.update(f"rag.{k}" for k in user["rag"].keys())
+        except Exception:
+            pass
+
+    for section, values in preset.items():
+        for k, v in values.items():
+            key_path = f"{section}.{k}"
+            if key_path not in user_supplied:
+                config.setdefault(section, {})[k] = v
 
 
 def config_show(config: dict[str, Any]) -> str:
