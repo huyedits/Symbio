@@ -438,3 +438,26 @@ def test_guarded_train_ignores_flaky_regression(tmp_path, monkeypatch):
     assert len(golden_calls) == 3  # baseline + first post + retry second
     assert len(load_calls) == 1
     assert (constants.ADAPTER_DIR / "adapter_config.json").read_text() == "trained-ok"
+
+
+def test_guarded_train_accepts_config_arg_from_learn_callback(tmp_path, monkeypatch):
+    """learn.maybe_train_on_mistakes passes train_fn(config, iters=...).
+    _guarded_train must accept that positional config argument without
+    raising a signature error."""
+    monkeypatch.setattr(constants, "ADAPTER_DIR", tmp_path / "adapters")
+    _write_adapter("original")
+
+    config = _base_config()
+    config["learn"]["golden_set_enabled"] = False  # skip golden for this unit test
+
+    monkeypatch.setattr(training, "run_training",
+                        lambda cfg, iters=None: _write_adapter("trained") or True)
+
+    load_calls: list[int] = []
+    session = _make_session(config, monkeypatch, load_calls)
+
+    # This is the exact call learn.maybe_train_on_mistakes makes.
+    trained = session._guarded_train(config, iters=25)
+
+    assert trained is True
+    assert (constants.ADAPTER_DIR / "adapter_config.json").read_text() == "trained"

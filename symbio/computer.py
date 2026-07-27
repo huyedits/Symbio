@@ -7,6 +7,7 @@ model receives text/HTML representations of the page instead of images.
 
 from __future__ import annotations
 
+import atexit
 import json
 import re
 import sys
@@ -131,7 +132,9 @@ class BrowserSession:
 
         from playwright.sync_api import sync_playwright
 
-        self._playwright = sync_playwright().start()
+        if self._playwright is None:
+            self._playwright = sync_playwright().start()
+            self._register_exit_cleanup()
         # Prefer Google Chrome when available; fall back to bundled Chromium.
         # A specific channel request overrides the stored default.
         preferred = channel or self._channel or "chrome"
@@ -340,6 +343,23 @@ class BrowserSession:
             return self._fail("screenshot", e)
 
     def close(self) -> str:
+        """Close the visible browser page/window and return immediately.
+
+        We keep the Playwright driver alive so reopening is fast; the driver
+        is stopped lazily on process exit via the atexit hook registered on
+        first use. This avoids a multi-second Playwright/asyncio teardown
+        blocking every chat turn."""
+        try:
+            if self._browser:
+                self._browser.close()
+                self._browser = None
+            self._page = None
+            return "Browser closed."
+        except Exception as e:
+            return f"Browser close error: {e}"
+
+    def _stop_playwright(self):
+        """Final cleanup: stop the Playwright driver. Called at process exit."""
         try:
             if self._browser:
                 self._browser.close()
@@ -348,9 +368,12 @@ class BrowserSession:
                 self._playwright.stop()
                 self._playwright = None
             self._page = None
-            return "Browser closed."
-        except Exception as e:
-            return f"Browser close error: {e}"
+        except Exception:
+            pass
+
+    def _register_exit_cleanup(self):
+        """Register a one-time atexit hook so Playwright doesn't outlive us."""
+        atexit.register(self._stop_playwright)
 
 
 def _screenshot_path() -> Path:
