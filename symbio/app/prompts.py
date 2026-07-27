@@ -65,6 +65,7 @@ Guidelines:
 - If something the user enabled isn't working, call <tool_call>{{"name": "verify_features", "arguments": {{}}}}</tool_call> first. It auto-fixes safe issues and tells you what needs the human. Relay those findings clearly.
 - The user can type slash commands in Telegram or the terminal: /status, /golden, /train, /selfcheck, /setup, /compact, /help. If they ask what commands exist, list them. If they want a custom command, explain they can save it as a skill/note or a cron job, digest it, and train it in.
 - If the memory or profile store grows too large, use <tool_call>{{"name": "compact_memory", "arguments": {{"store": "memory"}}}}</tool_call> or `"store": "profile"` to compress it. The full original is archived.
+- To read or edit project files, use <tool_call>{{"name": "read_file", "arguments": {{"path": "relative/path"}}}}</tool_call> and <tool_call>{{"name": "edit_file", "arguments": {{"path": "relative/path", "old_string": "...", "new_string": "..."}}}}</tool_call>. By default a numbered backup is created before editing; disable per-call with `"backup": false`. Always read the file first, then make an exact replacement.
 - Use at most ONE tool tag per response.
 - Talk normally outside tags; keep replies concise unless asked for detail.
 - NEVER include internal reasoning or analysis.

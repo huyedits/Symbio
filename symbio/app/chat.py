@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from mlx_lm import load, generate
@@ -141,8 +142,8 @@ _BROWSER_TOOLS = {
 # Tools that require explicit approval when running from a non-terminal
 # front-end (e.g. Telegram) because they mutate state or run user-supplied code.
 _TELEGRAM_CONFIRM_TOOLS = frozenset({
-    "execute_code", "run_command", "digest_notes", "train_adapter", "schedule_job", "config_set",
-    "delete_cron_job", "update_cron_job",
+    "execute_code", "run_command", "edit_file", "write_file", "digest_notes", "train_adapter",
+    "schedule_job", "config_set", "delete_cron_job", "update_cron_job",
 })
 
 # Map internal tool names back to Hermes-style names for <tool_response> labels.
@@ -1446,6 +1447,93 @@ class ChatSession:
                 self.retriever.invalidate_cache()
                 self.output_fn(f"  [Learn] Remembered research: {note.name}")
 
+    def _resolve_project_path(self, raw_path: str) -> Path | None:
+        """Normalize a user-supplied path so it stays inside the project dir."""
+        raw_path = raw_path.strip()
+        if not raw_path:
+            return None
+        target = Path(raw_path)
+        if not target.is_absolute():
+            target = constants.PROJECT_DIR / target
+        try:
+            target.resolve().relative_to(constants.PROJECT_DIR.resolve())
+        except ValueError:
+            return None
+        return target
+
+    def _make_backup(self, path: Path) -> Path:
+        """Create a numbered .bak sibling for an existing file."""
+        counter = 1
+        while True:
+            candidate = path.parent / f"{path.name}.{counter}.bak"
+            if not candidate.exists():
+                break
+            counter += 1
+            if counter > 9999:
+                raise RuntimeError("Could not find a free backup slot")
+        candidate.write_bytes(path.read_bytes())
+        return candidate
+
+    def _handle_file_tool(self, name: str, params: dict[str, Any]) -> str:
+        path = self._resolve_project_path(params.get("path", ""))
+        if path is None:
+            return f"Invalid path: {params.get('path')!r}. Must be inside the project directory."
+
+        if name == "read_file":
+            if not path.exists():
+                return f"File not found: {path.relative_to(constants.PROJECT_DIR)}"
+            try:
+                text = path.read_text(encoding="utf-8")
+            except Exception as e:
+                return f"Could not read {path.name}: {e}"
+            max_len = self.config["agent"].get("max_output_len", 4000)
+            if len(text) > max_len:
+                text = text[:max_len] + "\n... (truncated)"
+            return f"Contents of {path.relative_to(constants.PROJECT_DIR)}:\n{text}"
+
+        # Mutating file tools: backup by default unless explicitly disabled.
+        backup_default = self.config.get("agent", {}).get("backup_before_edit", True)
+        backup = params.get("backup")
+        if backup is None:
+            backup = backup_default
+
+        if name == "write_file":
+            try:
+                if path.exists() and backup:
+                    bak = self._make_backup(path)
+                    msg = f"Backed up original to {bak.name}. "
+                else:
+                    msg = ""
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(params.get("content", ""), encoding="utf-8")
+                self.retriever.invalidate_cache()
+                return f"{msg}Wrote {path.relative_to(constants.PROJECT_DIR)}."
+            except Exception as e:
+                return f"Failed to write {path.name}: {e}"
+
+        if name == "edit_file":
+            if not path.exists():
+                return f"File not found: {path.relative_to(constants.PROJECT_DIR)}"
+            try:
+                original = path.read_text(encoding="utf-8")
+            except Exception as e:
+                return f"Could not read {path.name}: {e}"
+            old_string = params.get("old_string", "")
+            new_string = params.get("new_string", "")
+            if old_string not in original:
+                return (
+                    f"Could not find the exact old_string in {path.relative_to(constants.PROJECT_DIR)}. "
+                    "Use read_file to see the current contents, then retry with the exact text."
+                )
+            if backup:
+                bak = self._make_backup(path)
+                msg = f"Backed up original to {bak.name}. "
+            else:
+                msg = ""
+            path.write_text(original.replace(old_string, new_string, 1), encoding="utf-8")
+            self.retriever.invalidate_cache()
+            return f"{msg}Edited {path.relative_to(constants.PROJECT_DIR)}."
+
     def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
         # Respect tool-group enable/disable settings.
         group = tooling.tool_group(name)
@@ -1486,6 +1574,9 @@ class ChatSession:
                 return f"Saved skill note: {p.name}"
             except Exception as e:
                 return f"Failed to save skill: {e}"
+
+        if name in ("read_file", "edit_file", "write_file"):
+            return self._handle_file_tool(name, params)
 
         if name == "run_command":
             ok, out = sandbox.run_sandboxed(params["cmd"], self.config, confirm_fn=self.confirm_fn)

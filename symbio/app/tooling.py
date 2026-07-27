@@ -25,6 +25,9 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_close": "browser",
     "save_memory": "memory",
     "compact_memory": "memory",
+    "read_file": "terminal",
+    "edit_file": "terminal",
+    "write_file": "terminal",
     "config_show": "config",
     "config_set": "config",
     "digest_notes": "digest",
@@ -145,6 +148,51 @@ _TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["store"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "Read a file inside the project directory and return its text content. Use before editing a file to see its current contents.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative or absolute path inside the project directory."},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "edit_file",
+        "description": (
+            "Edit an existing file inside the project directory by replacing old_string "
+            "with new_string. By default a numbered backup is created first; set backup=false "
+            "to override for this single call."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative or absolute path inside the project directory."},
+                "old_string": {"type": "string", "description": "Exact text to replace."},
+                "new_string": {"type": "string", "description": "Replacement text."},
+                "backup": {"type": "boolean", "description": "Override config backup_before_edit for this call."},
+            },
+            "required": ["path", "old_string", "new_string"],
+        },
+    },
+    {
+        "name": "write_file",
+        "description": (
+            "Create or overwrite a file inside the project directory with the given content. "
+            "If the file already exists and backups are enabled, a numbered backup is created first."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative or absolute path inside the project directory."},
+                "content": {"type": "string", "description": "Full file content."},
+                "backup": {"type": "boolean", "description": "Override config backup_before_edit for this call."},
+            },
+            "required": ["path", "content"],
         },
     },
     {
@@ -425,6 +473,36 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
             "replace": bool(m.group(1)),
         }))
 
+    # File tools (legacy tag form for quick edits).
+    for m in re.finditer(r'<read_file>(.*?)</read_file>', reply, re.DOTALL):
+        tools.append(("read_file", {"path": m.group(1).strip()}))
+
+    for m in re.finditer(
+        r'<edit_file\s+path=[\'"]([^\'"]*?)[\'"]\s+old_string=[\'"]([^\'"]*?)[\'"]\s+new_string=[\'"]([^\'"]*?)[\'"](?:\s+backup=[\'"]([^\'"]*?)[\'"])?\s*/?>',
+        reply,
+        re.DOTALL,
+    ):
+        backup_override = m.group(4)
+        params: dict[str, Any] = {
+            "path": m.group(1).strip(),
+            "old_string": m.group(2),
+            "new_string": m.group(3),
+        }
+        if backup_override is not None:
+            params["backup"] = backup_override.lower() in ("true", "yes", "1", "on")
+        tools.append(("edit_file", params))
+
+    for m in re.finditer(
+        r'<write_file\s+path=[\'"]([^\'"]*?)[\'"](?:\s+backup=[\'"]([^\'"]*?)[\'"])?\s*>(.*?)</write_file>',
+        reply,
+        re.DOTALL,
+    ):
+        backup_override = m.group(2)
+        params = {"path": m.group(1).strip(), "content": m.group(3)}
+        if backup_override is not None:
+            params["backup"] = backup_override.lower() in ("true", "yes", "1", "on")
+        tools.append(("write_file", params))
+
     if re.search(r'<digest\s*/>', reply) or re.search(r'<digest></digest>', reply):
         tools.append(("digest_notes", {}))
 
@@ -509,6 +587,9 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
     r'<cron\s+[^>]*?>(.*?)</cron>',
     r'<delegate\s+role=[\'"][^\'"]*?[\'"]>(.*?)</delegate>',
     r'<tool_call>\s*.*?\s*</tool_call>',
+    r'<read_file[^>]*>.*?</read_file>',
+    r'<edit_file[^>]*/?>',
+    r'<write_file[^>]*>.*?</write_file>',
 ]
 
 # Tag names recognized by the unterminated-tag cutoff below and by the
@@ -518,6 +599,7 @@ _KNOWN_TAG_NAMES: tuple[str, ...] = (
     "press", "browser_close",
     "note", "skill", "cron", "digest", "train", "retrain", "memory", "profile",
     "config", "tool_call", "delegate",
+    "read_file", "edit_file", "write_file",
 )
 
 # A reply cut off mid-tag leaves an unterminated tag; never show it.

@@ -20,7 +20,7 @@ def isolated_setup(tmp_path, monkeypatch):
 
 def test_setup_wizard_writes_config_and_sets_names(isolated_setup):
     cfg = copy.deepcopy(DEFAULT_CONFIG)
-    inputs = iter(["", "Alice", "Friday", "", "fast", "n", "y", "y", "n", ""])
+    inputs = iter(["", "Alice", "Friday", "", "fast", "n", "y", "y", "n", "y", ""])
     result = setup.run_setup_wizard(
         cfg,
         input_fn=lambda prompt="": next(inputs),
@@ -55,7 +55,7 @@ def test_setup_wizard_parses_multiple_telegram_chat_ids(isolated_setup):
     inputs = iter([
         "", "Bob", "Jarvis", "", "balanced", "n", "n", "n", "y",
         "my-token", "123456789, 987654321 ,bad, 111",
-        "y",
+        "y", "y",
     ])
     result = setup.run_setup_wizard(
         cfg,
@@ -69,7 +69,7 @@ def test_setup_wizard_parses_multiple_telegram_chat_ids(isolated_setup):
 
 def test_setup_wizard_custom_model_repo(isolated_setup):
     cfg = copy.deepcopy(DEFAULT_CONFIG)
-    inputs = iter(["", "User", "Bot", "0", "custom/model-7b", "balanced", "n", "y", "n", "n", ""])
+    inputs = iter(["", "User", "Bot", "0", "custom/model-7b", "balanced", "n", "y", "n", "n", "y", ""])
     result = setup.run_setup_wizard(
         cfg,
         input_fn=lambda prompt="": next(inputs),

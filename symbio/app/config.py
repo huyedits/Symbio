@@ -52,6 +52,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Speed preset: "balanced" (default) or "fast". "fast" trades context
         # length and RAG budget for snappier turns.
         "speed_mode": "balanced",
+        # When true, editing or overwriting an existing file inside the project
+        # directory first creates a numbered backup (e.g. file.txt.1.bak). The
+        # user can disable this in setup or config if they prefer in-place edits.
+        "backup_before_edit": True,
     },
     "browser": {
         # Browser automation is off by default. When enabled, the agent launches

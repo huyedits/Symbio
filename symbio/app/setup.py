@@ -224,6 +224,11 @@ def run_setup_wizard(
     else:
         config.setdefault("telegram", {})["enabled"] = False
 
+    if _ask_yes_no("  Create backups before editing existing files?", input_fn, default=True):
+        config.setdefault("agent", {})["backup_before_edit"] = True
+    else:
+        config.setdefault("agent", {})["backup_before_edit"] = False
+
     # 5. Review
     output_fn("\n  5. Review")
     output_fn(f"    Assistant name: {config['assistant_name']}")
@@ -235,6 +240,7 @@ def run_setup_wizard(
     output_fn(f"    Dispatch/MoA:     {'ON' if config['dispatch']['enabled'] else 'off'}")
     telegram_on = config["telegram"].get("enabled", False)
     output_fn(f"    Telegram:         {'ON' if telegram_on else 'off'}")
+    output_fn(f"    File backups:     {'ON' if config['agent'].get('backup_before_edit', True) else 'off'}")
     if telegram_on:
         ids = config["telegram"].get("allowed_chat_ids", [])
         token_set = bool(config["telegram"].get("bot_token") or os.environ.get("SYMBIO_TELEGRAM_TOKEN"))
