@@ -128,6 +128,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to write a JSON benchmark report",
     )
 
+    eval_lora_parser = sub.add_parser("eval-lora", help="Benchmark the current LoRA adapter against the base model")
+    eval_lora_parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Path to write a JSON evaluation report",
+    )
+
     return parser
 
 
@@ -583,6 +591,11 @@ def main(argv: list[str] | None = None) -> int:
 
         models = [m.strip() for m in args.models.split(",")] if args.models else None
         benchmark_mlx_main(models=models, output_path=args.output)
+        return 0
+    if command == "eval-lora":
+        from symbio.app.eval import run_lora_benchmark
+
+        run_lora_benchmark(config, output_path=args.output)
         return 0
     if command == "gateway":
         sub = getattr(args, "gateway_command", None) or "start"
