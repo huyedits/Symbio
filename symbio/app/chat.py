@@ -220,6 +220,8 @@ class ChatSession:
         self.system_prompt = prompts.build_system_prompt(
             config["assistant_name"], config["user_name"]
         )
+        self._system_prompt_text: str = self.system_prompt
+        self._cached_system_ids: list[int] | None = None
         self._refresh_sampler()
 
         self.output_fn(" Loading model...")
@@ -366,6 +368,19 @@ class ChatSession:
     def _status(self, message: str):
         self.output_fn(message)
 
+    def _encode_system_prompt(self) -> list[int]:
+        """Encode just the system message once and cache it. The cache is
+        invalidated when the system prompt text changes (e.g. identity edits)."""
+        if self._cached_system_ids is None or self.system_prompt != self._system_prompt_text:
+            self._system_prompt_text = self.system_prompt
+            self._cached_system_ids = self.tokenizer.encode(
+                self.tokenizer.apply_chat_template(
+                    [{"role": "system", "content": self.system_prompt}],
+                    tokenize=False, add_generation_prompt=False, enable_thinking=False,
+                )
+            )
+        return self._cached_system_ids
+
     def _generate_reply(
         self,
         messages: list[dict[str, str]],
@@ -381,6 +396,9 @@ class ChatSession:
         served from cache instead of reprocessed every round. This is what
         makes multi-round tool loops (e.g. a browser click sequence) and
         ordinary turn-to-turn chat fast; see _common_prefix_len.
+
+        The system prompt is also pre-encoded once per change so we don't
+        re-tokenize it on every turn.
 
         When self.stream_chunk_fn is set (and agent.stream_output), also
         streams tag-stripped text to it live via tooling.StreamingStripper,
@@ -417,7 +435,21 @@ class ChatSession:
                 timings["ttft_ms"] = timings["gen_ms"]
             return text, False
 
-        ids = self.tokenizer.encode(prompt_text)
+        # Avoid re-encoding the full system prompt every turn: cache its ids
+        # and splice them with the encoded rest of the conversation.
+        system_ids = self._encode_system_prompt()
+        if messages and messages[0].get("role") == "system":
+            rest = messages[1:]
+        else:
+            rest = messages
+            system_ids = []
+        rest_ids = self.tokenizer.encode(
+            self.tokenizer.apply_chat_template(
+                rest, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            )
+        ) if rest else []
+        ids = system_ids + rest_ids
+
         reused = _common_prefix_len(self._cached_prompt_ids, ids)
         if timings is not None:
             timings["cached_tokens"] = reused
@@ -451,10 +483,13 @@ class ChatSession:
         spinner.start()
 
         def _emit(text: str):
-            if self.stream_chunk_fn is None:
+            if self.stream_chunk_fn is None or not text:
                 return
+            nonlocal shown
             if not shown:
-                return
+                shown = True
+                if chunk_prefix:
+                    self.stream_chunk_fn(chunk_prefix)
             self.stream_chunk_fn(text)
 
         text_parts: list[str] = []
@@ -545,7 +580,7 @@ class ChatSession:
             training.mark_adapter_used()
             self.output_fn("  Keeping the adapter.")
 
-    def _guarded_train(self, iters: int | None = None) -> bool:
+    def _guarded_train(self, config: dict[str, Any] | None = None, iters: int | None = None) -> bool:
         """Run LoRA training, reload the adapter, then check it against the
         golden set (a fixed battery of prompts covering identity and
         tool-tag formatting — see symbio.app.golden). A regression, a case
@@ -553,7 +588,11 @@ class ChatSession:
         adapter back automatically so a bad fine-tune never silently ships
         as the new default behavior. Mirrors training.run_training's bool
         contract so it's a drop-in replacement everywhere training is
-        triggered (slash command, tool call, end-of-session, /learn)."""
+        triggered (slash command, tool call, end-of-session, /learn).
+
+        `config` is accepted (and ignored) so this method can be passed
+        directly to learn.maybe_train_on_mistakes, which expects a
+        `train_fn(config, iters=...)` signature."""
         learn_cfg = self.config.get("learn", {})
         golden_on = learn_cfg.get("golden_set_enabled", True)
 
