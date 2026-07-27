@@ -5,7 +5,7 @@ of hoarding."""
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from symbio import constants
 
@@ -76,6 +76,67 @@ def save_memory(store: str, content: str, config: dict[str, Any], replace: bool 
             f"replace='all'>...</...> keeping only what matters."
         )
     return f"Saved to {name} ({size}/{limit} chars)."
+
+
+def compact_store(
+    store: str,
+    config: dict[str, Any],
+    summarize_fn: Callable[[str], str] | None = None,
+) -> tuple[str, Path | None]:
+    """Compress a curated memory store when it exceeds its char limit.
+
+    If `summarize_fn` is provided, the full store text is passed to it and the
+    returned summary replaces the live store. The original full text is archived
+    to notes/archive/ so nothing is lost. If no summarizer is supplied, the
+    store is truncated to its most recent entries that fit under the limit.
+
+    Returns (status_message, archive_path_or_None).
+    """
+    path = _store_path(store)
+    if not path.exists():
+        return f"No {store} store to compact.", None
+
+    full_text = path.read_text(encoding="utf-8")
+    size = len(full_text)
+    limit = _store_limit(store, config)
+    if size <= limit:
+        return f"{store} store is within limit ({size}/{limit} chars).", None
+
+    name = path.name
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_name = f"{timestamp}_{name}.archive.md"
+    archive_path = constants.NOTES_ARCHIVE_DIR / archive_name
+    archive_path.write_text(f"# Archived {name} (before compaction)\n\n{full_text}\n", encoding="utf-8")
+
+    if summarize_fn is not None:
+        try:
+            prompt = (
+                f"Compress the following personal memory store into a shorter version "
+                f"under {limit} characters. Keep facts, preferences, and recurring tasks; "
+                f"drop redundant wording. Do not add commentary.\n\n{full_text}"
+            )
+            compacted = summarize_fn(prompt).strip()
+        except Exception as exc:
+            compacted = ""
+            archive_path.unlink(missing_ok=True)
+            return f"Could not summarize {store} store: {exc}", None
+    else:
+        # No summarizer: keep the tail of the file under the limit.
+        compacted = full_text
+        while len(compacted) > limit and "\n" in compacted:
+            compacted = compacted.split("\n", 1)[1]
+        compacted = compacted.strip()
+
+    if not compacted:
+        compacted = f"[Compacted on {datetime.now():%Y-%m-%d}. Full version archived in {archive_name}.]"
+
+    path.write_text(compacted + "\n", encoding="utf-8")
+    new_size = len(path.read_text(encoding="utf-8"))
+    return (
+        f"Compacted {store} store from {size} to {new_size} chars. "
+        f"Full version archived to {archive_path.name}.",
+        archive_path,
+    )
 
 
 def curated_memory_block(config: dict[str, Any]) -> str:

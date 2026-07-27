@@ -17,6 +17,7 @@ from typing import Any
 from symbio import constants
 from symbio.app.chat import chat_loop
 from symbio.app.config import config_show, get_telegram_token, load_config, set_config_value
+from symbio.app.setup import is_first_run, run_setup_wizard
 from symbio.app.training import run_training
 
 
@@ -50,6 +51,13 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("chat", help="Start the interactive chat CLI (default)")
+
+    setup_parser = sub.add_parser("setup", help="Run the interactive setup wizard")
+    setup_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Run the wizard even if setup was already completed",
+    )
 
     config_parser = sub.add_parser("config", help="Show or edit configuration")
     config_sub = config_parser.add_subparsers(dest="config_command")
@@ -541,7 +549,12 @@ def main(argv: list[str] | None = None) -> int:
     command = _resolve_command(args)
 
     if command == "chat":
+        if is_first_run(config) or getattr(args, "force", False):
+            config = run_setup_wizard(config)
         chat_loop(config)
+        return 0
+    if command == "setup":
+        config = run_setup_wizard(config)
         return 0
     if command == "config":
         return _cmd_config(config, args)

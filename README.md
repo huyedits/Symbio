@@ -41,10 +41,15 @@ pip install -r requirements.txt
 # Editable install links the current repo so code edits take effect immediately:
 pip install -e .
 
-# Start chatting
+# First launch runs an interactive setup wizard:
+#   - set names, pick a model preset, choose speed mode
+#   - toggle browser, web search, MOA dispatch, Telegram
+#   - add Telegram bot token and allowed chat IDs
 symbio
 # Or the short alias:
 #   symb
+# Re-run the wizard anytime with:
+#   symb setup
 ```
 ## How it works
 
@@ -156,6 +161,21 @@ Send any message to the bot, then copy the chat ID from the refusal message if y
 
 Dangerous actions from Telegram — blocked shell commands, new browser domains, Python code, config changes, cron jobs, digest, and training — ask for approval via an inline keyboard before running.
 
+### Telegram slash commands
+
+| Command | Description |
+|---|---|
+| `/start` | Welcome message |
+| `/help` | List available commands |
+| `/ping` | Last turn latency breakdown |
+| `/status` | Model, adapter, data, and last turn timings |
+| `/golden` | Run golden-set regression check |
+| `/train` | Start LoRA training |
+| `/selfcheck` | Verify enabled features and auto-fix safe issues |
+| `/setup` | How to change configuration |
+| `/tools` | Toggle tool groups |
+| `/cancel` | Clear the current session |
+
 ## Slash commands
 
 | Command | Description |
@@ -168,7 +188,9 @@ Dangerous actions from Telegram — blocked shell commands, new browser domains,
 | `/note [title]` | Create a markdown note |
 | `/notes` | List saved notes |
 | `/status` | Show model, adapter, notes, and session info |
-| `/setup` | Change assistant/user names |
+| `/selfcheck` | Verify enabled features and auto-fix safe issues |
+| `/setup` | Re-run the setup wizard (names, model, features) |
+| `/compact` | Compress memory/profile store and archive the original |
 | `/model` | List model presets |
 | `/model <preset>` | Switch to a named model preset (restart to load) |
 | `/run <cmd>` | Run a sandboxed shell command |

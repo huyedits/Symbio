@@ -24,6 +24,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_press": "browser",
     "browser_close": "browser",
     "save_memory": "memory",
+    "compact_memory": "memory",
     "config_show": "config",
     "config_set": "config",
     "digest_notes": "digest",
@@ -125,6 +126,25 @@ _TOOLS: list[dict[str, Any]] = [
                 "replace": {"type": "boolean", "description": "If true, replace all existing memory."},
             },
             "required": ["content"],
+        },
+    },
+    {
+        "name": "compact_memory",
+        "description": (
+            "Compress the always-in-context memory or profile store when it exceeds "
+            "its size limit. Archives the original and keeps a concise summary. Use when "
+            "the memory or profile store is overfull or the user asks to clean it up."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "store": {
+                    "type": "string",
+                    "description": "Which store to compact: 'memory' (facts about the assistant) or 'profile' (facts about the user).",
+                    "enum": ["memory", "profile"],
+                },
+            },
+            "required": ["store"],
         },
     },
     {
