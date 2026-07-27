@@ -17,7 +17,7 @@ from mlx_lm.sample_utils import make_sampler
 from rag import Retriever
 from symbio import constants
 from symbio.computer import BrowserSession
-from symbio.app import cron, dispatch, golden, health, learn, memory, mcp_bridge, prompts, sandbox, sessions, tooling, training, web
+from symbio.app import cron, dispatch, golden, health, learn, memory, mcp_bridge, prompts, sandbox, sessions, setup, tooling, training, web
 from symbio.app.config import config_show, set_config_value
 
 
@@ -107,7 +107,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"   Data   : {dataset_size:,} bytes")
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
-    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /help")
+    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
     output_fn("         /run <cmd>  /note [title]  /notes  /skills  /digest  /cron  /config")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     output_fn("-" * 50)
@@ -861,6 +861,43 @@ class ChatSession:
             report = health.verify_enabled_features(self.config, verbose=True, output_fn=self.output_fn)
             self._health_report = report
 
+        elif cmd == "/setup":
+            parts = user_input.split(None, 2)[1:]
+            if parts and parts[0].lower() == "wizard":
+                self.config = setup.run_setup_wizard(
+                    self.config, input_fn=self.input_fn, output_fn=self.output_fn
+                )
+                self.system_prompt = prompts.build_system_prompt(
+                    self.config["assistant_name"], self.config["user_name"]
+                )
+                self._cached_system_ids = None
+                self.output_fn("  Setup complete. Some changes may need a restart to take full effect.")
+            elif not self.config.get("assistant_name") or not self.config.get("user_name"):
+                self.config = setup.run_setup_wizard(
+                    self.config, input_fn=self.input_fn, output_fn=self.output_fn
+                )
+                self.system_prompt = prompts.build_system_prompt(
+                    self.config["assistant_name"], self.config["user_name"]
+                )
+                self._cached_system_ids = None
+            else:
+                self.output_fn("  Run /setup wizard to re-run the full setup, or use /config to change individual settings.")
+
+        elif cmd == "/compact":
+            parts = user_input.split(None, 2)[1:]
+            store = parts[0].lower() if parts else "memory"
+            if store not in ("memory", "profile"):
+                self.output_fn("  Usage: /compact [memory|profile]")
+            else:
+                def _summarize(text: str) -> str:
+                    return str(self.generate_fn(
+                        self.model, self.tokenizer, prompt=text, sampler=self.sampler,
+                        max_tokens=512, verbose=False,
+                    )).strip()
+                msg, _ = memory.compact_store(store, self.config, summarize_fn=_summarize)
+                self.retriever.invalidate_cache()
+                self.output_fn(f"  {msg}")
+
         elif cmd == "/status":
             files = sorted(constants.NOTES_DIR.glob("*.md"))
             data_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0
@@ -1508,6 +1545,17 @@ class ChatSession:
         if name == "save_memory":
             return memory.save_memory(params["store"], params["content"], self.config,
                                       replace=params.get("replace", False))
+
+        if name == "compact_memory":
+            store = params.get("store", "memory")
+            def _summarize(text: str) -> str:
+                return str(self.generate_fn(
+                    self.model, self.tokenizer, prompt=text, sampler=self.sampler,
+                    max_tokens=512, verbose=False,
+                )).strip()
+            msg, _ = memory.compact_store(store, self.config, summarize_fn=_summarize)
+            self.retriever.invalidate_cache()
+            return msg
 
         if name == "config_show":
             return f"Current configuration:\n{config_show(self.config)}"

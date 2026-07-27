@@ -502,6 +502,7 @@ def verify_enabled_features(
     *,
     verbose: bool = True,
     output_fn = print,
+    skip_model_load: bool = False,
 ) -> dict[str, Any]:
     """Verify only the features the user has enabled.
 
@@ -510,6 +511,10 @@ def verify_enabled_features(
     files, broken browser fallback), do it automatically. Anything that needs a
     human decision (wrong model, missing API key, no disk space) is reported.
 
+    `skip_model_load` is used during the first-run setup wizard: the model will
+    be loaded immediately afterward, so we avoid a duplicate (and possibly slow)
+    load during onboarding.
+
     Returns a structured report the agent can consume, surface in `/selfcheck`,
     or relay to the user.
     """
@@ -517,7 +522,10 @@ def verify_enabled_features(
         _check_config_validity(config),
         _check_python_env(config),
         _check_required_dirs(config),
-        _check_model_load(config),
+    ]
+    if not skip_model_load:
+        checks.append(_check_model_load(config))
+    checks.extend([
         _check_training_data(config),
         _check_memory(config),
         _check_rag(config),
@@ -527,7 +535,7 @@ def verify_enabled_features(
         _check_dispatch(config),
         _check_cron(config),
         _check_disk(config),
-    ]
+    ])
 
     fixed = [c for c in checks if c.auto_fixed]
     issues = [c for c in checks if not c.ok]

@@ -33,7 +33,7 @@ from telegram.ext import (
 from symbio import constants
 from symbio.app.chat import ChatSession
 from symbio.app.config import get_telegram_token
-from symbio.app import tooling
+from symbio.app import golden, health, tooling
 
 # Per-chat state shared between the async Telegram handlers and the
 # synchronous agent worker threads.
@@ -457,6 +457,11 @@ class TelegramBot:
             "/start — show welcome\n"
             "/help — show this help\n"
             "/ping — last-turn latency breakdown\n"
+            "/status — model, adapter, data, and last turn timings\n"
+            "/golden — run the golden-set regression check\n"
+            "/train — start LoRA training\n"
+            "/selfcheck — verify enabled features and auto-fix safe issues\n"
+            "/setup — how to change configuration\n"
             "/tools — enable or disable tool groups\n"
             "/cancel — stop the current turn"
         )
@@ -559,6 +564,97 @@ class TelegramBot:
         text, keyboard = self._tools_menu(chat_id)
         await query.edit_message_text(text, reply_markup=keyboard)
 
+    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not self._is_allowed(chat_id):
+            return
+        session = self._get_or_create_session(chat_id)
+        from datetime import datetime
+
+        files = sorted(constants.NOTES_DIR.glob("*.md"))
+        data_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0
+        adapter_files = list(constants.ADAPTER_DIR.glob("adapters.*"))
+        adapter_kb = sum(
+            f.stat().st_size for f in constants.ADAPTER_DIR.iterdir() if f.is_file()) // 1024
+        lines = [
+            f"Model: {session.config['model_name']}",
+            f"Assistant: {session.config['assistant_name']} | User: {session.config['user_name']}",
+            f"Notes: {len(files)}",
+            f"Training data: {data_size:,} bytes",
+            f"Adapter loaded: {'YES' if session.adapter_loaded else 'NO'}",
+            f"Adapter files: {len(adapter_files)} ({adapter_kb:,} KB)",
+        ]
+        timings = getattr(session, "last_turn_timings", {}) or {}
+        if timings.get("total_ms"):
+            lines.append("Last turn latency:")
+            for key in ("rag_ms", "prompt_ms", "ttft_ms", "gen_ms", "tools_ms", "total_ms"):
+                val = timings.get(key)
+                label = key.replace("_ms", "").upper()
+                lines.append(f"  {label}: {val:.0f}ms" if val is not None else f"  {label}: —")
+        await update.message.reply_text("\n".join(lines))
+
+    async def _cmd_golden(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not self._is_allowed(chat_id):
+            return
+        session = self._get_or_create_session(chat_id)
+        await update.message.reply_text("Running golden-set regression check…")
+        try:
+            result = golden.run_golden_set(
+                session.model, session.tokenizer, session.generate_fn, session.sampler,
+                session.system_prompt, session.config, session.enabled_groups)
+            lines = [f"Golden: {result.pass_count}/{result.total} checks passing"]
+            for case in golden.GOLDEN_CASES:
+                mark = "PASS" if result.results.get(case.id) else "FAIL"
+                lines.append(f"[{mark}] {case.id} — {case.description}")
+            await update.message.reply_text("\n".join(lines))
+        except Exception as e:
+            await update.message.reply_text(f"Golden check failed: {e}")
+
+    async def _cmd_train(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not self._is_allowed(chat_id):
+            return
+        session = self._get_or_create_session(chat_id)
+        await update.message.reply_text("Starting LoRA training. This may take a while…")
+        try:
+            session._guarded_train()
+            note = getattr(session, "_last_train_note", "")
+            await update.message.reply_text(note or "Training finished.")
+        except Exception as e:
+            await update.message.reply_text(f"Training failed: {e}")
+
+    async def _cmd_selfcheck(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not self._is_allowed(chat_id):
+            return
+        session = self._get_or_create_session(chat_id)
+        await update.message.reply_text("Running feature self-check…")
+        try:
+            report = health.verify_enabled_features(session.config, verbose=False)
+            lines = ["Self-check:"]
+            if report["all_ok"]:
+                lines.append("All enabled features are healthy.")
+            else:
+                for item in report["errors"]:
+                    lines.append(f"⚠ {item['name']}: {item['message']}")
+                for item in report["warnings"]:
+                    lines.append(f"• {item['name']}: {item['message']}")
+            await update.message.reply_text("\n".join(lines))
+        except Exception as e:
+            await update.message.reply_text(f"Self-check failed: {e}")
+
+    async def _cmd_setup_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not self._is_allowed(chat_id):
+            return
+        await update.message.reply_text(
+            "To change configuration, run the setup wizard in the terminal:\n"
+            "  symb setup\n\n"
+            "Available slash commands:\n"
+            "/start, /help, /ping, /status, /golden, /train, /selfcheck, /tools, /cancel"
+        )
+
     async def _cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
         if not self._is_allowed(chat_id):
@@ -649,6 +745,11 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("help", self._cmd_help))
         self.application.add_handler(CommandHandler("ping", self._cmd_ping))
         self.application.add_handler(CommandHandler("tools", self._cmd_tools))
+        self.application.add_handler(CommandHandler("status", self._cmd_status))
+        self.application.add_handler(CommandHandler("golden", self._cmd_golden))
+        self.application.add_handler(CommandHandler("train", self._cmd_train))
+        self.application.add_handler(CommandHandler("selfcheck", self._cmd_selfcheck))
+        self.application.add_handler(CommandHandler("setup", self._cmd_setup_info))
         self.application.add_handler(CommandHandler("cancel", self._cmd_cancel))
         self.application.add_handler(CallbackQueryHandler(self._on_callback))
         self.application.add_handler(

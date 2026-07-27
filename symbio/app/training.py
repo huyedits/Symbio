@@ -323,6 +323,19 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
             "Why isn't the browser working?",
             "<tool_call>{\"name\": \"verify_features\", \"arguments\": {}}</tool_call> Let me verify the enabled features and see what needs fixing.",
         ),
+        # Command awareness
+        (
+            "What commands can I use?",
+            "You can use /status, /golden, /train, /selfcheck, /setup, /help in Telegram or the terminal. In chat you can also use tags like <search>, <cmd>, <py>, <note>, <cron>, <train />.",
+        ),
+        (
+            "How do I add a custom command?",
+            "Save the command steps as a skill with <skill name='My command'>steps</skill> or as a cron job with <cron expr='0 9 * * *'>text</cron>, then run <digest /> and <train /> so I learn it.",
+        ),
+        (
+            "Compact my memory store.",
+            "<tool_call>{\"name\": \"compact_memory\", \"arguments\": {\"store\": \"memory\"}}</tool_call> Compressing your memory store and archiving the original.",
+        ),
     ]
 
     # Resilience: use this machine's native commands, and recover from a
