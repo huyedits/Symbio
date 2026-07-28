@@ -476,4 +476,3 @@ Apache 2.0
    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=huyedits/Symbio&type=date&theme=light&legend=top-left&sealed_token=BARd7crHixQjaz11nJTAZ7mVM0hzMRPkR0XsWnt0JCDpfGb7UODGYP_v1vWqVZ7oBnYNeBSjSPD41Jz3zptiRq5d4it22dMAG2hzDZp-hqN1WUU71TnCUQzen-QuIt_rS3gQGtX2rxkJBNKMo5q86C2O0Q4om5BuX_2rj91AZGictnTvSaGS7Yb0fayE" />
    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=huyedits/Symbio&type=date&legend=top-left&sealed_token=BARd7crHixQjaz11nJTAZ7mVM0hzMRPkR0XsWnt0JCDpfGb7UODGYP_v1vWqVZ7oBnYNeBSjSPD41Jz3zptiRq5d4it22dMAG2hzDZp-hqN1WUU71TnCUQzen-QuIt_rS3gQGtX2rxkJBNKMo5q86C2O0Q4om5BuX_2rj91AZGictnTvSaGS7Yb0fayE" />
  </picture>
-</a>
