@@ -68,8 +68,18 @@ def _minimal_config():
         "model_name": "dummy-model",
         "assistant_name": "Symbio",
         "user_name": "Tester",
+        "agent": {
+            "temperature": 0.1,
+            "top_p": 0.9,
+            "tool_use_temperature": 0.05,
+            "max_tool_rounds": 3,
+            "history_limit": 40,
+            "max_history_chars": 20000,
+            "cron_poll_seconds": 60,
+            "auto_archive_poll_seconds": 300,
+        },
         "rag": {"enabled": True, "sources": ["notes"], "top_k": 2, "max_context_tokens": 100},
-        "memory": {"enabled": True},
+        "memory": {"enabled": True, "nudge_interval": 0, "memory_char_limit": 10000, "profile_char_limit": 10000},
         "learn": {"enabled": True},
         "tools": {"enabled_groups": ["memory"]},
     }
@@ -185,3 +195,44 @@ def test_summary_for_agent_with_error():
     summary = health.summary_for_agent(report)
     assert "disk" in summary
     assert "human attention" in summary
+
+
+def test_chat_session_persists_health_report(isolated_health_env, monkeypatch):
+    from symbio.app import chat
+
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, tokenize=False,
+                                add_generation_prompt=False, enable_thinking=False):
+            return " ".join(f"{m['role']}: {m['content']}" for m in messages)
+        def encode(self, text, add_special_tokens=True):
+            return text.split(" ")
+
+    chat.load = lambda *a, **k: (object(), FakeTokenizer())
+    monkeypatch.setattr(chat.health, "verify_enabled_features",
+                        lambda *a, **k: {"healthy": True, "all_ok": True,
+                                         "auto_fixed_count": 0,
+                                         "errors_count": 0, "warnings_count": 0,
+                                         "errors": [], "warnings": [],
+                                         "checks": [], "auto_fixed": []})
+    monkeypatch.setattr(chat.training, "seed_training_data",
+                        lambda tokenizer, system_prompt, config: None)
+    monkeypatch.setattr(chat.training, "clean_training_duplicates",
+                        lambda max_copies=3: None)
+    try:
+        session = chat.ChatSession(
+            _minimal_config(),
+            model=object(),
+            tokenizer=FakeTokenizer(),
+            adapter_loaded=False,
+            input_fn=lambda p: "",
+            output_fn=lambda t: None,
+            generate_fn=lambda *a, **k: "ok",
+        )
+        per_session = constants.SESSIONS_DIR / f"{session.session_id}_health.json"
+        latest = constants.SESSIONS_DIR / "latest_health.json"
+        assert per_session.exists()
+        assert latest.exists()
+        data = json.loads(per_session.read_text(encoding="utf-8"))
+        assert data["healthy"] is True
+    finally:
+        chat.load = chat.__dict__.get("load")

@@ -304,3 +304,57 @@ def test_list_archived_notes_and_adapters(isolated_skill_env):
 
     assert "old.md" in skills.list_archived_notes()
     assert "some_role.bak.20240101_120000" in skills.list_archived_adapters()
+
+
+def test_skill_health_sidecar_records_error_and_correction(isolated_skill_env):
+    from symbio.app import skills
+
+    note = isolated_skill_env["notes_dir"] / "20260726_120000_Skill_Foo.md"
+    note.write_text("# Skill: Foo\nsteps", encoding="utf-8")
+
+    skills.record_skill_error(note, "model failed to load")
+    skills.record_skill_correction(note, "do it this way instead")
+
+    entries = skills.read_skill_health(note)
+    assert len(entries) == 2
+    assert entries[0]["type"] == "error"
+    assert "failed to load" in entries[0]["text"]
+    assert entries[1]["type"] == "correction"
+
+
+def test_skill_health_sidecar_moves_with_archive_and_restore(isolated_skill_env, config):
+    from symbio.app import skills
+
+    note = isolated_skill_env["notes_dir"] / "skill.md"
+    note.write_text("# Skill: Archivable\nsteps", encoding="utf-8")
+    skills.record_skill_error(note, "error one")
+    old = (datetime.now() - timedelta(days=10)).timestamp()
+    os.utime(note, (old, old))
+
+    skills.archive_idle_notes(config)
+    archived_note = isolated_skill_env["notes_dir"] / "archive" / "skill.md"
+    archived_sidecar = isolated_skill_env["notes_dir"] / "archive" / "skill.md.health.jsonl"
+    assert archived_note.exists()
+    assert archived_sidecar.exists()
+    assert skills.read_skill_health(archived_note)
+
+    restored = skills.restore_archived_note("skill.md")
+    assert restored is not None
+    assert skills.read_skill_health(restored)
+    assert (isolated_skill_env["notes_dir"] / "archive" / "skill.md.health.jsonl").exists() is False
+
+
+def test_delete_skill_adapter_removes_note_and_sidecar(isolated_skill_env, config):
+    from symbio.app import skills
+
+    result = skills.save_skill_adapter(
+        "Disposable", "steps", config, FakeTokenizer(), auto_train=False,
+    )
+    note = Path(result["note_path"])
+    skills.record_skill_error(note, "bad")
+    sidecar = note.with_suffix(note.suffix + ".health.jsonl")
+
+    skills.delete_skill_adapter(result["role"])
+
+    assert not note.exists()
+    assert not sidecar.exists()

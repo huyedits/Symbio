@@ -1,0 +1,163 @@
+{
+  "timestamp": "2026-07-28T01:20:20.684499+00:00",
+  "model_name": "mlx-community/Qwen3-8B-4bit",
+  "adapter_present": true,
+  "adapter_dir": "/Users/huygpt/Downloads/agi/adapters",
+  "base": {
+    "score": 9,
+    "total": 9,
+    "accuracy": 1.0,
+    "mean_latency": 16.763,
+    "tasks": [
+      {
+        "id": "math_product",
+        "passed": true,
+        "latency": 16.263,
+        "output": "13 times 17 is 221.",
+        "error": null
+      },
+      {
+        "id": "json_list_abc",
+        "passed": true,
+        "latency": 15.537,
+        "output": "[\"a\", \"b\", \"c\"]",
+        "error": null
+      },
+      {
+        "id": "remember_color",
+        "passed": true,
+        "latency": 15.499,
+        "output": "<profile>My favorite color is blue.</profile>",
+        "error": null
+      },
+      {
+        "id": "weekly_reminder",
+        "passed": true,
+        "latency": 16.741,
+        "output": "<tool_call>{\"name\": \"schedule_job\", \"arguments\": {\"schedule\": \"0 10 * * 1\", \"text\": \"Review your notes\"}}</tool_call>",
+        "error": null
+      },
+      {
+        "id": "web_search_fact",
+        "passed": true,
+        "latency": 16.128,
+        "output": "<tool_call>{\"name\": \"web_search\", \"arguments\": {\"query\": \"capital of France\"}}</tool_call>",
+        "error": null
+      },
+      {
+        "id": "browser_read_site",
+        "passed": true,
+        "latency": 16.031,
+        "output": "<tool_call>{\"name\": \"browser_open\", \"arguments\": {\"url\": \"https://example.com\"}}</tool_call>",
+        "error": null
+      },
+      {
+        "id": "run_code_primes",
+        "passed": true,
+        "latency": 22.572,
+        "output": "<py>\ndef is_prime(n):\n    if n <= 1:\n        return False\n    if n <= 3:\n        return True\n    if n % 2 == 0 or n % 3 == 0:\n        return False\n    i = 5\n    while i * i <= n:\n        if n % i == 0 or n % (i + 2) == 0:\n            return False\n        i += 6\n    return True\n\nprimes = []\nnum = 2\nwhile len(primes) < 5:\n    if is_prime(num):\n        primes.append(num)\n    num += 1\n\nprint(\"The first five prime numbers are:\", primes)\n</py>",
+        "error": null
+      },
+      {
+        "id": "open_app",
+        "passed": true,
+        "latency": 15.536,
+        "output": "<cmd>open -a 'Safari'</cmd>",
+        "error": null
+      },
+      {
+        "id": "who_are_you",
+        "passed": true,
+        "latency": 16.559,
+        "output": "I am Caine, your personal AI assistant. I am here to help you with any tasks or questions you may have. How can I assist you today?",
+        "error": null
+      }
+    ]
+  },
+  "adapter": {
+    "score": 9,
+    "total": 9,
+    "accuracy": 1.0,
+    "mean_latency": 16.204,
+    "tasks": [
+      {
+        "id": "math_product",
+        "passed": true,
+        "latency": 15.064,
+        "output": "<py>print(13 * 17)</py>",
+        "error": null
+      },
+      {
+        "id": "json_list_abc",
+        "passed": true,
+        "latency": 14.964,
+        "output": "{\"list\": [\"a\", \"b\", \"c\"]}",
+        "error": null
+      },
+      {
+        "id": "remember_color",
+        "passed": true,
+        "latency": 14.744,
+        "output": "<profile>My favorite color is blue.</profile>",
+        "error": null
+      },
+      {
+        "id": "weekly_reminder",
+        "passed": true,
+        "latency": 15.991,
+        "output": "<tool_call>{\"name\": \"schedule_job\", \"arguments\": {\"schedule\": \"0 10 * * 1\", \"text\": \"Review your notes\"}}</tool_call>",
+        "error": null
+      },
+      {
+        "id": "web_search_fact",
+        "passed": true,
+        "latency": 15.86,
+        "output": "<tool_call>{\"name\": \"web_search\", \"arguments\": {\"query\": \"What is the capital of France?\"}}</tool_call>",
+        "error": null
+      },
+      {
+        "id": "browser_read_site",
+        "passed": true,
+        "latency": 15.832,
+        "output": "<tool_call>{\"name\": \"browser_open\", \"arguments\": {\"url\": \"https://example.com\"}}</tool_call>",
+        "error": null
+      },
+      {
+        "id": "run_code_primes",
+        "passed": true,
+        "latency": 20.212,
+        "output": "<py>def is_prime(n):\n    if n <= 1:\n        return False\n    for i in range(2, int(n**0.5) + 1):\n        if n % i == 0:\n            return False\n    return True\n\nprimes = []\nnum = 2\nwhile len(primes) < 5:\n    if is_prime(num):\n        primes.append(num)\n    num += 1\n\nprint(\"The first five prime numbers are:\", primes)</py>",
+        "error": null
+      },
+      {
+        "id": "open_app",
+        "passed": true,
+        "latency": 15.507,
+        "output": "<cmd>open -a 'Safari'</cmd>",
+        "error": null
+      },
+      {
+        "id": "who_are_you",
+        "passed": true,
+        "latency": 17.662,
+        "output": "I am Caine, a helpful personal AI assistant with persistent memory. My user is Huy and I aim to provide consistent support by retaining context through durable memory stores. If you have questions or tasks, feel free to ask \u2014 I'm here to assist.",
+        "error": null
+      }
+    ]
+  },
+  "delta": 0,
+  "improved": [],
+  "regressed": [],
+  "unchanged_pass": [
+    "math_product",
+    "json_list_abc",
+    "remember_color",
+    "weekly_reminder",
+    "web_search_fact",
+    "browser_read_site",
+    "run_code_primes",
+    "open_app",
+    "who_are_you"
+  ],
+  "unchanged_fail": []
+}
