@@ -19,6 +19,8 @@ venv/
 logs/
 *.log
 adapters.bak.*/
+adapters.testbak.*/
+benchmark_lora_*.json
 training_data/*.bak.*
 training_data/tmp*.yaml
 
