@@ -11,8 +11,10 @@ Symbio takes notes and can construct it into training data to fine-tune itself -
 Symbio develops as you tell it what to do in repeat.
 
 **Try the interactive demo** — the agent's real tag parser, self-correction miner, research memory, and RAG retriever running in your browser: https://huggingface.co/spaces/HuyEdits/symbio-demo
-
+## MOA feature
 Symbio works with a feature called **MOA**, MOA is a mixture of agents. In staid of one big model to fine tune in staid the big model calls for smaller models to act on the task via tool call, the small model executes and if it fails then will return back to the big model to consult then the big model tries until it works then a .md file is made for both sides. IF they make the same mistake over five times or whatever you set it to then the smaller model and big model gets fine tuned, for the smaller model it would be how to execute it and how it did it well and the big model will fine tune its response to the smaller model to efficiently use tokens.
+## Skill feature
+Symbio also has a skill feature. The skill feature starts off with a simple .md file of what to do, the .md files builds on with the errors that is accumulated. Then after five or the user threshold amount of mistakes then the errors are collected and then goes through a LoRA fine tune to make an adapter, currently the idea is adapter = one skill. The adapters can be swapped and plugged in, also if the .md files or adapters does not get used for a while (you determine) then then Symbio will ask you "do you want to keep this [y/n]" and if you keep it then nothing happens but if you say N then it goes into the archives until you wanna delete it or leave it there. 
 ## What it does
 
 - Chat through a local CLI or a Telegram bot.
@@ -27,7 +29,7 @@ Please star this project too. It would help me out SO SO much. :3 <3
 ## Hardware prerequisites 
 Symbio (for now) runs on Apple Silicon using MLX and Metal performance shaders
 - **Recommended Unified RAM requirements** 16gb (the program itself takes 8 but overhead and expansion so comfortably would be 16)
-- **Minimum architecture** any m-series chip ideally. (if you can leme know if it works for m1,m2,m3,m5 and the pro and max variants)
+- **Minimum architecture** any m-series chip ideally. (if you can let me know if it works for m1,m2,m3,m5 and the pro and max variants)
 
 ## Quick start
 
@@ -395,7 +397,8 @@ Symbio understands two ways to call tools:
 - `terminal` and `execute_code` are best-effort sandboxes. They run with the privileges of the user who started the program and are scoped to the project directory.
 - `execute_code` requires the script to import from `symbio_tools` (or the backward-compatible `caine_tools` alias) and blocks known dangerous imports.
 - Do not paste untrusted code into the agent without reviewing it first.
-
+- And also do pay attention to the 'Do you wanna yes/no' questions those are there to keep you from having Symbio do random stuff without your consent because you might not want to do it.
+- 
 ## Architecture
 
 The project is organized as a `symbio/` Python package with a thin `main.py` wrapper:
@@ -419,7 +422,9 @@ The project is organized as a `symbio/` Python package with a thin `main.py` wra
 │   │   ├── computer.py    # Browser automation helpers
 │   │   ├── cron.py        # Scheduled jobs and reminders
 │   │   ├── telegram.py    # Telegram bot gateway
-│   │   └── tooling.py     # Tag parsing and tool stripping
+│   │   ├── tooling.py     # Tag parsing and tool stripping
+|   |   ├── prompts.py     # just the prompt idk nothing special
+|   |   └── skills.py      # saves the skills as adapters as well as manage the notes/
 │   └── utils.py         # Shared helpers
 ├── rag.py               # Lightweight keyword-based RAG
 ├── README.md
