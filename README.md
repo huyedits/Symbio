@@ -12,9 +12,12 @@ Symbio develops as you tell it what to do in repeat.
 
 **Try the interactive demo** — the agent's real tag parser, self-correction miner, research memory, and RAG retriever running in your browser: https://huggingface.co/spaces/HuyEdits/symbio-demo
 ## MOA feature
-Symbio works with a feature called **MOA**, MOA is a mixture of agents. In staid of one big model to fine tune in staid the big model calls for smaller models to act on the task via tool call, the small model executes and if it fails then will return back to the big model to consult then the big model tries until it works then a .md file is made for both sides. IF they make the same mistake over five times or whatever you set it to then the smaller model and big model gets fine tuned, for the smaller model it would be how to execute it and how it did it well and the big model will fine tune its response to the smaller model to efficiently use tokens.
+Symbio has a **MOA** (Mixture of Agents) mode. Instead of fine-tuning one big model for every task, the headmaster delegates bounded sub-tasks to smaller worker models via tool calls. The worker executes, and if it fails it returns to the headmaster for guidance. Once it works, a note is saved for both sides. If the same mistake repeats past the configured threshold, both the worker and the headmaster are fine-tuned: the worker learns how to execute the task, and the headmaster learns how to delegate it more efficiently.
+
 ## Skill feature
-Symbio also has a skill feature. The skill feature starts off with a simple .md file of what to do, the .md files builds on with the errors that is accumulated. Then after five or the user threshold amount of mistakes then the errors are collected and then goes through a LoRA fine tune to make an adapter, currently the idea is adapter = one skill. The adapters can be swapped and plugged in, also if the .md files or adapters does not get used for a while (you determine) then then Symbio will ask you "do you want to keep this [y/n]" and if you keep it then nothing happens but if you say N then it goes into the archives until you wanna delete it or leave it there. 
+Symbio can learn **skills** on the fly. A skill starts as a simple markdown note with step-by-step instructions. As errors and corrections accumulate, they are logged in a hidden `.md.health.jsonl` sidecar so the note itself stays clean and readable. Once the mistake threshold is reached, the collected examples are fed into a LoRA fine-tune that creates a dedicated worker adapter for that skill — one adapter = one skill. Adapters are hot-swappable and can be archived if unused.
+
+Use `/new-skill <name>` or `symb skill new <name>` to create one, `/skill-adapters` to list them, and `/archive` / `/restore` to manage idle notes and adapters.
 ## What it does
 
 - Chat through a local CLI or a Telegram bot.
@@ -93,7 +96,7 @@ symb config set telegram.allowed_chat_ids '[123456789]'
 
 | Key | Default | Note |
 |---|---|---|
-| `model_name` | `mlx-community/Qwen2.5-3B-Instruct-4bit` | Base MLX model |
+| `model_name` | `mlx-community/Qwen3-8B-4bit` | Base MLX model |
 | `assistant_name` | `Symbio` | What the assistant calls itself |
 | `user_name` | *(asked at first run)* | Your name |
 | `agent.max_turns` | `5` | Max tool rounds per user turn |
@@ -124,6 +127,12 @@ symb config show        # Print config.json (token redacted)
 symb config get <key>   # Print one value, e.g. agent.temperature
 symb config set <key> <value>
 symb train              # Run LoRA training
+symb skill list         # List saved skills and their adapter status
+symb skill new <name>   # Create a new skill (interactive steps)
+symb skill rm <role>   # Delete a skill, adapter, and training data
+symb archive            # Run auto-archive for idle notes/adapters
+symb archive --dry-run  # Preview what would be archived
+symb archive --restore note|adapter <name>
 symb gateway status     # Check Telegram gateway readiness
 symb gateway start      # Start the Telegram bot
 symb gateway stop       # Stop a running gateway
@@ -189,6 +198,11 @@ Dangerous actions from Telegram — blocked shell commands, new browser domains,
 | `/digest` | Convert notes into training samples |
 | `/note [title]` | Create a markdown note |
 | `/notes` | List saved notes |
+| `/new-skill <name>` | Create a skill note and start training a worker adapter |
+| `/skills` | List saved skill notes |
+| `/skill-adapters` | List skill adapters and their training/idle status |
+| `/archive` | Archive idle notes/adapters (or preview with `--dry-run`) |
+| `/restore note|adapter <name>` | Restore an archived note or adapter |
 | `/status` | Show model, adapter, notes, and session info |
 | `/selfcheck` | Verify enabled features and auto-fix safe issues |
 | `/setup` | Re-run the setup wizard (names, model, features) |
@@ -309,8 +323,7 @@ Answering yes deletes it; declining or saying "keep" both just leave it alone an
 | `learn.adapter_idle_reminder_enabled` | `true` | Ask about removing an adapter that's gone unused |
 | `learn.adapter_idle_days` | `30` | Days unused before the reminder fires |
 
-##
-Exmaple:
+## Example screenshots
 <img width="1300" height="89" alt="Screenshot 2026-07-23 at 11 23 21 am" src="https://github.com/user-attachments/assets/c4e02593-f527-44dc-9bcb-181f329360ad" />
 <img width="272" height="475" alt="Screenshot 2026-07-23 at 11 22 52 am" src="https://github.com/user-attachments/assets/e8e7475a-aac8-455b-b978-3996f1d4d3fd" />
 
@@ -467,7 +480,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and how to open issue
 - [ ] **Prune Old Weights (Future Milestone)**
 ## Licence
 Apache 2.0
-
-## Star History## Star History
-
-[![Star History Chart](https://api.star-history.com/chart?repos=huyedits/symbio&type=date&legend=top-left&sealed_token=nAgBpJJF6ocykEJzCXbv3RREw88dTHDwqOutHrxxQXODeG3JeNFcaBB7Pijip2YCn8MqcN9cc6Y4VmuEeyPAvsyj6CpTa00oHGxdG5yt8Gu0D6Vu50X-Xw)](https://www.star-history.com/?repos=huyedits%2Fsymbio&type=date&legend=top-left)
