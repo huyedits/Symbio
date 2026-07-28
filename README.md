@@ -468,11 +468,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and how to open issue
 ## Licence
 Apache 2.0
 
-## Star History
+## Star History## Star History
 
-[<a href="https://www.star-history.com/?repos=huyedits%2FSymbio&type=date&legend=top-left">
+<a href="https://www.star-history.com/?repos=huyedits%2Fsymbio&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=huyedits/Symbio&type=date&theme=dark&legend=top-left&sealed_token=BARd7crHixQjaz11nJTAZ7mVM0hzMRPkR0XsWnt0JCDpfGb7UODGYP_v1vWqVZ7oBnYNeBSjSPD41Jz3zptiRq5d4it22dMAG2hzDZp-hqN1WUU71TnCUQzen-QuIt_rS3gQGtX2rxkJBNKMo5q86C2O0Q4om5BuX_2rj91AZGictnTvSaGS7Yb0fayE" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=huyedits/Symbio&type=date&theme=light&legend=top-left&sealed_token=BARd7crHixQjaz11nJTAZ7mVM0hzMRPkR0XsWnt0JCDpfGb7UODGYP_v1vWqVZ7oBnYNeBSjSPD41Jz3zptiRq5d4it22dMAG2hzDZp-hqN1WUU71TnCUQzen-QuIt_rS3gQGtX2rxkJBNKMo5q86C2O0Q4om5BuX_2rj91AZGictnTvSaGS7Yb0fayE" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=huyedits/Symbio&type=date&legend=top-left&sealed_token=BARd7crHixQjaz11nJTAZ7mVM0hzMRPkR0XsWnt0JCDpfGb7UODGYP_v1vWqVZ7oBnYNeBSjSPD41Jz3zptiRq5d4it22dMAG2hzDZp-hqN1WUU71TnCUQzen-QuIt_rS3gQGtX2rxkJBNKMo5q86C2O0Q4om5BuX_2rj91AZGictnTvSaGS7Yb0fayE" />
- </picture>](https://www.star-history.com/?repos=huyedits%2Fsymbio&type=date&legend=top-left)
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=huyedits/symbio&type=date&theme=dark&legend=top-left&sealed_token=nAgBpJJF6ocykEJzCXbv3RREw88dTHDwqOutHrxxQXODeG3JeNFcaBB7Pijip2YCn8MqcN9cc6Y4VmuEeyPAvsyj6CpTa00oHGxdG5yt8Gu0D6Vu50X-Xw" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=huyedits/symbio&type=date&legend=top-left&sealed_token=nAgBpJJF6ocykEJzCXbv3RREw88dTHDwqOutHrxxQXODeG3JeNFcaBB7Pijip2YCn8MqcN9cc6Y4VmuEeyPAvsyj6CpTa00oHGxdG5yt8Gu0D6Vu50X-Xw" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=huyedits/symbio&type=date&legend=top-left&sealed_token=nAgBpJJF6ocykEJzCXbv3RREw88dTHDwqOutHrxxQXODeG3JeNFcaBB7Pijip2YCn8MqcN9cc6Y4VmuEeyPAvsyj6CpTa00oHGxdG5yt8Gu0D6Vu50X-Xw" />
+ </picture>
+</a>
