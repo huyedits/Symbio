@@ -27,6 +27,62 @@ ADAPTER_ARCHIVE_DIR = constants.ADAPTER_ARCHIVE_DIR
 _SKILL_FLAG = {"is_skill": True}
 
 
+def _skill_health_path(note_path: Path) -> Path:
+    """Sidecar file that holds health errors and corrections for a skill note."""
+    return note_path.with_suffix(note_path.suffix + ".health.jsonl")
+
+
+def _is_skill_note(path: Path) -> bool:
+    """True if the markdown file begins with '# Skill:'."""
+    try:
+        first = path.read_text(encoding="utf-8").splitlines()[0].strip().lower()
+    except (OSError, IndexError):
+        return False
+    return first.startswith("# skill:")
+
+
+def _append_health_entry(note_path: Path, entry_type: str, text: str):
+    """Append a dated error/correction entry to a skill's sidecar file."""
+    if not _is_skill_note(note_path):
+        return
+    sidecar = _skill_health_path(note_path)
+    entry = {
+        "t": datetime.now().isoformat(),
+        "type": entry_type,
+        "text": text,
+    }
+    with open(sidecar, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def record_skill_error(note_path: Path, error: str):
+    """Record a health error against the skill note at note_path."""
+    _append_health_entry(note_path, "error", error)
+
+
+def record_skill_correction(note_path: Path, correction: str):
+    """Record a user correction against the skill note at note_path."""
+    _append_health_entry(note_path, "correction", correction)
+
+
+def read_skill_health(note_path: Path) -> list[dict[str, Any]]:
+    """Return all recorded health/correction entries for a skill note."""
+    sidecar = _skill_health_path(note_path)
+    if not sidecar.exists():
+        return []
+    entries = []
+    with open(sidecar, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
 def _skill_slug(name: str) -> str:
     """Stable, filesystem-safe identifier from a skill title."""
     s = name.lower()
@@ -222,12 +278,25 @@ def list_skill_adapters() -> list[dict[str, Any]]:
 
 
 def delete_skill_adapter(role: str) -> dict[str, Any]:
-    """Remove a skill's worker catalog entry, adapter weights, and training data."""
+    """Remove a skill's worker catalog entry, adapter weights, training data,
+    and any health sidecar tied to its note."""
     catalog = _load_worker_catalog()
     removed_keys = [k for k, e in catalog.items() if e.get("role") == role and e.get("is_skill")]
     for k in removed_keys:
         del catalog[k]
     _save_worker_catalog(catalog)
+
+    # Remove the skill note and its health sidecar if they exist.
+    note_path = None
+    for title, p in memory.list_skills():
+        if _skill_slug(title[7:].strip()) == role:
+            note_path = p
+            break
+    if note_path and note_path.exists():
+        note_path.unlink()
+        sidecar = _skill_health_path(note_path)
+        if sidecar.exists():
+            sidecar.unlink()
 
     adapter_dir = constants.adapter_dir_for(role)
     data_dir = constants.data_dir_for(role)
@@ -319,6 +388,11 @@ def archive_idle_notes(config: dict[str, Any], dry_run: bool = False) -> list[st
             dest = constants.NOTES_ARCHIVE_DIR / f"{f.stem}_{counter}{f.suffix}"
             counter += 1
         f.rename(dest)
+        # Move any health sidecar with the note.
+        sidecar = _skill_health_path(f)
+        if sidecar.exists():
+            sidecar_dest = _skill_health_path(dest)
+            sidecar.rename(sidecar_dest)
         # Drop from manifest so a restored note starts fresh.
         manifest.pop(str(f.resolve()), None)
 
@@ -409,6 +483,10 @@ def restore_archived_note(filename: str) -> Path | None:
         dest = constants.NOTES_DIR / f"{src.stem}_{counter}{src.suffix}"
         counter += 1
     shutil.move(str(src), str(dest))
+    # Restore any health sidecar alongside the note.
+    sidecar_src = _skill_health_path(src)
+    if sidecar_src.exists():
+        sidecar_src.rename(_skill_health_path(dest))
     record_note_usage(dest)
     return dest
 

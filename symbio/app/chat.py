@@ -22,6 +22,18 @@ from symbio.app import cron, dispatch, golden, health, learn, memory, mcp_bridge
 from symbio.app.config import config_show, set_config_value
 
 
+def _persist_health_report(session_id: str, report: dict[str, Any]):
+    """Write the session health report to both a per-session file and a
+    rolling 'latest' file inside sessions/."""
+    constants.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    session_path = constants.SESSIONS_DIR / f"{session_id}_health.json"
+    session_path.write_text(json.dumps(report, indent=2, default=str) + "\n",
+                            encoding="utf-8")
+    latest_path = constants.SESSIONS_DIR / "latest_health.json"
+    latest_path.write_text(json.dumps(report, indent=2, default=str) + "\n",
+                           encoding="utf-8")
+
+
 def _make_chat_logger() -> logging.Logger:
     logger = logging.getLogger("chat")
     logger.setLevel(logging.INFO)
@@ -268,6 +280,16 @@ class ChatSession:
 
         self.history: list[dict[str, str]] = []
         self.session_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S-%f}"
+
+        # Persist the report so external tools and future sessions can audit it.
+        try:
+            _persist_health_report(self.session_id, self._health_report)
+        except Exception:
+            pass
+        # Skill notes touched this session; used to append health errors and
+        # user corrections to the matching sidecar files.
+        self._skill_notes_used: set[Path] = set()
+        self._skill_health_recorded: set[Path] = set()
         self.session_store = sessions.SessionStore(self.session_id)
         # Past sessions are retrievable; the live one is excluded to avoid echo.
         self.retriever = Retriever(config, session_store=self.session_store,
@@ -1245,9 +1267,25 @@ class ChatSession:
             f"inferred or invented details. Skip if nothing is worth keeping.]"
         )
 
+    def _record_health_errors_for_skill(self, note_path: Path):
+        """If the session health report has errors/warnings, record them once
+        into the sidecar of a skill note that is being used this session."""
+        if note_path in self._skill_health_recorded:
+            return
+        issues = (self._health_report.get("errors") or []) + (self._health_report.get("warnings") or [])
+        if not issues:
+            return
+        summary = "\n".join(f"{i['name']}: {i['message']}" for i in issues)
+        try:
+            skills.record_skill_error(note_path, f"Session health issues at startup:\n{summary}")
+            self._skill_health_recorded.add(note_path)
+        except Exception:
+            pass
+
     def _learn_from_correction(self, verbose: bool = False):
         """Capture the last (question -> corrected answer) pair as a mistake
-        note; at the configured threshold, retrain and reload the adapter."""
+        note; at the configured threshold, retrain and reload the adapter.
+        Also append the correction to every skill note used this session."""
         sample = learn.find_correction_sample(self.history, self.config)
         if sample is None:
             if verbose:
@@ -1257,6 +1295,19 @@ class ChatSession:
         severity = learn.correction_severity(sample[0], sample[2], self.config)
         path = learn.save_mistake_note(*sample, severity=severity)
         self.output_fn(f"  [Learn] Correction captured (severity {severity}): {path.name}")
+
+        correction_text = (
+            f"Original question: {sample[0]}\n"
+            f"Wrong answer: {sample[1]}\n"
+            f"Correction: {sample[2]}\n"
+            f"Correct answer: {sample[3]}"
+        )
+        for note_path in self._skill_notes_used:
+            try:
+                skills.record_skill_correction(note_path, correction_text)
+            except Exception:
+                pass
+
         learn.maybe_train_on_mistakes(
             self.config, self.tokenizer, self.system_prompt, train_fn=self._guarded_train)
 
@@ -1309,10 +1360,14 @@ class ChatSession:
         if self.retriever.rag_cfg.get("enabled", True):
             for r in self.retriever.retrieve(user_input):
                 if r.get("source") == "note" and r.get("path"):
+                    note_path = Path(r["path"])
                     try:
-                        skills.record_note_usage(r["path"])
+                        skills.record_note_usage(note_path)
                     except Exception:
                         pass
+                    if skills._is_skill_note(note_path):
+                        self._skill_notes_used.add(note_path)
+                        self._record_health_errors_for_skill(note_path)
         rag_block = f"\n\n{rag_context}" if rag_context else ""
         timings["rag_ms"] = (time.perf_counter() - turn_start) * 1000
 
