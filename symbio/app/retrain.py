@@ -6,6 +6,7 @@ from symbio import constants
 from symbio.app import config as app_config
 from symbio.app.training import (
     build_chat_training_sample,
+    clean_training_duplicates,
     digest_notes_to_training,
     remove_adapter,
     run_training,
@@ -61,7 +62,13 @@ def retrain_model(config: dict[str, Any], *, digest: bool = True, seed: bool = T
         except Exception as exc:
             print(f"  [System warning] Note digestion failed: {exc}")
 
-    # 6. Run full LoRA training.
+    # 6. Deduplicate before training so repeated notes/conversations don't
+    # drown out the seed corpus.
+    print("  [System] Cleaning duplicate training samples...")
+    kept, dropped = clean_training_duplicates(max_copies=3)
+    print(f"  [System] Kept {kept}, dropped {dropped} duplicate samples.")
+
+    # 7. Run full LoRA training.
     print("  [System] Starting LoRA training...")
     ok = run_training(config)
     if ok:

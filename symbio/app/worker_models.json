@@ -12,5 +12,15 @@
     "description": "Decide the next click/type/scroll action from the current page text.",
     "adapter_compatible": true,
     "memory_note": "~1 GB on disk, ~2-3 GB RAM at runtime"
+  },
+  "skill_fix_wifi": {
+    "model_name": "mlx-community/Qwen3-8B-4bit",
+    "role": "fix_wifi",
+    "description": "Skill: Fix wifi",
+    "adapter_compatible": true,
+    "memory_note": "~1 GB on disk, headmaster-size RAM at runtime",
+    "system_prompt": "You are the specialist worker for the skill 'Fix wifi'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. Toggle wifi off. 2. Toggle it on.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Fix wifi"
   }
 }

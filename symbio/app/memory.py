@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from symbio import constants
+from symbio.app import skills
 
 
 def save_note(title: str, body: str) -> Path:
@@ -16,6 +17,7 @@ def save_note(title: str, body: str) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = constants.NOTES_DIR / f"{ts}_{safe}.md"
     path.write_text(f"# {title}\n\n{body}\n", encoding="utf-8")
+    skills.record_note_usage(path)
     return path
 
 
@@ -27,10 +29,29 @@ def ensure_seed_notes(config: dict[str, Any]):
     save_note("User Identity", f"My user's name is {config['user_name']}.")
 
 
-def save_skill(name: str, steps: str) -> Path:
-    """Persist a reusable multi-step skill as a 'Skill:' note; RAG retrieves
-    it when a similar task appears, and digest bakes it into the weights."""
-    return save_note(f"Skill: {name}", steps)
+def save_skill(
+    name: str,
+    steps: str,
+    config: dict[str, Any] | None = None,
+    tokenizer: Any | None = None,
+    auto_train_adapter: bool = True,
+) -> Path | dict[str, Any]:
+    """Persist a reusable multi-step skill as a 'Skill:' note.
+
+    If `config` and `tokenizer` are provided, also create a dedicated worker
+    LoRA adapter for the skill and return a result dict. Otherwise just save
+    the note and return its path (legacy behavior).
+    """
+    path = save_note(f"Skill: {name}", steps)
+    if config is not None and tokenizer is not None:
+        from symbio.app import skills
+
+        result = skills.save_skill_adapter(
+            name, steps, config, tokenizer, auto_train=auto_train_adapter
+        )
+        result["note_path"] = str(path)
+        return result
+    return path
 
 
 def list_skills() -> list[tuple[str, Path]]:

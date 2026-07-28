@@ -22,6 +22,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_seq_length": 512,
         "steps_per_eval": 100,
         "save_every": 100,
+        # Early stopping: kill training if validation loss stops improving.
+        "early_stop_enabled": True,
+        "early_stop_patience": 2,
+        "early_stop_min_delta": 0.005,
     },
     "agent": {
         "max_tool_rounds": 3,
@@ -134,6 +138,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "fix it", "correction", "rephrase",
         ],
     },
+    "eval": {
+        "max_eval_tokens": 512,
+    },
     "tools": {
         "enabled_groups": [
             "memory", "notes", "terminal", "code", "web_search",
@@ -199,7 +206,7 @@ def load_config() -> dict[str, Any]:
         try:
             user_config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
             config.update(user_config)
-            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn", "telegram", "tools", "dispatch"):
+            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn", "telegram", "tools", "dispatch", "archive"):
                 if section in user_config:
                     config[section] = {**DEFAULT_CONFIG[section], **user_config[section]}
         except Exception as e:

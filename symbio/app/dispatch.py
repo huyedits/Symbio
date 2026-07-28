@@ -165,6 +165,18 @@ class WorkerPool:
         self._status(f"  [Dispatch] Worker '{role}' ready.")
         return model, tokenizer, entry
 
+    def _worker_system_prompt(self, role: str, entry: dict[str, Any]) -> str:
+        """Return the system prompt for a worker role.
+
+        Builtin roles use ROLE_SYSTEM_PROMPTS; skill/worker catalog entries
+        may carry their own system_prompt field.
+        """
+        if role in ROLE_SYSTEM_PROMPTS:
+            return ROLE_SYSTEM_PROMPTS[role]
+        if entry and "system_prompt" in entry:
+            return entry["system_prompt"]
+        return "Complete the following task concisely and directly."
+
     def run_delegated_task(self, role: str, task: str, max_tokens: int = 300,
                            browser: Any | None = None) -> str:
         """Execute a bounded task on the named worker and return an
@@ -190,9 +202,9 @@ class WorkerPool:
                 known = sorted({e.get("role") for e in load_catalog().values() if e.get("role")})
                 return f"No worker configured for role '{role}'. Known roles: {', '.join(known) or 'none'}."
             model, tokenizer, entry = loaded
+            training.mark_adapter_used(role=role)
             self._status(f"  [Dispatch] Delegating to '{role}': {task[:80]}{'...' if len(task) > 80 else ''}")
-            system_prompt = ROLE_SYSTEM_PROMPTS.get(
-                role, "Complete the following task concisely and directly.")
+            system_prompt = self._worker_system_prompt(role, entry)
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
@@ -229,6 +241,7 @@ class WorkerPool:
         if loaded is None:
             return "No worker configured for role 'browser'."
         model, tokenizer, entry = loaded
+        training.mark_adapter_used(role="browser")
         system_prompt = ROLE_SYSTEM_PROMPTS["browser"]
 
         try:
@@ -296,8 +309,12 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
     golden_on = dispatch_cfg.get("worker_golden_set_enabled", True)
     cases = WORKER_GOLDEN_CASES.get(role)
     sampler = make_sampler(temp=0.2, top_p=0.9)
-    system_prompt = ROLE_SYSTEM_PROMPTS.get(
-        role, "Complete the following task concisely and directly.")
+    entry = catalog_entry_for_role(role)
+    if entry and "system_prompt" in entry:
+        system_prompt = entry["system_prompt"]
+    else:
+        system_prompt = ROLE_SYSTEM_PROMPTS.get(
+            role, "Complete the following task concisely and directly.")
 
     def _run_golden(model, tokenizer):
         if not (golden_on and cases):

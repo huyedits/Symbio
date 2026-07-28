@@ -115,6 +115,7 @@ class Retriever:
                     "title": name,
                     "text": text,
                     "score": s,
+                    "path": str(NOTES_DIR / name),
                 })
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[: (top_k or self._top_k())]

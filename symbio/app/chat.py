@@ -18,7 +18,7 @@ from mlx_lm.sample_utils import make_sampler
 from rag import Retriever
 from symbio import constants
 from symbio.computer import BrowserSession
-from symbio.app import cron, dispatch, golden, health, learn, memory, mcp_bridge, prompts, sandbox, sessions, setup, tooling, training, web
+from symbio.app import cron, dispatch, golden, health, learn, memory, mcp_bridge, prompts, sandbox, sessions, setup, skills, tooling, training, web
 from symbio.app.config import config_show, set_config_value
 
 
@@ -109,7 +109,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
     output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
-    output_fn("         /run <cmd>  /note [title]  /notes  /skills  /digest  /cron  /config")
+    output_fn("         /run <cmd>  /note [title]  /notes  /new-skill <name>  /skills  /skill-adapters  /digest  /cron  /config  /archive  /restore")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     output_fn("-" * 50)
 
@@ -251,6 +251,7 @@ class ChatSession:
         # Seed identity notes + clean training corpus on first run.
         memory.ensure_seed_notes(config)
         training.seed_training_data(self.tokenizer, self.system_prompt, config)
+        training.clean_training_duplicates(max_copies=3)
 
         # AI-driven feature verification: run only the checks that match
         # enabled features, auto-fix safe failures, and store the report for
@@ -294,6 +295,7 @@ class ChatSession:
         # immediately, and queues the event for the model's next turn.
         self.cron_events: list[str] = []
         self.cron_lock = threading.Lock()
+        self._last_auto_archive: float = 0.0
         threading.Thread(target=self._cron_worker, daemon=True).start()
 
     # ---- Infrastructure ----
@@ -319,6 +321,21 @@ class ChatSession:
                     self.cron_events.extend(fired)
                 for ev in fired:
                     self.output_fn(f"\n  [Cron] {ev.splitlines()[0]}")
+            try:
+                if self.config.get("archive", {}).get("auto", False):
+                    interval = int(self.config["archive"].get("auto_poll_seconds", 3600))
+                    now = time.time()
+                    if now - self._last_auto_archive >= interval:
+                        self._last_auto_archive = now
+                        archived = skills.archive_idle_items(self.config)
+                        n_notes = len(archived.get("notes", []))
+                        n_adapters = len(archived.get("adapters", []))
+                        if n_notes or n_adapters:
+                            self.output_fn(
+                                f"\n  [Archive] Auto-archived {n_notes} idle note(s) and {n_adapters} idle adapter(s)."
+                            )
+            except Exception:
+                pass
 
     def _reload_model(self) -> str | None:
         """Reload model+adapter after training; returns an error message or None."""
@@ -844,6 +861,90 @@ class ChatSession:
                 for title, path in skills:
                     self.output_fn(f"    - {title}  ({path.name})")
 
+        elif cmd.startswith("/new-skill"):
+            rest = user_input[len("/new-skill"):].strip()
+            if not rest:
+                self.output_fn("  Usage: /new-skill <name> | <steps>")
+            else:
+                if "|" in rest:
+                    name, steps = rest.split("|", 1)
+                else:
+                    name, steps = rest, ""
+                name = name.strip()
+                steps = steps.strip()
+                if not name:
+                    self.output_fn("  Usage: /new-skill <name> | <steps>")
+                else:
+                    try:
+                        result = memory.save_skill(
+                            name,
+                            steps or "(no steps provided yet)",
+                            config=self.config,
+                            tokenizer=self.tokenizer,
+                            auto_train_adapter=True,
+                        )
+                        if isinstance(result, dict) and "role" in result:
+                            self.output_fn(
+                                f"  Created skill note and adapter for '{name}'. "
+                                f"Worker role: {result['role']}. Training started in the background."
+                            )
+                        else:
+                            self.output_fn(f"  Created skill note for '{name}'.")
+                    except Exception as e:
+                        self.output_fn(f"  Failed to create skill adapter: {e}")
+
+        elif cmd == "/skill-adapters":
+            adapters = skills.list_skill_adapters()
+            if not adapters:
+                self.output_fn("  No skill adapters active.")
+            else:
+                self.output_fn(f"  {len(adapters)} active skill adapter(s):")
+                for meta in adapters:
+                    self.output_fn(
+                        f"    - {meta['name']}  (role={meta['role']}, "
+                        f"last_used={meta.get('last_used','never')})"
+                    )
+
+        elif cmd == "/archive":
+            try:
+                archived = skills.archive_idle_items(self.config)
+                notes = archived.get("notes", [])
+                adapters = archived.get("adapters", [])
+                if notes or adapters:
+                    self.output_fn(f"  Archived {len(notes)} idle note(s) and {len(adapters)} idle adapter(s).")
+                    for n in notes:
+                        self.output_fn(f"    note: {Path(n).name}")
+                    for a in adapters:
+                        self.output_fn(f"    adapter: {Path(a).name}")
+                else:
+                    self.output_fn("  Nothing idle to archive.")
+            except Exception as e:
+                self.output_fn(f"  Archival failed: {e}")
+
+        elif cmd.startswith("/restore"):
+            rest = user_input[len("/restore"):].strip()
+            parts = rest.split(None, 1)
+            if len(parts) != 2 or parts[0] not in ("note", "adapter"):
+                self.output_fn("  Usage: /restore note <filename>  or  /restore adapter <role>")
+            else:
+                kind, name = parts
+                try:
+                    if kind == "note":
+                        restored = skills.restore_archived_note(name)
+                        if restored:
+                            self.retriever.invalidate_cache()
+                            self.output_fn(f"  Restored note: {restored.name}")
+                        else:
+                            self.output_fn(f"  No archived note named '{name}'.")
+                    else:
+                        restored = skills.restore_archived_adapter(name)
+                        if restored:
+                            self.output_fn(f"  Restored adapter for role: {name}")
+                        else:
+                            self.output_fn(f"  No archived adapter for role '{name}'.")
+                except Exception as e:
+                    self.output_fn(f"  Restore failed: {e}")
+
         elif cmd == "/notes":
             files = sorted(constants.NOTES_DIR.glob("*.md"))
             if not files:
@@ -1205,6 +1306,13 @@ class ChatSession:
         # Unbounded knowledge: pull relevant saved notes into this turn's
         # context. Retrieval text never enters history or training data.
         rag_context = self.retriever.build_context(user_input)
+        if self.retriever.rag_cfg.get("enabled", True):
+            for r in self.retriever.retrieve(user_input):
+                if r.get("source") == "note" and r.get("path"):
+                    try:
+                        skills.record_note_usage(r["path"])
+                    except Exception:
+                        pass
         rag_block = f"\n\n{rag_context}" if rag_context else ""
         timings["rag_ms"] = (time.perf_counter() - turn_start) * 1000
 
@@ -1569,9 +1677,18 @@ class ChatSession:
 
         if name == "save_skill":
             try:
-                p = memory.save_skill(params["name"], params["steps"])
+                result = memory.save_skill(
+                    params["name"],
+                    params["steps"],
+                    config=self.config,
+                    tokenizer=self.tokenizer,
+                    auto_train_adapter=True,
+                )
                 self.retriever.invalidate_cache()
-                return f"Saved skill note: {p.name}"
+                note_path = result.get("note_path", "")
+                role = result.get("role", "")
+                msg = result.get("message", "")
+                return f"Saved skill note: {Path(note_path).name}\n  Worker role: {role}\n  {msg}"
             except Exception as e:
                 return f"Failed to save skill: {e}"
 
@@ -1816,6 +1933,26 @@ class ChatSession:
                     self._guarded_train()
 
 
-def chat_loop(config: dict[str, Any]):
-    ChatSession(config, stream_chunk_fn=lambda s: print(s, end="", flush=True),
-                owner="cli").run()
+def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
+              adapter_loaded: bool | None = None,
+              generate_fn=None, stream_fn=None,
+              stream_chunk_fn=None,
+              input_fn=None, output_fn=None, confirm_fn=None):
+    """Run the interactive chat loop.
+
+    The CLI passes no extras and gets a real model load. Tests can inject
+    a fake model/tokenizer and generation functions to drive the loop without
+    loading weights.
+    """
+    if stream_chunk_fn is None:
+        stream_chunk_fn = lambda s: print(s, end="", flush=True)
+    if output_fn is None:
+        output_fn = print
+    ChatSession(
+        config,
+        model=model, tokenizer=tokenizer, adapter_loaded=adapter_loaded,
+        generate_fn=generate_fn, stream_fn=stream_fn,
+        stream_chunk_fn=stream_chunk_fn,
+        input_fn=input_fn, output_fn=output_fn, confirm_fn=confirm_fn,
+        owner="cli",
+    ).run()

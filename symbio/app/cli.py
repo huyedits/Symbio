@@ -79,6 +79,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("train", help="Run LoRA training")
 
+    skill_parser = sub.add_parser("skill", help="Manage skill adapters")
+    skill_sub = skill_parser.add_subparsers(dest="skill_command")
+    skill_new = skill_sub.add_parser("new", help="Create a skill note and worker adapter")
+    skill_new.add_argument("name", help="Skill name")
+    skill_new.add_argument("--steps", default="", help="Skill steps/instructions")
+    skill_new.add_argument("--no-train", action="store_true", help="Skip adapter training")
+    skill_sub.add_parser("list", help="List active skill adapters")
+    skill_rm = skill_sub.add_parser("rm", help="Delete a skill adapter")
+    skill_rm.add_argument("role", help="Worker role slug of the skill")
+    skill_parser.set_defaults(skill_command="list")
+
+    archive_parser = sub.add_parser("archive", help="Archive or restore idle notes and adapters")
+    archive_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Show what would be archived without moving anything",
+    )
+    archive_parser.add_argument(
+        "--restore", type=str, default=None, metavar="TYPE:NAME",
+        help="Restore an archived item: note:<filename> or adapter:<role>",
+    )
+    archive_parser.add_argument(
+        "--list-archived", action="store_true",
+        help="List archived notes and adapters",
+    )
+
     retrain_parser = sub.add_parser("retrain", help="Rebuild the LoRA adapter from scratch after switching models")
     retrain_parser.add_argument(
         "--no-digest",
@@ -134,6 +159,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Path to write a JSON evaluation report",
+    )
+    eval_lora_parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Max reply tokens per eval task (default 512)",
     )
 
     return parser
@@ -455,6 +486,115 @@ def _cmd_config(config: dict[str, Any], args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_skill(config: dict[str, Any], args: argparse.Namespace) -> int:
+    from symbio.app import memory, skills
+
+    sub = args.skill_command
+    if sub == "list":
+        adapters = skills.list_skill_adapters()
+        if not adapters:
+            print("No skill adapters active.")
+        else:
+            for meta in adapters:
+                print(f"{meta['role']}: {meta['name']}  "
+                      f"(adapter_exists={meta['adapter_exists']}, "
+                      f"last_used={meta.get('last_used','never')})")
+        return 0
+
+    if sub == "rm":
+        result = skills.delete_skill_adapter(args.role)
+        print(f"Removed {len(result['removed_entries'])} catalog entry(s) for role {result['role']}.")
+        return 0
+
+    if sub == "new":
+        from mlx_lm import load
+
+        print(f"Loading tokenizer for {config['model_name']}...")
+        _, tokenizer = load(config["model_name"])
+        result = memory.save_skill(
+            args.name,
+            args.steps,
+            config=config,
+            tokenizer=tokenizer,
+            auto_train_adapter=not args.no_train,
+        )
+        if isinstance(result, dict):
+            print(result.get("message", f"Skill '{args.name}' saved."))
+            print(f"  note:  {result.get('note_path')}")
+            print(f"  role:  {result.get('role')}")
+            print(f"  adapter_dir: {result.get('adapter_dir')}")
+        else:
+            print(f"Skill note saved: {result}")
+        return 0
+
+    print("Usage: symb skill [list | new <name> | rm <role>]")
+    return 1
+
+
+def _cmd_archive(config: dict[str, Any], args: argparse.Namespace) -> int:
+    from symbio.app import skills
+
+    if args.list_archived:
+        notes = skills.list_archived_notes()
+        adapters = skills.list_archived_adapters()
+        print(f"Archived notes: {len(notes)}")
+        for n in notes:
+            print(f"  note: {n}")
+        print(f"Archived adapters: {len(adapters)}")
+        for a in adapters:
+            print(f"  adapter: {a}")
+        return 0
+
+    if args.restore:
+        if ":" not in args.restore:
+            print("Usage: symb archive --restore note:<filename>  or  --restore adapter:<role>")
+            return 1
+        kind, name = args.restore.split(":", 1)
+        if kind == "note":
+            restored = skills.restore_archived_note(name)
+            if restored:
+                print(f"Restored note: {restored.name}")
+            else:
+                print(f"No archived note named '{name}'.")
+                return 1
+        elif kind == "adapter":
+            restored = skills.restore_archived_adapter(name)
+            if restored:
+                print(f"Restored adapter for role: {name}")
+            else:
+                print(f"No archived adapter for role '{name}'.")
+                return 1
+        else:
+            print(f"Unknown restore kind '{kind}'. Use note: or adapter:.")
+            return 1
+        return 0
+
+    if args.dry_run:
+        days_note = int(config.get("archive", {}).get("note_idle_days", 90))
+        days_adapter = int(config.get("archive", {}).get("adapter_idle_days", 90))
+        print(f"Archive thresholds: notes={days_note}d, adapters={days_adapter}d")
+        archived = skills.archive_idle_items(config, dry_run=True)
+        print(f"Would archive {len(archived['notes'])} note(s) and {len(archived['adapters'])} adapter(s).")
+        for n in archived["notes"]:
+            print(f"  note: {n}")
+        for a in archived["adapters"]:
+            print(f"  adapter: {a}")
+        return 0
+
+    archived = skills.archive_idle_items(config)
+    n_notes = len(archived.get("notes", []))
+    n_adapters = len(archived.get("adapters", []))
+    if n_notes or n_adapters:
+        print(f"Archived {n_notes} note(s) and {n_adapters} adapter(s).")
+        for n in archived.get("notes", []):
+            print(f"  note: {n}")
+        for a in archived.get("adapters", []):
+            print(f"  adapter: {a}")
+    else:
+        print("Nothing idle to archive.")
+    return 0
+
+
 def _cmd_train(config: dict[str, Any]) -> int:
     run_training(config)
     return 0
@@ -566,6 +706,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if command == "config":
         return _cmd_config(config, args)
+    if command == "skill":
+        return _cmd_skill(config, args)
+    if command == "archive":
+        return _cmd_archive(config, args)
     if command == "train":
         return _cmd_train(config)
     if command == "retrain":
@@ -595,7 +739,7 @@ def main(argv: list[str] | None = None) -> int:
     if command == "eval-lora":
         from symbio.app.eval import run_lora_benchmark
 
-        run_lora_benchmark(config, output_path=args.output)
+        run_lora_benchmark(config, output_path=args.output, max_tokens=args.max_tokens)
         return 0
     if command == "gateway":
         sub = getattr(args, "gateway_command", None) or "start"
