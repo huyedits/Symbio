@@ -58,7 +58,7 @@ def build_system_prompt(assistant_name: str, user_name: str, _tools: list[dict[s
         "  list_threads — list unread emails\n"
         "  get_thread — read one email thread\n"
         "  web_search / web_extract — web lookup\n"
-        "  browser_open / browser_navigate / browser_click / browser_type / browser_scroll / browser_screenshot — control a web browser\n"
+        "  browser_open / browser_navigate / browser_click / browser_type / browser_scroll / browser_screenshot / close_browser — control a web browser\n"
         "  browser_get_text / browser_get_html / browser_evaluate — read the current page\n"
         "  desktop_screenshot / desktop_click / desktop_type / desktop_press — control the macOS desktop\n\n"
         "Guidelines:\n"

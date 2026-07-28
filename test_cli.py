@@ -23,6 +23,7 @@ def isolated_cli(tmp_path, monkeypatch):
     """Point CLI file paths into tmp_path so tests do not touch the real repo."""
     monkeypatch.setattr(constants, "CONFIG_FILE", tmp_path / "config.json")
     monkeypatch.setattr(constants, "GATEWAY_PID_FILE", tmp_path / "gateway.pid")
+    monkeypatch.setattr(constants, "WORKER_MODELS_FILE", tmp_path / "worker_models.json")
 
     # Patch load_config inside cli.py so it does not read the real config.json.
     import symbio.app.cli as cli_module
@@ -90,3 +91,26 @@ def test_cli_legacy_train_flag(isolated_cli, monkeypatch, capsys):
     main(["--train"])
 
     mock_train.assert_called_once()
+
+
+def test_cli_skill_list_empty(isolated_cli, monkeypatch, capsys):
+    monkeypatch.setattr("symbio.app.cli.load_config", _default_config)
+    main(["skill"])
+    out = capsys.readouterr().out.strip()
+    assert "No skill adapters active" in out
+
+
+def test_cli_archive_dry_run(isolated_cli, monkeypatch, capsys):
+    monkeypatch.setattr("symbio.app.cli.load_config", _default_config)
+    main(["archive", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "Archive thresholds" in out
+    assert "Would archive" in out
+
+
+def test_cli_archive_list_empty(isolated_cli, monkeypatch, capsys):
+    monkeypatch.setattr("symbio.app.cli.load_config", _default_config)
+    main(["archive", "--list-archived"])
+    out = capsys.readouterr().out
+    assert "Archived notes: 0" in out
+    assert "Archived adapters: 0" in out

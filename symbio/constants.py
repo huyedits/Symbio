@@ -14,6 +14,7 @@ ADAPTER_DIR = PROJECT_DIR / "adapters"
 # existing "adapters/" .gitignore entry and by any tooling that already
 # treats ADAPTER_DIR's contents as disposable/local-only.
 WORKER_ADAPTERS_DIR = ADAPTER_DIR / "workers"
+ADAPTER_ARCHIVE_DIR = PROJECT_DIR / "adapters_archive"
 WORKER_MODELS_FILE = PROJECT_DIR / "symbio" / "app" / "worker_models.json"
 NOTES_DIR = PROJECT_DIR / "notes"
 MISTAKES_DIR = NOTES_DIR / "mistakes"
@@ -42,6 +43,7 @@ for d in (
     LOG_DIR,
     DATA_DIR,
     ADAPTER_DIR,
+    ADAPTER_ARCHIVE_DIR,
     NOTES_DIR,
     MISTAKES_DIR,
     MISTAKES_ARCHIVE_DIR,
@@ -51,6 +53,13 @@ for d in (
     SESSIONS_DIR,
 ):
     d.mkdir(parents=True, exist_ok=True)
+
+
+def adapter_archive_dir_for(role: str | None = None) -> Path:
+    """Archive directory for idle worker adapters (or the headmaster adapter)."""
+    if role is None:
+        return ADAPTER_ARCHIVE_DIR
+    return ADAPTER_ARCHIVE_DIR / "workers" / role
 
 
 def adapter_dir_for(role: str | None = None) -> Path:
@@ -122,6 +131,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "top_k": 3,
         "max_context_tokens": 800,
         "sources": ["notes", "sessions"],
+    },
+    "archive": {
+        "auto": False,
+        "auto_poll_seconds": 3600,
+        "note_idle_days": 30,
+        "adapter_idle_days": 30,
     },
     "training_planner": {
         "enabled": True,

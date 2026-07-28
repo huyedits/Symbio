@@ -254,6 +254,7 @@ def _check_required_dirs(config: dict[str, Any]) -> _CheckResult:
         constants.LOG_DIR,
         constants.DATA_DIR,
         constants.ADAPTER_DIR,
+        constants.ADAPTER_ARCHIVE_DIR,
         constants.NOTES_DIR,
         constants.MISTAKES_DIR,
         constants.MISTAKES_ARCHIVE_DIR,
@@ -536,6 +537,25 @@ def verify_enabled_features(
         _check_cron(config),
         _check_disk(config),
     ])
+
+    # Conditionally include skill/adapter checks only when at least one skill adapter exists.
+    from symbio.app import skills as _skills
+    adapters = _skills.list_skill_adapters()
+    if adapters:
+        missing_adapters = [a["role"] for a in adapters if not a.get("adapter_exists")]
+        if missing_adapters:
+            checks.append(_CheckResult(
+                "skill_adapters",
+                False,
+                message=f"Skill catalog entries exist without trained adapters: {', '.join(missing_adapters)}. Run /new-skill or wait for background training to finish.",
+                severity="warning",
+            ))
+        else:
+            checks.append(_CheckResult(
+                "skill_adapters",
+                True,
+                message=f"{len(adapters)} skill adapter(s) registered; all have trained weights.",
+            ))
 
     fixed = [c for c in checks if c.auto_fixed]
     issues = [c for c in checks if not c.ok]

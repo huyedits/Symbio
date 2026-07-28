@@ -4,10 +4,12 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -132,6 +134,11 @@ def decay_research_notes(config: dict[str, Any]) -> list[str]:
 
 def digest_notes_to_training(tokenizer, system_prompt: str,
                              config: dict[str, Any] | None = None) -> int:
+    try:
+        from symbio.app import skills as _skills
+    except Exception:
+        _skills = None  # type: ignore
+
     files = sorted(constants.NOTES_DIR.glob("*.md"))
 
     manifest: dict[str, str] = {}
@@ -148,6 +155,12 @@ def digest_notes_to_training(tokenizer, system_prompt: str,
         content = f.read_text(encoding="utf-8").strip()
         if not content:
             continue
+
+        if _skills is not None:
+            try:
+                _skills.record_note_usage(str(f))
+            except Exception:
+                pass
 
         h = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
         new_manifest[f.name] = h
@@ -280,6 +293,10 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
             "Who is who here?",
             f"I'm {assistant}, the assistant. You're {user}, my user.",
         ),
+        (
+            "Who are you?",
+            f"I am {assistant}, your personal AI assistant.",
+        ),
         # Tool-use demonstration: "remember a fact" = note, "remind me at a time" = cron
         (
             "Please remember that I prefer concise replies.",
@@ -335,6 +352,36 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
         (
             "Compact my memory store.",
             "<tool_call>{\"name\": \"compact_memory\", \"arguments\": {\"store\": \"memory\"}}</tool_call> Compressing your memory store and archiving the original.",
+        ),
+        # Direct answers: not every question needs a tool. Keep answers factual
+        # and concise when the user asks for a value.
+        (
+            "What is 13 times 17?",
+            "13 times 17 is 221.",
+        ),
+        (
+            "What is 7 times 8?",
+            "7 times 8 is 56.",
+        ),
+        (
+            "Return this list as JSON: [\"a\", \"b\", \"c\"]. Output only the JSON.",
+            "[\"a\", \"b\", \"c\"]",
+        ),
+        (
+            "Return this list as JSON: [\"red\", \"blue\", \"green\"]. Output only the JSON.",
+            "[\"red\", \"blue\", \"green\"]",
+        ),
+        (
+            "Return [1, 2, 3] as JSON. No extra text.",
+            "[1, 2, 3]",
+        ),
+        (
+            "Output only JSON for ['x', 'y', 'z'].",
+            "[\"x\", \"y\", \"z\"]",
+        ),
+        (
+            "Give me the JSON array [\"hello\", \"world\"].",
+            "[\"hello\", \"world\"]",
         ),
         # File editing: read before edit, backup by default
         (
@@ -394,6 +441,26 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
         (
             "Start Google Chrome for me.",
             f"<cmd>{open_chrome}</cmd> Starting Google Chrome for you, {user}.",
+        ),
+        (
+            "Open Safari.",
+            "<cmd>open -a 'Safari'</cmd> Opening Safari for you.",
+        ),
+        (
+            "Launch the Safari app.",
+            "<cmd>open -a 'Safari'</cmd> Launching the Safari app for you.",
+        ),
+        (
+            "Start Safari for me.",
+            "<cmd>open -a 'Safari'</cmd> Starting Safari for you.",
+        ),
+        (
+            "Open example.com in Safari.",
+            "<tool_call>{\"name\": \"browser_open\", \"arguments\": {\"url\": \"https://example.com\"}}</tool_call> Opening example.com in the controllable browser.",
+        ),
+        (
+            "Open Safari using a tool call.",
+            "<tool_call>{\"name\": \"terminal\", \"arguments\": {\"cmd\": \"open -a 'Safari'\"}}</tool_call> Opening Safari via a tool call.",
         ),
         (
             "[System observation: Command 'chrome' exited error.\nOutput:\nCommand not found: chrome]",
@@ -623,6 +690,59 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
     return added
 
 
+def _strip_tool_calls(text: str) -> str:
+    """Remove assistant tool-call tags so we can compare the underlying prose."""
+    # Drop Hermes tool_call blocks and self-closing legacy tags.
+    text = re.sub(r"<tool_call>.*?</tool_call>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<digest\s*/>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<train\s*/>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<retrain\s*/>", "", text, flags=re.DOTALL)
+    return text.strip()
+
+
+def clean_training_duplicates(train_file: Path | None = None,
+                              max_copies: int = 3,
+                              role: str | None = None) -> tuple[int, int]:
+    """Deduplicate training samples by the assistant's stripped reply text.
+
+    Some conversation patterns and digested notes get saved many times (e.g.
+    "Opening Chrome" or "Huy likes coffee."). Keeping the first `max_copies`
+    occurrences prevents the adapter from overfitting to high-frequency noise.
+    Returns (kept, dropped).
+    """
+    train_file = train_file or _train_file_for(role)
+    if not train_file.exists():
+        return 0, 0
+    lines = train_file.read_text(encoding="utf-8").splitlines()
+    kept_lines: list[str] = []
+    seen: dict[str, int] = {}
+    kept = dropped = 0
+    for line in lines:
+        if not line.strip():
+            kept_lines.append(line)
+            continue
+        try:
+            text = json.loads(line).get("text", "")
+        except Exception:
+            kept_lines.append(line)
+            continue
+        # Fingerprint by the assistant reply only, ignoring system/user turns.
+        parts = text.split("<|im_start|>assistant\n")
+        if len(parts) > 1:
+            reply = parts[1].split("<|im_end|>")[0]
+            key = _strip_tool_calls(reply)
+            if key:
+                count = seen.get(key, 0)
+                if count >= max_copies:
+                    dropped += 1
+                    continue
+                seen[key] = count + 1
+        kept_lines.append(line)
+        kept += 1
+    train_file.write_text("\n".join(kept_lines) + ("\n" if kept_lines else ""), encoding="utf-8")
+    return kept, dropped
+
+
 def ensure_validation_split(every_nth: int = 10, max_samples: int = 24,
                             role: str | None = None):
     """mlx_lm silently skips evaluation when valid.jsonl is missing, which
@@ -688,19 +808,27 @@ def run_training(config: dict[str, Any], iters: int | None = None,
         "--save-every", str(lora["save_every"]),
         "--config", config_path,
     ]
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError:
-        print("  [System] Training failed.")
-        return False
-    except KeyboardInterrupt:
-        print("  [System] Training stopped.")
-        return False
-    finally:
+
+    early_stop = lora.get("early_stop_enabled", False)
+    if early_stop:
+        trained = _run_training_with_early_stop(
+            cmd, lora, adapter_dir, config_path,
+        )
+    else:
         try:
-            os.unlink(config_path)
-        except OSError:
-            pass
+            subprocess.run(cmd, check=True)
+            trained = True
+        except subprocess.CalledProcessError:
+            print("  [System] Training failed.")
+            trained = False
+        except KeyboardInterrupt:
+            print("  [System] Training stopped.")
+            trained = False
+        finally:
+            try:
+                os.unlink(config_path)
+            except OSError:
+                pass
 
     config_file = adapter_dir / "adapter_config.json"
     weight_files = list(adapter_dir.glob("adapters.*"))
@@ -710,6 +838,112 @@ def run_training(config: dict[str, Any], iters: int | None = None,
 
     adapter_kb = sum(f.stat().st_size for f in adapter_dir.iterdir() if f.is_file()) // 1024
     print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB")
+    return trained
+
+
+def _run_training_with_early_stop(
+    cmd: list[str],
+    lora: dict[str, Any],
+    adapter_dir: Path,
+    config_path: str,
+) -> bool:
+    """Run mlx_lm lora and terminate early if validation loss plateaus.
+
+    Parses stdout for "Iter N: Val loss X.XXX" lines. Keeps the best adapter
+    seen so far; if validation loss does not improve for `patience` eval
+    steps within `min_delta`, kills the subprocess and restores the best
+    checkpoint, then removes intermediate step files.
+    """
+    patience = max(1, int(lora.get("early_stop_patience", 2)))
+    min_delta = float(lora.get("early_stop_min_delta", 0.005))
+    val_re = re.compile(r"Iter\s+\d+:\s+Val\s+loss\s+([0-9.eE+-]+)")
+
+    best_loss: float | None = None
+    best_step: int | None = None
+    steps_without_improvement = 0
+    current_step = 0
+    process: subprocess.Popen | None = None
+    stopped_early = False
+
+    def _restore_best(step: int) -> None:
+        src = adapter_dir / f"{step:07d}_adapters.safetensors"
+        dst = adapter_dir / "adapters.safetensors"
+        if src.exists():
+            shutil.copy2(src, dst)
+            print(f"  [Train] Restored best checkpoint (step {step}).")
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+            match = val_re.search(line)
+            if match:
+                loss = float(match.group(1))
+                current_step += 1
+                improved = best_loss is None or loss < (best_loss - min_delta)
+                if improved:
+                    best_loss = loss
+                    best_step = current_step
+                    steps_without_improvement = 0
+                else:
+                    steps_without_improvement += 1
+
+                print(
+                    f"  [Train] Early stop monitor: val_loss={loss:.4f} "
+                    f"best={best_loss:.4f} patience={steps_without_improvement}/{patience}"
+                )
+
+                if steps_without_improvement >= patience:
+                    print(
+                        f"  [Train] Validation loss stalled for {patience} eval steps. "
+                        "Stopping early and keeping best checkpoint."
+                    )
+                    stopped_early = True
+                    process.terminate()
+                    try:
+                        process.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    if best_step is not None:
+                        _restore_best(best_step)
+                    break
+
+        if not stopped_early:
+            process.wait()
+            if process.returncode != 0:
+                return False
+    except KeyboardInterrupt:
+        print("  [System] Training stopped.")
+        if process is not None:
+            process.terminate()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        return False
+    finally:
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
+        # Clean up per-step checkpoint files; keep the final adapters.safetensors.
+        for cp in adapter_dir.glob("[0-9]*_adapters.safetensors"):
+            try:
+                cp.unlink()
+            except OSError:
+                pass
+
     return True
 
 

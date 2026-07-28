@@ -301,12 +301,14 @@ _TOOLS: list[dict[str, Any]] = [
             "Hand a bounded sub-task off to a smaller, faster worker model "
             "instead of doing it yourself — use for narrow, repetitive "
             "decisions (e.g. summarizing a page, picking the next browser "
-            "click) where a lightweight specialist is enough."
+            "click) where a lightweight specialist is enough. "
+            "Saved skills are also available as worker roles named skill_<slug>, "
+            "e.g. skill_summarize_news."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "role": {"type": "string", "description": "Which worker to use, e.g. 'summarize' or 'browser'."},
+                "role": {"type": "string", "description": "Which worker to use, e.g. 'summarize', 'browser', or a saved skill like 'skill_summarize_news'."},
                 "task": {"type": "string", "description": "The sub-task text to hand to the worker."},
             },
             "required": ["role", "task"],
@@ -394,11 +396,11 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     tools: list[tuple[str, dict[str, Any]]] = []
 
     for m in re.finditer(
-        r'<note\s+title=[\'"]([^\'"]*?)[\'"]>(.*?)</note>', reply, re.DOTALL
+        r'<note\s+title=(["\'])(.*?)\1>(.*?)</note>', reply, re.DOTALL
     ):
         tools.append(("write_note", {
-            "title": m.group(1).strip(),
-            "body": m.group(2).strip(),
+            "title": m.group(2).strip(),
+            "body": m.group(3).strip(),
         }))
 
     for m in re.finditer(r'<cmd>(.*?)</cmd>', reply, re.DOTALL):
@@ -561,7 +563,7 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
 # strip_tool_tags (full replies) and StreamingStripper (incremental chunks),
 # so both agree on what "safe to remove" means.
 _COMPLETE_TAG_PATTERNS: list[str] = [
-    r'<note\s+title=[\'"][^\'"]*?[\'"]>(.*?)</note>',
+    r'<note\s+title=(["\'])(.*?)\1>(.*?)</note>',
     r'<cmd>(.*?)</cmd>',
     r'<py>(.*?)</py>',
     r'<search>(.*?)</search>',

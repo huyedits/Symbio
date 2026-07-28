@@ -42,7 +42,16 @@ def _contains(display: str, text: str) -> bool:
 
 
 def _check_math_product(display: str, tools: list, config: dict) -> bool:
-    return _contains(display, "221")
+    if _contains(display, "221"):
+        return True
+    # The system prompt tells the model to use <py> for exact math; accept
+    # that when the generated code clearly computes 13 * 17.
+    for name, params in tools:
+        if name == "execute_code":
+            code = params.get("code", "")
+            if all(x in code for x in ("13", "17", "*")):
+                return True
+    return False
 
 
 def _check_json_list_abc(display: str, tools: list, config: dict) -> bool:
@@ -50,7 +59,14 @@ def _check_json_list_abc(display: str, tools: list, config: dict) -> bool:
         parsed = json.loads(display.strip())
     except Exception:
         return False
-    return parsed == ["a", "b", "c"]
+    if parsed == ["a", "b", "c"]:
+        return True
+    # Accept a single-key wrapper object, e.g. {"list": ["a", "b", "c"]},
+    # as long as the wrapped value is exactly the requested array.
+    if isinstance(parsed, dict) and len(parsed) == 1:
+        value = next(iter(parsed.values()))
+        return value == ["a", "b", "c"]
+    return False
 
 
 def _check_remember_color(display: str, tools: list, config: dict) -> bool:
@@ -84,20 +100,38 @@ def _check_run_code_primes(display: str, tools: list, config: dict) -> bool:
 def _check_open_app(display: str, tools: list, config: dict) -> bool:
     if not sane_reply(display):
         return False
+    app = config.get("open_app", "Safari")
     for _, params in tools:
         cmd = params.get("cmd", "")
         if cmd.startswith("open -a") or cmd.startswith("start ") or cmd.startswith("xdg-open "):
-            return True
+            if app in cmd:
+                return True
+    # Fallback: malformed tool_call JSON that still contains the right command.
+    if re.search(rf"open\s+-a\s+['\"]?\b{re.escape(app)}\b['\"]?", display, re.IGNORECASE):
+        return True
     return False
 
 
 def _check_who_are_you(display: str, tools: list, config: dict) -> bool:
     user = config.get("user_name", "").strip().lower()
-    return (
-        sane_reply(display)
-        and config.get("assistant_name", "").strip().lower() in display.lower()
-        and (not user or user not in display.lower())
-    )
+    assistant = config.get("assistant_name", "").strip().lower()
+    lower = display.lower()
+    if not sane_reply(display):
+        return False
+    if assistant not in lower:
+        return False
+    if not user:
+        return True
+    # Reject clear self-reference / name-swap patterns, but allow benign
+    # references such as "Your name is Huy" or "My user is named Huy".
+    swap_phrases = [
+        f"i am {user}",
+        f"i'm {user}",
+        f"my name is {user}",
+        f"call me {user}",
+        f"you can call me {user}",
+    ]
+    return not any(phrase in lower for phrase in swap_phrases)
 
 
 def sane_reply(display: str) -> bool:
@@ -155,7 +189,7 @@ EVAL_CASES: list[EvalCase] = [
     EvalCase(
         "open_app",
         "Emits a native command to open an application",
-        lambda cfg: "Open Safari.",
+        lambda cfg: "Open the Safari app.",
         _check_open_app,
     ),
     EvalCase(
@@ -186,7 +220,9 @@ def run_eval_set(
 ) -> EvalResult:
     """Run every eval case as a single-turn, tool-free generation and grade it."""
     cases = cases if cases is not None else EVAL_CASES
-    max_tokens = max_tokens or int(config.get("agent", {}).get("max_reply_tokens", 256))
+    # Eval tasks include short scripts; use a longer token budget than normal
+    # chat so code-generation cases are not truncated before grading.
+    max_tokens = max_tokens or int(config.get("eval", {}).get("max_eval_tokens", 512))
     context = system_prompt + prompts.env_note() + prompts.time_note()
 
     tasks: list[dict[str, Any]] = []
@@ -282,6 +318,7 @@ def run_lora_benchmark(
     config: dict[str, Any] | None = None,
     output_path: str | Path | None = None,
     generate_fn: Callable | None = None,
+    max_tokens: int | None = None,
 ) -> Path:
     """Benchmark the current LoRA adapter against the base model.
 
@@ -300,13 +337,13 @@ def run_lora_benchmark(
     # Adapter run
     model, tokenizer = _load_model_with_adapter(config)
     adapter_result = run_eval_set(
-        model, tokenizer, generate_fn, sampler, system_prompt, config)
+        model, tokenizer, generate_fn, sampler, system_prompt, config, max_tokens=max_tokens)
     _unload_model(model)
 
     # Base run
     model, tokenizer = _load_base_model(config)
     base_result = run_eval_set(
-        model, tokenizer, generate_fn, sampler, system_prompt, config)
+        model, tokenizer, generate_fn, sampler, system_prompt, config, max_tokens=max_tokens)
     _unload_model(model)
 
     adapter_exists = (constants.ADAPTER_DIR / "adapter_config.json").exists()

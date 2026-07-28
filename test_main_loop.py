@@ -75,16 +75,10 @@ class ScriptedSession:
 
     def run(self):
         real_input = builtins.input
-        real_load = chat.load
-        real_generate = chat.generate
-        real_stream_generate = chat.stream_generate
         real_make_cache = chat.make_prompt_cache
         real_can_trim = chat.can_trim_prompt_cache
         real_trim = chat.trim_prompt_cache
         builtins.input = self.fake_input
-        chat.load = lambda *a, **k: (object(), FakeTokenizer())
-        chat.generate = self.fake_generate
-        chat.stream_generate = self.fake_stream_generate
         chat.make_prompt_cache = lambda model: []
         chat.can_trim_prompt_cache = lambda cache: True
         chat.trim_prompt_cache = lambda cache, n: cache
@@ -93,12 +87,19 @@ class ScriptedSession:
             # (checks adapter_config.json, marks it used) even with load()
             # faked out — guard it the same way training runs already are.
             with preserve_training_state(adapters=True):
-                chat.chat_loop(self.config or app_config.load_config())
+                chat.chat_loop(
+                    self.config or app_config.load_config(),
+                    model=object(),
+                    tokenizer=FakeTokenizer(),
+                    adapter_loaded=False,
+                    generate_fn=self.fake_generate,
+                    stream_fn=self.fake_stream_generate,
+                    stream_chunk_fn=lambda s: None,
+                    output_fn=lambda t: None,
+                    input_fn=self.fake_input,
+                )
         finally:
             builtins.input = real_input
-            chat.load = real_load
-            chat.generate = real_generate
-            chat.stream_generate = real_stream_generate
             chat.make_prompt_cache = real_make_cache
             chat.can_trim_prompt_cache = real_can_trim
             chat.trim_prompt_cache = real_trim
@@ -207,6 +208,25 @@ def test_parse_and_strip_tool_tags():
     assert tools[5][1] == {"schedule": "at 2026-12-31 23:59", "text": "happy new year"}
     assert tooling.strip_tool_tags(reply) == "Sure.", repr(tooling.strip_tool_tags(reply))
     print("test_parse_and_strip_tool_tags passed")
+
+
+def test_parse_note_with_apostrophe_in_title():
+    reply = (
+        "<note title='Huy's Favorite Color'>My favorite color is blue.</note>"
+    )
+    tools = tooling.parse_tools(reply)
+    assert tools == [
+        ("write_note", {"title": "Huy's Favorite Color", "body": "My favorite color is blue."})
+    ], tools
+    assert tooling.strip_tool_tags(reply) == "", repr(tooling.strip_tool_tags(reply))
+
+    # Double-quoted title with an internal single quote should also work.
+    reply2 = '<note title="Huy\'s Favorite Color">blue</note>'
+    tools2 = tooling.parse_tools(reply2)
+    assert tools2 == [
+        ("write_note", {"title": "Huy's Favorite Color", "body": "blue"})
+    ], tools2
+    print("test_parse_note_with_apostrophe_in_title passed")
 
 
 def test_parse_hermes_tool_calls():
