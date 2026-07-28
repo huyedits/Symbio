@@ -470,10 +470,4 @@ Apache 2.0
 
 ## Star History## Star History
 
-<a href="https://www.star-history.com/?repos=huyedits%2Fsymbio&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=huyedits/symbio&type=date&theme=dark&legend=top-left&sealed_token=nAgBpJJF6ocykEJzCXbv3RREw88dTHDwqOutHrxxQXODeG3JeNFcaBB7Pijip2YCn8MqcN9cc6Y4VmuEeyPAvsyj6CpTa00oHGxdG5yt8Gu0D6Vu50X-Xw" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=huyedits/symbio&type=date&legend=top-left&sealed_token=nAgBpJJF6ocykEJzCXbv3RREw88dTHDwqOutHrxxQXODeG3JeNFcaBB7Pijip2YCn8MqcN9cc6Y4VmuEeyPAvsyj6CpTa00oHGxdG5yt8Gu0D6Vu50X-Xw" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=huyedits/symbio&type=date&legend=top-left&sealed_token=nAgBpJJF6ocykEJzCXbv3RREw88dTHDwqOutHrxxQXODeG3JeNFcaBB7Pijip2YCn8MqcN9cc6Y4VmuEeyPAvsyj6CpTa00oHGxdG5yt8Gu0D6Vu50X-Xw" />
- </picture>
-</a>
+[![Star History Chart](https://api.star-history.com/chart?repos=huyedits/symbio&type=date&legend=top-left&sealed_token=nAgBpJJF6ocykEJzCXbv3RREw88dTHDwqOutHrxxQXODeG3JeNFcaBB7Pijip2YCn8MqcN9cc6Y4VmuEeyPAvsyj6CpTa00oHGxdG5yt8Gu0D6Vu50X-Xw)](https://www.star-history.com/?repos=huyedits%2Fsymbio&type=date&legend=top-left)
