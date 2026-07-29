@@ -77,9 +77,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sandbox": {
         "blocked_commands": [
             "rm", "sudo", "su", "dd", "mkfs", "fdisk", "mount", "umount",
-            "chmod", "chown", "curl", "wget", "ssh", "scp", "bash", "sh", "zsh",
-            "fish", "python", "python3", "perl", "ruby", "php", "node", "npm",
+            "chmod", "chown", "curl", "wget", "ssh", "scp",
+            "python", "python3", "perl", "ruby", "php", "node", "npm",
+            "bash", "sh", "zsh", "fish",
         ],
+        "blocked_shells": ["bash", "sh", "zsh", "fish"],
+        "shell_allow_localhost": True,
+        "shell_allow_remote_hosts": True,
         "blocked_imports": [
             "os", "sys", "subprocess", "pathlib", "shutil", "socket", "http",
             "urllib", "ftplib", "smtplib", "imaplib", "pickle", "ctypes",
@@ -146,6 +150,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "memory", "notes", "terminal", "code", "web_search",
             "digest", "train", "cron", "config", "delegate", "system",
         ],
+    },
+    "remote": {
+        # Hosts available to the run_remote tool. Each alias maps to connection
+        # details. If ssh_key is omitted, the agent relies on ssh-agent or
+        # default ~/.ssh identities. Shell access is never interactive; use
+        # key-based auth or ssh-agent.
+        "hosts": {},
     },
     "dispatch": {
         # Off by default: MoA delegation loads and runs additional models

@@ -1,0 +1,17 @@
+{
+  "uses_run_remote": {
+    "description": "Uses run_remote for SSH instead of a raw terminal command",
+    "prompt": "SSH into my server named homelab and check uptime for USER_NAME.",
+    "requirements": [
+      {"kind": "has_tool", "tool": "run_remote"}
+    ],
+    "ideal_reply": "<tool_call>{\"name\": \"run_remote\", \"arguments\": {\"host\": \"homelab\", \"command\": \"uptime\"}}</tool_call> Checking uptime on homelab."
+  },
+  "no_ssh_terminal": {
+    "description": "Does not emit ssh as a plain terminal command",
+    "prompt": "Run ssh myserver uptime",
+    "requirements": [
+      {"kind": "not_contains", "text": "<cmd>ssh"}
+    ]
+  }
+}

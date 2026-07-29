@@ -41,17 +41,31 @@ _TOOL_GROUPS: dict[str, str] = {
     "brain_solve": "frontier",
     "system_check": "system",
     "verify_features": "system",
+    "run_remote": "terminal",
+    "add_golden_case": "config",
 }
 
 # Hermes-style tool registry: JSON schemas for the system prompt <tools> block.
 _TOOLS: list[dict[str, Any]] = [
     {
         "name": "terminal",
-        "description": "Run a sandboxed shell command and return its output. Use when the user asks you to run a command.",
+        "description": "Run a sandboxed shell command and return its output. Use when the user asks you to run a command. Some binaries (e.g. ssh, bash) may require user approval or use run_remote instead.",
         "parameters": {
             "type": "object",
             "properties": {"cmd": {"type": "string", "description": "The shell command to run."}},
             "required": ["cmd"],
+        },
+    },
+    {
+        "name": "run_remote",
+        "description": "Run a shell command on a configured remote host via SSH, or run a shell command locally if host is localhost. Use for SSHing into servers or for commands that need shell features (pipes, env vars, globs).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "description": "Configured host alias (from remote.hosts) or 'localhost'."},
+                "command": {"type": "string", "description": "Shell command to run on the host."},
+            },
+            "required": ["host", "command"],
         },
     },
     {
@@ -336,6 +350,43 @@ _TOOLS: list[dict[str, Any]] = [
         ),
         "parameters": {"type": "object", "properties": {}},
     },
+    {
+        "name": "add_golden_case",
+        "description": (
+            "Add a new golden-set regression check by appending to golden_cases.json. "
+            "Use when you notice a new feature or contract the model must not forget "
+            "during future fine-tuning. The case will be included in pre/post-train "
+            "golden checks, and the user can review it in golden_cases.json."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Short unique slug for the case, e.g. 'uses_run_remote'"},
+                "description": {"type": "string", "description": "One-line summary of what this check verifies."},
+                "prompt": {"type": "string", "description": "User prompt to feed the model. Use ASSISTANT_NAME and USER_NAME placeholders if needed."},
+                "requirements": {
+                    "type": "array",
+                    "description": "List of requirements the model's reply must satisfy.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["sane_reply", "has_tool", "contains", "not_contains", "regex", "not_regex"],
+                                "description": "Type of check to apply.",
+                            },
+                            "tool": {"type": "string", "description": "Tool name for kind='has_tool'."},
+                            "text": {"type": "string", "description": "Text to search for kind='contains'/'not_contains'."},
+                            "pattern": {"type": "string", "description": "Regex pattern for kind='regex'/'not_regex'."},
+                        },
+                        "required": ["kind"],
+                    },
+                },
+                "ideal_reply": {"type": "string", "description": "Optional canonical reply used to generate remedy training samples if this case fails."},
+            },
+            "required": ["id", "description", "prompt", "requirements"],
+        },
+    },
 ]
 
 # Hermes name -> internal name (most are already the same).
@@ -368,7 +419,10 @@ def clean_response(text: str) -> str:
 
 def tool_group(name: str) -> str | None:
     """Return the user-facing group for a tool name, or None if unknown."""
-    return _TOOL_GROUPS.get(name)
+    group = _TOOL_GROUPS.get(name)
+    if group is None and name.startswith("mcp_"):
+        return "mcp"
+    return group
 
 
 def build_tools_block(groups: set[str] | None = None) -> str:
@@ -386,6 +440,23 @@ def build_tools_block(groups: set[str] | None = None) -> str:
 def tool_schemas() -> list[dict[str, Any]]:
     """Return the tool registry as a list of JSON schemas."""
     return list(_TOOLS)
+
+
+def refresh_mcp_tools() -> list[dict[str, Any]]:
+    """Discover user-generated MCP tools on disk and register them.
+
+    Returns the list of newly registered schemas. Safe to call repeatedly;
+    existing tools are skipped.
+    """
+    from symbio.app import mcp_tools as _mcp_tools
+
+    added: list[dict[str, Any]] = []
+    for _mcp_schema in _mcp_tools.discover_mcp_tools():
+        if not any(t["name"] == _mcp_schema["name"] for t in _TOOLS):
+            _TOOLS.append(_mcp_schema)
+            _TOOL_GROUPS[_mcp_schema["name"]] = "mcp"
+            added.append(_mcp_schema)
+    return added
 
 
 def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
