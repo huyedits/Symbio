@@ -38,6 +38,7 @@ SESSIONS_DIR = PROJECT_DIR / "sessions"
 # Snapshot of the last shipped default prompt; used to auto-update prompt.md
 # when the user has not customized it.
 PROMPT_DEFAULT_FILE = PROJECT_DIR / "prompt.md.default"
+GOLDEN_CASES_FILE = PROJECT_DIR / "golden_cases.json"
 
 for d in (
     LOG_DIR,

@@ -10,15 +10,22 @@ automatically before and after every LoRA update, so a regression (a tag
 format that stopped parsing, an identity the model forgot, a runaway
 repetition loop from an overfit adapter) is caught immediately instead of
 surfacing later as a silently worse assistant.
+
+Users and the AI itself can extend the golden set by editing
+`golden_cases.json` in the project root. Built-in cases are always present;
+extensions add new behavioral contracts the model should keep.
 """
 
 from __future__ import annotations
 
+import json
 import platform as platform_module
+import re
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple
 
+from symbio import constants
 from symbio.app import prompts, tooling, training
 
 _LEAKED_TAG_MARKERS = ("<tool_call", "</tool_call>", "<tool_response")
@@ -116,6 +123,25 @@ def _check_system_check(display: str, tools: list, config: dict) -> bool:
     return sane_reply(display) and _has_tool(tools, "system_check")
 
 
+# Maps string check names from golden_cases.json to real checker functions.
+# New built-in checkers can be added here; users can also request custom ones.
+_CHECK_REGISTRY: dict[str, Callable[[str, list, dict], bool]] = {
+    "sane_reply": lambda display, tools, cfg: sane_reply(display),
+    "has_tool": lambda display, tools, cfg, name="": _has_tool(tools, name),
+    "identity_self": _check_identity_self,
+    "identity_not_user": _check_identity_not_user,
+    "save_note": _check_save_note,
+    "schedule": _check_schedule,
+    "execute_code": _check_run_code,
+    "web_search": _check_web_search,
+    "open_app": _check_open_app,
+    "browse": _check_browse_for_interaction,
+    "browser_press": _check_browser_press,
+    "system_check": _check_system_check,
+    "non_empty": lambda display, tools, cfg: bool(display.strip()),
+}
+
+
 # Prompts and expected behavior mirror pairs baked into seed_training_data,
 # so every install can learn them fresh even before any real conversation —
 # a case failing means fine-tuning eroded a contract that was demonstrably
@@ -185,10 +211,13 @@ GOLDEN_CASES: list[GoldenCase] = [
 
 
 def _golden_ideal_replies(config: dict[str, Any]) -> dict[str, str]:
-    """The canonical assistant reply for each golden case, used to build
+    """The canonical assistant reply for each built-in golden case, used to build
     remedy training samples when a case consistently fails after a LoRA
     update. Values mirror the seed corpus so the remedy reinforces the
-    same contract, but are name/platform-aware."""
+    same contract, but are name/platform-aware.
+
+    User-defined golden cases can optionally supply an `ideal_reply` field in
+    golden_cases.json to be used for remedy samples."""
     assistant = config.get("assistant_name", "Assistant")
     user = config.get("user_name", "User")
     platform = platform_module.system()
@@ -214,6 +243,23 @@ def _golden_ideal_replies(config: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _user_ideal_reply(case_id: str, config: dict[str, Any]) -> str | None:
+    """Return an ideal reply for a user-defined golden case, if provided."""
+    if not constants.GOLDEN_CASES_FILE.exists():
+        return None
+    try:
+        data = json.loads(constants.GOLDEN_CASES_FILE.read_text(encoding="utf-8"))
+        spec = data.get(case_id, {})
+        reply = spec.get("ideal_reply")
+        if not reply:
+            return None
+        return reply.replace("ASSISTANT_NAME", config.get("assistant_name", "Assistant")).replace(
+            "USER_NAME", config.get("user_name", "User")
+        )
+    except Exception:
+        return None
+
+
 def append_golden_remedy_samples(
     failing_case_ids: list[str],
     tokenizer,
@@ -223,15 +269,18 @@ def append_golden_remedy_samples(
     copies: int = 3,
 ) -> int:
     """Write boosted (prompt, ideal-reply) training samples for golden cases
-    that consistently fail. Returns the number of samples appended."""
+    that consistently fail. Returns the number of samples appended.
+
+    Built-in cases use the shipped ideal replies; user-defined cases use the
+    `ideal_reply` field from golden_cases.json when available."""
     ideal = _golden_ideal_replies(config)
-    case_by_id = {case.id: case for case in GOLDEN_CASES}
+    case_by_id = {case.id: case for case in all_golden_cases()}
     added = 0
     for case_id in failing_case_ids:
         case = case_by_id.get(case_id)
         if case is None:
             continue
-        target = ideal.get(case_id)
+        target = ideal.get(case_id) or _user_ideal_reply(case_id, config)
         if target is None:
             continue
         user_msg = case.prompt_fn(config)
@@ -259,6 +308,99 @@ class GoldenResult:
         return len(self.results)
 
 
+def _make_dynamic_check(requirements: list[dict[str, Any]]) -> Callable[[str, list, dict], bool]:
+    """Build a check function from JSON requirements.
+
+    Each requirement is {"kind": "sane_reply" | "has_tool" | "contains" | "not_contains", ...}.
+    All requirements must pass.
+    """
+    def check(display: str, tools: list, config: dict) -> bool:
+        if not sane_reply(display):
+            return False
+        for req in requirements:
+            kind = req.get("kind")
+            if kind == "sane_reply":
+                if not sane_reply(display):
+                    return False
+            elif kind == "has_tool":
+                if not _has_tool(tools, req.get("tool", "")):
+                    return False
+            elif kind == "contains":
+                text = req.get("text", "")
+                if text.lower() not in display.lower():
+                    return False
+            elif kind == "not_contains":
+                text = req.get("text", "")
+                if text.lower() in display.lower():
+                    return False
+            elif kind == "regex":
+                pattern = req.get("pattern", "")
+                if not re.search(pattern, display):
+                    return False
+            elif kind == "not_regex":
+                pattern = req.get("pattern", "")
+                if re.search(pattern, display):
+                    return False
+            else:
+                # Unknown requirement kind fails closed.
+                return False
+        return True
+    return check
+
+
+def load_user_golden_cases() -> list[GoldenCase]:
+    """Load extra golden cases from golden_cases.json if present.
+
+    The file format is a JSON object mapping case id to:
+      {"description": ..., "prompt": "...", "requirements": [...]}
+    Prompts may contain {assistant_name} and {user_name} placeholders.
+    """
+    cases: list[GoldenCase] = []
+    if not constants.GOLDEN_CASES_FILE.exists():
+        return cases
+    try:
+        data = json.loads(constants.GOLDEN_CASES_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return cases
+    if not isinstance(data, dict):
+        return cases
+    for case_id, spec in data.items():
+        if not isinstance(spec, dict):
+            continue
+        description = spec.get("description", "")
+        prompt_template = spec.get("prompt", "")
+        requirements = spec.get("requirements", [])
+        if not isinstance(requirements, list):
+            continue
+
+        def prompt_fn(cfg, template=prompt_template):
+            try:
+                return template.replace("ASSISTANT_NAME", cfg.get("assistant_name", "Assistant")).replace(
+                    "USER_NAME", cfg.get("user_name", "User")
+                )
+            except Exception:
+                return template
+
+        cases.append(GoldenCase(
+            id=case_id,
+            description=description,
+            prompt_fn=prompt_fn,
+            check=_make_dynamic_check(requirements),
+        ))
+    return cases
+
+
+def all_golden_cases() -> list[GoldenCase]:
+    """Return built-in golden cases plus any user-defined extensions."""
+    user_cases = load_user_golden_cases()
+    if not user_cases:
+        return list(GOLDEN_CASES)
+    # Avoid id collisions: built-ins take precedence.
+    seen = {case.id for case in GOLDEN_CASES}
+    extras = [c for c in user_cases if c.id not in seen]
+    return list(GOLDEN_CASES) + extras
+
+
 def run_golden_set(
     model, tokenizer, generate_fn, sampler, system_prompt: str,
     config: dict[str, Any], enabled_groups: set[str] | None = None,
@@ -267,9 +409,10 @@ def run_golden_set(
     """Run every golden case as a single-turn, tool-free generation and
     grade it. Never executes a tool — only parses the reply — so it is safe
     to run automatically around every LoRA update. `cases` defaults to the
-    headmaster's identity/tool-tag battery (GOLDEN_CASES); a worker role
-    passes its own smaller, task-scoped list (see dispatch.WORKER_GOLDEN_CASES)."""
-    cases = cases if cases is not None else GOLDEN_CASES
+    headmaster's identity/tool-tag battery plus any user-defined extensions
+    from golden_cases.json; a worker role passes its own smaller, task-scoped
+    list (see dispatch.WORKER_GOLDEN_CASES)."""
+    cases = cases if cases is not None else all_golden_cases()
     max_tokens = max_tokens or int(config.get("learn", {}).get("golden_max_tokens", 150))
     context = system_prompt + prompts.env_note() + prompts.time_note()
 

@@ -116,14 +116,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip seeding baseline training data",
     )
 
-    mcp_parser = sub.add_parser("mcp", help="Start the local-brain MCP server")
-    mcp_parser.add_argument(
+    mcp_parser = sub.add_parser("mcp", help="Start the local-brain MCP server or build custom MCP tools")
+    mcp_sub = mcp_parser.add_subparsers(dest="mcp_command")
+    mcp_run = mcp_sub.add_parser("run", help="Start the local-brain MCP server")
+    mcp_run.add_argument(
         "--transport",
         type=str,
         default="stdio",
         choices=["stdio", "sse"],
         help="MCP transport (stdio or sse)",
     )
+    mcp_build = mcp_sub.add_parser("build", help="Generate a custom MCP tool from a description")
+    mcp_build.add_argument("name", help="Tool name")
+    mcp_build.add_argument("--desc", default="", help="Short description of what the tool does")
+    mcp_sub.add_parser("list", help="List generated MCP tools")
+    mcp_parser.set_defaults(mcp_command="run")
 
     benchmark_parser = sub.add_parser("benchmark", help="Benchmark Ollama models as local brains")
     benchmark_parser.add_argument(
@@ -718,10 +725,45 @@ def main(argv: list[str] | None = None) -> int:
         ok = retrain_model(config, digest=not args.no_digest, seed=not args.no_seed)
         return 0 if ok else 1
     if command == "mcp":
-        from symbio.mcp.server import mcp
+        sub = getattr(args, "mcp_command", None) or "run"
+        if sub == "run":
+            from symbio.mcp.server import mcp
 
-        mcp.run(transport=args.transport)
-        return 0
+            mcp.run(transport=args.transport)
+            return 0
+        if sub == "list":
+            from symbio.app import mcp_tools
+
+            tools = mcp_tools.list_mcp_tools()
+            if not tools:
+                print("No MCP tools built yet.")
+            else:
+                for meta in tools:
+                    print(f"{meta['name']}: {meta['schema'].get('name')} — {meta['description']}")
+            return 0
+        if sub == "build":
+            from symbio.app import mcp_tools
+            from mlx_lm import load
+
+            desc = args.desc or args.name
+            print(f"Loading tokenizer for {config['model_name']}...")
+            _, tokenizer = load(config["model_name"])
+            result = mcp_tools.build_mcp_tool(
+                args.name,
+                desc,
+                model=None,
+                tokenizer=tokenizer,
+                generate_fn=None,
+                config=config,
+            )
+            print(result.get("message", f"MCP tool '{args.name}' generated."))
+            print(f"  Tool name: {result['tool_name']}")
+            print(f"  Smoke test: {'PASS' if result['smoke_ok'] else 'FAIL'}")
+            if result.get("smoke_error"):
+                print(f"  Error: {result['smoke_error']}")
+            return 0 if result["smoke_ok"] else 1
+        print("Usage: symb mcp [run | list | build <name> --desc ...]")
+        return 1
     if command == "benchmark":
         import asyncio
 

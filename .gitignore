@@ -42,3 +42,5 @@ adapters/
 screenshots/
 sandbox/caine_tools.py
 sandbox/symbio_tools.py
+golden_cases.json
+mcp_modules/

@@ -3,6 +3,7 @@ and the growth loop (memory nudges, exit flush, cron surfacing)."""
 
 import json
 import logging
+import re
 import sys
 import threading
 import time
@@ -20,6 +21,29 @@ from symbio import constants
 from symbio.computer import BrowserSession
 from symbio.app import cron, dispatch, golden, health, learn, memory, mcp_bridge, prompts, sandbox, sessions, setup, skills, tooling, training, web
 from symbio.app.config import config_show, set_config_value
+
+
+def _looks_like_shell_command(cmd: str) -> bool:
+    """Return True if a command uses shell syntax that shlex+no-shell can't handle.
+
+    Pipes, redirects, command separators, subshells, globs, and env var
+    assignments all need a real shell interpreter. Simple space-separated
+    commands (including URLs) stay in the direct sandbox path.
+    """
+    shell_tokens = {"|", "&&", "||", ";", "&", "<", ">", "$(", "`", "*", "$", "{", "}"}
+    for token in shell_tokens:
+        if token in cmd:
+            return True
+    # Glob characters only count when not inside a URL/query string.
+    if "?" in cmd and "?" not in cmd.split()[-1].lstrip("https://").rstrip("/?"):
+        return True
+    if "*" in cmd and not any(s.endswith(("*", "?")) for s in cmd.split()):
+        return True
+    # Bare environment variable assignment (e.g. FOO=bar ./x)
+    first_word = cmd.split(None, 1)[0] if cmd.strip() else ""
+    if "=" in first_word and not first_word.startswith("-"):
+        return True
+    return False
 
 
 def _persist_health_report(session_id: str, report: dict[str, Any]):
@@ -122,6 +146,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn("-" * 50)
     output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
     output_fn("         /run <cmd>  /note [title]  /notes  /new-skill <name>  /skills  /skill-adapters  /digest  /cron  /config  /archive  /restore")
+    output_fn("         /build-mcp <name> | <description>  /mcp-tools  /hosts")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     output_fn("-" * 50)
 
@@ -284,6 +309,12 @@ class ChatSession:
         # Persist the report so external tools and future sessions can audit it.
         try:
             _persist_health_report(self.session_id, self._health_report)
+        except Exception:
+            pass
+        # Load any custom MCP tools the user has previously built so they are
+        # available to the model without restarting the process.
+        try:
+            tooling.refresh_mcp_tools()
         except Exception:
             pass
         # Skill notes touched this session; used to append health errors and
@@ -926,6 +957,64 @@ class ChatSession:
                         f"    - {meta['name']}  (role={meta['role']}, "
                         f"last_used={meta.get('last_used','never')})"
                     )
+
+        elif cmd.startswith("/build-mcp"):
+            rest = user_input[len("/build-mcp"):].strip()
+            if "|" in rest:
+                name, description = rest.split("|", 1)
+            else:
+                name, description = rest, ""
+            name = name.strip()
+            description = description.strip() or name
+            if not name:
+                self.output_fn("  Usage: /build-mcp <name> | <description>")
+            else:
+                try:
+                    from symbio.app import mcp_tools
+                    result = mcp_tools.build_mcp_tool(
+                        name,
+                        description,
+                        model=self.model,
+                        tokenizer=self.tokenizer,
+                        generate_fn=self.generate_fn,
+                        config=self.config,
+                    )
+                    # Refresh the in-memory tool registry so the new MCP tool
+                    # is available immediately in this session.
+                    tooling.refresh_mcp_tools()
+                    self.output_fn(f"  {result['message']}")
+                    self.output_fn(f"  Tool name: {result['tool_name']}")
+                    self.output_fn(f"  Smoke test: {'PASS' if result['smoke_ok'] else 'FAIL'}")
+                    if result.get("smoke_error"):
+                        self.output_fn(f"    Error: {result['smoke_error']}")
+                except Exception as e:
+                    self.output_fn(f"  Failed to build MCP tool: {e}")
+
+        elif cmd == "/mcp-tools":
+            from symbio.app import mcp_tools
+            tools = mcp_tools.list_mcp_tools()
+            if not tools:
+                self.output_fn("  No MCP tools built yet.")
+            else:
+                self.output_fn(f"  {len(tools)} MCP tool(s):")
+                for meta in tools:
+                    self.output_fn(f"    - {meta['name']}  ({meta['schema'].get('name')})")
+
+        elif cmd == "/hosts":
+            hosts = self.config.get("remote", {}).get("hosts", {})
+            if not hosts:
+                self.output_fn("  No remote hosts configured.")
+                self.output_fn("  Usage: /config set remote.hosts '{\"alias\": {\"hostname\": \"...\", \"user\": \"...\"}}'")
+            else:
+                self.output_fn(f"  {len(hosts)} remote host(s):")
+                for alias, cfg in hosts.items():
+                    hostname = cfg.get("hostname", alias)
+                    user = cfg.get("user")
+                    port = cfg.get("port", 22)
+                    display = f"{user}@{hostname}" if user else hostname
+                    if port != 22:
+                        display += f" (port {port})"
+                    self.output_fn(f"    - {alias}: {display}")
 
         elif cmd == "/archive":
             try:
@@ -1751,8 +1840,21 @@ class ChatSession:
             return self._handle_file_tool(name, params)
 
         if name == "run_command":
+            cmd = params["cmd"].strip()
+            # Shell-heavy commands (pipes, redirections, globs, semicolons) are
+            # routed through the local shell instead of shlex+no-shell, so the
+            # user gets the behavior they expect from a normal terminal.
+            if _looks_like_shell_command(cmd):
+                ok, out = sandbox.run_shell(cmd, self.config, confirm_fn=self.confirm_fn)
+                return f"Shell command exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
             ok, out = sandbox.run_sandboxed(params["cmd"], self.config, confirm_fn=self.confirm_fn)
             return f"Command '{params['cmd']}' exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
+
+        if name == "run_remote":
+            ok, out = sandbox.run_remote(
+                params["host"], params["command"], self.config, confirm_fn=self.confirm_fn
+            )
+            return f"Remote '{params['host']}' command exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
         if name == "execute_code":
             ok, out = sandbox.run_python_code(params["code"], self.config)
@@ -1916,7 +2018,74 @@ class ChatSession:
             return self.dispatch.run_delegated_task(
                 params["role"], params["task"], browser=self.browser)
 
+        if name == "add_golden_case":
+            return self._add_golden_case(params)
+
+        if name.startswith("mcp_"):
+            from symbio.app import mcp_tools
+            tool_name = name[4:]
+            ok, output = mcp_tools.execute_mcp_tool(tool_name, params, self.config)
+            return f"MCP tool '{name}' {'succeeded' if ok else 'failed'}.\nOutput:\n{output}"
+
         return f"Unknown tool: {name}"
+
+    def _add_golden_case(self, params: dict[str, Any]) -> str:
+        """Append a new case to golden_cases.json and return a status message."""
+        from symbio.app import golden as golden_mod
+
+        case_id = params.get("id", "").strip()
+        if not case_id:
+            return "add_golden_case requires an id."
+        if not re.match(r"^[a-z0-9_]+$", case_id):
+            return "Golden case id must be lowercase letters, digits, and underscores."
+
+        description = params.get("description", "").strip() or case_id
+        prompt = params.get("prompt", "").strip()
+        if not prompt:
+            return "add_golden_case requires a prompt."
+        requirements = params.get("requirements", [])
+        if not isinstance(requirements, list) or not requirements:
+            return "add_golden_case requires at least one requirement."
+
+        data: dict[str, Any] = {}
+        if constants.GOLDEN_CASES_FILE.exists():
+            try:
+                data = json.loads(constants.GOLDEN_CASES_FILE.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    data = {}
+            except Exception:
+                data = {}
+
+        if case_id in data:
+            return f"Golden case '{case_id}' already exists; edit {constants.GOLDEN_CASES_FILE.name} directly to change it."
+
+        entry: dict[str, Any] = {
+            "description": description,
+            "prompt": prompt,
+            "requirements": requirements,
+        }
+        ideal_reply = params.get("ideal_reply", "").strip()
+        if ideal_reply:
+            entry["ideal_reply"] = ideal_reply
+
+        data[case_id] = entry
+        try:
+            constants.GOLDEN_CASES_FILE.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+        except Exception as e:
+            return f"Could not write golden_cases.json: {e}"
+
+        # Validate by loading it.
+        try:
+            golden_mod.load_user_golden_cases()
+        except Exception as e:
+            return f"Saved, but the case failed validation: {e}"
+
+        return (
+            f"Added golden case '{case_id}' to {constants.GOLDEN_CASES_FILE.name}. "
+            "It will be included in the next pre/post-train golden check."
+        )
 
     @staticmethod
     def _tool_confirm_prompt(name: str, params: dict[str, Any]) -> str:
