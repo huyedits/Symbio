@@ -573,6 +573,10 @@ class ChatSession:
             nonlocal shown
             if not shown:
                 shown = True
+                # Stop the spinner and clear its line before the first visible
+                # chunk, otherwise the spinner thread keeps overwriting the
+                # streaming reply.
+                spinner.stop()
                 if chunk_prefix:
                     self.stream_chunk_fn(chunk_prefix)
             self.stream_chunk_fn(text)
@@ -609,8 +613,15 @@ class ChatSession:
             tail = stripper.finish()
             if tail:
                 _emit(tail)
+            # If nothing was emitted during the stream (e.g. the entire reply
+            # was a tool tag or was held back as ambiguous), make sure a
+            # newline is still sent so the terminal cursor is in the right
+            # place and any later non-streamed print starts on a fresh line.
             if self.stream_chunk_fn is not None:
-                self.stream_chunk_fn("\n")
+                if not shown and chunk_prefix:
+                    self.stream_chunk_fn(chunk_prefix + "\n")
+                else:
+                    self.stream_chunk_fn("\n")
 
         if timings is not None:
             timings["gen_ms"] = (time.perf_counter() - gen_start) * 1000

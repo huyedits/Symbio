@@ -189,11 +189,19 @@ def looks_like_correction(user_input: str, history: list[dict[str, str]],
     if not any(t.get("role") == "assistant" for t in history):
         return False
 
+    # Very short or trivial follow-ups (greetings, acknowledgments) are not
+    # corrections even if the assistant just said something similar.
+    stripped = user_input.strip()
+    trivial = (
+        len(stripped.split()) <= 2
+        or stripped.lower() in {"hi", "hello", "hey", "ok", "okay", "thanks", "ty", "bye"}
+    )
+
     if _is_correction(user_input, learn_cfg.get("correction_phrases", [])):
-        return True
+        return not trivial
 
     # An exact repeat of the question that was just answered usually means
-    # the previous answer was wrong or incomplete.
+    # the previous answer was wrong or incomplete. Ignore trivial repeats.
     prior_query = ""
     for turn in reversed(history):
         if _is_real_user_turn(turn):
@@ -201,7 +209,7 @@ def looks_like_correction(user_input: str, history: list[dict[str, str]],
             break
     a = re.sub(r"[^\w]", "", user_input.lower())
     b = re.sub(r"[^\w]", "", prior_query.lower())
-    return bool(a) and a == b
+    return bool(a) and a == b and not trivial
 
 
 def find_correction_sample(history: list[dict[str, str]], config: dict[str, Any],
@@ -228,6 +236,9 @@ def find_correction_sample(history: list[dict[str, str]], config: dict[str, Any]
         re.sub(r"[^\w]", "", correction_text.lower())
         == re.sub(r"[^\w]", "", original_query.lower())
     )
+    # Trivial repeats (greetings, acknowledgments) are not real corrections.
+    if is_repeat and len(correction_text.strip().split()) <= 2:
+        is_repeat = False
     if not (_is_correction(correction_text, phrases) or is_repeat):
         return None
     if not original_query.strip():
