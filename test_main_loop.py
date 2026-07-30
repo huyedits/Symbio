@@ -772,7 +772,12 @@ def test_rag_injects_saved_notes():
     finally:
         note_path.unlink(missing_ok=True)
 
-    # Unrelated questions get no retrieval block.
+    # Unrelated questions get no retrieval block. Clean up the session store
+    # and training file first so earlier test conversations are not retrieved.
+    for f in constants.SESSIONS_DIR.glob("*.jsonl"):
+        f.unlink()
+    if constants.TRAIN_FILE.exists():
+        constants.TRAIN_FILE.unlink()
     session = ScriptedSession(
         user_inputs=["hey", "/quit", "n"],
         model_replies=["Hey Huy!"],

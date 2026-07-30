@@ -1460,6 +1460,61 @@ class ChatSession:
                 "content": "[System observation: scheduled event(s)]\n" + wrapped_events,
             })
 
+        # Canary check: if the user asks for the canary phrase, the model must
+        # echo it back. Failing is a signal that the system prompt is being
+        # ignored or context has degraded.
+        canary_phrase = "SYMBIO_CANARY_v1"
+        lower_input = user_input.lower()
+        is_canary_request = (
+            "canary" in lower_input
+            or "repeat the hidden phrase" in lower_input
+            or f"repeat {canary_phrase.lower()}" in lower_input
+        )
+        canary_failed = False
+        if is_canary_request:
+            self.history.append({"role": "user", "content": user_input})
+            # Skip normal processing: run a single-shot generation just to check
+            # whether the model still follows the system prompt.
+            check_messages = [
+                {"role": "system", "content": self.system_prompt},
+                {"role": "user", "content": f"What is the canary phrase? Reply with only '{canary_phrase}' and nothing else."},
+            ]
+            try:
+                check_prompt = self.tokenizer.apply_chat_template(
+                    check_messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+                )
+                check_reply = self.generate_fn(
+                    self.model, self.tokenizer, prompt=check_prompt, sampler=self.sampler,
+                    max_tokens=int(self.config["agent"]["max_reply_tokens"]), verbose=False,
+                ).strip()
+            except Exception as e:
+                self.output_fn(f"[Canary check failed: {e}]")
+                canary_failed = True
+                check_reply = ""
+            if canary_phrase not in check_reply:
+                canary_failed = True
+                self.output_fn(
+                    "  [Canary] The model did not repeat the canary phrase — "
+                    "system-prompt adherence may have degraded. Compacting memory to reduce context pressure."
+                )
+                # Compact both curated stores to shrink context.
+                for store in ("memory", "profile"):
+                    if constants.PROFILE_FILE.exists() or constants.MEMORY_FILE.exists():
+                        try:
+                            msg, _ = memory.compact_store(store, self.config)
+                            self.output_fn(f"  [Canary] {msg}")
+                        except Exception as exc:
+                            self.output_fn(f"  [Canary] Could not compact {store}: {exc}")
+                self.retriever.invalidate_cache()
+                safety.log_security_event("canary_failed", {
+                    "reply": check_reply,
+                    "prompt_tokens": timings.get("prompt_tokens"),
+                    "new_tokens": timings.get("new_tokens"),
+                })
+            else:
+                self.output_fn(f"  [Canary] OK — the model still follows the system prompt.")
+            return
+
         self.history.append({"role": "user", "content": user_input})
 
         # Unbounded knowledge: pull relevant saved notes into this turn's
