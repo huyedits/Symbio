@@ -1,7 +1,6 @@
 """Sandboxed shell commands and pure-computation Python scripts."""
 
 import ast
-import ast
 import os
 import shlex
 import subprocess
@@ -11,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from symbio import constants
+from symbio.ansi_scanner import scan_text, strip_ansi
 
 
 def _ask_command_permission(command: str, binary: str, ask_fn=None) -> bool:
@@ -35,24 +35,41 @@ def _ask_command_permission(command: str, binary: str, ask_fn=None) -> bool:
 
 def _run_subprocess(args: list[str], config: dict[str, Any], cwd: str | None = None,
                     env: dict[str, str] | None = None) -> tuple[bool, str]:
-    """Run a subprocess and return a trimmed (ok, output) tuple."""
+    """Run a subprocess and return a trimmed (ok, output) tuple.
+
+    ANSI colour codes are preserved for scanning, then stripped from the final
+    output so the LLM gets clean text. Red segments and error keywords are
+    prepended when found.
+    """
     try:
         result = subprocess.run(
             args,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=config["agent"]["sandbox_timeout"],
             cwd=cwd,
             env=env,
         )
-        out = result.stdout
-        if result.stderr:
-            out += "\n" + result.stderr
-        out = out.strip()
+        raw = result.stdout + b"\n" + result.stderr
+        out = raw.decode("utf-8", errors="replace").strip()
         max_len = config["agent"]["max_output_len"]
         if len(out) > max_len:
             out = out[:max_len] + "\n... (truncated)"
-        return result.returncode == 0, out
+
+        scan = scan_text(out)
+        clean = strip_ansi(out)
+        if scan.looks_bad:
+            report_lines = []
+            if scan.has_red:
+                report_lines.append("Red terminal text detected:")
+                for seg in scan.red_segments:
+                    report_lines.append(f"  - {seg}")
+            if scan.error_keywords:
+                report_lines.append("Error keywords: " + ", ".join(scan.error_keywords))
+            report_lines.append("---")
+            clean = "\n".join(report_lines) + "\n" + clean
+
+        return result.returncode == 0, clean
     except subprocess.TimeoutExpired:
         return False, f"Timed out after {config['agent']['sandbox_timeout']}s."
     except FileNotFoundError:
