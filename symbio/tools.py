@@ -642,9 +642,23 @@ def _tool_search_files(agent: AIAgent, args: dict[str, Any]) -> str:
 
 
 def _tool_terminal(agent: AIAgent, args: dict[str, Any]) -> str:
+    from symbio.ansi_scanner import scan_text, strip_ansi
+
     cmd = args.get("cmd", "")
-    ok, out = _run_sandboxed(cmd, agent.config)
-    return f"Command '{cmd}' exited {'ok' if ok else 'error'}.\n{out}"
+    ok, raw_out = _run_sandboxed(cmd, agent.config, preserve_ansi=True)
+    scan = scan_text(raw_out)
+    clean_out = strip_ansi(raw_out)
+
+    lines = [f"Command '{cmd}' exited {'ok' if ok else 'error'}."]
+    if scan.has_red:
+        lines.append("Red terminal text detected:")
+        for seg in scan.red_segments:
+            lines.append(f"  - {seg}")
+    if scan.error_keywords:
+        lines.append("Error keywords: " + ", ".join(scan.error_keywords))
+    lines.append("---")
+    lines.append(clean_out)
+    return "\n".join(lines)
 
 
 def _tool_execute_code(agent: AIAgent, args: dict[str, Any]) -> str:
