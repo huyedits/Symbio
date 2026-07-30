@@ -19,6 +19,7 @@ from mlx_lm.sample_utils import make_sampler
 from rag import Retriever
 from symbio import constants
 from symbio.computer import BrowserSession
+from symbio import safety
 from symbio.app import cron, dispatch, golden, health, learn, memory, mcp_bridge, prompts, sandbox, sessions, setup, skills, tooling, training, web
 from symbio.app.config import config_show, set_config_value
 
@@ -314,7 +315,7 @@ class ChatSession:
         # Load any custom MCP tools the user has previously built so they are
         # available to the model without restarting the process.
         try:
-            tooling.refresh_mcp_tools()
+            tooling.refresh_mcp_tools(self.config)
         except Exception:
             pass
         # Skill notes touched this session; used to append health errors and
@@ -981,7 +982,7 @@ class ChatSession:
                     )
                     # Refresh the in-memory tool registry so the new MCP tool
                     # is available immediately in this session.
-                    tooling.refresh_mcp_tools()
+                    tooling.refresh_mcp_tools(self.config)
                     self.output_fn(f"  {result['message']}")
                     self.output_fn(f"  Tool name: {result['tool_name']}")
                     self.output_fn(f"  Smoke test: {'PASS' if result['smoke_ok'] else 'FAIL'}")
@@ -1309,13 +1310,16 @@ class ChatSession:
                 and self.user_turns >= flush_min and self.history):
             return
         self.output_fn(" Letting the model save memories before exit...")
+        # Keep the system prompt as the only trusted system content.
+        # Memory and RAG live in user-role context so they cannot override it.
         flush_messages = [{"role": "system", "content": (
-            self.system_prompt + memory.curated_memory_block(self.config)
-            + prompts.env_note() + prompts.time_note()
+            self.system_prompt + prompts.env_note() + prompts.time_note()
         )}]
         flush_messages.extend(self.history[-self.config["agent"]["history_limit"]:])
+        memory_block = memory.curated_memory_block(self.config)
         flush_messages.append({"role": "user", "content": (
-            "[Session ending. If this conversation contained anything durable "
+            (memory_block + "\n\n" if memory_block else "")
+            + "[Session ending. If this conversation contained anything durable "
             "worth keeping — facts about the user, lessons learned, procedures "
             "that worked — save it now with <memory>, <profile>, or <note>. "
             "Record only what was actually said or observed in this session; "
@@ -1432,13 +1436,17 @@ class ChatSession:
         # user turn is still the question the assistant just answered.
         is_correction = learn.looks_like_correction(user_input, self.history, self.config)
 
-        # Surface any cron events that fired since the last turn.
+        # Surface any cron events that fired since the last turn. Treat their
+        # text as untrusted: a malicious reminder could try to inject commands.
         with self.cron_lock:
             due_events, self.cron_events[:] = list(self.cron_events), []
         if due_events:
+            due_text = "\n".join(due_events)
+            cron_scan = safety.scan_for_injection(due_text, self.config)
+            wrapped_events = safety.wrap_untrusted("scheduled event", due_text, cron_scan)
             self.history.append({
                 "role": "user",
-                "content": "[System observation: " + "\n".join(due_events) + "]",
+                "content": "[System observation: scheduled event(s)]\n" + wrapped_events,
             })
 
         self.history.append({"role": "user", "content": user_input})
@@ -1799,6 +1807,20 @@ class ChatSession:
             if not self.confirm_fn(prompt):
                 return f"Tool '{name}' was not approved."
 
+        # Risk-based escalation: the more dangerous an action is, the louder
+        # the alert. High-risk actions require explicit approval; medium-risk
+        # ones run but annotate the observation so the model sees the warning.
+        risk = safety.assess_tool_risk(name, params, self.config)
+        allowed, reason = safety.maybe_confirm(name, params, risk, self.config, self.confirm_fn)
+        if not allowed:
+            safety.log_security_event("tool_blocked", {
+                "tool": name, "params": params, "risk": risk, "reason": reason,
+            })
+            return (
+                f"Tool '{name}' was not approved (risk score {risk['risk_score']}/3: "
+                f"{', '.join(risk['flags'])})."
+            )
+
         # A tool failing outright (e.g. clicking before the browser was ever
         # opened) must never crash the whole session — every branch below
         # already tries to catch its own likely failures, but this is the
@@ -1806,9 +1828,18 @@ class ChatSession:
         # observation the model — and the tool-mistake-learning pipeline in
         # _agent_turn — can react to, same as any other tool failure.
         try:
-            return self._dispatch_tool(name, params)
+            observation = self._dispatch_tool(name, params)
         except Exception as e:
             return f"Tool '{name}' failed unexpectedly: {e}"
+
+        log_score = self.config.get("safety", {}).get("log_score", 2)
+        if risk["risk_score"] >= log_score:
+            annotation = safety.risk_annotation(risk)
+            observation += annotation
+            safety.log_security_event("tool_executed", {
+                "tool": name, "params": params, "risk": risk, "annotation": annotation,
+            })
+        return observation
 
     def _dispatch_tool(self, name: str, params: dict[str, Any]) -> str:
         if name == "write_note":
@@ -2046,6 +2077,19 @@ class ChatSession:
         requirements = params.get("requirements", [])
         if not isinstance(requirements, list) or not requirements:
             return "add_golden_case requires at least one requirement."
+
+        # Golden cases shape future training; reject injected prompts/replies.
+        scan = safety.scan_for_injection(
+            f"{prompt}\n{ideal_reply}", self.config
+        )
+        if scan["risk_score"] >= 2:
+            safety.log_security_event("golden_case_injection_refused", {
+                "id": case_id, "flags": scan["flags"], "snippet": scan["snippet"],
+            })
+            return (
+                f"Refused to add golden case '{case_id}': prompt/ideal_reply "
+                f"contains possible injection ({', '.join(scan['flags'])})."
+            )
 
         data: dict[str, Any] = {}
         if constants.GOLDEN_CASES_FILE.exists():

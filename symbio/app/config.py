@@ -158,6 +158,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # key-based auth or ssh-agent.
         "hosts": {},
     },
+    "safety": {
+        # Prompt-injection defenses and risk-based escalation.
+        "enabled": True,
+        # Risk scores: 0=safe, 1=notice, 2=alert, 3=requires approval.
+        # Actions at or above this score require explicit confirmation.
+        "require_confirm_score": 3,
+        # Actions at or above this score get an alert appended to the
+        # tool observation so the model sees what it is doing.
+        "log_score": 2,
+    },
     "dispatch": {
         # Off by default: MoA delegation loads and runs additional models
         # on your machine, which is a bigger behavior/resource change than

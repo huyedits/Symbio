@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from symbio import constants
+from symbio import constants, safety
 from symbio.app import memory, training
 from symbio.app.tooling import strip_tool_tags
 
@@ -152,6 +152,14 @@ def remember_research(question: str, answer: str, config: dict[str, Any]) -> Pat
             continue
 
     body = f"**Question:** {question}\n\n**Answer (from web research):** {answer}"
+    # Don't let a poisoned web result become a durable note that RAG will
+    # serve back into context every turn.
+    scan = safety.scan_for_injection(f"{title}\n{body}", config)
+    if scan["risk_score"] >= 2:
+        safety.log_security_event("research_note_injection_refused", {
+            "title": title, "flags": scan["flags"], "snippet": scan["snippet"],
+        })
+        return None
     return memory.save_note(title, body)
 
 

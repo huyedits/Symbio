@@ -442,20 +442,30 @@ def tool_schemas() -> list[dict[str, Any]]:
     return list(_TOOLS)
 
 
-def refresh_mcp_tools() -> list[dict[str, Any]]:
+def refresh_mcp_tools(config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Discover user-generated MCP tools on disk and register them.
 
     Returns the list of newly registered schemas. Safe to call repeatedly;
-    existing tools are skipped.
+    existing tools are skipped. Each new schema is sanitized so a malicious
+    description cannot smuggle instructions into the system prompt.
     """
+    from symbio import safety as _safety
     from symbio.app import mcp_tools as _mcp_tools
 
     added: list[dict[str, Any]] = []
     for _mcp_schema in _mcp_tools.discover_mcp_tools():
-        if not any(t["name"] == _mcp_schema["name"] for t in _TOOLS):
-            _TOOLS.append(_mcp_schema)
-            _TOOL_GROUPS[_mcp_schema["name"]] = "mcp"
-            added.append(_mcp_schema)
+        if any(t["name"] == _mcp_schema["name"] for t in _TOOLS):
+            continue
+        clean = _safety.sanitize_tool_schema(_mcp_schema, config)
+        if clean is None:
+            _safety.log_security_event("mcp_schema_rejected", {
+                "name": _mcp_schema.get("name"),
+                "reason": "injection markers in description/system_prompt",
+            })
+            continue
+        _TOOLS.append(clean)
+        _TOOL_GROUPS[clean["name"]] = "mcp"
+        added.append(clean)
     return added
 
 

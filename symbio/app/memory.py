@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from symbio import constants
+from symbio import constants, safety
 from symbio.app import skills
 
 
@@ -77,10 +77,25 @@ def _store_limit(store: str, config: dict[str, Any]) -> int:
 
 
 def save_memory(store: str, content: str, config: dict[str, Any], replace: bool = False) -> str:
-    """Append (or replace) an entry in a curated memory store; nag when full."""
+    """Append (or replace) an entry in a curated memory store; nag when full.
+
+    Refuses to save content that looks like a prompt injection so the
+    always-in-context store cannot be used to override the system prompt.
+    """
     content = content.strip()
     if not content:
         return "Empty memory content."
+    scan = safety.scan_for_injection(content, config)
+    if scan["risk_score"] >= 2:
+        safety.log_security_event("memory_injection_refused", {
+            "store": store,
+            "flags": scan["flags"],
+            "snippet": scan["snippet"],
+        })
+        return (
+            f"Refused to save to {store}: content looks like a prompt injection "
+            f"({', '.join(scan['flags'])}). Only save facts that were actually said or observed."
+        )
     path = _store_path(store)
     if replace or not path.exists():
         path.write_text(content + "\n", encoding="utf-8")
@@ -161,16 +176,20 @@ def compact_store(
 
 
 def curated_memory_block(config: dict[str, Any]) -> str:
-    """The always-on memory injected into the system prompt each turn."""
+    """The always-on memory block, marked as untrusted data.
+
+    It is prepended to a user-role message, never the system prompt, so it
+    cannot override the default instructions.
+    """
     if not config["memory"]["enabled"]:
         return ""
     parts = []
     if constants.MEMORY_FILE.exists():
         text = constants.MEMORY_FILE.read_text(encoding="utf-8").strip()
         if text:
-            parts.append(f"[Your saved memory]\n{text}")
+            parts.append(safety.wrap_untrusted("saved memory", text, safety.scan_for_injection(text, config)))
     if constants.PROFILE_FILE.exists():
         text = constants.PROFILE_FILE.read_text(encoding="utf-8").strip()
         if text:
-            parts.append(f"[About {config['user_name']}]\n{text}")
+            parts.append(safety.wrap_untrusted(f"about {config['user_name']}", text, safety.scan_for_injection(text, config)))
     return ("\n\n" + "\n\n".join(parts)) if parts else ""

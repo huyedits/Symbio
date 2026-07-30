@@ -14,6 +14,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from symbio import safety
+
 
 PROJECT_DIR = Path(__file__).parent.resolve()
 NOTES_DIR = PROJECT_DIR / "notes"
@@ -240,6 +242,11 @@ class Retriever:
             used_tokens += tokens
 
         text = "\n\n".join(lines)
+        # Treat everything retrieved from notes/sessions/training data as
+        # untrusted data. Scan it for hidden commands and wrap it with explicit
+        # markers so the model knows it must not follow instructions found here.
+        scan = safety.scan_for_injection(text)
+        text = safety.wrap_untrusted("retrieved context", text, scan)
         # Keep the cache small and fresh; stale entries expire via TTL checks.
         if len(self._context_cache) >= self._context_cache_max:
             oldest = min(self._context_cache, key=lambda k: self._context_cache[k][1])
