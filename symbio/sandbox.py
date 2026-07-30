@@ -13,8 +13,19 @@ from symbio.constants import DEFAULT_CONFIG, PROJECT_DIR, SANDBOX_DIR
 from symbio.utils import _scrub_env, _truncated
 
 
-def _run_sandboxed(command: str, config: dict[str, Any]) -> tuple[bool, str]:
-    """Run a sandboxed shell command and return (ok, output)."""
+def _run_sandboxed(
+    command: str,
+    config: dict[str, Any],
+    *,
+    preserve_ansi: bool = False,
+) -> tuple[bool, str]:
+    """Run a sandboxed shell command and return (ok, output).
+
+    `preserve_ansi=True` keeps ANSI colour codes in the returned text so callers
+    can detect red error text. The default strips them for clean LLM reading.
+    """
+    from symbio.ansi_scanner import strip_ansi
+
     command = command.strip()
     if not command:
         return False, "Empty command."
@@ -37,18 +48,18 @@ def _run_sandboxed(command: str, config: dict[str, Any]) -> tuple[bool, str]:
         result = subprocess.run(
             args,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=config["agent"]["sandbox_timeout"],
             cwd=str(SANDBOX_DIR),
             shell=False,
         )
-        out = result.stdout
-        if result.stderr:
-            out += "\n" + result.stderr
-        out = out.strip()
+        raw = result.stdout + b"\n" + result.stderr
+        out = raw.decode("utf-8", errors="replace").strip()
         max_len = config["agent"]["max_output_len"]
         if len(out) > max_len:
             out = out[:max_len] + "\n... (truncated)"
+        if not preserve_ansi:
+            out = strip_ansi(out)
         return result.returncode == 0, out
     except subprocess.TimeoutExpired:
         return False, f"Timed out after {config['agent']['sandbox_timeout']}s."
