@@ -11,8 +11,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from mlx_lm import load, generate
-from mlx_lm.generate import stream_generate
+import mlx.core as mx
+import mlx.nn as nn
+from mlx_lm import load
+from mlx_lm.generate import generate, generate_step, stream_generate
 from mlx_lm.models.cache import can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache
 from mlx_lm.sample_utils import make_sampler
 
@@ -304,6 +306,11 @@ class ChatSession:
                 "errors": [{"name": "self_check", "message": f"Self-check crashed: {e}"}],
             }
 
+        # Warm the KV cache with the system prompt now so the first real turn
+        # does not pay the prompt-processing tax twice (once at boot, once at
+        # first reply). This is guarded so fake-model tests skip it.
+        self._prefill_system_prompt_cache()
+
         self.history: list[dict[str, str]] = []
         self.session_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S-%f}"
 
@@ -465,6 +472,51 @@ class ChatSession:
                 )
             )
         return self._cached_system_ids
+
+    def _prefill_system_prompt_cache(self):
+        """Process the system prompt through the model once at boot so the
+        first user turn skips re-processing it. This is a pure latency win;
+        failures are silently ignored and the chat loop falls back to cold
+        generation.
+
+        Only runs with the real MLX model/stream path — tests and front-ends
+        that inject fake objects should not trigger a real model call.
+        """
+        if self.stream_fn is not stream_generate:
+            return
+        if self.model is None or self.tokenizer is None:
+            return
+        if not isinstance(self.model, nn.Module):
+            return
+        agent_cfg = self.config.get("agent", {})
+        if not agent_cfg.get("prompt_cache_enabled", True):
+            return
+
+        spinner = _Spinner("warming prompt cache…")
+        spinner.start()
+        try:
+            system_ids = self._encode_system_prompt()
+            if not system_ids:
+                return
+            self._prompt_cache = make_prompt_cache(self.model)
+            # max_tokens=0 processes the prompt into the KV cache and stops
+            # before generating any output tokens.
+            for _ in generate_step(
+                mx.array(system_ids),
+                self.model,
+                max_tokens=0,
+                sampler=self.sampler,
+                prompt_cache=self._prompt_cache,
+            ):
+                pass
+            self._cached_prompt_ids = list(system_ids)
+        except Exception:
+            # Prefill is an optimization, never a hard requirement. Clear any
+            # partial state so the next generation rebuilds cleanly.
+            self._prompt_cache = None
+            self._cached_prompt_ids = None
+        finally:
+            spinner.stop()
 
     def _generate_reply(
         self,
