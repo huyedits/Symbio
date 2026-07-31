@@ -327,6 +327,8 @@ Answering yes deletes it; declining or saying "keep" both just leave it alone an
 <img width="1300" height="89" alt="Screenshot 2026-07-23 at 11 23 21 am" src="https://github.com/user-attachments/assets/c4e02593-f527-44dc-9bcb-181f329360ad" />
 <img width="272" height="475" alt="Screenshot 2026-07-23 at 11 22 52 am" src="https://github.com/user-attachments/assets/e8e7475a-aac8-455b-b978-3996f1d4d3fd" />
 
+## Example video of Symbio opening up google chrome then clicking a button
+https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20
 
 ## Mixture of agents: delegating to smaller worker models
 
