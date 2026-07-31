@@ -6,6 +6,8 @@ cache trim/reset decisions."""
 
 import random
 
+import mlx.nn as nn
+
 from symbio.app import chat, tooling
 
 
@@ -258,3 +260,88 @@ def test_generate_reply_cache_disabled_uses_legacy_blocking_path(monkeypatch):
     assert shown is False
     assert calls["make"] == 0  # never touched the cache machinery at all
     assert isinstance(called["prompt"], str)  # full templated string, not token ids
+
+
+class _FakeIntTokenizer(FakeTokenizer):
+    """Like FakeTokenizer but returns integer token ids, matching real
+    tokenizers and the mx.array conversion used during boot prefill."""
+
+    def encode(self, text, add_special_tokens=True):
+        # Stable integer per word so token-level prefix matching still works.
+        return [hash(w) % (2 ** 31) for w in text.split(" ")]
+
+
+class _FakeModel(nn.Module):
+    """Minimal mlx.nn.Module stand-in so the boot prefill guard accepts it
+    as a real model without running any actual MLX code."""
+    pass
+
+
+def test_prefill_system_prompt_cache_at_boot(monkeypatch):
+    """When the real MLX generation path is used, the system prompt is
+    prefilled into the KV cache during ChatSession construction so the first
+    user turn skips reprocessing it."""
+    step_calls = []
+
+    def fake_make_cache(model):
+        return []
+
+    def fake_generate_step(prompt, model, **kwargs):
+        step_calls.append(("generate_step", len(prompt)))
+        return iter([])
+
+    monkeypatch.setattr(chat, "make_prompt_cache", fake_make_cache)
+    monkeypatch.setattr(chat, "generate_step", fake_generate_step)
+
+    config = {
+        "assistant_name": "Caine", "user_name": "Huy",
+        "agent": {"temperature": 0.1, "top_p": 0.9, "max_reply_tokens": 100,
+                  "prompt_cache_enabled": True, "stream_output": True,
+                  "max_tool_rounds": 5, "history_limit": 40, "cron_poll_seconds": 9999},
+        "tools": {"enabled_groups": []},
+        "learn": {}, "memory": {"enabled": False}, "rag": {"enabled": False}, "web": {},
+    }
+    session = chat.ChatSession(
+        config, model=_FakeModel(), tokenizer=_FakeIntTokenizer(), adapter_loaded=False,
+        output_fn=lambda *a, **k: None,
+    )
+    assert session._prompt_cache is not None
+    assert session._cached_prompt_ids is not None
+    assert len(step_calls) == 1
+    assert step_calls[0][0] == "generate_step"
+    assert step_calls[0][1] > 0
+
+
+def test_prefill_system_prompt_cache_skipped_with_fake_stream(monkeypatch):
+    """Front-ends and tests that inject a fake stream_fn must not trigger a
+    real model prefill call."""
+    step_calls = []
+
+    def fake_make_cache(model):
+        return []
+
+    def fake_generate_step(prompt, model, **kwargs):
+        step_calls.append(("generate_step", len(prompt)))
+        return iter([])
+
+    def fake_stream(model, tokenizer, prompt, **kwargs):
+        yield _FakeResponse("hi", "hi")
+
+    monkeypatch.setattr(chat, "make_prompt_cache", fake_make_cache)
+    monkeypatch.setattr(chat, "generate_step", fake_generate_step)
+
+    config = {
+        "assistant_name": "Caine", "user_name": "Huy",
+        "agent": {"temperature": 0.1, "top_p": 0.9, "max_reply_tokens": 100,
+                  "prompt_cache_enabled": True, "stream_output": True,
+                  "max_tool_rounds": 5, "history_limit": 40, "cron_poll_seconds": 9999},
+        "tools": {"enabled_groups": []},
+        "learn": {}, "memory": {"enabled": False}, "rag": {"enabled": False}, "web": {},
+    }
+    session = chat.ChatSession(
+        config, model=_FakeModel(), tokenizer=_FakeIntTokenizer(), adapter_loaded=False,
+        output_fn=lambda *a, **k: None, stream_fn=fake_stream,
+    )
+    assert session._prompt_cache is None
+    assert session._cached_prompt_ids is None
+    assert step_calls == []
