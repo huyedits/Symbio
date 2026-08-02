@@ -617,6 +617,8 @@ def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
     """Build or refresh the hierarchical tag index over notes."""
     from pathlib import Path
 
+    import httpx
+
     from tag_rag import TagIndex
     from rag import _default_tag_llm_fn
     from symbio.constants import NOTES_DIR, PROJECT_DIR
@@ -628,13 +630,16 @@ def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
         print("No broad_tags configured. Add them to config.json under rag.broad_tags.")
         return 1
 
-    if not settings.frontier_api_key:
-        print(
-            "No FRONTIER_API_KEY set. The tag index needs a frontier model to generate\n"
-            "broad tags, meta tags, descriptions, and chunk summaries. Set the key in\n"
-            ".env or your environment, then run this command again."
+    # Quick local-brain reachability check.
+    local_ok = False
+    try:
+        resp = httpx.get(
+            f"{settings.ollama_base_url.rstrip('/')}/api/tags",
+            timeout=5.0,
         )
-        return 1
+        local_ok = resp.status_code == 200
+    except Exception:
+        local_ok = False
 
     db_path = rag_cfg.get("tag_index_db", "notes/tags.db")
     db_path = Path(db_path)
@@ -644,6 +649,14 @@ def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
     print(f"Indexing notes under {NOTES_DIR}...")
     print(f"Tag DB: {db_path}")
     print(f"Broad tags: {', '.join(broad_tags)}")
+    print(f"Local brain ({settings.ollama_base_url}): {'reachable' if local_ok else 'not reachable'}")
+    if not local_ok and not settings.frontier_api_key:
+        print(
+            "\nNo local brain and no FRONTIER_API_KEY. The tag index needs an LLM\n"
+            "to generate metadata. Either start Ollama locally (default URL is\n"
+            "http://127.0.0.1:11434) or set FRONTIER_API_KEY for frontier fallback."
+        )
+        return 1
 
     index = TagIndex(
         notes_dir=NOTES_DIR,
@@ -653,6 +666,15 @@ def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
     )
     stats = index.index_all(force=force)
     print(f"Done. Indexed: {stats['indexed']}, failed: {stats['failed']}, removed stale: {stats['removed']}")
+    if stats.get("errors"):
+        print("\nFailures:")
+        for err in stats["errors"]:
+            print(f"  • {err}")
+        print(
+            "\nTip: if every file failed, the LLM is not producing valid JSON metadata.\n"
+            "Check that your local Ollama model supports JSON/instruction following,\n"
+            "or set FRONTIER_API_KEY for frontier fallback."
+        )
     return 0
 
 

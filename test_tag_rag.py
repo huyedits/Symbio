@@ -106,7 +106,9 @@ def test_index_and_search(base_tag_config):
 
     index = TagIndex(cfg["notes_dir"], cfg["db_path"], cfg["broad_tags"], cfg["fake_llm"])
     stats = index.index_all()
-    assert stats == {"indexed": 1, "failed": 0, "removed": 0}
+    assert stats["indexed"] == 1
+    assert stats["failed"] == 0
+    assert stats["removed"] == 0
 
     results = index.search("how do I authenticate with JWT?", top_k=3)
     assert len(results) == 1
@@ -170,6 +172,7 @@ def test_rag_uses_tag_index_when_enabled(base_tag_config, monkeypatch):
     monkeypatch.setattr("rag.NOTES_DIR", cfg["notes_dir"])
     monkeypatch.setattr("rag.DATA_DIR", cfg["notes_dir"].parent / "training_data")
     monkeypatch.setattr("rag.TRAIN_FILE", cfg["notes_dir"].parent / "training_data" / "train.jsonl")
+    monkeypatch.setattr("rag._default_tag_llm_fn", cfg["fake_llm"])
 
     config = {
         "rag": {

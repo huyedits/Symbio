@@ -290,6 +290,50 @@ def test_guarded_train_worker_regression_rolls_back(monkeypatch, tmp_path):
     assert (constants.adapter_dir_for("summarize") / "adapter_config.json").read_text() == "original"
 
 
+def test_guarded_train_worker_regression_remedies_then_succeeds(monkeypatch, tmp_path):
+    """If a worker regresses but remedy samples push the golden check back to
+    passing, the adapter should stay in place, not roll back."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+    })
+    _write_worker_adapter("summarize", "original")
+
+    train_calls = []
+
+    def fake_run_training(cfg, iters=None, role=None, model_name=None):
+        train_calls.append(iters)
+        _write_worker_adapter(role, "remedied" if iters else "regressed")
+        return True
+
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
+    monkeypatch.setattr(training, "run_training", fake_run_training)
+
+    calls = []
+
+    def fake_golden(*a, **k):
+        calls.append(1)
+        # baseline passes, post-train fails, recheck fails, remedy recheck passes
+        if len(calls) in (1, 5):
+            return golden.GoldenResult({"summarize_produces_output": True}, {})
+        return golden.GoldenResult({"summarize_produces_output": False}, {})
+
+    monkeypatch.setattr(golden, "run_golden_set", fake_golden)
+
+    config = app_config.load_config()
+    config["dispatch"]["worker_golden_rollback_on_regression"] = True
+    trained, msg = dispatch.guarded_train_worker("summarize", config)
+    assert trained is True
+    assert "rolled back" not in msg.lower()
+    assert "50" in msg or "checks passing" in msg.lower()
+    assert len(train_calls) == 2, "should train once, then remedy-train again"
+    assert train_calls[1] == 50
+    train_file = constants.data_dir_for("summarize") / "train.jsonl"
+    assert train_file.exists()
+    assert "bike lane network" in train_file.read_text()
+    assert (constants.adapter_dir_for("summarize") / "adapter_config.json").read_text() == "remedied"
+
+
 def test_guarded_train_worker_unknown_role(monkeypatch, tmp_path):
     _isolate_dirs(monkeypatch, tmp_path)
     _write_catalog(monkeypatch, tmp_path, {})

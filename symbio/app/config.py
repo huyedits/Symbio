@@ -179,6 +179,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "worker_golden_set_enabled": True,
         "worker_golden_regression_threshold": 0,
         "worker_golden_rollback_on_regression": True,
+        # When a worker adapter regresses on a golden case, synthesize extra
+        # training samples from the case's ideal reply and do a targeted
+        # retrain before deciding whether to roll back.
+        "worker_golden_retry_enabled": True,
+        "worker_golden_retry_max_extra_iters": 50,
+        "worker_golden_retry_samples_per_case": 3,
     },
 }
 

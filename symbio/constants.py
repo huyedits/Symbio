@@ -86,6 +86,19 @@ def data_dir_for(role: str | None = None) -> Path:
 DEFAULT_CONFIG: dict[str, Any] = {
     "model_name": "mlx-community/Qwen3-8B-4bit",
     "assistant_name": "Symbio",
+    # Dispatch / MoA worker defaults.
+    "dispatch": {
+        "enabled": False,
+        "max_resident_workers": 1,
+        "worker_idle_unload_minutes": 10,
+        "max_worker_rounds": 4,
+        "worker_golden_set_enabled": True,
+        "worker_golden_regression_threshold": 0,
+        "worker_golden_rollback_on_regression": True,
+        "worker_golden_retry_enabled": True,
+        "worker_golden_retry_max_extra_iters": 50,
+        "worker_golden_retry_samples_per_case": 3,
+    },
     # Empty by default so the first run triggers interactive name setup and
     # every install seeds its own identity and training data.
     "user_name": "",
@@ -134,7 +147,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "top_k": 3,
         "max_context_tokens": 800,
         "sources": ["notes", "sessions"],
-        "tag_index_enabled": True,
+        "tag_index_enabled": False,
+        "auto_index_enabled": False,
+        "auto_index_interval_seconds": 300,
         "broad_tags": [
             "identity",
             "projects",

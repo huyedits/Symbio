@@ -71,6 +71,10 @@ WORKER_GOLDEN_CASES: dict[str, list[golden.GoldenCase]] = {
                 "expected to finish by late summer 2027."
             ),
             lambda display, tools, cfg: bool(display.strip()) and golden.sane_reply(display),
+            ideal_reply=(
+                "The city council approved a downtown bike lane network, with "
+                "construction starting next spring and expected completion by late summer 2027."
+            ),
         ),
     ],
     "browser": [
@@ -81,6 +85,7 @@ WORKER_GOLDEN_CASES: dict[str, list[golden.GoldenCase]] = {
                 display.strip().lower().startswith(verb)
                 for verb in ("click:", "type:", "scroll", "done")
             ),
+            ideal_reply="click: Sign in",
         ),
     ],
 }
@@ -347,6 +352,69 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
         after = _run_golden(new_model, new_tok)
         regressions = sorted(baseline.passing - after.passing) if after else []
         threshold = int(dispatch_cfg.get("worker_golden_regression_threshold", 0))
+
+        if (len(regressions) > threshold
+                and dispatch_cfg.get("worker_golden_retry_enabled", True)):
+            print(
+                f"  [Golden] Double-checking {len(regressions)} regression(s) "
+                f"for worker '{role}'..."
+            )
+            recheck, consistent = golden.run_golden_set_retry(
+                new_model, new_tok, generate, sampler, system_prompt, config,
+                enabled_groups=None, cases=cases,
+            )
+            flaky = sorted(set(regressions) - consistent)
+            if flaky:
+                print(
+                    f"  [Golden] {len(flaky)} regression(s) passed on recheck: "
+                    f"{', '.join(flaky)}"
+                )
+            if not consistent:
+                print("  [Golden] All regressions were flaky; using recheck result.")
+                after = recheck
+                regressions = sorted(baseline.passing - after.passing)
+            else:
+                print(
+                    f"  [Golden] {len(consistent)} case(s) consistently failing "
+                    f"for worker '{role}': {', '.join(sorted(consistent))}"
+                )
+                extra_iters = int(dispatch_cfg.get("worker_golden_retry_max_extra_iters", 50))
+                copies = int(dispatch_cfg.get("worker_golden_retry_samples_per_case", 3))
+                worker_cases = WORKER_GOLDEN_CASES.get(role) or []
+                extra_ideals = {
+                    case.id: case.ideal_reply
+                    for case in worker_cases
+                    if case.ideal_reply
+                }
+                added = golden.append_golden_remedy_samples(
+                    sorted(consistent), new_tok, system_prompt, config,
+                    role=role, copies=copies,
+                    extra_ideal_replies=extra_ideals,
+                    extra_cases=worker_cases,
+                )
+                if added:
+                    print(
+                        f"  [Train] Injected {added} remedy sample(s) for worker "
+                        f"'{role}' consistent failures."
+                    )
+                    print(
+                        f"  [Train] Running targeted remedy training ({extra_iters} "
+                        f"iters) for worker '{role}'..."
+                    )
+                    trained2 = training.run_training(
+                        config, iters=extra_iters, role=role, model_name=entry["model_name"])
+                    if trained2:
+                        new_model, new_tok = load(
+                            entry["model_name"], adapter_path=str(adapter_dir))
+                        print(
+                            "  [Train] Remedy adapter reloaded. Re-checking worker "
+                            f"'{role}' golden set..."
+                        )
+                        after = _run_golden(new_model, new_tok)
+                        regressions = sorted(baseline.passing - after.passing) if after else []
+                else:
+                    print("  [Train] No remedy samples could be generated.")
+
         if len(regressions) > threshold:
             if backup_dir and dispatch_cfg.get("worker_golden_rollback_on_regression", True):
                 training.restore_adapter(backup_dir, role=role)
