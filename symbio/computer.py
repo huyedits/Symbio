@@ -249,39 +249,54 @@ class BrowserSession:
     def click(self, selector: str = "", text: str = "") -> str:
         try:
             page = self._ensure_open()
-            if selector:
-                # Generic selectors often match dozens of elements, many
-                # hidden; click the first *visible* match instead of the
-                # first match (which times out on hidden elements).
-                target, count = _first_visible(page.locator(selector))
-                if target is not None:
-                    target.click(timeout=self._TIMEOUT_MS)
-                    which = f" (first visible of {count} matches)" if count > 1 else ""
-                    return f"Clicked element matching '{selector}'{which}."
-                if not text:
-                    if count == 0:
-                        return f"Click failed: nothing matches selector '{selector}'. Try clicking by visible text instead."
-                    return (
-                        f"Click failed: '{selector}' matched {count} element(s) but none are visible. "
-                        "Use a more specific selector or click by visible text."
-                    )
-            if text:
-                target, count = _first_visible(page.get_by_text(text, exact=False))
-                if target is None:
-                    for role in ("button", "link"):
-                        target, count = _first_visible(page.get_by_role(role, name=text, exact=False))
-                        if target is not None:
-                            break
-                if target is not None:
-                    target.click(timeout=self._TIMEOUT_MS)
-                    return f"Clicked element containing text '{text}'."
-                return (
-                    f"Click failed: no visible element with text '{text}'. "
-                    "Use browser_get_text to see what is on the page."
-                )
-            return "Error: provide selector or text to click."
+            return self._try_click(page, selector, text)
         except Exception as e:
             return self._fail("click", e)
+
+    def _try_click(self, page, selector: str = "", text: str = "", attempt: int = 1) -> str:
+        """Single click attempt. On the first failure due to a timeout or
+        missing visible element, wait a moment and try once more — small
+        models often issue a click before the page has fully settled."""
+        def _result(msg: str) -> str:
+            return msg
+
+        if selector:
+            # Generic selectors often match dozens of elements, many
+            # hidden; click the first *visible* match instead of the
+            # first match (which times out on hidden elements).
+            target, count = _first_visible(page.locator(selector))
+            if target is not None:
+                target.click(timeout=self._TIMEOUT_MS)
+                which = f" (first visible of {count} matches)" if count > 1 else ""
+                return f"Clicked element matching '{selector}'{which}."
+            if not text:
+                if count == 0:
+                    return f"Click failed: nothing matches selector '{selector}'. Try clicking by visible text instead."
+                return (
+                    f"Click failed: '{selector}' matched {count} element(s) but none are visible. "
+                    "Use a more specific selector or click by visible text."
+                )
+        if text:
+            # Try substring match first, then exact, then role-based.
+            for exact in (False, True):
+                target, count = _first_visible(page.get_by_text(text, exact=exact))
+                if target is not None:
+                    target.click(timeout=self._TIMEOUT_MS)
+                    return f"Clicked element containing text '{text}'" + (" (exact match)." if exact else ".")
+                for role in ("button", "link"):
+                    target, count = _first_visible(page.get_by_role(role, name=text, exact=exact))
+                    if target is not None:
+                        target.click(timeout=self._TIMEOUT_MS)
+                        return f"Clicked {role} '{text}'" + (" (exact match)." if exact else ".")
+            if attempt == 1:
+                # Page may still be settling; one automatic retry.
+                time.sleep(0.5)
+                return self._try_click(page, selector, text, attempt=2)
+            return (
+                f"Click failed: no visible element with text '{text}'. "
+                "Use browser_get_text to see what is on the page, then retry with exact visible text."
+            )
+        return "Error: provide selector or text to click."
 
     def type_text(self, text: str, selector: str = "", press_enter: bool = False) -> str:
         try:

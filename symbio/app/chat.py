@@ -24,6 +24,7 @@ from symbio.computer import BrowserSession
 from symbio import safety
 from symbio.app import cron, dispatch, golden, health, learn, memory, mcp_bridge, prompts, sandbox, sessions, setup, skills, tooling, training, web
 from symbio.app.config import config_show, set_config_value
+from tag_rag import TagIndex
 
 
 def _looks_like_shell_command(cmd: str) -> bool:
@@ -54,6 +55,7 @@ def _persist_health_report(session_id: str, report: dict[str, Any]):
     rolling 'latest' file inside sessions/."""
     constants.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     session_path = constants.SESSIONS_DIR / f"{session_id}_health.json"
+    report["_persisted"] = True
     session_path.write_text(json.dumps(report, indent=2, default=str) + "\n",
                             encoding="utf-8")
     latest_path = constants.SESSIONS_DIR / "latest_health.json"
@@ -148,7 +150,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
     output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
-    output_fn("         /run <cmd>  /note [title]  /notes  /new-skill <name>  /skills  /skill-adapters  /digest  /cron  /config  /archive  /restore")
+    output_fn("         /run <cmd>  /note [title]  /notes  /index-notes [--force]  /auto-index on|off  /new-skill <name>  /skills  /skill-adapters  /digest  /cron  /config  /archive  /restore")
     output_fn("         /build-mcp <name> | <description>  /mcp-tools  /hosts")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     output_fn("-" * 50)
@@ -177,6 +179,11 @@ _WEB_TOOLS = {
 
 _BROWSER_TOOLS = {
     "browser_open", "browser_click", "browser_type", "browser_scroll", "browser_press",
+}
+
+# Browser actions that can sensibly be retried with a different target.
+_BROWSER_ACTION_TOOLS = {
+    "browser_click", "browser_type", "browser_scroll", "browser_press",
 }
 
 # Tools that require explicit approval when running from a non-terminal
@@ -276,19 +283,24 @@ class ChatSession:
         self._model_lock = threading.Lock()
         self._model_loaded = model is not None and tokenizer is not None
         self._model_load_error: str | None = None
+        # Health report placeholder must exist before any model setup that might
+        # read it, and must not be overwritten after _run_post_load_self_check().
+        self._health_report: dict[str, Any] = {"healthy": True, "errors": [], "warnings": []}
         # If a caller already handed us a loaded model, do all the post-load
         # setup immediately (same behavior as before lazy loading).
         if self._model_loaded:
             if adapter_loaded is None:
                 self.adapter_loaded = self.adapter_config.exists()
             self._finish_model_setup()
+            self._run_post_load_self_check()
 
         self.history: list[dict[str, str]] = []
         self.session_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S-%f}"
-        # Health report is set by _finish_model_setup(); default to a minimal
-        # placeholder until the model loads, so code that reads it early does
-        # not crash.
-        self._health_report: dict[str, Any] = {"healthy": True, "errors": [], "warnings": []}
+
+        # If a caller already handed us a loaded model, the self-check ran
+        # before session_id existed; re-persist now that we have one.
+        if self._model_loaded and self._health_report.get("_persisted") is None:
+            self._run_post_load_self_check()
 
         # Load any custom MCP tools the user has previously built so they are
         # available to the model without restarting the process.
@@ -304,6 +316,7 @@ class ChatSession:
         # Past sessions are retrievable; the live one is excluded to avoid echo.
         self.retriever = Retriever(config, session_store=self.session_store,
                                    exclude_session_id=self.session_id)
+        self.tag_index: TagIndex | None = None
         self.browser = BrowserSession(confirm_fn=self.confirm_fn)
         # Worker models are loaded lazily on first delegated task — this
         # just holds the (empty) pool, no extra RAM until dispatch.enabled
@@ -329,6 +342,13 @@ class ChatSession:
         self.cron_lock = threading.Lock()
         self._last_auto_archive: float = 0.0
         threading.Thread(target=self._cron_worker, daemon=True).start()
+
+        # Background tag-index maintenance. Runs only when enabled and only
+        # while the model is idle, so it never races with generation.
+        self._index_lock = threading.Lock()
+        self._indexing_now = False
+        self._index_stop = threading.Event()
+        threading.Thread(target=self._background_index_worker, daemon=True).start()
 
     # ---- Infrastructure ----
 
@@ -477,6 +497,7 @@ class ChatSession:
                 raise
             finally:
                 spinner.stop()
+            self._run_post_load_self_check()
 
     def _finish_model_setup(self):
         """Run all work that requires a loaded tokenizer/model.
@@ -491,9 +512,15 @@ class ChatSession:
         training.seed_training_data(self.tokenizer, self.system_prompt, self.config)
         training.clean_training_duplicates(max_copies=3)
 
-        # AI-driven feature verification: run only the checks that match
-        # enabled features, auto-fix safe failures, and store the report for
-        # later tool access / user surfacing.
+        # Warm the KV cache with the system prompt so the first real turn skips
+        # re-processing it. This is guarded so fake-model tests skip it.
+        self._prefill_system_prompt_cache()
+
+    def _run_post_load_self_check(self):
+        """AI-driven feature verification after the model has finished loading.
+
+        Runs outside the "Waking model..." spinner so user-facing output is
+        not interleaved with the load progress."""
         try:
             self._health_report = health.verify_enabled_features(
                 self.config, verbose=True, output_fn=self.output_fn
@@ -509,10 +536,6 @@ class ChatSession:
             _persist_health_report(self.session_id, self._health_report)
         except Exception:
             pass
-
-        # Warm the KV cache with the system prompt so the first real turn skips
-        # re-processing it. This is guarded so fake-model tests skip it.
-        self._prefill_system_prompt_cache()
 
     def _encode_system_prompt(self) -> list[int]:
         """Encode just the system message once and cache it. The cache is
@@ -615,12 +638,14 @@ class ChatSession:
             spinner = _Spinner()
             spinner.start()
             gen_start = time.perf_counter()
+            self._indexing_now = True
             try:
                 text = self.generate_fn(
                     self.model, self.tokenizer, prompt=prompt_text, sampler=self.sampler,
                     max_tokens=max_tokens, verbose=False,
                 )
             finally:
+                self._indexing_now = False
                 spinner.stop()
             if timings is not None:
                 timings["gen_ms"] = (time.perf_counter() - gen_start) * 1000
@@ -691,6 +716,8 @@ class ChatSession:
         text_parts: list[str] = []
         gen_ids: list[int] = []
         gen_tokens = 0
+        # Mark the model as busy so the background indexer waits.
+        self._indexing_now = True
         try:
             for response in self.stream_fn(
                 self.model, self.tokenizer, feed, max_tokens=max_tokens,
@@ -714,6 +741,7 @@ class ChatSession:
             self._cached_prompt_ids = None
             raise
         finally:
+            self._indexing_now = False
             spinner.stop()
 
         if stripper is not None:
@@ -737,6 +765,124 @@ class ChatSession:
 
         self._cached_prompt_ids = ids + gen_ids
         return "".join(text_parts), shown
+
+    def _generate_tag_metadata(self, prompt: str) -> str:
+        """Generate a tag-indexing response using the already-loaded MLX model.
+
+        Uses the same chat-template path as normal generation but with a
+        higher token limit and lower temperature so the output is stable JSON.
+        """
+        self._ensure_model_loaded()
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        prompt_text = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+        )
+        # Make a fresh sampler for deterministic JSON.
+        sampler = make_sampler(temp=0.1, top_p=0.9)
+        try:
+            text = self.generate_fn(
+                self.model, self.tokenizer, prompt=prompt_text, sampler=sampler,
+                max_tokens=2048, verbose=False,
+            )
+            # Strip reasoning artifacts that smaller local models sometimes emit.
+            for pattern in (
+                r"\bthinking\b.*?/\bthinking\b",
+                r"\breasoning\b.*?/\breasoning\b",
+            ):
+                text = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
+            return text.strip()
+        except Exception as e:
+            return ""
+
+    def _ensure_tag_index(self) -> bool:
+        """Initialize self.tag_index if needed. Returns True if ready."""
+        rag_cfg = self.config.get("rag", {})
+        broad_tags = rag_cfg.get("broad_tags", [])
+        if not broad_tags:
+            return False
+        if self.tag_index is None:
+            db_path = rag_cfg.get("tag_index_db", "notes/tags.db")
+            db_path = Path(db_path)
+            if not db_path.is_absolute():
+                db_path = constants.PROJECT_DIR / db_path
+            self.tag_index = TagIndex(
+                notes_dir=constants.NOTES_DIR,
+                db_path=db_path,
+                broad_tags=broad_tags,
+                llm_fn=self._generate_tag_metadata,
+            )
+        return True
+
+    def _cmd_index_notes(self, force: bool = False) -> None:
+        """Index or reindex notes using the in-session loaded model."""
+        if not self._ensure_tag_index():
+            self.output_fn("  No broad_tags configured. Add them to config.json under rag.broad_tags.")
+            return
+
+        self.output_fn("  Indexing notes with the loaded model...")
+        stats = self.tag_index.index_all(force=force)
+        self.output_fn(
+            f"  Done. Indexed: {stats['indexed']}, failed: {stats['failed']}, "
+            f"removed stale: {stats['removed']}, skipped: {stats.get('skipped', 0)}"
+        )
+        if stats.get("errors"):
+            self.output_fn("  Failures:")
+            for err in stats["errors"]:
+                self.output_fn(f"    • {err}")
+            self.output_fn(
+                "  Tip: if every file failed, the model is not producing valid JSON metadata.\n"
+                "       Try a larger model or lower the broad_tag guardrail."
+            )
+        self.retriever.invalidate_cache()
+
+    def _background_index_worker(self) -> None:
+        """Daemon thread that periodically reindexes notes when idle.
+
+        Only runs when:
+        - rag.tag_index_enabled is true
+        - rag.auto_index_enabled is true
+        - the model is not currently generating a reply
+        """
+        rag_cfg = self.config.get("rag", {})
+        if not rag_cfg.get("tag_index_enabled") or not rag_cfg.get("auto_index_enabled"):
+            return
+
+        interval = max(30, int(rag_cfg.get("auto_index_interval_seconds", 300)))
+
+        while not self._index_stop.is_set():
+            # Sleep in small chunks so shutdown is responsive.
+            for _ in range(interval):
+                if self._index_stop.is_set():
+                    return
+                time.sleep(1)
+
+            # Wait until the model is free.
+            while self._indexing_now and not self._index_stop.is_set():
+                time.sleep(0.5)
+            if self._index_stop.is_set():
+                return
+
+            if not self._ensure_tag_index():
+                continue
+
+            with self._index_lock:
+                try:
+                    stats = self.tag_index.index_all(force=False)
+                    if stats["indexed"] or stats["failed"] or stats.get("removed"):
+                        self.output_fn(
+                            f"[auto-index] Indexed {stats['indexed']}, failed {stats['failed']}, "
+                            f"removed {stats['removed']} (skipped {stats.get('skipped', 0)})"
+                        )
+                    if stats.get("errors"):
+                        for err in stats["errors"]:
+                            self.output_fn(f"[auto-index] failure: {err}")
+                    if stats["indexed"] or stats.get("removed"):
+                        self.retriever.invalidate_cache()
+                except Exception as exc:
+                    self.output_fn(f"[auto-index] error: {exc}")
 
     def _check_idle_adapter(self):
         """A saved adapter that exists on disk but wasn't loaded this session
@@ -1014,6 +1160,33 @@ class ChatSession:
                 self.output_fn(f"  Digested {added} new note samples into training data.")
             else:
                 self.output_fn("  No new or changed notes to digest.")
+
+        elif cmd.startswith("/index-notes"):
+            rest = user_input[len("/index-notes"):].strip()
+            force = rest == "--force"
+            self._cmd_index_notes(force=force)
+
+        elif cmd.startswith("/auto-index"):
+            rest = user_input[len("/auto-index"):].strip().lower()
+            if rest in ("on", "true", "yes", "1"):
+                self.config.setdefault("rag", {})["auto_index_enabled"] = True
+                from symbio.app.config import save_config
+                save_config(self.config)
+                self.output_fn("  Auto-index enabled. Notes will be reindexed in the background.")
+                # If the worker thread is already running but was disabled by config
+                # at startup, it exited; restart it.
+                if self._index_stop.is_set():
+                    self._index_stop.clear()
+                    threading.Thread(target=self._background_index_worker, daemon=True).start()
+            elif rest in ("off", "false", "no", "0"):
+                self.config.setdefault("rag", {})["auto_index_enabled"] = False
+                from symbio.app.config import save_config
+                save_config(self.config)
+                self.output_fn("  Auto-index disabled.")
+            else:
+                state = "ON" if self.config.get("rag", {}).get("auto_index_enabled") else "OFF"
+                self.output_fn(f"  Auto-index is {state}.")
+                self.output_fn("  Usage: /auto-index on | /auto-index off")
 
         elif cmd.startswith("/run"):
             self._cmd_run(user_input[4:].strip())
@@ -1664,6 +1837,12 @@ class ChatSession:
         # sample the moment a later tool call actually succeeds. Cleared on
         # any success so only a confirmed fix gets saved, not a mere retry.
         pending_tool_error: str | None = None
+        # Track whether the last tool executed this turn was a browser action
+        # that failed. If the model then tries to end the turn without another
+        # tool tag, we nudge it to retry — otherwise Caine just explains the
+        # failure and gives up after one attempt.
+        pending_browser_error: str | None = None
+        browser_retry_nudged = False
         for _ in range(max_rounds):
             # Once we are inside a tool-followup round, lower the temperature
             # so the model sticks to the tag grammar instead of drifting into
@@ -1741,6 +1920,25 @@ class ChatSession:
                         f"syntax (matching open/close tags, valid JSON "
                         f"inside <tool_call>) and try again, or continue "
                         f"without it.]"
+                    )})
+                    self._trim_history()
+                    continue
+
+                # Browser actions often fail on the first target (element not
+                # visible yet, text mismatch, selector typo). If the model tries
+                # to end the turn after a browser failure without issuing another
+                # tool tag, force it to retry once — don't let it give up and
+                # explain the failure.
+                if pending_browser_error and not browser_retry_nudged:
+                    browser_retry_nudged = True
+                    self.output_fn(
+                        "  [Browser] Previous action failed; prompting retry...")
+                    self.history.append({"role": "user", "content": (
+                        f"[System observation: {pending_browser_error} "
+                        "Do not explain the failure. Retry the browser action "
+                        "with a different exact visible text or selector. "
+                        "Use browser_get_text if needed. Do not end the turn "
+                        "until the user's request is completed.]"
                     )})
                     self._trim_history()
                     continue
@@ -1851,6 +2049,12 @@ class ChatSession:
                 f"[System observation: {observation}]" if learn.sounds_like_tool_error(observation)
                 else None
             )
+            # Track browser-action failures so we can force a retry if the
+            # model tries to end the turn without another tool tag.
+            if name in _BROWSER_ACTION_TOOLS and learn.sounds_like_tool_error(observation):
+                pending_browser_error = observation
+            else:
+                pending_browser_error = None
 
             self.output_fn(f"  [Observation] {observation.replace(chr(10), chr(10) + '  ')}")
             timings["tools_ms"] = (time.perf_counter() - gen_start) * 1000
@@ -2087,12 +2291,12 @@ class ChatSession:
 
         browser_action_tools = {
             "browser_click": lambda: self.browser.click(
-                selector=params["target"] if params["target"].startswith(("#", ".", "//", "[")) else "",
-                text=params["target"] if not params["target"].startswith(("#", ".", "//", "[")) else "",
+                selector=params.get("target", "") if str(params.get("target", "")).startswith(("#", ".", "//", "[")) else "",
+                text=params.get("target", "") if not str(params.get("target", "")).startswith(("#", ".", "//", "[")) else "",
             ),
-            "browser_type": lambda: self.browser.type_text(params["text"], press_enter=params["enter"]),
-            "browser_scroll": lambda: self.browser.scroll(params["direction"]),
-            "browser_press": lambda: self.browser.press(params["key"]),
+            "browser_type": lambda: self.browser.type_text(params.get("text", ""), press_enter=params.get("enter", False)),
+            "browser_scroll": lambda: self.browser.scroll(params.get("direction", "down")),
+            "browser_press": lambda: self.browser.press(params.get("key", "")),
             "browser_close": lambda: self.browser.close(),
         }
 
@@ -2102,6 +2306,23 @@ class ChatSession:
                     "Browser automation is disabled. Enable it with "
                     "<config set=\"browser.enabled\">true</config> so I can use "
                     "my own Chrome window."
+                )
+            # Validate required parameters for browser actions so malformed
+            # tool calls produce clear, actionable errors instead of crashing.
+            if name == "browser_click" and not params.get("target"):
+                return (
+                    "Click failed: missing 'target'. "
+                    "Use <click>exact visible text or CSS selector</click>, e.g. <click>Mac</click>."
+                )
+            if name == "browser_type" and not params.get("text"):
+                return (
+                    "Type failed: missing 'text'. "
+                    "Use <type>text to type</type>."
+                )
+            if name == "browser_press" and not params.get("key"):
+                return (
+                    "Press failed: missing 'key'. "
+                    "Use <press>down</press>."
                 )
             out = browser_action_tools[name]()
             if "Browser is not open" in out:
@@ -2389,11 +2610,17 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
         stream_chunk_fn = lambda s: print(s, end="", flush=True)
     if output_fn is None:
         output_fn = print
-    ChatSession(
+    session = ChatSession(
         config,
         model=model, tokenizer=tokenizer, adapter_loaded=adapter_loaded,
         generate_fn=generate_fn, stream_fn=stream_fn,
         stream_chunk_fn=stream_chunk_fn,
         input_fn=input_fn, output_fn=output_fn, confirm_fn=confirm_fn,
         owner="cli",
-    ).run()
+    )
+    # When the CLI itself runs, load and warm the model before showing the
+    # banner or interactive prompt. Tests that inject a model skip this so
+    # they remain lightweight.
+    if model is None:
+        session._ensure_model_loaded()
+    session.run()

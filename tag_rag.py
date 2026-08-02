@@ -14,6 +14,7 @@ import re
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -359,10 +360,34 @@ class TagIndex:
         conn.commit()
         return True
 
-    def index_all(self, force: bool = False) -> dict[str, int]:
-        """Index all markdown files in notes_dir. Return stats."""
+
+    def _is_fresh(self, path: Path, rel: str) -> bool:
+        """Return True if the file has already been indexed and not changed since.
+
+        Files are reindexed when:
+        - they are not in the DB yet,
+        - their mtime is newer than the stored indexed_at timestamp, or
+        - their size changed.
+        """
+        row = self._conn().execute(
+            "SELECT indexed_at FROM docs WHERE path = ?", (rel,)
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            stat = path.stat()
+            indexed_at = datetime.fromisoformat(row["indexed_at"])
+            # Reindex if mtime is newer than the index timestamp.
+            if datetime.fromtimestamp(stat.st_mtime) > indexed_at:
+                return False
+        except Exception:
+            return False
+        return True
+
+    def index_all(self, force: bool = False) -> dict[str, Any]:
+        """Index all markdown files in notes_dir. Return stats + errors."""
         if not self.notes_dir.exists():
-            return {"indexed": 0, "failed": 0, "removed": 0}
+            return {"indexed": 0, "failed": 0, "removed": 0, "errors": []}
 
         conn = self._conn()
 
@@ -373,17 +398,25 @@ class TagIndex:
         current: set[str] = set()
         indexed = 0
         failed = 0
+        skipped = 0
+        errors: list[str] = []
 
         for path in sorted(self.notes_dir.rglob("*.md")):
             rel = self._rel_path(path)
             current.add(rel)
-            # Skip unchanged files unless force is true.
-            if not force and rel in existing:
+            # Skip files that have not changed since the last index.
+            if not force and rel in existing and self._is_fresh(path, rel):
+                skipped += 1
                 continue
-            if self.index_file(path):
-                indexed += 1
-            else:
+            try:
+                if self.index_file(path):
+                    indexed += 1
+                else:
+                    failed += 1
+                    errors.append(f"{rel}: metadata generation failed (LLM returned nothing or bad JSON)")
+            except Exception as exc:
                 failed += 1
+                errors.append(f"{rel}: {exc}")
 
         # Remove stale entries for files that no longer exist.
         removed = 0
@@ -392,7 +425,8 @@ class TagIndex:
             removed += 1
         conn.commit()
 
-        return {"indexed": indexed, "failed": failed, "removed": removed}
+        return {"indexed": indexed, "failed": failed, "removed": removed, "skipped": skipped, "errors": errors}
+
 
     def _route_query(self, query: str) -> dict[str, Any]:
         """Use the LLM to pick a broad tag and extract query concepts."""
@@ -438,13 +472,20 @@ class TagIndex:
         return [candidates[i] for i in indices if 0 <= i < len(candidates)]
 
     def search(self, query: str, top_k: int = 5) -> list[ChunkResult]:
-        """Hierarchical tag search: broad tag → meta tags → chunks."""
+        """Hierarchical tag search: broad tag → meta tags → chunks.
+
+        Fast path: if the index is empty, return nothing immediately so the
+        caller can fall back to keyword search without burning an LLM call.
+        """
+        conn = self._conn()
+        doc_count = conn.execute("SELECT COUNT(*) AS n FROM docs").fetchone()["n"]
+        if doc_count == 0:
+            return []
+
         route = self._route_query(query)
         broad_tag = route["broad_tag"]
         meta_tags = set(route["meta_tags"])
         keywords = set(route["keywords"])
-
-        conn = self._conn()
 
         # Broad-tag filter: if the LLM picked a valid tag, restrict to it;
         # otherwise scan all docs.

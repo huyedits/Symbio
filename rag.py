@@ -46,14 +46,49 @@ def _normalize(text: str) -> list[str]:
 def _default_tag_llm_fn(prompt: str) -> str:
     """Best-effort synchronous LLM for tag indexing and query routing.
 
-    Uses the frontier provider configured in symbio.mcp.config if an API key
-    is present. If not, returns an empty string and the tag index falls back
-    to keyword-based retrieval.
+    Tries the local Ollama brain first (cheap, offline-friendly), then falls
+    back to the frontier provider if no local brain is reachable or no API key.
+    Returns an empty string on total failure so the tag index can fall back to
+    keyword-based retrieval.
     """
     try:
         from symbio.mcp.config import settings
-        if not settings.frontier_api_key:
-            return ""
+    except Exception:
+        return ""
+
+    # Try local Ollama brain first.
+    try:
+        import httpx
+        headers = {}
+        if settings.ollama_api_key:
+            headers["Authorization"] = f"Bearer {settings.ollama_api_key}"
+        response = httpx.post(
+            f"{settings.ollama_base_url}/api/generate",
+            headers=headers,
+            json={
+                "model": settings.local_model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": settings.local_temperature,
+                    "num_predict": min(settings.local_max_tokens, 2048),
+                },
+            },
+            timeout=min(settings.local_timeout, 5.0),
+        )
+        response.raise_for_status()
+        data = response.json()
+        text = data.get("response", "")
+        # Strip thinking tags that local models sometimes emit.
+        text = re.sub(r"\bthinking\b.*?/\bthinking\b", "", text, flags=re.DOTALL | re.IGNORECASE)
+        return text.strip()
+    except Exception:
+        pass
+
+    # Fall back to frontier provider.
+    if not settings.frontier_api_key:
+        return ""
+    try:
         import anthropic
         client = anthropic.Anthropic(
             api_key=settings.frontier_api_key,

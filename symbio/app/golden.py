@@ -59,6 +59,7 @@ class GoldenCase(NamedTuple):
     description: str
     prompt_fn: Callable[[dict[str, Any]], str]
     check: Callable[[str, list[tuple[str, dict[str, Any]]], dict[str, Any]], bool]
+    ideal_reply: str | None = None
 
 
 def _check_greeting(display: str, tools: list, config: dict) -> bool:
@@ -313,20 +314,32 @@ def append_golden_remedy_samples(
     config: dict[str, Any],
     role: str | None = None,
     copies: int = 3,
+    extra_ideal_replies: dict[str, str] | None = None,
+    extra_cases: list[GoldenCase] | None = None,
 ) -> int:
     """Write boosted (prompt, ideal-reply) training samples for golden cases
     that consistently fail. Returns the number of samples appended.
 
     Built-in cases use the shipped ideal replies; user-defined cases use the
-    `ideal_reply` field from golden_cases.json when available."""
+    `ideal_reply` field from golden_cases.json when available. Worker golden
+    cases can supply both the case metadata and ideal replies via
+    `extra_cases` / `extra_ideal_replies`."""
     ideal = _golden_ideal_replies(config)
     case_by_id = {case.id: case for case in all_golden_cases()}
+    for case in (extra_cases or []):
+        case_by_id.setdefault(case.id, case)
     added = 0
+    extra = extra_ideal_replies or {}
     for case_id in failing_case_ids:
         case = case_by_id.get(case_id)
         if case is None:
             continue
-        target = ideal.get(case_id) or _user_ideal_reply(case_id, config)
+        target = (
+            ideal.get(case_id)
+            or extra.get(case_id)
+            or case.ideal_reply
+            or _user_ideal_reply(case_id, config)
+        )
         if target is None:
             continue
         user_msg = case.prompt_fn(config)
