@@ -880,7 +880,7 @@ def test_agent_loop_survives_tool_exception():
             session = ScriptedSession(
                 user_inputs=["Open youtube and click the first video.", "/quit", "n"],
                 model_replies=[
-                    "<cmd>open 'https://www.youtube.com/results?search_query=x'</cmd> Opening it.",
+                    "<cmd>open 'https://www.youtube.com/results?search_query=panini'</cmd> Opening it.",
                     "<click>first video</click> Clicking it.",
                     "Sorry, I couldn't click that — let me try browsing it myself instead.",
                 ],
