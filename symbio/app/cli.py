@@ -104,6 +104,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="List archived notes and adapters",
     )
 
+    index_parser = sub.add_parser("index-notes", help="Build or refresh the hierarchical tag index for notes")
+    index_parser.add_argument(
+        "--force", action="store_true",
+        help="Reindex every note even if it has not changed",
+    )
+
     retrain_parser = sub.add_parser("retrain", help="Rebuild the LoRA adapter from scratch after switching models")
     retrain_parser.add_argument(
         "--no-digest",
@@ -607,6 +613,49 @@ def _cmd_train(config: dict[str, Any]) -> int:
     return 0
 
 
+def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
+    """Build or refresh the hierarchical tag index over notes."""
+    from pathlib import Path
+
+    from tag_rag import TagIndex
+    from rag import _default_tag_llm_fn
+    from symbio.constants import NOTES_DIR, PROJECT_DIR
+    from symbio.mcp.config import settings
+
+    rag_cfg = config.get("rag", {})
+    broad_tags = rag_cfg.get("broad_tags", [])
+    if not broad_tags:
+        print("No broad_tags configured. Add them to config.json under rag.broad_tags.")
+        return 1
+
+    if not settings.frontier_api_key:
+        print(
+            "No FRONTIER_API_KEY set. The tag index needs a frontier model to generate\n"
+            "broad tags, meta tags, descriptions, and chunk summaries. Set the key in\n"
+            ".env or your environment, then run this command again."
+        )
+        return 1
+
+    db_path = rag_cfg.get("tag_index_db", "notes/tags.db")
+    db_path = Path(db_path)
+    if not db_path.is_absolute():
+        db_path = PROJECT_DIR / db_path
+
+    print(f"Indexing notes under {NOTES_DIR}...")
+    print(f"Tag DB: {db_path}")
+    print(f"Broad tags: {', '.join(broad_tags)}")
+
+    index = TagIndex(
+        notes_dir=NOTES_DIR,
+        db_path=db_path,
+        broad_tags=broad_tags,
+        llm_fn=_default_tag_llm_fn,
+    )
+    stats = index.index_all(force=force)
+    print(f"Done. Indexed: {stats['indexed']}, failed: {stats['failed']}, removed stale: {stats['removed']}")
+    return 0
+
+
 def _cmd_gateway_status(config: dict[str, Any]) -> int:
     running, pid = _gateway_running()
     token_set = _token_configured(config)
@@ -717,6 +766,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_skill(config, args)
     if command == "archive":
         return _cmd_archive(config, args)
+    if command == "index-notes":
+        return _cmd_index_notes(config, force=getattr(args, "force", False))
     if command == "train":
         return _cmd_train(config)
     if command == "retrain":

@@ -17,6 +17,8 @@ WORKER_ADAPTERS_DIR = ADAPTER_DIR / "workers"
 ADAPTER_ARCHIVE_DIR = PROJECT_DIR / "adapters_archive"
 WORKER_MODELS_FILE = PROJECT_DIR / "symbio" / "app" / "worker_models.json"
 NOTES_DIR = PROJECT_DIR / "notes"
+# Bare hierarchical tag index for notes RAG. Stores only metadata + line ranges.
+TAG_INDEX_DB = NOTES_DIR / "tags.db"
 MISTAKES_DIR = NOTES_DIR / "mistakes"
 MISTAKES_ARCHIVE_DIR = MISTAKES_DIR / "archive"
 # Decayed research notes go here instead of being deleted, mirroring how
@@ -132,6 +134,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "top_k": 3,
         "max_context_tokens": 800,
         "sources": ["notes", "sessions"],
+        "tag_index_enabled": True,
+        "broad_tags": [
+            "identity",
+            "projects",
+            "learning",
+            "ops",
+            "ideas",
+            "reference",
+        ],
+        "tag_index_db": str(TAG_INDEX_DB),
     },
     "archive": {
         "auto": False,

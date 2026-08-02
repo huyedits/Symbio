@@ -16,6 +16,11 @@ from typing import Any
 
 from symbio import safety
 
+try:
+    from tag_rag import TagIndex
+except Exception:
+    TagIndex = None  # type: ignore
+
 
 PROJECT_DIR = Path(__file__).parent.resolve()
 NOTES_DIR = PROJECT_DIR / "notes"
@@ -36,6 +41,33 @@ def _token_count_approx(text: str) -> int:
 def _normalize(text: str) -> list[str]:
     """Lowercase, strip punctuation, split into words."""
     return [w for w in re.sub(r"[^\w\s]", " ", text.lower()).split() if len(w) > 1]
+
+
+def _default_tag_llm_fn(prompt: str) -> str:
+    """Best-effort synchronous LLM for tag indexing and query routing.
+
+    Uses the frontier provider configured in symbio.mcp.config if an API key
+    is present. If not, returns an empty string and the tag index falls back
+    to keyword-based retrieval.
+    """
+    try:
+        from symbio.mcp.config import settings
+        if not settings.frontier_api_key:
+            return ""
+        import anthropic
+        client = anthropic.Anthropic(
+            api_key=settings.frontier_api_key,
+            timeout=settings.frontier_timeout,
+        )
+        response = client.messages.create(
+            model=settings.frontier_model,
+            max_tokens=min(settings.frontier_max_tokens, 2048),
+            temperature=settings.frontier_temperature,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return "\n".join(block.text for block in response.content if block.type == "text")
+    except Exception:
+        return ""
 
 
 class Retriever:
@@ -59,6 +91,9 @@ class Retriever:
         self._context_cache: dict[str, tuple[str, float]] = {}
         self._context_cache_ttl = float(self.rag_cfg.get("context_cache_ttl_seconds", 30))
         self._context_cache_max = int(self.rag_cfg.get("context_cache_max_entries", 32))
+        # Hierarchical tag index. Built lazily; disabled if no broad_tags or no LLM.
+        self._tag_index: TagIndex | None = None
+        self._tag_index_built = False
 
     def _enabled_sources(self) -> list[str]:
         return list(self.rag_cfg.get("sources", ["notes", "sessions"]))
@@ -68,6 +103,32 @@ class Retriever:
 
     def _max_context_tokens(self) -> int:
         return int(self.rag_cfg.get("max_context_tokens", 1500))
+
+    def _tag_index_enabled(self) -> bool:
+        # Default to False when the key is missing so existing unit tests are
+        # unaffected; real configs merge DEFAULT_CONFIG which sets it to True.
+        return bool(self.rag_cfg.get("tag_index_enabled", False))
+
+    def _build_tag_index(self) -> TagIndex | None:
+        if self._tag_index_built:
+            return self._tag_index
+        self._tag_index_built = True
+        if TagIndex is None or not self._tag_index_enabled():
+            return None
+        broad_tags = self.rag_cfg.get("broad_tags", [])
+        if not broad_tags:
+            return None
+        db_path = self.rag_cfg.get("tag_index_db", "notes/tags.db")
+        db_path = Path(db_path)
+        if not db_path.is_absolute():
+            db_path = PROJECT_DIR / db_path
+        self._tag_index = TagIndex(
+            notes_dir=NOTES_DIR,
+            db_path=db_path,
+            broad_tags=broad_tags,
+            llm_fn=_default_tag_llm_fn,
+        )
+        return self._tag_index
 
     def _load_notes(self) -> dict[str, str]:
         if self._note_cache is not None:
@@ -86,6 +147,10 @@ class Retriever:
         """Call after notes are written or removed."""
         self._note_cache = None
         self._context_cache.clear()
+        if self._tag_index is not None:
+            self._tag_index.invalidate()
+            self._tag_index = None
+        self._tag_index_built = False
 
     @staticmethod
     def _context_cache_key(query: str) -> str:
@@ -107,6 +172,31 @@ class Retriever:
         query_terms = _normalize(query)
         if not query_terms:
             return []
+
+        # Try hierarchical tag index first. If it returns nothing or the index
+        # is unavailable, fall back to the existing keyword overlap search.
+        tag_index = self._build_tag_index()
+        if tag_index is not None:
+            try:
+                tag_results = tag_index.search(query, top_k=top_k or self._top_k())
+                if tag_results:
+                    return [
+                        {
+                            "source": "note",
+                            "title": r.path.name,
+                            "text": f"{r.heading_path}\n{r.text}",
+                            "score": r.score,
+                            "path": str(r.path),
+                            "heading_path": r.heading_path,
+                            "broad_tag": r.broad_tag,
+                            "meta_tags": r.meta_tags,
+                            "description": r.description,
+                        }
+                        for r in tag_results
+                    ]
+            except Exception:
+                pass
+
         notes = self._load_notes()
         scored = []
         for name, text in notes.items():
