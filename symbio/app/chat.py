@@ -265,60 +265,31 @@ class ChatSession:
         self._cached_system_ids: list[int] | None = None
         self._refresh_sampler()
 
-        self.output_fn(" Loading model...")
         self.adapter_config = constants.ADAPTER_DIR / "adapter_config.json"
-        self.adapter_loaded = adapter_loaded if adapter_loaded is not None else False
-        if model is not None and tokenizer is not None:
-            self.model, self.tokenizer = model, tokenizer
+        # adapter_loaded state is "unknown" when no model is supplied. We infer
+        # presence cheaply from disk without loading weights, so the banner can
+        # still show something useful before the model wakes up.
+        self.adapter_loaded = adapter_loaded if adapter_loaded is not None else self.adapter_config.exists()
+        # model/tokenizer may be None until _ensure_model_loaded() runs.
+        self.model: Any | None = model if model is not None else None
+        self.tokenizer: Any | None = tokenizer if tokenizer is not None else None
+        self._model_lock = threading.Lock()
+        self._model_loaded = model is not None and tokenizer is not None
+        self._model_load_error: str | None = None
+        # If a caller already handed us a loaded model, do all the post-load
+        # setup immediately (same behavior as before lazy loading).
+        if self._model_loaded:
             if adapter_loaded is None:
                 self.adapter_loaded = self.adapter_config.exists()
-        elif self.adapter_config.exists():
-            self.output_fn(" Found existing adapter. Loading it...")
-            try:
-                self.model, self.tokenizer = load(
-                    config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
-                )
-                self.adapter_loaded = True
-            except Exception as e:
-                self.output_fn(f" Could not load adapter: {e}")
-                self.output_fn(" Falling back to base model...")
-                self.model, self.tokenizer = load(config["model_name"])
-        else:
-            self.model, self.tokenizer = load(config["model_name"])
-
-        self._check_idle_adapter()
-
-        # Seed identity notes + clean training corpus on first run.
-        memory.ensure_seed_notes(config)
-        training.seed_training_data(self.tokenizer, self.system_prompt, config)
-        training.clean_training_duplicates(max_copies=3)
-
-        # AI-driven feature verification: run only the checks that match
-        # enabled features, auto-fix safe failures, and store the report for
-        # later tool access / user surfacing.
-        try:
-            self._health_report = health.verify_enabled_features(
-                self.config, verbose=True, output_fn=self.output_fn
-            )
-        except Exception as e:
-            self._health_report = {
-                "healthy": False,
-                "errors": [{"name": "self_check", "message": f"Self-check crashed: {e}"}],
-            }
-
-        # Warm the KV cache with the system prompt now so the first real turn
-        # does not pay the prompt-processing tax twice (once at boot, once at
-        # first reply). This is guarded so fake-model tests skip it.
-        self._prefill_system_prompt_cache()
+            self._finish_model_setup()
 
         self.history: list[dict[str, str]] = []
         self.session_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S-%f}"
+        # Health report is set by _finish_model_setup(); default to a minimal
+        # placeholder until the model loads, so code that reads it early does
+        # not crash.
+        self._health_report: dict[str, Any] = {"healthy": True, "errors": [], "warnings": []}
 
-        # Persist the report so external tools and future sessions can audit it.
-        try:
-            _persist_health_report(self.session_id, self._health_report)
-        except Exception:
-            pass
         # Load any custom MCP tools the user has previously built so they are
         # available to the model without restarting the process.
         try:
@@ -460,6 +431,89 @@ class ChatSession:
     def _status(self, message: str):
         self.output_fn(message)
 
+    def _ensure_model_loaded(self):
+        """Load the model on first use. Idempotent and thread-safe.
+
+        When the caller already supplied a model, this returns immediately.
+        All model-dependent setup (adapter check, training seed, health checks,
+        KV-cache warmup) happens here instead of in __init__ so the CLI can
+        show its prompt before any heavy work.
+        """
+        if self._model_loaded and self.model is not None and self.tokenizer is not None:
+            return
+        with self._model_lock:
+            # Double-checked locking: another thread may have finished while we
+            # were acquiring the lock.
+            if self._model_loaded and self.model is not None and self.tokenizer is not None:
+                return
+            if self._model_load_error is not None:
+                raise RuntimeError(self._model_load_error)
+
+            spinner = _Spinner("Waking model...")
+            spinner.start()
+            try:
+                if self.adapter_config.exists():
+                    self.output_fn(" Loading adapter...")
+                    try:
+                        self.model, self.tokenizer = load(
+                            self.config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
+                        )
+                        self.adapter_loaded = True
+                    except Exception as e:
+                        self.output_fn(f" Could not load adapter: {e}")
+                        self.output_fn(" Falling back to base model...")
+                        self.model, self.tokenizer = load(self.config["model_name"])
+                        self.adapter_loaded = False
+                else:
+                    self.model, self.tokenizer = load(self.config["model_name"])
+                    self.adapter_loaded = False
+
+                self._finish_model_setup()
+                self._model_loaded = True
+                self._model_load_error = None
+            except Exception as e:
+                self._model_load_error = str(e)
+                self.output_fn(f" Failed to load model: {e}")
+                raise
+            finally:
+                spinner.stop()
+
+    def _finish_model_setup(self):
+        """Run all work that requires a loaded tokenizer/model.
+
+        Called either immediately (when a model is supplied by the caller) or
+        from _ensure_model_loaded() the first time the model is needed.
+        """
+        self._check_idle_adapter()
+
+        # Seed identity notes + clean training corpus on first run.
+        memory.ensure_seed_notes(self.config)
+        training.seed_training_data(self.tokenizer, self.system_prompt, self.config)
+        training.clean_training_duplicates(max_copies=3)
+
+        # AI-driven feature verification: run only the checks that match
+        # enabled features, auto-fix safe failures, and store the report for
+        # later tool access / user surfacing.
+        try:
+            self._health_report = health.verify_enabled_features(
+                self.config, verbose=True, output_fn=self.output_fn
+            )
+        except Exception as e:
+            self._health_report = {
+                "healthy": False,
+                "errors": [{"name": "self_check", "message": f"Self-check crashed: {e}"}],
+            }
+
+        # Persist the report so external tools and future sessions can audit it.
+        try:
+            _persist_health_report(self.session_id, self._health_report)
+        except Exception:
+            pass
+
+        # Warm the KV cache with the system prompt so the first real turn skips
+        # re-processing it. This is guarded so fake-model tests skip it.
+        self._prefill_system_prompt_cache()
+
     def _encode_system_prompt(self) -> list[int]:
         """Encode just the system message once and cache it. The cache is
         invalidated when the system prompt text changes (e.g. identity edits)."""
@@ -546,6 +600,7 @@ class ChatSession:
         caller knows whether the final consolidated print is still needed.
         """
         agent_cfg = self.config["agent"]
+        self._ensure_model_loaded()
         prompt_text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
         )
