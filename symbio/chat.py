@@ -428,3 +428,6 @@ def chat_loop(config: dict[str, Any]):
                         agent.reload_adapter()
                     except Exception as e:
                         print(f" Could not reload: {e}")
+        else:
+            print("Conversation is NOT saved. You can save it later using /save or running symbio with the --train flag.")
+            quit()

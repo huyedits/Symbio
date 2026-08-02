@@ -103,6 +103,10 @@ class _Spinner:
         with self._lock:
             self._gen_tokens = n
 
+    def set_label(self, label: str):
+        with self._lock:
+            self.label = label
+
     def start(self):
         if not self.active or self._thread is not None:
             return
@@ -139,6 +143,79 @@ class _Spinner:
 
 
 
+def _adapter_trained_at() -> datetime | None:
+    """mtime of the adapter weights — the last time a LoRA run wrote them."""
+    weights = constants.ADAPTER_DIR / "adapters.safetensors"
+    if weights.exists():
+        try:
+            return datetime.fromtimestamp(weights.stat().st_mtime)
+        except OSError:
+            return None
+    return None
+
+
+def _adapter_iters() -> int | None:
+    """iters recorded in the last training run's adapter_config.json."""
+    cfg = constants.ADAPTER_DIR / "adapter_config.json"
+    if not cfg.exists():
+        return None
+    try:
+        return int(json.loads(cfg.read_text(encoding="utf-8")).get("iters", 0)) or None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _fmt_ago(then: datetime, now: datetime | None = None) -> str:
+    """Compact '2h ago'-style relative time."""
+    now = now or datetime.now()
+    secs = int((now - then).total_seconds())
+    if secs < 60:
+        return "just now"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins}m ago"
+    hrs = mins // 60
+    if hrs < 48:
+        return f"{hrs}h ago"
+    return f"{hrs // 24}d ago"
+
+
+def learn_progress_line(config: dict[str, Any]) -> str:
+    """One-line summary of the self-finetune loop: mistake counter state.
+
+    e.g. '3/5 mistakes to next tune', '5/5 mistakes — tuning due', or
+    'learn: off' when the loop is disabled."""
+    learn_cfg = config.get("learn", {}) or {}
+    if not learn_cfg.get("enabled", True):
+        return "learn: off"
+    threshold = max(1, int(learn_cfg.get("mistake_threshold", 5)))
+    count = learn.mistake_note_count()
+    suffix = "" if learn_cfg.get("auto_train", True) else " (auto-train off)"
+    if count >= threshold:
+        return f"{count}/{threshold} mistakes — tuning due{suffix}"
+    return f"{count}/{threshold} mistakes to next tune{suffix}"
+
+
+def adapter_status_value(config: dict[str, Any], adapter_loaded: bool) -> str:
+    """Legible adapter + learn state, e.g.
+
+    'loaded (trained 2h ago, 50 iters) · 3/5 mistakes to next tune'
+    'none (base) · 3/5 mistakes to next tune'
+    """
+    progress = learn_progress_line(config)
+    if not adapter_loaded:
+        return f"none (base) · {progress}"
+    bits: list[str] = []
+    trained = _adapter_trained_at()
+    if trained is not None:
+        bits.append(f"trained {_fmt_ago(trained)}")
+    iters = _adapter_iters()
+    if iters is not None:
+        bits.append(f"{iters} iters")
+    detail = f" ({', '.join(bits)})" if bits else ""
+    return f"loaded{detail} · {progress}"
+
+
 def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int,
                  output_fn=print):
     note_count = len(list(constants.NOTES_DIR.glob("*.md")))
@@ -146,7 +223,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"  {config['assistant_name'].upper()} — PERSONAL CHAT-FINETUNE CLI")
     output_fn(f"   Model  : {config['model_name']}")
     output_fn(f"   User   : {config['user_name']}")
-    output_fn(f"   LoRA   : {'YES' if adapter_loaded else 'None (base)'}")
+    output_fn(f"   LoRA   : {adapter_status_value(config, adapter_loaded)}")
     output_fn(f"   Data   : {dataset_size:,} bytes")
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
@@ -470,8 +547,11 @@ class ChatSession:
             if self._model_load_error is not None:
                 raise RuntimeError(self._model_load_error)
 
-            spinner = _Spinner("Waking model...")
-            spinner.start()
+            # Don't spin during load(): HuggingFace's download progress bar
+            # animates the same terminal line via \r, and the two carriages
+            # overprint each other into garbage. A static label is enough
+            # while the download bar shows progress.
+            self.output_fn(" Waking model...")
             try:
                 if self.adapter_config.exists():
                     self.output_fn(" Loading adapter...")
@@ -489,15 +569,20 @@ class ChatSession:
                     self.model, self.tokenizer = load(self.config["model_name"])
                     self.adapter_loaded = False
 
-                self._finish_model_setup()
-                self._model_loaded = True
-                self._model_load_error = None
+                # Warmup (KV-cache prefill + seed notes) has no progress bar of
+                # its own, so this is where the spinner actually earns its keep.
+                spinner = _Spinner("Waking model...")
+                spinner.start()
+                try:
+                    self._finish_model_setup()
+                    self._model_loaded = True
+                    self._model_load_error = None
+                finally:
+                    spinner.stop()
             except Exception as e:
                 self._model_load_error = str(e)
                 self.output_fn(f" Failed to load model: {e}")
                 raise
-            finally:
-                spinner.stop()
             self._run_post_load_self_check()
 
     def _finish_model_setup(self):
@@ -632,66 +717,73 @@ class ChatSession:
         """
         agent_cfg = self.config["agent"]
         self._ensure_model_loaded()
-        prompt_text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
-        )
-        prompt_tokens = len(self.tokenizer.encode(prompt_text))
-        if timings is not None:
-            timings["prompt_tokens"] = prompt_tokens
-            timings["prompt_chars"] = len(prompt_text)
-        max_tokens = int(agent_cfg["max_reply_tokens"])
-
-        if not agent_cfg.get("prompt_cache_enabled", True):
-            # Caching off: the exact original call, unchanged.
-            spinner = _Spinner()
-            spinner.start()
-            gen_start = time.perf_counter()
-            self._indexing_now = True
-            try:
-                text = self.generate_fn(
-                    self.model, self.tokenizer, prompt=prompt_text, sampler=self.sampler,
-                    max_tokens=max_tokens, verbose=False,
-                )
-            finally:
-                self._indexing_now = False
-                spinner.stop()
-            if timings is not None:
-                timings["gen_ms"] = (time.perf_counter() - gen_start) * 1000
-                timings["ttft_ms"] = timings["gen_ms"]
-            return text, False
-
-        # Avoid re-encoding the full system prompt every turn: cache its ids
-        # and splice them with the encoded rest of the conversation.
-        system_ids = self._encode_system_prompt()
-        if messages and messages[0].get("role") == "system":
-            rest = messages[1:]
-        else:
-            rest = messages
-            system_ids = []
-        rest_ids = self.tokenizer.encode(
-            self.tokenizer.apply_chat_template(
-                rest, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+        # Start the spinner before tokenizing the prompt: apply_chat_template
+        # plus the encode passes (the full prompt for token counting, then the
+        # conversation tail) and the cache-prefix diff take a visible beat on
+        # longer sessions and otherwise read as a dead gap after the user hits
+        # enter. This early spinner hands off to the generation spinner below.
+        tokenizing_spinner = _Spinner("thinking…")
+        tokenizing_spinner.start()
+        try:
+            prompt_text = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
             )
-        ) if rest else []
-        ids = system_ids + rest_ids
+            prompt_tokens = len(self.tokenizer.encode(prompt_text))
+            if timings is not None:
+                timings["prompt_tokens"] = prompt_tokens
+                timings["prompt_chars"] = len(prompt_text)
+            max_tokens = int(agent_cfg["max_reply_tokens"])
 
-        reused = _common_prefix_len(self._cached_prompt_ids, ids)
-        if timings is not None:
-            timings["cached_tokens"] = reused
-            timings["new_tokens"] = len(ids) - reused
-        if self._prompt_cache is None or reused == 0:
-            self._prompt_cache = make_prompt_cache(self.model)
-            feed = ids
-        else:
-            stale = len(self._cached_prompt_ids) - reused
-            if stale and can_trim_prompt_cache(self._prompt_cache):
-                trim_prompt_cache(self._prompt_cache, stale)
-            elif stale:
+            if not agent_cfg.get("prompt_cache_enabled", True):
+                # Caching off: the exact original call, unchanged.
+                gen_start = time.perf_counter()
+                self._indexing_now = True
+                try:
+                    text = self.generate_fn(
+                        self.model, self.tokenizer, prompt=prompt_text, sampler=self.sampler,
+                        max_tokens=max_tokens, verbose=False,
+                    )
+                finally:
+                    self._indexing_now = False
+                if timings is not None:
+                    timings["gen_ms"] = (time.perf_counter() - gen_start) * 1000
+                    timings["ttft_ms"] = timings["gen_ms"]
+                return text, False
+
+            # Avoid re-encoding the full system prompt every turn: cache its ids
+            # and splice them with the encoded rest of the conversation.
+            system_ids = self._encode_system_prompt()
+            if messages and messages[0].get("role") == "system":
+                rest = messages[1:]
+            else:
+                rest = messages
+                system_ids = []
+            rest_ids = self.tokenizer.encode(
+                self.tokenizer.apply_chat_template(
+                    rest, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+                )
+            ) if rest else []
+            ids = system_ids + rest_ids
+
+            reused = _common_prefix_len(self._cached_prompt_ids, ids)
+            if timings is not None:
+                timings["cached_tokens"] = reused
+                timings["new_tokens"] = len(ids) - reused
+            if self._prompt_cache is None or reused == 0:
                 self._prompt_cache = make_prompt_cache(self.model)
-                reused = 0
-            feed = ids[reused:] if reused else ids
-        if not feed:
-            feed = ids[-1:]
+                feed = ids
+            else:
+                stale = len(self._cached_prompt_ids) - reused
+                if stale and can_trim_prompt_cache(self._prompt_cache):
+                    trim_prompt_cache(self._prompt_cache, stale)
+                elif stale:
+                    self._prompt_cache = make_prompt_cache(self.model)
+                    reused = 0
+                feed = ids[reused:] if reused else ids
+            if not feed:
+                feed = ids[-1:]
+        finally:
+            tokenizing_spinner.stop()
 
         use_stream = self.stream_chunk_fn is not None and agent_cfg.get("stream_output", True)
         stripper = tooling.StreamingStripper() if use_stream else None
@@ -981,6 +1073,7 @@ class ChatSession:
 
             if not golden_on or baseline is None:
                 self.output_fn("  [Train] Adapter reloaded.")
+                self.output_fn(f"  [Train] {adapter_status_value(self.config, True)}")
                 self._last_train_note = "Training complete. Adapter reloaded."
                 return True
 
@@ -1076,6 +1169,7 @@ class ChatSession:
                     f"Training complete. Adapter reloaded "
                     f"({after.pass_count}/{after.total} golden checks passing, no regression)."
                 )
+            self.output_fn(f"  [Train] {adapter_status_value(self.config, self.adapter_loaded)}")
             return True
         finally:
             training.discard_adapter_backup(backup_dir)
@@ -1423,10 +1517,18 @@ class ChatSession:
             self.output_fn(f"  Training data: {data_size:,} bytes")
             self.output_fn(f"  Adapter loaded: {'YES' if self.adapter_loaded else 'NO'}")
             self.output_fn(f"  Adapter files: {len(adapter_files)} ({adapter_kb:,} KB)")
+            trained_at = _adapter_trained_at()
+            if trained_at is not None:
+                iters = _adapter_iters()
+                self.output_fn(
+                    f"  Adapter trained: {_fmt_ago(trained_at)}"
+                    + (f" ({iters} iters)" if iters is not None else "")
+                )
             last_used = training.adapter_last_used()
             if last_used is not None:
                 idle_days = (datetime.now() - last_used).days
                 self.output_fn(f"  Adapter last used: {idle_days} day(s) ago")
+            self.output_fn(f"  Learn: {learn_progress_line(self.config)}")
             dispatch_on = self.config.get("dispatch", {}).get("enabled", False)
             loaded_workers = self.dispatch.loaded_roles()
             self.output_fn(
@@ -1808,8 +1910,10 @@ class ChatSession:
         # Unbounded knowledge: pull relevant saved notes into this turn's
         # context. Retrieval text never enters history or training data.
         rag_context = self.retriever.build_context(user_input)
+        rag_results: list[dict[str, Any]] = []
         if self.retriever.rag_cfg.get("enabled", True):
             for r in self.retriever.retrieve(user_input):
+                rag_results.append(r)
                 if r.get("source") == "note" and r.get("path"):
                     note_path = Path(r["path"])
                     try:
@@ -1820,7 +1924,22 @@ class ChatSession:
                         self._skill_notes_used.add(note_path)
                         self._record_health_errors_for_skill(note_path)
         rag_block = f"\n\n{rag_context}" if rag_context else ""
-        timings["rag_ms"] = (time.perf_counter() - turn_start) * 1000
+        rag_ms = (time.perf_counter() - turn_start) * 1000
+        timings["rag_ms"] = rag_ms
+        # Surface that retrieval ran and what it pulled in, so the user can see
+        # the agent isn't sitting silent before the spinner starts. Hits are
+        # always shown; a no-match is only mentioned when retrieval was slow
+        # enough that the pause would otherwise look like a stall.
+        if self.retriever.rag_cfg.get("enabled", True):
+            if rag_results:
+                labels = sorted({
+                    r.get("broad_tag") or r.get("title", "?")
+                    for r in rag_results if r.get("source") == "note"
+                })[:3]
+                extra = f" ({', '.join(labels)})" if labels else ""
+                self.output_fn(f"  [RAG] {len(rag_results)} hit(s){extra} · {rag_ms:.0f}ms")
+            elif rag_ms > 100:
+                self.output_fn(f"  [RAG] no notes matched · {rag_ms:.0f}ms")
 
         # Live-reload: config changes and prompt.md edits apply on the next turn.
         self._refresh_sampler()
@@ -1851,6 +1970,7 @@ class ChatSession:
         # failure and gives up after one attempt.
         pending_browser_error: str | None = None
         browser_retry_nudged = False
+        blank_retry_nudged = False
         for _ in range(max_rounds):
             # Once we are inside a tool-followup round, lower the temperature
             # so the model sticks to the tag grammar instead of drifting into
@@ -1950,6 +2070,32 @@ class ChatSession:
                     )})
                     self._trim_history()
                     continue
+
+                # The model blanked out mid-task: it already ran at least one
+                # tool this turn (a browser action, search, command…) and then
+                # produced no visible answer and no new tool call. Most often
+                # a Qwen3 thinking block that clean_response() stripped to
+                # nothing. Don't let the turn die silent — nudge it once to
+                # continue the task or give a final answer. This is the
+                # symmetric guard to the browser-error retry above, for the
+                # case where the prior action SUCCEEDED but the model still
+                # went empty.
+                if not display.strip() and executed_calls and not blank_retry_nudged:
+                    blank_retry_nudged = True
+                    self.output_fn(
+                        "  [Blank] Mid-task reply came back empty; "
+                        "prompting the model to continue...")
+                    self.history.append({"role": "user", "content": (
+                        "[System observation: your last reply was empty after "
+                        "removing internal reasoning. You are mid-task — a tool "
+                        "already ran this turn and the user's request is not yet "
+                        "answered. Continue with the next tool call, or give the "
+                        "user a final answer summarizing what you did and found. "
+                        "Do not end the turn with no visible output.]"
+                    )})
+                    self._trim_history()
+                    continue
+
                 # Don't let the model fill knowledge gaps by guessing: an
                 # unsure-sounding answer, or a hedged made-up figure for a
                 # numeric question, with no tool call triggers one automatic
@@ -2621,7 +2767,34 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
     if stream_chunk_fn is None:
         stream_chunk_fn = lambda s: print(s, end="", flush=True)
     if output_fn is None:
-        output_fn = print
+        # The background note-indexer (and other daemon threads) call output_fn
+        # while the main thread is blocked in input() with the 'Huy : ' readline
+        # prompt drawn. A bare print() clobbers that prompt and readline never
+        # redraws it, so the terminal looks frozen after the [auto-index] line.
+        # When a background thread prints, escape to a fresh line first and then
+        # redraw the prompt + any in-progress input so the session stays
+        # responsive. No-op for non-interactive (piped/test) runs.
+        try:
+            import readline as _readline
+        except ImportError:
+            _readline = None
+        _main_thread = threading.main_thread()
+        _user_prompt = f"{config['user_name']:8}: "
+
+        def _cli_output(message=""):
+            if threading.current_thread() is _main_thread or not sys.stdin.isatty() or _readline is None:
+                print(message)
+                return
+            sys.stdout.write("\n")
+            print(message)
+            try:
+                sys.stdout.write(_user_prompt + _readline.get_line_buffer())
+                _readline.redisplay()
+                sys.stdout.flush()
+            except Exception:
+                print(_user_prompt, end="", flush=True)
+
+        output_fn = _cli_output
     session = ChatSession(
         config,
         model=model, tokenizer=tokenizer, adapter_loaded=adapter_loaded,
