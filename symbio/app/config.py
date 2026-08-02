@@ -224,6 +224,17 @@ def _apply_env_overrides(config: dict[str, Any]) -> None:
             print("[Config warning] SYMBIO_TELEGRAM_ALLOWED_CHAT_IDS contains non-integer values; ignored.")
 
 
+def save_config(config: dict[str, Any]) -> None:
+    """Persist the merged config back to config.json.
+
+    Writes the full merged config so runtime changes (e.g. /auto-index on)
+    survive restarts."""
+    try:
+        constants.CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    except Exception as e:
+        print(f"[Config warning] Could not write {constants.CONFIG_FILE}: {e}")
+
+
 def load_config() -> dict[str, Any]:
     """Load config.json if present; merge with sensible defaults and env overrides."""
     # Deep copy: callers (e.g. set_config_value) mutate nested sections, and a

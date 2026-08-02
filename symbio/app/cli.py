@@ -10,6 +10,7 @@ import atexit
 import curses
 import json
 import os
+import re
 import signal
 import sys
 from typing import Any
@@ -614,15 +615,20 @@ def _cmd_train(config: dict[str, Any]) -> int:
 
 
 def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
-    """Build or refresh the hierarchical tag index over notes."""
+    """Build or refresh the hierarchical tag index over notes.
+
+    Uses the same in-session MLX model chat uses (the 'local brain'), not an
+    external Ollama or frontier API. Loads the model once, runs indexing, then
+    exits.
+    """
     from pathlib import Path
 
-    import httpx
-
+    from mlx_lm import generate as mlx_generate, load as mlx_load
+    from mlx_lm.sample_utils import make_sampler
     from tag_rag import TagIndex
-    from rag import _default_tag_llm_fn
-    from symbio.constants import NOTES_DIR, PROJECT_DIR
-    from symbio.mcp.config import settings
+
+    from symbio import constants
+    from symbio.app import prompts
 
     rag_cfg = config.get("rag", {})
     broad_tags = rag_cfg.get("broad_tags", [])
@@ -630,50 +636,68 @@ def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
         print("No broad_tags configured. Add them to config.json under rag.broad_tags.")
         return 1
 
-    # Quick local-brain reachability check.
-    local_ok = False
-    try:
-        resp = httpx.get(
-            f"{settings.ollama_base_url.rstrip('/')}/api/tags",
-            timeout=5.0,
-        )
-        local_ok = resp.status_code == 200
-    except Exception:
-        local_ok = False
-
     db_path = rag_cfg.get("tag_index_db", "notes/tags.db")
     db_path = Path(db_path)
     if not db_path.is_absolute():
-        db_path = PROJECT_DIR / db_path
+        db_path = constants.PROJECT_DIR / db_path
 
-    print(f"Indexing notes under {NOTES_DIR}...")
+    print(f"Indexing notes under {constants.NOTES_DIR}...")
     print(f"Tag DB: {db_path}")
     print(f"Broad tags: {', '.join(broad_tags)}")
-    print(f"Local brain ({settings.ollama_base_url}): {'reachable' if local_ok else 'not reachable'}")
-    if not local_ok and not settings.frontier_api_key:
-        print(
-            "\nNo local brain and no FRONTIER_API_KEY. The tag index needs an LLM\n"
-            "to generate metadata. Either start Ollama locally (default URL is\n"
-            "http://127.0.0.1:11434) or set FRONTIER_API_KEY for frontier fallback."
-        )
+    print("Loading local brain for tag metadata generation...")
+
+    adapter_dir = constants.ADAPTER_DIR
+    try:
+        if adapter_dir.exists() and (adapter_dir / "adapter_config.json").exists():
+            model, tokenizer = mlx_load(config["model_name"], adapter_path=str(adapter_dir))
+        else:
+            model, tokenizer = mlx_load(config["model_name"])
+    except Exception as e:
+        print(f"Failed to load model {config['model_name']}: {e}")
         return 1
 
+    system_prompt = prompts.build_system_prompt(
+        config.get("assistant_name", ""), config.get("user_name", "")
+    )
+
+    def _llm_fn(prompt: str) -> str:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ]
+        prompt_text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+        )
+        sampler = make_sampler(temp=0.1, top_p=0.9)
+        try:
+            text = mlx_generate(
+                model, tokenizer, prompt=prompt_text, sampler=sampler,
+                max_tokens=2048, verbose=False,
+            )
+            for pattern in (
+                r"\bthinking\b.*?/\bthinking\b",
+                r"\breasoning\b.*?/\breasoning\b",
+            ):
+                text = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
+            return text.strip()
+        except Exception:
+            return ""
+
     index = TagIndex(
-        notes_dir=NOTES_DIR,
+        notes_dir=constants.NOTES_DIR,
         db_path=db_path,
         broad_tags=broad_tags,
-        llm_fn=_default_tag_llm_fn,
+        llm_fn=_llm_fn,
     )
     stats = index.index_all(force=force)
-    print(f"Done. Indexed: {stats['indexed']}, failed: {stats['failed']}, removed stale: {stats['removed']}")
+    print(f"Done. Indexed: {stats['indexed']}, failed: {stats['failed']}, removed stale: {stats['removed']}, skipped: {stats.get('skipped', 0)}")
     if stats.get("errors"):
         print("\nFailures:")
         for err in stats["errors"]:
             print(f"  • {err}")
         print(
-            "\nTip: if every file failed, the LLM is not producing valid JSON metadata.\n"
-            "Check that your local Ollama model supports JSON/instruction following,\n"
-            "or set FRONTIER_API_KEY for frontier fallback."
+            "\nTip: if every file failed, the model is not producing valid JSON metadata.\n"
+            "Check that the loaded MLX model supports JSON/instruction following."
         )
     return 0
 
