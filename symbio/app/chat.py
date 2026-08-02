@@ -73,6 +73,7 @@ def _make_chat_logger() -> logging.Logger:
         logger.removeHandler(h)
         h.close()
     path = constants.LOG_DIR / f"chat_{datetime.now():%Y-%m-%d_%H-%M-%S}.log"
+    constants.LOG_DIR.mkdir(parents=True, exist_ok=True)
     fh = logging.FileHandler(path, delay=True)
     fh.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
     logger.addHandler(fh)
@@ -514,7 +515,9 @@ class ChatSession:
 
         # Warm the KV cache with the system prompt so the first real turn skips
         # re-processing it. This is guarded so fake-model tests skip it.
-        self._prefill_system_prompt_cache()
+        # No inner spinner: when called from _ensure_model_loaded() the outer
+        # 'Waking model...' spinner is already active.
+        self._prefill_system_prompt_cache(show_spinner=False)
 
     def _run_post_load_self_check(self):
         """AI-driven feature verification after the model has finished loading.
@@ -550,7 +553,7 @@ class ChatSession:
             )
         return self._cached_system_ids
 
-    def _prefill_system_prompt_cache(self):
+    def _prefill_system_prompt_cache(self, show_spinner: bool = True):
         """Process the system prompt through the model once at boot so the
         first user turn skips re-processing it. This is a pure latency win;
         failures are silently ignored and the chat loop falls back to cold
@@ -558,6 +561,9 @@ class ChatSession:
 
         Only runs with the real MLX model/stream path — tests and front-ends
         that inject fake objects should not trigger a real model call.
+        When called from _ensure_model_loaded() the outer 'Waking model...'
+        spinner is already running, so show_spinner=False prevents two
+        spinners fighting for the same terminal line.
         """
         if self.stream_fn is not stream_generate:
             return
@@ -569,8 +575,9 @@ class ChatSession:
         if not agent_cfg.get("prompt_cache_enabled", True):
             return
 
-        spinner = _Spinner("warming prompt cache…")
-        spinner.start()
+        spinner = _Spinner("warming prompt cache…") if show_spinner else None
+        if spinner:
+            spinner.start()
         try:
             system_ids = self._encode_system_prompt()
             if not system_ids:
@@ -593,7 +600,8 @@ class ChatSession:
             self._prompt_cache = None
             self._cached_prompt_ids = None
         finally:
-            spinner.stop()
+            if spinner:
+                spinner.stop()
 
     def _generate_reply(
         self,
@@ -2312,17 +2320,21 @@ class ChatSession:
             if name == "browser_click" and not params.get("target"):
                 return (
                     "Click failed: missing 'target'. "
-                    "Use <click>exact visible text or CSS selector</click>, e.g. <click>Mac</click>."
+                    "Retry now with the exact visible text inside the tag, e.g. "
+                    "<click>Mac</click>. "
+                    "Do not explain the failure — just emit the corrected click tag."
                 )
             if name == "browser_type" and not params.get("text"):
                 return (
                     "Type failed: missing 'text'. "
-                    "Use <type>text to type</type>."
+                    "Retry now with <type>text to type</type>. "
+                    "Do not explain the failure — just emit the corrected type tag."
                 )
             if name == "browser_press" and not params.get("key"):
                 return (
                     "Press failed: missing 'key'. "
-                    "Use <press>down</press>."
+                    "Retry now with <press>down</press>. "
+                    "Do not explain the failure — just emit the corrected press tag."
                 )
             out = browser_action_tools[name]()
             if "Browser is not open" in out:
@@ -2619,8 +2631,14 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
         owner="cli",
     )
     # When the CLI itself runs, load and warm the model before showing the
-    # banner or interactive prompt. Tests that inject a model skip this so
-    # they remain lightweight.
-    if model is None:
+    # banner or interactive prompt. Tests that inject a model or generation
+    # functions skip this so they remain lightweight.
+    is_real_cli_run = (
+        model is None
+        and tokenizer is None
+        and generate_fn is None
+        and stream_fn is None
+    )
+    if is_real_cli_run:
         session._ensure_model_loaded()
     session.run()
