@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from symbio import constants
 from symbio.app import config as app_config
-from symbio.app import health, memory
+from symbio.app import health, memory, telemetry
 
 
 def _ask(prompt: str, input_fn: Callable[[str], str]) -> str:
@@ -136,14 +136,35 @@ def _write_config(config: dict[str, Any]) -> None:
 
 
 def is_first_run(config: dict[str, Any]) -> bool:
-    """Return True if the wizard should run before the first chat session."""
+    """Return True if the wizard should run before the first chat session.
+
+    Gated solely on config.json existing and its ``first_run`` flag being
+    False. A user who completed *or* skipped the wizard (both paths set
+    ``first_run=False``) is never forced through it again. Empty identity
+    names are NOT a trigger here — they get sane defaults at chat startup
+    (see ensure_identity_defaults) instead of ambushing the user with the
+    full wizard on every launch.
+    """
     if not constants.CONFIG_FILE.exists():
         return True
-    if config.get("first_run", True):
-        return True
-    if not config.get("assistant_name") or not config.get("user_name"):
-        return True
-    return False
+    return bool(config.get("first_run", True))
+
+
+def ensure_identity_defaults(config: dict[str, Any]) -> bool:
+    """Fill in blank assistant/user names with sane defaults so the chat
+    banner and prompt are never blank. Returns True if anything changed.
+
+    Handles a skipped wizard (which leaves names empty) and a reset/broken
+    config.json without forcing the user back through the full wizard.
+    """
+    changed = False
+    if not config.get("assistant_name"):
+        config["assistant_name"] = "Symbio"
+        changed = True
+    if not config.get("user_name"):
+        config["user_name"] = "User"
+        changed = True
+    return changed
 
 
 def run_setup_wizard(
@@ -165,6 +186,10 @@ def run_setup_wizard(
     skip = _ask("  Skip setup? [s/N]: ", input_fn).lower()
     if skip == "s":
         output_fn("  Skipped. You can re-run anytime with: symb setup")
+        # A skip leaves identity blank, but a blank name breaks the chat
+        # banner/prompt and (previously) re-triggered the wizard every launch.
+        # Apply sane defaults so the session is usable as-is.
+        ensure_identity_defaults(config)
         config["first_run"] = False
         _write_config(config)
         return config
@@ -229,6 +254,17 @@ def run_setup_wizard(
     else:
         config.setdefault("agent", {})["backup_before_edit"] = False
 
+    # Telemetry consent: REQUIRED Y/N. The full data set is disclosed first so
+    # the user sees exactly what will be sent; "No" is allowed and the app
+    # continues normally. Default off. Re-askable anytime via /telemetry.
+    output_fn("")
+    output_fn(telemetry.consent_summary(config))
+    if _ask_yes_no("  Enable anonymous telemetry?", input_fn, default=False):
+        config.setdefault("telemetry", {})["enabled"] = True
+    else:
+        config.setdefault("telemetry", {})["enabled"] = False
+    config.setdefault("telemetry", {})["consented"] = True
+
     # 5. Review
     output_fn("\n  5. Review")
     output_fn(f"    Assistant name: {config['assistant_name']}")
@@ -241,6 +277,8 @@ def run_setup_wizard(
     telegram_on = config["telegram"].get("enabled", False)
     output_fn(f"    Telegram:         {'ON' if telegram_on else 'off'}")
     output_fn(f"    File backups:     {'ON' if config['agent'].get('backup_before_edit', True) else 'off'}")
+    tcfg = config.get("telemetry", {})
+    output_fn(f"    Telemetry:        {'ON' if tcfg.get('enabled') else 'off (consent recorded)'}")
     if telegram_on:
         ids = config["telegram"].get("allowed_chat_ids", [])
         token_set = bool(config["telegram"].get("bot_token") or os.environ.get("SYMBIO_TELEGRAM_TOKEN"))

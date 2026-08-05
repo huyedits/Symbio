@@ -1,0 +1,14 @@
+name = "symbio-telemetry"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Public vars (non-secret). The branch to append pings.ndjson to.
+[vars]
+GITHUB_BRANCH = "telemetry"
+GITHUB_REPO = "huyedits/symbio-telemetry"
+
+# Secrets — set these with `wrangler secret put <NAME>`, do NOT commit them:
+#   TELEMETRY_SECRET  — shared bearer key (paste the same value into Symbio's
+#                      telemetry.shared_secret in config.json)
+#   GITHUB_TOKEN      — fine-grained PAT: repo "Issues: Read and Write" + "Contents: Read and Write"
+#   GITHUB_REPO       — "owner/repo" to file issues into and append pings to

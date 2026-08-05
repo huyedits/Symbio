@@ -20,9 +20,11 @@ from mlx_lm.sample_utils import make_sampler
 
 from rag import Retriever
 from symbio import constants
+from symbio.config import _adapter_matches_model
 from symbio.computer import BrowserSession
 from symbio import safety
-from symbio.app import cron, dispatch, golden, health, learn, memory, mcp_bridge, prompts, sandbox, sessions, setup, skills, tooling, training, web
+from symbio.tools import tool_few_shots
+from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, prompts, sandbox, sessions, setup, skills, tooling, training, web
 from symbio.app.config import config_show, set_config_value
 from tag_rag import TagIndex
 
@@ -48,6 +50,393 @@ def _looks_like_shell_command(cmd: str) -> bool:
     if "=" in first_word and not first_word.startswith("-"):
         return True
     return False
+
+
+# Short verification follow-ups ("are you sure?", "check again") carry almost
+# no signal, so a small low-temperature model derails — reciting its identity
+# or regurgitating an earlier topic instead of re-examining the answer it just
+# gave. Detected here so the turn loop can inject a contextual nudge.
+_VERIFICATION_FOLLOWUPS = {
+    # Direct re-check requests.
+    "are you sure", "you sure", "sure", "sure?", "really", "really?",
+    "certain", "certain?", "is that right", "is that correct", "that right",
+    "check again", "again", "verify", "double check", "doublecheck",
+    "recheck", "redo", "rethink", "reconsider",
+    # Subtler hedging / doubt a user fires back at a factual claim.
+    "i don't think so", "i dont think so",
+    "not sure", "not so sure", "not convinced", "not really",
+    "not sure about that", "not sure about this",
+    "doesn't sound right", "doesnt sound right", "sounds wrong", "sounds off",
+    "are you certain", "are you positive",
+    "are you sure about that", "are you sure about this",
+    "how do you know", "how do you know that", "how are you sure", "how so",
+    "hmm", "wait", "wait what", "wait really", "huh",
+    "nope", "nah", "i doubt it", "doubt it", "skeptical",
+}
+
+# Cues that also work at the END of a longer pushback, e.g.
+# "that's qatar, not america. check again". Bare ambiguous single tokens
+# (again/sure/really/wait/hmm) are excluded here — they only qualify as short
+# standalone follow-ups, not as trailing cues, so a sentence that merely ends
+# with one of them isn't mistaken for doubt. "you think" is deliberately
+# excluded so "what do you think" (asking for an opinion) never trips.
+_VERIFICATION_TRAILING = {
+    "check again", "are you sure", "is that right", "is that correct",
+    "double check", "double-check", "doublecheck", "recheck", "rethink",
+    "reconsider", "verify that", "verify it", "verify this",
+    "are you certain", "are you positive",
+    "are you sure about that", "are you sure about this",
+    "how do you know", "how do you know that", "how are you sure",
+    "doesn't sound right", "doesnt sound right", "sounds wrong", "sounds off",
+    "doesn't sound right to me",
+    "i don't think so", "i dont think so", "not so sure", "not convinced",
+    "not sure about that", "not sure about this",
+    "i doubt it",
+}
+
+
+def _looks_like_verification_followup(text: str) -> bool:
+    """Is this a follow-up asking the model to re-examine its last answer?
+
+    Fires on (a) a short ≤4-word hedging phrase (with an optional leading "no"
+    negation, so "no. check again" matches), or (b) a longer pushback (≤20
+    words) that ends with an unambiguous verification cue like "check again".
+    Normal turns and standalone questions are unaffected.
+    """
+    stripped = text.strip().lower()
+    if not stripped or stripped.startswith("/"):
+        return False
+    # (a) short exact hedging phrase, allowing a leading negation.
+    short = re.sub(r"^no[.,]?\s+", "", stripped).strip("?.!\"' ")
+    if len(short.split()) <= 4 and short in _VERIFICATION_FOLLOWUPS:
+        return True
+    # (b) longer pushback ending in an unambiguous verification cue.
+    tail = re.sub(r"[?.!\"']+$", "", stripped).strip()
+    if len(tail.split()) <= 20 and any(
+        tail == p or tail.endswith(" " + p) for p in _VERIFICATION_TRAILING
+    ):
+        return True
+    return False
+
+
+# Imperative "search for me" phrasings. When the user explicitly tells the model
+# to search and it waffles (describes searching instead of calling <search>),
+# the turn loop forces a web search so the user isn't left stranded. Word-
+# boundary anchored so "research" (which contains "search") never matches.
+_EXPLICIT_SEARCH_RE = re.compile(
+    r"\b(?:search\s+it|search\s+online|search\s+the\s+web|search\s+now|"
+    r"google\s+it|look\s+it\s+up|just\s+search|check\s+online|check\s+the\s+web|"
+    r"look\s+online|verify\s+online)\b",
+    re.IGNORECASE,
+)
+
+# Function/filler words (len>=4) that never constitute a search subject on
+# their own. Words shorter than 4 chars (it, has, the, is, of, on, in, at,
+# do, to, be, a, an, as, by, he, we, me, my, no, so, or, up, us) are dropped
+# by the len>=4 signature filter in _subjectless_search_command, so they
+# don't need listing here. A "check online" command is subjectless when,
+# after dropping the matched command phrase, no substantive word survives —
+# e.g. "it has check online" -> "it has" -> no signature word -> inject the
+# previous question; "check online who won the world cup" -> "world" survives
+# -> the model can bind the topic itself.
+_SEARCH_FILLER_STOPWORDS = {
+    "does", "much", "will", "would", "should", "could", "that", "this",
+    "with", "from", "about", "they", "them", "have", "been", "were",
+    "your", "their", "when", "where", "which", "there", "here", "than",
+    "then", "what", "whats", "just", "into", "onto", "over", "sure",
+    "know", "think", "thought", "said", "told", "means", "again",
+    "never", "always", "very", "more", "most", "some", "such", "only",
+    "also", "even", "because", "though", "however", "anyway", "really",
+    "actually", "convinced", "done", "went", "getting", "going",
+    "already", "still", "happened", "happening", "happens", "dont",
+}
+
+
+def _subjectless_search_command(text: str) -> bool:
+    """A "go search" command whose own words carry no searchable subject —
+    "check online.", "it has check online", "search it", "just google it".
+    The small model has nothing to bind the search to and will hallucinate an
+    unrelated query, so the caller injects the previous unanswered question
+    as the subject instead.
+
+    Detects this by dropping the matched command phrase (e.g. "check online")
+    and checking whether any substantive word (len>=4, not a function-word
+    stopword) survives in the remainder. "it has" -> none -> subjectless;
+    "who won the world cup" -> "world" -> has a subject.
+    """
+    t = text.strip().lower().rstrip("?.!")
+    if not t or len(t.split()) > 6:
+        return False
+    m = _EXPLICIT_SEARCH_RE.search(t)
+    if not m:
+        return False
+    remainder = (t[:m.start()] + " " + t[m.end():]).strip()
+    signature = {w for w in re.findall(r"[a-z0-9]{4,}", remainder)
+                 if w not in _SEARCH_FILLER_STOPWORDS}
+    return not signature
+
+
+# Stopwords excluded when comparing a model-emitted search query to the
+# resolved subject, so a coincidence like "does" in both doesn't make a
+# hallucinated query look on-topic.
+_QUERY_STOPWORDS = {
+    "does", "much", "will", "would", "should", "could", "that", "this",
+    "with", "from", "about", "they", "them", "have", "has", "been",
+    "were", "your", "their", "when", "where", "which", "there", "here",
+    "than", "then", "what", "whats",
+}
+
+
+def _queries_overlap(model_query: str, subject: str) -> bool:
+    """Does the model's search query mention any signature word (len>=4, not a
+    stopword) from the subject question? If not, the model likely hallucinated
+    an unrelated topic and the caller should override the query."""
+    subj_words = {w for w in re.findall(r"[a-z0-9]{4,}", subject.lower())
+                  if w not in _QUERY_STOPWORDS}
+    if not subj_words:
+        return True  # can't tell; trust the model
+    model_lower = (model_query or "").lower()
+    return any(w in model_lower for w in subj_words)
+
+# Greeting-only messages ("hi", "hi caine", "hello there", "hey", "good
+# morning"). A blank reply to one must never trigger a web search (we'd
+# "search" the word "hi" and get nonsense) and must never be "learned" as
+# research. Matched by tokenizing so "hi" can't false-fire on "this" etc.
+_GREETING_WORDS = {
+    "hi", "hello", "hey", "yo", "sup", "howdy", "hiya", "heya",
+    "morning", "evening", "afternoon", "greetings", "whatsup", "whats",
+    "hola", "aloha",
+}
+_GREETING_FILLERS = {
+    "there", "you", "all", "guys", "man", "dude", "bro", "mate", "good",
+    "caine", "symbio", "bot", "ai",
+}
+
+
+def _is_greeting(text: str) -> bool:
+    t = text.strip().lower()
+    if not t:
+        return False
+    words = re.findall(r"[a-z']+", t)
+    if not words or len(words) > 4:
+        return False
+    return all(w in _GREETING_WORDS or w in _GREETING_FILLERS for w in words)
+
+
+# A user turn that asks Caine to *do* something with a tool — open/navigate to a
+# page, click/press/type/scroll, or read a URL. When the model blanks on one of
+# these (no tool call, no prose), the turn must not die silent: the user is
+# waiting for an action, so we nudge the model to emit the right tool rather than
+# leaving them with nothing. Matches the same verbs browser_followup uses, plus
+# an explicit URL, so "now go to cloudflare pricing" / "read the webpage at …"
+# are caught.
+def _is_action_request(text: str) -> bool:
+    t = text.strip().lower()
+    if not t:
+        return False
+    if "http" in t or ".com" in t:
+        return True
+    return any(m in t for m in (
+        "go to ", "open ", "browse ", "click ", "press ", "type ", "scroll ",
+        "read the webpage", "read the page", "read this", "navigate", "visit ",
+    ))
+
+
+# A pure navigation request: "open/go to/visit <site>" with NO ask for info or
+# further on-page action. Once the page is open, the task is done — re-prompting
+# the model with the freshly-loaded page only invites it to auto-click elements
+# it happens to see (the "Stream now"/"Continue" problem). Used to stop the
+# tool loop right after a successful browser_open so the model's pre-tool prose
+# (e.g. "Opening Apple.com.") stands as the reply. Requests that also want info
+# ("go to cloudflare pricing", "open X and tell me…") are NOT navigation-only,
+# so the loop continues and the model can read/summarize the page.
+def _is_navigation_only(text: str) -> bool:
+    t = text.strip().lower()
+    if not t:
+        return False
+    if not any(m in t for m in ("open ", "go to ", "visit ", "browse ", "navigate ")):
+        return False
+    if any(m in t for m in (
+        "click", "press", "type ", "scroll", "read", "tell", "what", "find",
+        "show", "price", "pricing", "cost", "how much", "list", "summary",
+        "summari", "extract", "who", "when", "where", "why", "and then", "then ",
+    )):
+        return False
+    return True
+
+
+def _last_exchange(history: list[dict[str, str]]) -> tuple[str | None, str | None]:
+    """Return (last real user question, last assistant answer) from history.
+
+    Skips system observations and injected [System: …] nudges so a verification
+    follow-up can be given the full prior context inline rather than relying on
+    the model to dig it out of history itself.
+    """
+    answer = None
+    ans_idx = None
+    for i in range(len(history) - 1, -1, -1):
+        turn = history[i]
+        if turn.get("role") == "assistant" and turn.get("content", "").strip():
+            answer = turn["content"].strip()
+            ans_idx = i
+            break
+    if answer is None:
+        return None, None
+    question = None
+    for i in range(ans_idx - 1, -1, -1):
+        turn = history[i]
+        if turn.get("role") != "user":
+            continue
+        content = turn.get("content", "")
+        if content.startswith("[System"):
+            continue
+        if content.strip():
+            question = content.strip()
+            break
+    return question, answer
+
+
+# Per-turn user affect: a lightweight read of how the user is feeling from one
+# message, so Caine can adapt tone/directness instead of waffling cheerfully
+# while the user is frustrated. Heuristic only — caps/punctuation + a small
+# lexicon — good enough to spot the states that should change how it replies
+# (frustration/impatience most of all), not a fine-grained emotion model.
+
+_AFFECT_FRUSTRATION = {
+    "frick", "insufferable", "annoying", "stupid", "wtf", "ugh", "bruh",
+    "damn", "ridiculous", "useless", "broken", "hate", "crap", "garbage",
+    "trash", "awful", "not working", "doesn't work", "fix this", "serious",
+    "for real", "cmon", "c'mon", "ffs",
+}
+_AFFECT_IMPATIENCE = {
+    "still not", "why won't", "why is it", "why are you", "come on", "just do",
+    "enough", "yet again", "i keep", "still doesn't", "again and again",
+}
+_AFFECT_CONFUSED = {
+    "confused", "don't get", "dont get", "don't understand", "dont understand",
+    "what do you mean", "i'm lost", "im lost", "make sense", "lost",
+    "what is going on", "not following",
+}
+_AFFECT_GRATEFUL = {
+    "thank", "thanks", "thank you", "appreciate", "love ya", "love you",
+    "awesome", "great job", "nice work", "perfect", "<3",
+}
+_AFFECT_HAPPY = {
+    "lol", "haha", "yay", "love this", "sweet", "amazing", "woohoo",
+    "🔥", "😊", "😄", "🥳", "😂",
+}
+_AFFECT_CURIOUS = {
+    "what if", "i wonder", "how about", "what happens", "curious",
+    "let's try", "brainstorm", "idea: ",
+}
+# Exasperated rhetorical closes — the message ends with one of these (often
+# with a single raised-voice emphasis word, e.g. "what are you DOINGG").
+# Matched against a repeat-normalized, trailing-punctuation-stripped copy of
+# the lowercased text, and required at the *end* so a genuine "what are you
+# doing tomorrow" does not trip it.
+_AFFECT_EXASPERATION = (
+    "what are you doing",
+    "what are you even doing",
+    "what are you even",
+    "what are you talking about",
+    "what are you on about",
+    "what is wrong with you",
+    "what is your problem",
+    "are you kidding me",
+    "are you kidding me right now",
+    "are you kidding",
+    "are you serious right now",
+    "are you serious",
+    "why are you like this",
+    "are you actually doing",
+    "are you done",
+    "are you finished",
+)
+# Same phrases with repeated letters collapsed, so misspelled emphasis
+# ("doingg", "soooo") matches them and legit doubles ("kidding" -> "kiding")
+# line up on both sides of the comparison.
+_AFFECT_EXASPERATION_NORM = tuple(
+    re.sub(r"(.)\1+", r"\1", p) for p in _AFFECT_EXASPERATION
+)
+
+# Command-start verbs, to tell an all-caps imperative ("TELL ME SEARCH IT
+# ONLINE") from an all-caps question ("WHO IS THE CEO") when there's no
+# question mark. Question auxiliaries (do/does/is/are) are deliberately
+# excluded so "DO YOU KNOW" doesn't read as a command.
+_CMD_START_RE = re.compile(
+    r"^\s*(?:tell|search|find|get|show|give|make|run|open|fix|check|look|go|"
+    r"stop|help|explain|list|try|call|fetch|write|read|delete|create|start|"
+    r"shut|send|bring|take|install|build|deploy|test|restart|update|download|"
+    r"copy|clear|reset|quit|exit|please|just|now)\b", re.IGNORECASE,
+)
+
+# Tone adaptation for the detected mood now lives in the system prompt (the
+# model reads the mood itself and adjusts), so there is no per-turn nudge
+# dict here.
+
+
+def infer_user_affect(text: str) -> str:
+    """Best-guess the user's current mood from a single message.
+
+    Returns one of: frustrated, impatient, confused, grateful, happy, curious,
+    neutral. Coarse by design — it only needs to spot the states that should
+    change how Caine responds (mainly frustration/impatience), not be a
+    fine-grained emotion model.
+    """
+    if not text or not text.strip():
+        return "neutral"
+    lower = text.lower()
+    letters = [c for c in text if c.isalpha()]
+    caps_ratio = (sum(1 for c in letters if c.isupper()) / len(letters)) if letters else 0.0
+    # Raised voice: heavy caps across enough letters, paired with exclamations
+    # so acronyms ("NASA", "CEO") don't read as shouting.
+    shouting = caps_ratio > 0.45 and len(letters) >= 5
+    excl = text.count("!") >= 2
+
+    # Impatience (persistence over time: "still not", "why won't", "i keep")
+    # is checked before frustration so "still not working" reads as impatient
+    # rather than angry — the two share some negativity but differ in tone.
+    if any(w in lower for w in _AFFECT_IMPATIENCE):
+        return "impatient"
+    # Exasperated rhetorical close ("...what are you DOINGG", "are you kidding
+    # me"): normalize exaggerated repeats ("doingg" -> "doing") so misspelled
+    # emphasis still matches, then test whether the message ends with one of
+    # these phrases. End-position avoids "what are you doing tomorrow" (a
+    # genuine question) reading as frustration.
+    _exasp_norm = re.sub(r"(.)\1+", r"\1", lower)
+    _exasp_tail = re.sub(r"[?!.\s]+$", "", _exasp_norm)
+    if any(_exasp_tail.endswith(p) for p in _AFFECT_EXASPERATION_NORM):
+        return "frustrated"
+    # All-caps counts as frustration only when it's a command or exclamatory
+    # (raised voice), not an all-caps question — "WHO IS THE CEO" is just a
+    # question typed in caps, "TELL ME SEARCH IT ONLINE" is a frustrated order.
+    imperative = bool(_CMD_START_RE.match(text))
+    if any(w in lower for w in _AFFECT_FRUSTRATION) or (shouting and (imperative or excl)):
+        return "frustrated"
+    if any(w in lower for w in _AFFECT_CONFUSED):
+        return "confused"
+    if any(w in lower for w in _AFFECT_GRATEFUL):
+        return "grateful"
+    if any(w in lower for w in _AFFECT_HAPPY):
+        return "happy"
+    if any(w in lower for w in _AFFECT_CURIOUS):
+        return "curious"
+    return "neutral"
+
+
+# --- Model-emitted mood tag -------------------------------------------------
+# The model itself reads the user's tone (it was trained on human language, so
+# it catches anger/frustration/sadness/joy that a regex misses — e.g. a single
+# raised-voice emphasis word like "DOINGG"). It emits <mood>tag</mood> at the
+# start of its reply; StreamingStripper + strip_tool_tags hide that tag from
+# the user, and the turn loop parses it to surface [Mood: tag]. The lexicon
+# heuristic (infer_user_affect) is only a fallback for turns where the model
+# omits the tag.
+_MOOD_TAG_RE = re.compile(r"<mood>\s*([a-zA-Z]+)\s*</mood>", re.IGNORECASE)
+_VALID_MOODS = {
+    "angry", "frustrated", "impatient", "confused", "sad", "anxious",
+    "grateful", "happy", "excited", "curious", "neutral",
+}
 
 
 def _persist_health_report(session_id: str, report: dict[str, Any]):
@@ -229,7 +618,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn("-" * 50)
     output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
     output_fn("         /run <cmd>  /note [title]  /notes  /index-notes [--force]  /auto-index on|off  /new-skill <name>  /skills  /skill-adapters  /digest  /cron  /config  /archive  /restore")
-    output_fn("         /build-mcp <name> | <description>  /mcp-tools  /hosts")
+    output_fn("         /build-mcp <name> | <description>  /mcp-tools  /hosts  /telemetry on|off  /feedback <text>")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
     output_fn("-" * 50)
 
@@ -337,6 +726,13 @@ class ChatSession:
         # under it (adapter reload, a generation that errored mid-stream).
         self._prompt_cache: list | None = None
         self._cached_prompt_ids: list[int] | None = None
+        # The system-prompt prefill runs on a daemon thread at boot so the user
+        # can read the banner and type their first message while the ~4000-token
+        # system+tools prefix is processed into the KV cache, instead of paying
+        # that cost as a blocking "warming prompt cache…" step. _await_prefill()
+        # joins it before any generation (so the model is never used by two
+        # threads at once).
+        self._prefill_thread: threading.Thread | None = None
         self.enabled_groups: set[str] = set(
             config.get("tools", {}).get("enabled_groups", [])
         )
@@ -346,8 +742,6 @@ class ChatSession:
         self.system_prompt = prompts.build_system_prompt(
             config["assistant_name"], config["user_name"]
         )
-        self._system_prompt_text: str = self.system_prompt
-        self._cached_system_ids: list[int] | None = None
         self._refresh_sampler()
 
         self.adapter_config = constants.ADAPTER_DIR / "adapter_config.json"
@@ -393,7 +787,8 @@ class ChatSession:
         self.session_store = sessions.SessionStore(self.session_id)
         # Past sessions are retrievable; the live one is excluded to avoid echo.
         self.retriever = Retriever(config, session_store=self.session_store,
-                                   exclude_session_id=self.session_id)
+                                   exclude_session_id=self.session_id,
+                                   llm_fn=self._generate_tag_metadata)
         self.tag_index: TagIndex | None = None
         self.browser = BrowserSession(confirm_fn=self.confirm_fn)
         # Worker models are loaded lazily on first delegated task — this
@@ -410,6 +805,11 @@ class ChatSession:
         self.logger = _make_chat_logger()
         self.user_turns = 0
         self.auto_searches = 0
+        # Resolved subject for a subjectless "check online"-style command this
+        # turn, so the web_search tool can override a hallucinated query and
+        # the research note can be filed under the real question. None on a
+        # normal turn.
+        self._search_subject: str | None = None
         # Human-readable outcome of the last _guarded_train() call, surfaced
         # verbatim as the train_adapter tool's observation.
         self._last_train_note = ""
@@ -553,7 +953,14 @@ class ChatSession:
             # while the download bar shows progress.
             self.output_fn(" Waking model...")
             try:
-                if self.adapter_config.exists():
+                if self.adapter_config.exists() and not _adapter_matches_model(self.config):
+                    self.output_fn(
+                        " [Warning] Existing adapter was trained for a different model."
+                        " Loading base model only."
+                    )
+                    self.model, self.tokenizer = load(self.config["model_name"])
+                    self.adapter_loaded = False
+                elif self.adapter_config.exists():
                     self.output_fn(" Loading adapter...")
                     try:
                         self.model, self.tokenizer = load(
@@ -568,6 +975,10 @@ class ChatSession:
                 else:
                     self.model, self.tokenizer = load(self.config["model_name"])
                     self.adapter_loaded = False
+
+                local_telemetry.log_event(
+                    "model", model=self.config["model_name"], adapter=self.adapter_loaded,
+                )
 
                 # Warmup (KV-cache prefill + seed notes) has no progress bar of
                 # its own, so this is where the spinner actually earns its keep.
@@ -625,30 +1036,19 @@ class ChatSession:
         except Exception:
             pass
 
-    def _encode_system_prompt(self) -> list[int]:
-        """Encode just the system message once and cache it. The cache is
-        invalidated when the system prompt text changes (e.g. identity edits)."""
-        if self._cached_system_ids is None or self.system_prompt != self._system_prompt_text:
-            self._system_prompt_text = self.system_prompt
-            self._cached_system_ids = self.tokenizer.encode(
-                self.tokenizer.apply_chat_template(
-                    [{"role": "system", "content": self.system_prompt}],
-                    tokenize=False, add_generation_prompt=False, enable_thinking=False,
-                )
-            )
-        return self._cached_system_ids
-
     def _prefill_system_prompt_cache(self, show_spinner: bool = True):
         """Process the system prompt through the model once at boot so the
         first user turn skips re-processing it. This is a pure latency win;
         failures are silently ignored and the chat loop falls back to cold
         generation.
 
+        Runs on a daemon thread so the user can start typing their first
+        message while the ~4000-token system+tools prefix is processed into
+        the KV cache — instead of blocking boot for that long. _await_prefill()
+        joins the thread before any generation.
+
         Only runs with the real MLX model/stream path — tests and front-ends
         that inject fake objects should not trigger a real model call.
-        When called from _ensure_model_loaded() the outer 'Waking model...'
-        spinner is already running, so show_spinner=False prevents two
-        spinners fighting for the same terminal line.
         """
         if self.stream_fn is not stream_generate:
             return
@@ -660,33 +1060,62 @@ class ChatSession:
         if not agent_cfg.get("prompt_cache_enabled", True):
             return
 
-        spinner = _Spinner("warming prompt cache…") if show_spinner else None
-        if spinner:
-            spinner.start()
-        try:
-            system_ids = self._encode_system_prompt()
-            if not system_ids:
-                return
-            self._prompt_cache = make_prompt_cache(self.model)
-            # max_tokens=0 processes the prompt into the KV cache and stops
-            # before generating any output tokens.
-            for _ in generate_step(
-                mx.array(system_ids),
-                self.model,
-                max_tokens=0,
-                sampler=self.sampler,
-                prompt_cache=self._prompt_cache,
-            ):
-                pass
-            self._cached_prompt_ids = list(system_ids)
-        except Exception:
-            # Prefill is an optimization, never a hard requirement. Clear any
-            # partial state so the next generation rebuilds cleanly.
-            self._prompt_cache = None
-            self._cached_prompt_ids = None
-        finally:
-            if spinner:
-                spinner.stop()
+        def _prefill():
+            # Block the background note-indexer from touching the model while
+            # the prefill runs; it sleeps while _indexing_now is True. The main
+            # thread is blocked on input() here, and _await_prefill() joins us
+            # before it generates, so the model is never used concurrently.
+            self._indexing_now = True
+            try:
+                # The Mistral template only renders the system message inside a
+                # following user [INST] block, so apply_chat_template([system])
+                # alone emits just BOS and caches nothing useful. Render the
+                # system prompt with an empty user turn to get the real
+                # system+tools prefix, then prefill those ids. The empty user's
+                # closing [/INST] becomes a few stale tokens on the first real
+                # turn and is trimmed by the cache-diff logic in _generate_reply.
+                templated = self.tokenizer.apply_chat_template(
+                    [{"role": "system", "content": self.system_prompt},
+                     {"role": "user", "content": ""}],
+                    tokenize=False, add_generation_prompt=False, enable_thinking=False,
+                )
+                system_ids = self.tokenizer.encode(templated)
+                if not system_ids:
+                    return
+                self._prompt_cache = make_prompt_cache(self.model)
+                # max_tokens=0 processes the prompt into the KV cache and stops
+                # before generating any output tokens.
+                for _ in generate_step(
+                    mx.array(system_ids),
+                    self.model,
+                    max_tokens=0,
+                    sampler=self.sampler,
+                    prompt_cache=self._prompt_cache,
+                ):
+                    pass
+                self._cached_prompt_ids = list(system_ids)
+            except Exception:
+                # Prefill is an optimization, never a hard requirement. Clear any
+                # partial state so the next generation rebuilds cleanly.
+                self._prompt_cache = None
+                self._cached_prompt_ids = None
+            finally:
+                self._indexing_now = False
+
+        self._prefill_thread = threading.Thread(target=_prefill, daemon=True)
+        self._prefill_thread.start()
+
+    def _await_prefill(self):
+        """Block until the background system-prompt prefill (if any) has
+        finished, so the model is never used by two threads at once. After this
+        returns, _prompt_cache/_cached_prompt_ids are either populated (prefill
+        succeeded) or None (prefill failed or never started), and the cache path
+        falls back to cold generation in the latter case."""
+        thread = self._prefill_thread
+        if thread is None:
+            return
+        thread.join()
+        self._prefill_thread = None
 
     def _generate_reply(
         self,
@@ -717,6 +1146,10 @@ class ChatSession:
         """
         agent_cfg = self.config["agent"]
         self._ensure_model_loaded()
+        # The system-prompt prefill may still be running on its background
+        # thread (started at boot). Join it before touching the model so the
+        # prefill thread and this generation never use the model concurrently.
+        self._await_prefill()
         # Start the spinner before tokenizing the prompt: apply_chat_template
         # plus the encode passes (the full prompt for token counting, then the
         # conversation tail) and the cache-prefix diff take a visible beat on
@@ -726,9 +1159,18 @@ class ChatSession:
         tokenizing_spinner.start()
         try:
             prompt_text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+                messages, tokenize=False, add_generation_prompt=True, enable_thinking=True,
             )
-            prompt_tokens = len(self.tokenizer.encode(prompt_text))
+            # Encode the FULL templated prompt (system + tools + conversation).
+            # The Mistral chat template only renders the system message inside a
+            # following user [INST] block, so apply_chat_template([system]) on
+            # its own emits just BOS — and the old "encode system separately,
+            # encode the rest separately, then concatenate" splice silently
+            # dropped the entire system prompt + tool catalog (and produced a
+            # double-BOS). The model then had no idea what tools it has.
+            # Templating the whole message list renders everything correctly.
+            ids = self.tokenizer.encode(prompt_text)
+            prompt_tokens = len(ids)
             if timings is not None:
                 timings["prompt_tokens"] = prompt_tokens
                 timings["prompt_chars"] = len(prompt_text)
@@ -743,6 +1185,10 @@ class ChatSession:
                         self.model, self.tokenizer, prompt=prompt_text, sampler=self.sampler,
                         max_tokens=max_tokens, verbose=False,
                     )
+                    # Cut at the end-of-turn marker (mirrors the streaming stop).
+                    m = tooling.END_TURN_RE.search(text)
+                    if m:
+                        text = text[:m.start()]
                 finally:
                     self._indexing_now = False
                 if timings is not None:
@@ -750,21 +1196,12 @@ class ChatSession:
                     timings["ttft_ms"] = timings["gen_ms"]
                 return text, False
 
-            # Avoid re-encoding the full system prompt every turn: cache its ids
-            # and splice them with the encoded rest of the conversation.
-            system_ids = self._encode_system_prompt()
-            if messages and messages[0].get("role") == "system":
-                rest = messages[1:]
-            else:
-                rest = messages
-                system_ids = []
-            rest_ids = self.tokenizer.encode(
-                self.tokenizer.apply_chat_template(
-                    rest, tokenize=False, add_generation_prompt=True, enable_thinking=False,
-                )
-            ) if rest else []
-            ids = system_ids + rest_ids
-
+            # Reuse the KV cache across calls: only the token-level suffix that's
+            # new since the last call (an exact longest-common-prefix diff) is
+            # prefilled — the system prompt, tools, and unchanged history are
+            # served from cache. The system prompt is prefilled at boot (see
+            # _prefill_system_prompt_cache) so the first turn feeds only the
+            # user message, not the whole system+tools prefix.
             reused = _common_prefix_len(self._cached_prompt_ids, ids)
             if timings is not None:
                 timings["cached_tokens"] = reused
@@ -816,6 +1253,7 @@ class ChatSession:
         text_parts: list[str] = []
         gen_ids: list[int] = []
         gen_tokens = 0
+        raw_acc = ""
         # Mark the model as busy so the background indexer waits.
         self._indexing_now = True
         try:
@@ -824,6 +1262,7 @@ class ChatSession:
                 sampler=self.sampler, prompt_cache=self._prompt_cache,
             ):
                 text_parts.append(response.text)
+                raw_acc += response.text
                 gen_ids.append(response.token)
                 gen_tokens += 1
                 spinner.set_gen_tokens(gen_tokens)
@@ -833,6 +1272,12 @@ class ChatSession:
                         _emit(safe)
                 else:
                     _emit(response.text)
+                # Stop the instant the explicit end-of-turn marker streams out,
+                # so a model that forgets <|im_end|> can't loop, repeating tool
+                # calls, until max_tokens. The marker is stripped from display
+                # by StreamingStripper/strip_tool_tags, so it never shows.
+                if tooling.END_TURN_RE.search(raw_acc):
+                    break
         except BaseException:
             # The real MLX cache may already be mutated beyond what our
             # bookkeeping reflects (interrupted mid-token) — never trust a
@@ -873,6 +1318,10 @@ class ChatSession:
         higher token limit and lower temperature so the output is stable JSON.
         """
         self._ensure_model_loaded()
+        # The background note-indexer calls this; the boot prefill sets
+        # _indexing_now so the indexer waits, but join the prefill here too in
+        # case some other caller reaches this before the prefill is done.
+        self._await_prefill()
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": prompt},
@@ -1060,6 +1509,7 @@ class ChatSession:
 
         try:
             trained = training.run_training(self.config, iters=iters)
+            local_telemetry.log_event("train", iters=iters, ok=bool(trained))
             if not trained or not self.adapter_config.exists():
                 self._last_train_note = "Training skipped (no new data or failed)."
                 return trained
@@ -1198,6 +1648,20 @@ class ChatSession:
             self.history.pop(0)
 
     # ---- Slash commands ----
+
+    def _yes_no(self, prompt: str) -> bool:
+        """Local Y/N prompt: uses confirm_fn if a front-end supplied one, else
+        reads a line from input_fn. Used by /telemetry's consent re-prompt."""
+        if self.confirm_fn is not None:
+            try:
+                return self.confirm_fn(prompt)
+            except Exception:
+                pass
+        try:
+            ans = self.input_fn(prompt).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return ans in ("y", "yes", "true", "1", "on")
 
     def _handle_command(self, user_input: str) -> str:
         """Handle a /command; returns _QUIT or _HANDLED."""
@@ -1477,7 +1941,11 @@ class ChatSession:
                 self.system_prompt = prompts.build_system_prompt(
                     self.config["assistant_name"], self.config["user_name"]
                 )
-                self._cached_system_ids = None
+                # Identity changed → the prefilled KV cache holds the old system
+                # prompt's tokens, so drop it. The next turn rebuilds a fresh
+                # cache instead of mismatching the prefix and re-prefilling.
+                self._prompt_cache = None
+                self._cached_prompt_ids = None
                 self.output_fn("  Setup complete. Some changes may need a restart to take full effect.")
             elif not self.config.get("assistant_name") or not self.config.get("user_name"):
                 self.config = setup.run_setup_wizard(
@@ -1486,7 +1954,8 @@ class ChatSession:
                 self.system_prompt = prompts.build_system_prompt(
                     self.config["assistant_name"], self.config["user_name"]
                 )
-                self._cached_system_ids = None
+                self._prompt_cache = None
+                self._cached_prompt_ids = None
             else:
                 self.output_fn("  Run /setup wizard to re-run the full setup, or use /config to change individual settings.")
 
@@ -1496,6 +1965,10 @@ class ChatSession:
             if store not in ("memory", "profile"):
                 self.output_fn("  Usage: /compact [memory|profile]")
             else:
+                # /compact can be the user's first input, before any _agent_turn
+                # joined the boot prefill — make sure that background prefill is
+                # done before we use the model to summarize.
+                self._await_prefill()
                 def _summarize(text: str) -> str:
                     return str(self.generate_fn(
                         self.model, self.tokenizer, prompt=text, sampler=self.sampler,
@@ -1584,6 +2057,71 @@ class ChatSession:
                 self.output_fn("  No stale checkpoints to remove.")
             self.output_fn(f"  Current adapter footprint: {info['total_kb']:,} KB")
             self.output_fn("  Note: mlx_lm LoRA adapters do not support true weight pruning; keeping rank low and removing checkpoints is the practical way to stay small.")
+
+        elif cmd.startswith("/telemetry"):
+            from symbio.app import telemetry
+            from symbio.app.config import save_config
+            rest = user_input[len("/telemetry"):].strip().lower()
+            tcfg = self.config.setdefault("telemetry", {})
+            if rest in ("on", "enable", "true", "yes", "1"):
+                # Re-ask consent with the full data set disclosed, honoring the
+                # "required consent" rule: the user can say No and keep going.
+                self.output_fn(telemetry.consent_summary(self.config))
+                if self._yes_no("  Enable anonymous telemetry? [y/N]: "):
+                    tcfg["enabled"] = True
+                    tcfg["consented"] = True
+                    save_config(self.config)
+                    self.output_fn("  Telemetry enabled. Set telemetry.endpoint to send to your worker;")
+                    self.output_fn("  with no endpoint, records are kept locally under telemetry/.")
+                else:
+                    tcfg["consented"] = True
+                    tcfg["enabled"] = False
+                    save_config(self.config)
+                    self.output_fn("  Telemetry remains off. (Consent recorded.) /telemetry on re-asks anytime.")
+            elif rest in ("off", "disable", "false", "no", "0"):
+                tcfg["enabled"] = False
+                save_config(self.config)
+                self.output_fn("  Telemetry disabled. /telemetry on to re-enable (re-asks consent).")
+            else:
+                enabled = tcfg.get("enabled", False)
+                fb = tcfg.get("feedback_enabled", True)
+                endpoint = tcfg.get("endpoint", "") or "(none — local only)"
+                self.output_fn(f"  Telemetry: {'ON' if enabled else 'off'}  |  consented: {'yes' if tcfg.get('consented') else 'not yet asked'}")
+                self.output_fn(f"  /feedback: {'ON' if fb else 'off'}  |  endpoint: {endpoint}")
+                self.output_fn("  /telemetry on  — re-asks consent (shows the full data set first)")
+                self.output_fn("  /telemetry off — disable")
+
+        elif cmd.startswith("/feedback"):
+            from symbio.app import telemetry
+            from symbio.app.config import save_config
+            rest = user_input[len("/feedback"):].strip()
+            tcfg = self.config.setdefault("telemetry", {})
+            if rest.lower() in ("on", "enable", "true", "yes", "1"):
+                tcfg["feedback_enabled"] = True
+                save_config(self.config)
+                self.output_fn("  /feedback enabled. /feedback <your message> to send.")
+            elif rest.lower() in ("off", "disable", "false", "no", "0"):
+                tcfg["feedback_enabled"] = False
+                save_config(self.config)
+                self.output_fn("  /feedback disabled. /feedback on to bring it back.")
+            elif not rest:
+                fb = tcfg.get("feedback_enabled", True)
+                self.output_fn(f"  /feedback is {'ON' if fb else 'off'}.")
+                self.output_fn("  /feedback <your message>  — send feedback")
+                self.output_fn("  /feedback on | /feedback off — toggle")
+            else:
+                if not tcfg.get("feedback_enabled", True):
+                    self.output_fn("  /feedback is disabled. /feedback on to bring it back.")
+                else:
+                    state = telemetry.load_state()
+                    ok, msg = telemetry.send_feedback(rest, self.config, state)
+                    if ok:
+                        self.output_fn(f"  Feedback {msg}.")
+                        if "feedback.txt" in msg:
+                            self.output_fn("  Open that file and submit it as a PR, or paste the block")
+                            self.output_fn("  into a GitHub Discussion. /feedback off to disable.")
+                    else:
+                        self.output_fn(f"  Could not save feedback: {msg}")
 
         elif cmd in ("/help", "/h", "/?"):
             data_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0
@@ -1821,6 +2359,11 @@ class ChatSession:
     # ---- The autonomous agent loop ----
 
     def _agent_turn(self, user_input: str):
+        # The boot system-prompt prefill may still be running on its background
+        # thread. Join it before any model use this turn (canary, memory flush,
+        # tool summarizers, _generate_reply) so the model is never used by two
+        # threads at once. No-op once the prefill has finished.
+        self._await_prefill()
         self.logger.info(f"User: {user_input}")
         self.session_store.log("user", user_input)
         turn_start = time.perf_counter()
@@ -1906,6 +2449,74 @@ class ChatSession:
             return
 
         self.history.append({"role": "user", "content": user_input})
+        local_telemetry.log_event("turn", user=user_input)
+
+        # A subjectless "check online" / "search it" / "look it up" gives the
+        # 8B model no topic to bind the search to, so it hallucinates a query
+        # unrelated to the conversation ("Who is the CEO of Apple Inc." when
+        # asked to look up Windows 11 pricing). Resolve the previous unanswered
+        # question as the search subject; the web_search tool layer overrides
+        # any hallucinated query with this subject, and the research note is
+        # filed under it instead of under the bare command.
+        self._search_subject = None
+        if _subjectless_search_command(user_input):
+            subj_q, _subj_a = _last_exchange(self.history)
+            if subj_q:
+                self._search_subject = subj_q
+                # Fold the nudge into the user's own turn instead of appending a
+                # second user message: two consecutive user turns break the
+                # Mistral chat template's strict role alternation ("After the
+                # optional system message, conversation roles must alternate
+                # user/assistant/user/assistant/..."). The template allows only
+                # one optional system message at the start, so a mid-conversation
+                # system injection has to ride inside a user turn.
+                self.history[-1]["content"] += (
+                    "\n\n[System: the user asked you to search online but gave no "
+                    f"subject. They mean your previous unanswered question: "
+                    f"\"{subj_q}\". Call web_search for exactly that question, "
+                    f"then answer from the results. Do NOT search for anything "
+                    f"else or change the subject.]"
+                )
+                self._trim_history()
+
+        # Short verification follow-ups ("are you sure?", "check again") give
+        # the 8B model almost no signal, so at low temperature it derails —
+        # reciting its identity or regurgitating an earlier topic instead of
+        # re-examining the answer it just gave. Inject a contextual nudge that
+        # embeds the actual previous Q&A so the model has the full prior context
+        # inline and knows to verify (search if uncertain), rather than having
+        # to dig it out of history itself.
+        if _looks_like_verification_followup(user_input):
+            q, a = _last_exchange(self.history)
+            if q and a:
+                a_short = a if len(a) <= 600 else a[:600] + "…"
+                nudge = (
+                    "[System: the user doubts your previous answer and asks you to "
+                    f"re-check it.\nPrevious question: {q}\n"
+                    f"Your previous answer: {a_short}\n"
+                    "Re-examine that answer. If you are not certain it is correct, "
+                    "call web_search to verify and then give a corrected answer. "
+                    "Do not recite your identity or change the subject.]"
+                )
+            else:
+                nudge = (
+                    "[System: the user is asking you to re-examine your previous answer. "
+                    "Briefly restate what you last claimed, then verify it — if you are "
+                    "not certain, call web_search and answer from the results. "
+                    "Do not recite your identity or change the subject.]"
+                )
+            # Fold into the user's own turn, not a separate message — see the
+            # subjectless-search block above for why two consecutive user turns
+            # break the Mistral chat template's role alternation.
+            self.history[-1]["content"] += f"\n\n{nudge}"
+
+        # The user's mood this turn is inferred by the model itself, not here:
+        # Caine reads tone from language (the way a language model naturally
+        # does) and emits a <mood>tag</mood> at the start of its reply, which
+        # the tool loop parses and surfaces as [Mood: tag]. infer_user_affect
+        # is only a fallback for turns where the model omits the tag. No
+        # pre-generation nudge — the model adapts its own tone per the system
+        # prompt once it has read the mood.
 
         # Unbounded knowledge: pull relevant saved notes into this turn's
         # context. Retrieval text never enters history or training data.
@@ -1957,6 +2568,10 @@ class ChatSession:
         auto_searched = False
         self_corrected = False
         final_display = ""
+        # User mood this turn, resolved from the model's own <mood> tag (or
+        # the lexicon heuristic fallback). Surfaced once as [Mood: ...].
+        mood = "neutral"
+        mood_decided = False
         consecutive_tool_rounds = 0
         # The exact "[System observation: ...]" text of the most recent
         # tool failure this turn, if any — used to capture (saw this error
@@ -1999,13 +2614,27 @@ class ChatSession:
                             "content": context_block + "\n\n" + working_history[i]["content"],
                         }
                         break
+            # Canonical tool-use examples (open/close an app, disk space,
+            # weather, post-tool acknowledgement, etc.). The agent stack
+            # (symbio/agent.py) always injects these; the app stack did not,
+            # so the model never saw a worked <cmd>/<search> example and fell
+            # back to giving manual steps. They are constant across turns, so
+            # they fold into the cached system+few-shot prefix at no cost.
+            messages.extend(tool_few_shots(self.config))
             messages.extend(working_history)
 
             chunk_prefix = f"{self.config['assistant_name']:8}: " if self.stream_prefix else ""
             try:
                 raw_reply, streamed_live = self._generate_reply(
                     messages, chunk_prefix=chunk_prefix, timings=timings)
-                reply = raw_reply.strip()
+                # Thinking is ON: the generated reply may start with a Qwen3
+                # reasoning block (the open delimiter is in the prompt prefix, so
+                # raw_reply holds reasoning + close delimiter then the answer).
+                # Strip the reasoning so display/history/parse_tools see only the
+                # answer; raw_reply is preserved for the RAW_REPLY debug log.
+                reply = tooling.clean_response(
+                    tooling.strip_reasoning_block(raw_reply)).strip()
+                self.logger.info(f"RAW_REPLY: {raw_reply!r}")
             except KeyboardInterrupt:
                 # Ctrl-C during a slow generation abandons the turn, not the app.
                 self.output_fn("\n  [Generation interrupted.]")
@@ -2013,6 +2642,26 @@ class ChatSession:
             except Exception as e:
                 self.output_fn(f"[MLX Error: {e}]")
                 break
+
+            # The model emits <mood>tag</mood> at the start of its reply to show
+            # how it read the user's tone (it catches things a regex misses —
+            # e.g. a lone raised-voice word like "DOINGG"). StreamingStripper
+            # already hid the tag while streaming; strip it from the reply so
+            # it never reaches history/display/parse_tools, and surface the
+            # detected mood once. If the model gave no tag this turn, fall
+            # back to the lexicon heuristic.
+            m_match = _MOOD_TAG_RE.search(reply)
+            if m_match:
+                reply = _MOOD_TAG_RE.sub("", reply).strip()
+                tag = m_match.group(1).lower()
+                if not mood_decided:
+                    mood = tag if tag in _VALID_MOODS else "neutral"
+                    mood_decided = True
+                    self.output_fn(f"  [Mood: {mood}]")
+            elif not mood_decided:
+                mood = infer_user_affect(user_input)
+                mood_decided = True
+                self.output_fn(f"  [Mood: {mood}]")
 
             tools = tooling.parse_tools(reply, self.enabled_groups)
             display = tooling.strip_tool_tags(reply)
@@ -2042,7 +2691,11 @@ class ChatSession:
                 malformed = tooling.detect_malformed_tag(reply)
                 if malformed and not self_corrected:
                     self_corrected = True
-                    self.output_fn(f"  [Format] {malformed}")
+                    # Show the user a terse note (the raw mangled text is
+                    # unreadable); the full snippet is still passed to the
+                    # model via the system observation below for self-correction.
+                    snippet = " ".join(malformed.split())[:80]
+                    self.output_fn(f"  [Format] malformed tool call ({snippet}) — retrying.")
                     self.history.append({"role": "user", "content": (
                         f"[System observation: {malformed} Check your tag "
                         f"syntax (matching open/close tags, valid JSON "
@@ -2071,26 +2724,43 @@ class ChatSession:
                     self._trim_history()
                     continue
 
-                # The model blanked out mid-task: it already ran at least one
-                # tool this turn (a browser action, search, command…) and then
-                # produced no visible answer and no new tool call. Most often
-                # a Qwen3 thinking block that clean_response() stripped to
-                # nothing. Don't let the turn die silent — nudge it once to
-                # continue the task or give a final answer. This is the
-                # symmetric guard to the browser-error retry above, for the
-                # case where the prior action SUCCEEDED but the model still
-                # went empty.
-                if not display.strip() and executed_calls and not blank_retry_nudged:
+                # The model produced no visible answer and no new tool call.
+                # Most often a Qwen3 thinking block (or a lone <mood> tag) that
+                # clean_response()/mood-stripping reduced to nothing. Don't let
+                # the turn die silent — nudge it once to answer or continue.
+                # Fires for a mid-task blank (a tool already ran) and for a
+                # greeting blank ("hi" → only a mood tag, nothing else): without
+                # the greeting branch a first-round blank would skip straight to
+                # auto-searching the greeting and answer with random web results.
+                # A non-greeting first-round blank is left to the auto-search path
+                # below — a real question that blanks should search, not nudge.
+                action_req = _is_action_request(user_input)
+                if (not display.strip() and not blank_retry_nudged
+                        and (executed_calls or _is_greeting(user_input)
+                             or action_req)):
                     blank_retry_nudged = True
                     self.output_fn(
-                        "  [Blank] Mid-task reply came back empty; "
-                        "prompting the model to continue...")
+                        "  [Blank] Reply came back empty; "
+                        "prompting the model to respond...")
+                    if action_req and not executed_calls:
+                        act_hint = (
+                            "The user asked you to perform an action (open/go to/"
+                            "click/press/read a page) but you emitted no tool call. "
+                            "Use the matching tool now — browser_open to navigate to "
+                            "a URL, read_page to read one, browser_click/press/scroll "
+                            "to act on the open page. Then answer in one short line. "
+                        )
+                    else:
+                        act_hint = ""
+                    mid_task = "You are mid-task — a tool already ran this turn " \
+                               "and the user's request is not yet answered. " if executed_calls else ""
                     self.history.append({"role": "user", "content": (
                         "[System observation: your last reply was empty after "
-                        "removing internal reasoning. You are mid-task — a tool "
-                        "already ran this turn and the user's request is not yet "
-                        "answered. Continue with the next tool call, or give the "
-                        "user a final answer summarizing what you did and found. "
+                        "removing internal reasoning and the mood tag. "
+                        + act_hint + mid_task +
+                        "Answer the user now, or continue with the next tool "
+                        "call if you are mid-task. The <mood> tag is metadata, "
+                        "not your reply — always follow it with a real response. "
                         "Do not end the turn with no visible output.]"
                     )})
                     self._trim_history()
@@ -2121,6 +2791,13 @@ class ChatSession:
                 unsure = bool(display.strip()) and learn.sounds_unsure(display)
                 fabricated = (not unsure and bool(display.strip())
                               and learn.sounds_fabricated(user_input, display))
+                # A confident-sounding non-answer to a price/figure question —
+                # "it depends on the device, check the official website" with no
+                # number — is the model papering over a gap without committing
+                # to a figure. sounds_fabricated misses it (no digit to hedge),
+                # so detect the deflection explicitly.
+                evasive = (not unsure and not fabricated and bool(display.strip())
+                           and learn.sounds_evasive(user_input, display))
                 # A turn that ends with no visible answer at all is the model
                 # blanking out entirely — always search then, even when the
                 # user's wording asked for one (they asked and got nothing).
@@ -2132,23 +2809,36 @@ class ChatSession:
                     ("ok", "okay", "yes", "sure", "go on", "go ahead", "continue", "proceed")
                 )
                 session_cap = int(self.config["web"].get("auto_search_session_cap", 20))
+                # If the user explicitly told it to search and the model waffled
+                # (described searching instead of calling <search>), force one —
+                # don't leave the user stranded with a confident non-answer.
+                forced_by_explicit = bool(_EXPLICIT_SEARCH_RE.search(user_input))
+                gap_trigger = ((blanked or not user_asked_web_search)
+                               and (unsure or fabricated or evasive or blanked))
                 if (self.config["web"].get("auto_search_when_unsure", True)
                         and not auto_searched and not web_used and not browser_followup
                         and not trivial_ack
-                        and (blanked or not user_asked_web_search)
+                        and not _is_greeting(user_input)
                         and self.auto_searches < session_cap
-                        and (unsure or fabricated or blanked)):
+                        and (forced_by_explicit or gap_trigger)):
                     auto_searched = True
                     web_used = True
                     self.auto_searches += 1
-                    reason = ("hedged a made-up-sounding figure" if fabricated
+                    reason = ("ignored an explicit request to search" if forced_by_explicit
+                              else "hedged a made-up-sounding figure" if fabricated
+                              else "deflected a price question without a figure" if evasive
                               else "sounded unsure" if unsure
                               else "came back blank")
+                    # A subjectless "check online" command has no topic of its
+                    # own — search the resolved previous question, not the bare
+                    # command text (which would query the engine for "check
+                    # online" and return junk).
+                    search_query = self._search_subject or user_input
                     self.output_fn(f"  [Auto-search] Reply {reason} — searching the web...")
-                    ok, out = web.web_search(user_input, self.config)
+                    ok, out = web.web_search(search_query, self.config)
                     self.history.append({"role": "user", "content": (
                         f"[System observation: Your answer {reason}, so a web "
-                        f"search for '{user_input}' ran automatically "
+                        f"search for '{search_query}' ran automatically "
                         f"({'succeeded' if ok else 'failed'}).\nResults:\n{out}\n"
                         f"Answer from these results, citing the exact figure they "
                         f"give. If they don't help, say plainly that you could not "
@@ -2175,6 +2865,10 @@ class ChatSession:
             if name in _WEB_TOOLS:
                 web_used = True
             observation = self._execute_tool(name, params)
+            local_telemetry.log_event(
+                "tool", name=name, ok=not learn.sounds_like_tool_error(observation),
+                result=observation,
+            )
             if extra:
                 ignored = ", ".join(n for n, _ in extra)
                 observation += (
@@ -2203,6 +2897,15 @@ class ChatSession:
                 f"[System observation: {observation}]" if learn.sounds_like_tool_error(observation)
                 else None
             )
+            # Anonymous tool-error counter for telemetry (no content, just +1).
+            if learn.sounds_like_tool_error(observation):
+                try:
+                    from symbio.app import telemetry
+                    _tstate = telemetry.load_state()
+                    telemetry.record_error(_tstate)
+                    telemetry.save_state(_tstate)
+                except Exception:
+                    pass
             # Track browser-action failures so we can force a retry if the
             # model tries to end the turn without another tool tag.
             if name in _BROWSER_ACTION_TOOLS and learn.sounds_like_tool_error(observation):
@@ -2212,6 +2915,17 @@ class ChatSession:
 
             self.output_fn(f"  [Observation] {observation.replace(chr(10), chr(10) + '  ')}")
             timings["tools_ms"] = (time.perf_counter() - gen_start) * 1000
+            # Web results must ground the answer: tell the model to answer from
+            # them and admit it couldn't find the answer, so an 8B model can't
+            # just regurgitate its confident prior instead of using the results.
+            # Appended after the user-facing print so the grounding reaches the
+            # model/history but not the terminal line.
+            if name in _WEB_TOOLS:
+                observation += (
+                    "\n\n[Answer ONLY from the results above. If they do not state "
+                    "the answer, say plainly that you could not find it — do not "
+                    "repeat your earlier claim or guess.]"
+                )
             # Present results in Hermes-style <tool_response> JSON so the model
             # learns the structured format, while keeping a plain-text fallback
             # for models that have not switched to Hermes calls yet.
@@ -2223,6 +2937,18 @@ class ChatSession:
             )})
             self._trim_history()
 
+            # Pure navigation is complete the moment the page is open. Stop
+            # here instead of re-prompting the model with the freshly-loaded
+            # page — that re-prompt is what makes it auto-click elements it sees
+            # ("Continue", "Stream now"). The model's pre-tool prose already
+            # stands as the user-facing reply. Requests that also want info
+            # ("go to cloudflare pricing") are not navigation-only, so the loop
+            # continues and the model can read on.
+            if (name == "browser_open"
+                    and _is_navigation_only(user_input)
+                    and not learn.sounds_like_tool_error(observation)):
+                break
+
         timings["total_ms"] = (time.perf_counter() - turn_start) * 1000
         self.last_turn_timings = timings
         self.logger.info(f"Timings: {timings}")
@@ -2233,10 +2959,21 @@ class ChatSession:
         elif web_used and final_display:
             # Web research produced an answer: remember durable knowledge so
             # it is retrievable later and trained into the weights on digest.
-            note = learn.remember_research(user_input, final_display, self.config)
-            if note:
-                self.retriever.invalidate_cache()
-                self.output_fn(f"  [Learn] Remembered research: {note.name}")
+            # But don't memorize a suspect answer — one given under a doubt/
+            # verification followup, or one that hedged or couldn't find the
+            # fact — that would bake an unverified (or non-)fact into the
+            # weights. Let the user confirm it first.
+            suspect = (_looks_like_verification_followup(user_input)
+                       or learn.sounds_unsure(final_display))
+            if not suspect:
+                # File the note under the real question, not a bare "check
+                # online" command — otherwise the note gets titled "Learned:
+                # check online" and trains a command string into the weights.
+                research_q = self._search_subject or user_input
+                note = learn.remember_research(research_q, final_display, self.config)
+                if note:
+                    self.retriever.invalidate_cache()
+                    self.output_fn(f"  [Learn] Remembered research: {note.name}")
 
     def _resolve_project_path(self, raw_path: str) -> Path | None:
         """Normalize a user-supplied path so it stays inside the project dir."""
@@ -2423,12 +3160,28 @@ class ChatSession:
             return f"Python script exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
         if name == "web_search":
-            ok, out = web.web_search(params["query"], self.config)
-            return f"Web search for '{params['query']}' {'succeeded' if ok else 'failed'}.\nResults:\n{out}"
+            query = params.get("query", "") or ""
+            # If the user gave a subjectless "check online" command, the model
+            # had no topic and may have hallucinated a query unrelated to the
+            # conversation. Override it with the resolved previous question
+            # unless the model's query already mentions a signature word from
+            # that question (in which case it bound the right subject itself).
+            subject = getattr(self, "_search_subject", None)
+            if subject and not _queries_overlap(query, subject):
+                self.output_fn(
+                    f"  [Auto-correct] 'search' command had no subject — "
+                    f"searching the previous question instead of "
+                    f"'{query[:60]}'.")
+                query = subject
+            ok, out = web.web_search(query, self.config)
+            return f"Web search for '{query}' {'succeeded' if ok else 'failed'}.\nResults:\n{out}"
 
         if name == "read_page":
-            ok, out = web.read_page(params["url"], self.config)
-            return f"Reading {params['url']} {'succeeded' if ok else 'failed'}.\nContent:\n{out}"
+            url = params.get("url", "")
+            if not url:
+                return "Read page error: no URL provided."
+            ok, out = web.read_page(url, self.config)
+            return f"Reading {url} {'succeeded' if ok else 'failed'}.\nContent:\n{out}"
 
         if name == "browser_open":
             if not self.config.get("browser", {}).get("enabled", False):
@@ -2437,9 +3190,12 @@ class ChatSession:
                     "own Google Chrome window, enable it with "
                     "<config set=\"browser.enabled\">true</config>."
                 )
-            out = self.browser.open(params["url"])
+            url = params.get("url", "")
+            if not url:
+                return "Browser open error: no URL provided. Please specify a URL to open."
+            out = self.browser.open(url)
             if "blocked" not in out and "error" not in out.lower():
-                self._last_browsed_url = params["url"]
+                self._last_browsed_url = url
                 out += _browser_peek(self.browser)
             return out
 
@@ -2766,6 +3522,13 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
     """
     if stream_chunk_fn is None:
         stream_chunk_fn = lambda s: print(s, end="", flush=True)
+    # Never run with a blank identity: a skipped wizard or a reset config.json
+    # can leave names empty, which blanks the chat banner and the input prompt.
+    # Fill sane defaults in-memory now (cheap); persist only on a real CLI run
+    # (below) so test runs with an injected model don't rewrite the user's
+    # config.json. This is the backstop for is_first_run no longer re-launching
+    # the wizard over empty names.
+    _identity_filled = setup.ensure_identity_defaults(config)
     if output_fn is None:
         # The background note-indexer (and other daemon threads) call output_fn
         # while the main thread is blocked in input() with the 'Huy : ' readline
@@ -2814,4 +3577,23 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
     )
     if is_real_cli_run:
         session._ensure_model_loaded()
+        # Persist the identity defaults filled above (only on a real CLI run,
+        # so tests with injected models don't rewrite the user's config.json).
+        if _identity_filled:
+            try:
+                from symbio.app.config import save_config
+                save_config(config)
+            except Exception:
+                pass
+        # Telemetry: count this session and maybe fire one daily ping. Cheap and
+        # local-first: maybe_daily_ping is a no-op when telemetry is off or not
+        # consented, and only stamps state on a successful send/save.
+        try:
+            from symbio.app import telemetry
+            _tstate = telemetry.load_state()
+            telemetry.record_session(_tstate)
+            telemetry.save_state(_tstate)
+            telemetry.maybe_daily_ping(config, _tstate)
+        except Exception:
+            pass
     session.run()

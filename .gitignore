@@ -44,3 +44,10 @@ sandbox/caine_tools.py
 sandbox/symbio_tools.py
 golden_cases.json
 mcp_modules/
+
+# Telemetry: local feedback/pings/state must never be committed.
+telemetry/
+
+# Throwaway one-off scripts (tool-use seeding, manual training runner).
+seed_tools.py
+train_runner.py

@@ -113,10 +113,17 @@ class Retriever:
         config: dict[str, Any],
         session_store: Any | None = None,
         exclude_session_id: str | None = None,
+        llm_fn: Any = None,
     ):
         self.config = config
         self.rag_cfg = config.get("rag", {})
         self.session_store = session_store
+        # Tag-LLM used by the hierarchical tag index. Defaults to the Ollama/
+        # frontier fallback; the live agent passes its already-loaded MLX model
+        # here so the index doesn't spin up a separate Ollama process (which
+        # cost ~20s/turn). The MLX fn lazily loads the model on first use, so
+        # passing it at construction (before the model is loaded) is safe.
+        self._llm_fn = llm_fn
         # The live session is already in the agent's history; retrieving it
         # again just echoes the current question back into the prompt.
         self.exclude_session_id = exclude_session_id
@@ -161,7 +168,7 @@ class Retriever:
             notes_dir=NOTES_DIR,
             db_path=db_path,
             broad_tags=broad_tags,
-            llm_fn=_default_tag_llm_fn,
+            llm_fn=self._llm_fn or _default_tag_llm_fn,
         )
         return self._tag_index
 

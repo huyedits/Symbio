@@ -112,11 +112,58 @@ def sounds_fabricated(question: str, reply: str) -> bool:
     return bool(_HEDGE_BEFORE_NUMBER_RE.search(r) or _HEDGE_AFTER_NUMBER_RE.search(r))
 
 
+# The third knowledge-gap disguise: a confident-sounding non-answer that
+# deflects to "it depends" / "check the official website" with NO figure at
+# all. sounds_unsure misses it (no "I don't know") and sounds_fabricated
+# misses it (no number to hedge), so the gap goes unsearched and the user is
+# left with prose that sounds like an answer but commits to nothing.
+_DEFLECTION_MARKERS = (
+    "depends on", "may vary", "might vary", "varies by", "varies depending",
+    "check the official", "check the website", "visit the official",
+    "see the official", "refer to the official", "check with",
+    "check the retailer", "check the provider", "check the manufacturer",
+    "check the microsoft", "check the apple", "check the google",
+    "for precise", "for exact pricing", "for current pricing",
+    "for exact", "for current", "for accurate", "for up-to-date",
+    "for up to date", "for the latest pricing", "for pricing details",
+    "pricing may vary", "price may vary", "prices vary",
+)
+_EVASIVE_QUESTION_MARKERS = _NUMERIC_QUESTION_MARKERS + (
+    "cost", "price", "pricing", "how much is", "how much does",
+)
+
+
+def sounds_evasive(question: str, reply: str) -> bool:
+    """A factual/price question deflected with 'it depends' / 'check the
+    website' and no actual figure — a confident non-answer masking a gap.
+    A reply that commits to a number is never evasive (sounds_fabricated or
+    the correction pipeline handle a wrong number)."""
+    q = question.lower()
+    if not any(m in q for m in _EVASIVE_QUESTION_MARKERS):
+        return False
+    if not reply.strip():
+        return False
+    r = reply.lower()
+    return any(m in r for m in _DEFLECTION_MARKERS) and not re.search(r"\d", reply)
+
+
 # Queries/answers about the current moment go stale immediately — training
 # them into weights would teach outdated facts, so they are never remembered.
 _EPHEMERAL_MARKERS = (
     "weather", "news", "headline", "today", "tonight", "tomorrow", "yesterday",
     "right now", "currently", "latest", "price", "stock", "forecast",
+)
+
+# A bare "go search" command with no subject — "check online.", "look it up",
+# "just google it". Such text is not a question and must never become the title
+# of a Learned note (it would train a command string into the weights). The
+# caller normally resolves the real question first; this is defense in depth.
+_RESEARCH_COMMAND_ONLY_RE = re.compile(
+    r"^(?:please\s+)?(?:just\s+)?(?:go\s+)?"
+    r"(?:search|google|check|look|verify|browse)"
+    r"(?:\s+(?:it|that|this|online|the\s+web|up|out|now|for\s+me))*"
+    r"[.?!]*$",
+    re.IGNORECASE,
 )
 
 
@@ -137,6 +184,12 @@ def remember_research(question: str, answer: str, config: dict[str, Any]) -> Pat
         marker in q_lower for marker in
         ("ok", "okay", "yes", "sure", "go on", "go ahead", "continue", "proceed")
     ):
+        return None
+    # A bare search command ("check online", "look it up", "search it") is not
+    # a real question — filing a note under it trains a command string into the
+    # weights and produces a junk title like "Learned: check online". The
+    # caller resolves the real question and passes that, but guard here too.
+    if _RESEARCH_COMMAND_ONLY_RE.match(question):
         return None
     text = f"{question} {answer}".lower()
     if any(marker in text for marker in _EPHEMERAL_MARKERS):

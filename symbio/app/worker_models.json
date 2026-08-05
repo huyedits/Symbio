@@ -14,7 +14,7 @@
     "memory_note": "~1 GB on disk, ~2-3 GB RAM at runtime"
   },
   "skill_fix_wifi": {
-    "model_name": "mlx-community/Qwen3-8B-4bit",
+    "model_name": "mlx-community/Mistral-Nemo-Instruct-2407-3bit",
     "role": "fix_wifi",
     "description": "Skill: Fix wifi",
     "adapter_compatible": true,
