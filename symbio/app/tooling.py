@@ -392,7 +392,66 @@ _TOOLS: list[dict[str, Any]] = [
 # Hermes name -> internal name (most are already the same).
 _HERMES_NAME_MAP: dict[str, str] = {
     "terminal": "run_command",
+    "cmd": "run_command",
+    "command": "run_command",
+    "run": "run_command",
+    "shell": "run_command",
+    "exec": "run_command",
+    "execute": "run_command",
+    "search": "web_search",
+    "web_search": "web_search",
+    "google": "web_search",
+    "read": "read_page",
+    "read_page": "read_page",
+    "fetch": "read_page",
+    "browse": "browser_open",
+    "open": "browser_open",
+    "navigate": "browser_open",
+    "goto": "browser_open",
+    "go_to": "browser_open",
+    "browser_open": "browser_open",
+    "click": "browser_click",
+    "browser_click": "browser_click",
+    "type": "browser_type",
+    "browser_type": "browser_type",
+    "scroll": "browser_scroll",
+    "browser_scroll": "browser_scroll",
+    "press": "browser_press",
+    "browser_press": "browser_press",
+    "close": "browser_close",
+    "browser_close": "browser_close",
+    "note": "write_note",
+    "save_note": "write_note",
+    "write_note": "write_note",
+    "remember": "write_note",
 }
+
+# Argument-name aliases: the model often emits natural argument names that
+# differ from the canonical tool parameter (e.g. {"text": "Continue"} for
+# browser_click which expects "target"). Map per-tool aliases so the call
+# still executes without a correction round-trip.
+_ARG_ALIASES: dict[str, dict[str, str]] = {
+    "run_command": {"cmd": "cmd", "command": "cmd", "shell": "cmd", "cmdline": "cmd"},
+    "web_search": {"query": "query", "q": "query", "search": "query", "term": "query", "what": "query"},
+    "read_page": {"url": "url", "link": "url", "page": "url", "site": "url", "address": "url"},
+    "browser_open": {"url": "url", "link": "url", "page": "url", "site": "url", "address": "url", "to": "url"},
+    "browser_click": {"target": "target", "text": "target", "selector": "target", "element": "target", "name": "target", "button": "target"},
+    "browser_type": {"text": "text", "value": "text", "input": "text", "content": "text", "string": "text", "enter": "enter", "press_enter": "enter", "return": "enter"},
+    "browser_scroll": {"direction": "direction", "dir": "direction", "way": "direction", "amount": "direction"},
+    "browser_press": {"key": "key", "keys": "key", "press": "key", "button": "key"},
+    "write_note": {"title": "title", "body": "body", "content": "body", "text": "body", "note": "body", "value": "body", "subject": "title"},
+}
+
+
+def _normalize_args(name: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Rename a tool call's arguments to the canonical parameter names."""
+    aliases = _ARG_ALIASES.get(name)
+    if not aliases:
+        return params
+    out: dict[str, Any] = {}
+    for k, v in params.items():
+        out[aliases.get(k, k)] = v
+    return out
 
 # Common thinking/reasoning delimiters that must never reach the user or training data.
 _THINKING_PATTERNS = [
@@ -407,14 +466,114 @@ _THINKING_PATTERNS = [
 ]
 
 
+def _truncate_repetition(text: str) -> str:
+    """Detect and truncate repetition loops in model output.
+
+    A small quantized model at low temperature can get stuck repeating the same
+    token sequence (e.g. a URL repeated dozens of times inside a tool call).
+    This finds the longest suffix that is a pure repetition of a shorter prefix
+    and cuts it off, keeping only the first occurrence.
+    """
+    # Only check reasonably long text — short replies can't meaningfully loop.
+    if len(text) < 120:
+        return text
+
+    # The repetition may be followed by a short non-repeating suffix (e.g. a
+    # closing quote+brace like '"}'). Try stripping up to 10 trailing chars
+    # to reveal the repetition boundary, but only if the stripped suffix is
+    # "structural" (quotes, braces, brackets, whitespace) — not prose.
+    for strip_len in (0, 1, 2, 3, 4, 5, 6, 8, 10):
+        if strip_len == 0:
+            candidate = text
+        else:
+            suffix = text[-strip_len:]
+            if not all(c in '\'"}])\n\r\t ' for c in suffix):
+                continue
+            candidate = text[:-strip_len]
+
+        if len(candidate) < 120:
+            continue
+
+        # Strategy: look for a substring of length 8-80 chars that, when repeated
+        # at least 3 times consecutively, covers the tail of the text.
+        for win in range(8, min(81, len(candidate) // 3 + 1)):
+            tail = candidate[-win:]
+            # Count how many times this exact substring repeats at the end.
+            count = 0
+            pos = len(candidate)
+            while pos >= win and candidate[pos - win:pos] == tail:
+                count += 1
+                pos -= win
+            if count >= 3:
+                # Found a repetition loop. Truncate to just before the repeats,
+                # keeping one copy, then re-append the structural suffix.
+                return candidate[:pos + win] + (text[-strip_len:] if strip_len else "")
+
+    return text
+
+
 def clean_response(text: str) -> str:
     for pattern in _THINKING_PATTERNS:
         text = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
+    # The end-of-turn marker is a stop signal only; never keep it in the reply.
+    text = END_TURN_RE.sub("", text)
     text = re.sub(r"^Assistant:\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^user:\s*", "", text, flags=re.IGNORECASE)
     # Collapse multiple blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
+    # Detect and truncate repetition loops: the small quantized model at low
+    # temperature can get stuck repeating the same token sequence (e.g. a URL
+    # repeated dozens of times inside a tool call). Find the longest suffix
+    # that is a pure repetition of a shorter prefix and cut it off.
+    text = _truncate_repetition(text)
     return text.strip()
+
+
+# Qwen3 reasoning delimiters, built from codepoints so this file does not
+# contain the literal tag characters (which confuse some tooling/parsers).
+_QWEN_THINK_OPEN = "".join(chr(c) for c in [0x3c, 0x74, 0x68, 0x69, 0x6e, 0x6b, 0x3e])
+_QWEN_THINK_CLOSE = "".join(chr(c) for c in [0x3c, 0x2f, 0x74, 0x68, 0x69, 0x6e, 0x6b, 0x3e])
+
+# Explicit end-of-turn marker the model is taught to emit at the end of every
+# reply (see tool_few_shots + the system prompt). It is used as an early stop
+# sequence in _generate_reply: the moment it streams out, generation stops, so
+# a weak/quantized model that forgets the real EOT token can't keep emitting
+# repeated tool calls until max_reply_tokens. The \b after "end" means it only
+# matches <end>, <end/>, <end > — not <endless> or <endocrine>.
+END_TURN_TAG = "<end>"
+END_TURN_RE = re.compile(r"<end\b[^>]*>")
+
+
+def strip_reasoning_block(text: str) -> str:
+    """Strip Qwen3 reasoning (think) blocks from a *generated* reply to
+    recover the answer.
+
+    A well-formed turn is one open...close block (the reasoning) followed by
+    the answer. The small/quantized model with the LoRA adapter sometimes
+    produces malformed output instead:
+
+      * several leading think blocks, often empty:  O..C O..C answer
+      * an empty think block, then a re-opened *unclosed* think block that
+        contains the answer:  O..C O answer   (no second close)
+
+    We strip every complete leading O..C block, then any trailing lone O
+    (treating what follows it as the answer, since the model dropped the
+    close). With no close delimiter at all and no leading O, the text is a
+    plain answer (or pure reasoning with no answer) and is returned as-is so
+    callers can decide; display/history/parse_tools then see only prose.
+    """
+    while True:
+        s = text.lstrip("\n")
+        if not s.startswith(_QWEN_THINK_OPEN):
+            break
+        cidx = s.find(_QWEN_THINK_CLOSE, len(_QWEN_THINK_OPEN))
+        if cidx == -1:
+            # Lone unclosed open delimiter: the model dropped the close, so
+            # everything after this open is the answer.
+            return s[len(_QWEN_THINK_OPEN):].lstrip("\n")
+        # Drop this complete think block and look at what remains.
+        text = s[cidx + len(_QWEN_THINK_CLOSE):]
+    return text.lstrip("\n")
 
 
 def tool_group(name: str) -> str | None:
@@ -467,6 +626,95 @@ def refresh_mcp_tools(config: dict[str, Any] | None = None) -> list[dict[str, An
         _TOOL_GROUPS[clean["name"]] = "mcp"
         added.append(clean)
     return added
+
+
+# A bare JSON tool call as the prompt examples teach it: a JSON object with a
+# "name" (or "function") key, NOT wrapped in the XML tool-call tag. The parser
+# and stripper used to only recognize the wrapped form, so a model that followed
+# the prompt's bare-JSON examples had its calls silently dropped and the raw
+# JSON leaked into the visible reply. These helpers recognize the bare form too.
+_LT = chr(60)
+_WRAPPED_TOOL_CALL_RE = re.compile(_LT + "tool_call" + r"\s*.*?\s*" + _LT + "/tool_call" + chr(62))
+_BARE_TOOL_CALL_OPEN_RE = re.compile(r'\{\s*"(?:name|function)"\s*:')
+
+
+def _balance_json_object(text: str, start: int) -> tuple[str | None, int]:
+    """Given text[start] == '{', return (balanced_substring, end_index_exclusive)
+    where end_index is just past the matching '}'. String-aware so braces inside
+    JSON string values don't count. Returns (None, start) if unbalanced."""
+    if start >= len(text) or text[start] != '{':
+        return None, start
+    depth = 0
+    i = start
+    in_str = False
+    esc = False
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == '\\':
+                esc = True
+            elif c == '"':
+                in_str = False
+        else:
+            if c == '"':
+                in_str = True
+            elif c == '{':
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1], i + 1
+        i += 1
+    return None, start
+
+
+def _extract_bare_tool_calls(text: str) -> list[tuple[int, int, dict[str, Any]]]:
+    """Find bare (unwrapped) JSON tool-call objects in text and return
+    (start, end_exclusive, parsed_dict) for each.
+
+    A tool call is a JSON object with a 'name' or 'function' key whose value,
+    after _HERMES_NAME_MAP, is a known tool name. Brace-balanced extraction
+    handles nested arguments objects; string-aware so braces inside string
+    values don't confuse the scan. Regions already wrapped in the XML tool-call
+    tag are masked out so a wrapped call isn't double-counted. Calls inside a
+    markdown code fence are skipped (the model is showing an example, not calling)."""
+    masked = list(text)
+    for m in _WRAPPED_TOOL_CALL_RE.finditer(text):
+        for i in range(m.start(), m.end()):
+            masked[i] = '\x00'
+    scan = ''.join(masked)
+    out: list[tuple[int, int, dict[str, Any]]] = []
+    for m in _BARE_TOOL_CALL_OPEN_RE.finditer(scan):
+        start = m.start()
+        if text[:start].count("```") % 2 == 1:
+            continue
+        obj_text, end = _balance_json_object(scan, start)
+        if obj_text is None:
+            continue
+        try:
+            call = json.loads(obj_text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(call, dict):
+            continue
+        name = call.get("name") or call.get("function")
+        if not isinstance(name, str):
+            continue
+        resolved = _HERMES_NAME_MAP.get(name, name)
+        if resolved not in _TOOL_GROUPS:
+            # The small model sometimes stuffs a whole shell command into the
+            # "name" field, e.g. {"name": "open -a 'Google Chrome' 'URL'"}. If
+            # the name is unrecognized but looks like a command (multi-word),
+            # treat it as a run_command call so the action still happens.
+            stripped = name.strip()
+            if " " in stripped and not stripped.startswith(("{", "[")):
+                out.append((start, end, {"name": "run_command", "arguments": {"cmd": name}}))
+            continue
+        out.append((start, end, call))
+    return out
 
 
 def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
@@ -629,7 +877,18 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
             params = {}
         if isinstance(name, str):
             internal_name = _HERMES_NAME_MAP.get(name, name)
-            tools.append((internal_name, params))
+            tools.append((internal_name, _normalize_args(internal_name, params)))
+
+    # Bare JSON tool calls (the form the prompt examples teach: a JSON object
+    # with name/arguments, NOT wrapped in the XML tool-call tag).
+    for _start, _end, call in _extract_bare_tool_calls(reply):
+        name = call.get("name") or call.get("function")
+        params = call.get("arguments") or call.get("parameters") or call.get("args") or {}
+        if not isinstance(params, dict):
+            params = {}
+        if isinstance(name, str):
+            internal_name = _HERMES_NAME_MAP.get(name, name)
+            tools.append((internal_name, _normalize_args(internal_name, params)))
 
     if enabled_groups is not None:
         tools = [
@@ -656,6 +915,8 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
     r'<press>(.*?)</press>',
     r'<browser_close[^>]*/>',
     r'<browser_close>(.*?)</browser_close>',
+    r'<end\s*/?>',
+    r'</end>',
     r'<skill\s+name=[\'"][^\'"]*?[\'"]>(.*?)</skill>',
     r'<memory[^>]*>(.*?)</memory>',
     r'<profile[^>]*>(.*?)</profile>',
@@ -669,6 +930,7 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
     r'<retrain></retrain>',
     r'<cron\s+[^>]*?>(.*?)</cron>',
     r'<delegate\s+role=[\'"][^\'"]*?[\'"]>(.*?)</delegate>',
+    r'<mood>(.*?)</mood>',
     r'<tool_call>\s*.*?\s*</tool_call>',
     r'<read_file[^>]*>.*?</read_file>',
     r'<edit_file[^>]*/?>',
@@ -679,10 +941,10 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
 # streaming stripper's "might this become a tag" check.
 _KNOWN_TAG_NAMES: tuple[str, ...] = (
     "cmd", "py", "search", "read", "browse", "click", "type", "scroll",
-    "press", "browser_close",
+    "press", "browser_close", "end",
     "note", "skill", "cron", "digest", "train", "retrain", "memory", "profile",
     "config", "tool_call", "delegate",
-    "read_file", "edit_file", "write_file",
+    "read_file", "edit_file", "write_file", "mood",
 )
 
 # A reply cut off mid-tag leaves an unterminated tag; never show it.
@@ -699,6 +961,10 @@ def _strip_complete_tag_pairs(text: str) -> str:
 
 def strip_tool_tags(reply: str) -> str:
     display = _strip_complete_tag_pairs(reply)
+    # Drop bare JSON tool-call objects the model may emit unwrapped, so the
+    # raw JSON never reaches the visible reply.
+    for _start, _end, _c in sorted(_extract_bare_tool_calls(display), key=lambda s: s[0], reverse=True):
+        display = display[:_start] + display[_end:]
     display = _UNTERMINATED_TAG_RE.sub('', display)
     return clean_response(display)
 
@@ -712,6 +978,19 @@ def detect_malformed_tag(reply: str) -> str | None:
     against the ORIGINAL reply, not stripped text — a syntactically
     complete but JSON-invalid <tool_call> is already removed by
     strip_tool_tags, so it must be caught here instead."""
+    # A bare JSON tool call that opened but never balanced (truncated by
+    # max_tokens) or contained invalid JSON is unusable; surface it so the
+    # model can self-correct on the next round.
+    for m in _BARE_TOOL_CALL_OPEN_RE.finditer(reply):
+        if reply[:m.start()].count("```") % 2 == 1:
+            continue
+        obj, _end = _balance_json_object(reply, m.start())
+        if obj is None:
+            return f"A JSON tool call was left incomplete and could not be used: {reply[m.start():m.start()+120]!r}"
+        try:
+            json.loads(obj)
+        except json.JSONDecodeError as e:
+            return f"A JSON tool call contained invalid JSON and could not be used: {e}"
     unterminated = _UNTERMINATED_TAG_RE.search(_strip_complete_tag_pairs(reply))
     if unterminated:
         return f"An unterminated tag was left open and unusable: {unterminated.group(0)[:120]!r}"
@@ -734,35 +1013,129 @@ class StreamingStripper:
 
     def __init__(self):
         self._buffer = ""
+        # Qwen3 think block: with enable_thinking=True the generation prompt
+        # ends with the open think delimiter, so the model streams reasoning
+        # text then the close delimiter then the answer. We hold the whole
+        # reasoning block back until the close delimiter arrives so it never
+        # flashes on screen; only the answer (after it) is shown live.
+        self._think_done = False
+        # Leading whitespace (newlines left after the think block, or after a
+        # re-opened delim the adapter drops) is discarded until the first real
+        # answer character is shown, so the reply starts flush on its line.
+        self._answer_started = False
 
     def feed(self, chunk: str) -> str:
         """Add newly generated text; return the text now safe to display."""
-        self._buffer = _strip_complete_tag_pairs(self._buffer + chunk)
-        cut = self._first_ambiguous_lt()
+        self._buffer += chunk
+        if not self._think_done:
+            cidx = self._buffer.find(_QWEN_THINK_CLOSE)
+            if cidx == -1:
+                # Still inside the reasoning block (or a degenerate reply
+                # with no think block at all) — show nothing yet. finish()
+                # flushes any leftover once generation ends.
+                return ""
+            # Drop the reasoning block and everything up through the close
+            # delimiter; what remains is the answer.
+            self._buffer = self._buffer[cidx + len(_QWEN_THINK_CLOSE):]
+            self._think_done = True
+            # The answer may still carry think-delimiter artifacts (the
+            # adapter sometimes emits an empty think block, then re-opens an
+            # unclosed one around the answer). Both delimiters are fixed
+            # 7-char markers that never appear in normal prose, so drop every
+            # remaining one, then strip the leading newlines once at the
+            # answer start.
+            self._buffer = self._buffer.replace(_QWEN_THINK_OPEN, "").replace(_QWEN_THINK_CLOSE, "").lstrip("\n")
+            if self._buffer == "":
+                return ""
+        else:
+            # Drop stray think delimiters emitted mid-answer (re-opened or
+            # empty blocks the adapter appends after the answer started).
+            self._buffer = self._buffer.replace(_QWEN_THINK_OPEN, "").replace(_QWEN_THINK_CLOSE, "")
+        self._buffer = _strip_complete_tag_pairs(self._buffer)
+        # Drop complete bare-JSON tool calls so their raw JSON never flashes.
+        for _start, _end, _c in sorted(_extract_bare_tool_calls(self._buffer), key=lambda s: s[0], reverse=True):
+            self._buffer = self._buffer[:_start] + self._buffer[_end:]
+        candidates = [c for c in (self._first_ambiguous_lt(), self._first_ambiguous_bare_json()) if c != -1]
+        cut = min(candidates) if candidates else -1
         if cut == -1:
             safe, self._buffer = self._buffer, ""
         else:
             safe, self._buffer = self._buffer[:cut], self._buffer[cut:]
+        if not self._answer_started:
+            # Drop leading whitespace (newlines left after the think block or
+            # a re-opened delim) until the first real answer character shows.
+            stripped = safe.lstrip()
+            if stripped:
+                self._answer_started = True
+            return stripped
         return safe
 
     def finish(self) -> str:
         """Call once generation ends; returns any remaining safe text —
         plain prose with a stray '<' that never became a tag, or a
-        genuinely truncated tag, either way handled by strip_tool_tags."""
-        remaining = strip_tool_tags(self._buffer)
+        genuinely truncated tag, either way handled by strip_tool_tags.
+        If the close think delimiter never arrived, the buffer is still
+        reasoning and is discarded (the authoritative reply is computed
+        separately via strip_reasoning_block, so dropping it here only
+        affects the live display tail)."""
+        if not self._think_done:
+            # Pure reasoning, no answer yet — never show it.
+            self._buffer = ""
+            return ""
+        remaining = strip_tool_tags(
+            self._buffer.replace(_QWEN_THINK_OPEN, "").replace(_QWEN_THINK_CLOSE, ""))
         self._buffer = ""
+        if not self._answer_started:
+            return remaining.lstrip()
         return remaining
 
     def _first_ambiguous_lt(self) -> int:
         """Index of a '<' that might still be starting a known tag and
         can't be ruled out yet, or -1 if the buffer is unambiguously safe
         to show as-is (no '<', or every '<' has already diverged from
-        every known tag name — e.g. "x < 5" is never held back)."""
+        every known tag name — e.g. "x < 5" is never held back).
+
+        Also holds a '<' that could be starting the Qwen3 think-open
+        delimiter: after the reasoning block the adapter sometimes re-opens
+        an (unclosed) think block, and that delimiter can arrive split
+        across chunks ('<' then 'think>'). Holding the partial lets it
+        complete, after which feed()'s delimiter-strip removes it so the
+        raw marker never flashes on screen."""
         for m in re.finditer('<', self._buffer):
             tail = self._buffer[m.start() + 1:]
             if tail == "" or any(
                 name.startswith(tail) or tail.startswith(name)
                 for name in _KNOWN_TAG_NAMES
-            ):
+            ) or "think".startswith(tail) or tail.startswith("think"):
                 return m.start()
+        return -1
+
+    def _first_ambiguous_bare_json(self) -> int:
+        """Index of a '{' that might still be starting a bare JSON tool call
+        and hasn't balanced yet, or -1 if none.
+
+        Unlike an XML '<' (which is ambiguous the instant it appears), a bare
+        JSON call only becomes recognizable once several chars of the opener
+        have arrived. Holding back from the leading '{' (when it could be the
+        start of a '"name"'/'"function"' key) lets the opener accumulate so the
+        complete call can be dropped instead of flashing token-by-token."""
+        buf = self._buffer
+        i = 0
+        n = len(buf)
+        while i < n:
+            if buf[i] != '{':
+                i += 1
+                continue
+            obj, end = _balance_json_object(buf, i)
+            if obj is not None:
+                # Balanced object: not ambiguous. A real tool call was already
+                # removed by _extract_bare_tool_calls in feed(); skip past it.
+                i = end
+                continue
+            tail = buf[i + 1:].lstrip()
+            # A tool-call opener is '{"name"'/'"function"' (optionally spaced),
+            # so a '{' that may be starting one is followed by nothing or a '"'.
+            if tail == "" or tail.startswith('"'):
+                return i
+            i += 1
         return -1

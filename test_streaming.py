@@ -4,6 +4,7 @@ tooling.detect_malformed_tag (self-correction signal), chat._common_prefix_len
 (the token-level cache-reuse diff), and ChatSession._generate_reply's actual
 cache trim/reset decisions."""
 
+import json
 import random
 
 import mlx.nn as nn
@@ -88,6 +89,88 @@ def test_streaming_stripper_does_not_hold_back_literal_angle_bracket_in_prose():
     stripper = tooling.StreamingStripper()
     out = stripper.feed("if x < 5 then") + stripper.finish()
     assert out == "if x < 5 then"
+
+
+# ---- bare JSON tool calls (the form prompt.md teaches) ----
+
+def _bare(name="terminal", **args):
+    return json.dumps({"name": name, "arguments": dict(args)})
+
+def _wrapped(name="terminal", **args):
+    o, c = chr(60) + "tool_call" + chr(62), chr(60) + "/tool_call" + chr(62)
+    return o + json.dumps({"name": name, "arguments": dict(args)}) + c
+
+
+def test_parse_tools_bare_json_call():
+    calls = tooling.parse_tools("Sure. " + _bare(cmd="ls -la") + " done")
+    assert calls == [("run_command", {"cmd": "ls -la"})], calls
+
+
+def test_parse_tools_bare_json_function_key_form():
+    call = json.dumps({"function": "web_search", "arguments": {"query": "ai news"}})
+    assert tooling.parse_tools("go " + call) == [("web_search", {"query": "ai news"})]
+
+
+def test_parse_tools_bare_json_unknown_name_is_not_a_call():
+    # A JSON object whose "name" isn't a tool (e.g. prose about a record) must
+    # never be executed.
+    prose = json.dumps({"name": "Alice", "age": 30})
+    assert tooling.parse_tools("the record " + prose + " in db") == []
+
+
+def test_parse_tools_bare_json_inside_code_fence_ignored():
+    fenced = "```json\n" + _bare(cmd="rm -rf /") + "\n```"
+    assert tooling.parse_tools("example:\n" + fenced) == []
+
+
+def test_parse_tools_wrapped_call_not_double_counted_as_bare():
+    # A wrapped call contains the same JSON object; it must parse once, not twice.
+    assert tooling.parse_tools("go " + _wrapped(cmd="ls")) == [("run_command", {"cmd": "ls"})]
+
+
+def test_parse_tools_bare_json_respects_enabled_groups():
+    assert tooling.parse_tools(_bare(cmd="ls"), enabled_groups={"terminal"}) == [("run_command", {"cmd": "ls"})]
+    assert tooling.parse_tools(_bare(cmd="ls"), enabled_groups={"web_search"}) == []
+
+
+def test_strip_tool_tags_removes_bare_json_call():
+    assert tooling.strip_tool_tags("Let me check. " + _bare(cmd="ls") + " All done.") == "Let me check.  All done."
+
+
+def test_strip_tool_tags_keeps_non_tool_json_object():
+    prose = json.dumps({"age": 30, "name": "Alice"})
+    assert tooling.strip_tool_tags("record " + prose + " ok") == "record " + prose + " ok"
+
+
+def test_streaming_stripper_holds_back_bare_json_call_char_by_char():
+    # build a call with nested arguments to stress brace balancing
+    call = json.dumps({"name": "terminal", "arguments": {"cmd": "ls -la", "opts": {"a": 1}}})
+    full = "Let me run " + call + " now"
+    stripper = tooling.StreamingStripper()
+    seen = ""
+    for ch in full:
+        seen += stripper.feed(ch)
+        # raw JSON object syntax must never appear in the live stream
+        assert "tool_call" not in seen
+    seen += stripper.finish()
+    assert seen == "Let me run  now", repr(seen)
+
+
+def test_streaming_stripper_shows_prose_brace_set():
+    stripper = tooling.StreamingStripper()
+    out = "".join(stripper.feed(c) for c in "the set {a, b} is fine") + stripper.finish()
+    assert out == "the set {a, b} is fine", repr(out)
+
+
+def test_detect_malformed_tag_flags_truncated_bare_json():
+    trunc = json.dumps({"name": "terminal", "arguments": {"cmd": "ls"}})[:-3]
+    msg = tooling.detect_malformed_tag("doing " + trunc)
+    assert msg is not None and "incomplete" in msg.lower(), msg
+
+
+def test_detect_malformed_tag_clean_bare_call_returns_none():
+    assert tooling.detect_malformed_tag("doing " + _bare(cmd="ls")) is None
+
 
 
 # ---- tooling.detect_malformed_tag ----

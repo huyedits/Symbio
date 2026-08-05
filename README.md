@@ -1,23 +1,16 @@
 # Symbio
 
-**Local Ai that learns from your corrections. No Cloud, No subscriptions.**
+A local-first agent that fine-tunes itself from your corrections — no cloud, no subscriptions, runs on your Mac.
 
-Symbio takes notes and can construct it into training data to fine-tune itself - so you can stop repeating yourself.
+Symbio takes notes, runs shell commands, searches the web, and turns your corrections into LoRA training data so it stops repeating your mistakes.
 
-[![Live Demo on Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Live%20Demo-Hugging%20Face%20Spaces-blue)](https://huggingface.co/spaces/HuyEdits/symbio-demo)| [GitHub](https://github.com/huyedits/Symbio) | [Try it now](#quick-start)
+[![Live Demo on Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Live%20Demo-Hugging%20Face%20Spaces-blue)](https://huggingface.co/spaces/HuyEdits/symbio-demo) | [GitHub](https://github.com/huyedits/Symbio) | [Try it now](#quick-start)
 
+<!-- TODO: drop a 15-20s GIF here showing the CLI status line (adapter "trained Xm ago", mistake counter ticking toward the threshold). 
+     e.g. ffmpeg -i recording.mov -vf "fps=10,scale=960:-1" docs/demo.gif -->
 
+> **Try the interactive demo** — the real tag parser, self-correction miner, research memory, and RAG retriever running in your browser: https://huggingface.co/spaces/HuyEdits/symbio-demo
 
-Symbio develops as you tell it what to do in repeat.
-
-**Try the interactive demo** — the agent's real tag parser, self-correction miner, research memory, and RAG retriever running in your browser: https://huggingface.co/spaces/HuyEdits/symbio-demo
-## MOA feature
-Symbio has a **MOA** (Mixture of Agents) mode. Instead of fine-tuning one big model for every task, the headmaster delegates bounded sub-tasks to smaller worker models via tool calls. The worker executes, and if it fails it returns to the headmaster for guidance. Once it works, a note is saved for both sides. If the same mistake repeats past the configured threshold, both the worker and the headmaster are fine-tuned: the worker learns how to execute the task, and the headmaster learns how to delegate it more efficiently.
-
-## Skill feature
-Symbio can learn **skills** on the fly. A skill starts as a simple markdown note with step-by-step instructions. As errors and corrections accumulate, they are logged in a hidden `.md.health.jsonl` sidecar so the note itself stays clean and readable. Once the mistake threshold is reached, the collected examples are fed into a LoRA fine-tune that creates a dedicated worker adapter for that skill — one adapter = one skill. Adapters are hot-swappable and can be archived if unused.
-
-Use `/new-skill <name>` or `symb skill new <name>` to create one, `/skill-adapters` to list them, and `/archive` / `/restore` to manage idle notes and adapters.
 ## What it does
 
 - Chat through a local CLI or a Telegram bot.
@@ -28,7 +21,13 @@ Use `/new-skill <name>` or `symb skill new <name>` to create one, `/skill-adapte
 - Digest notes into training data and fine-tune a LoRA adapter on the fly.
 - Persist every conversation turn to JSONL and an SQLite store.
 
-Please star this project too. It would help me out SO SO much. :3 <3
+## MOA feature
+Symbio has a **MOA** (Mixture of Agents) mode. Instead of fine-tuning one big model for every task, the headmaster delegates bounded sub-tasks to smaller worker models via tool calls. The worker executes, and if it fails it returns to the headmaster for guidance. Once it works, a note is saved for both sides. If the same mistake repeats past the configured threshold, both the worker and the headmaster are fine-tuned: the worker learns how to execute the task, and the headmaster learns how to delegate it more efficiently.
+
+## Skill feature
+Symbio can learn **skills** on the fly. A skill starts as a simple markdown note with step-by-step instructions. As errors and corrections accumulate, they are logged in a hidden `.md.health.jsonl` sidecar so the note itself stays clean and readable. Once the mistake threshold is reached, the collected examples are fed into a LoRA fine-tune that creates a dedicated worker adapter for that skill — one adapter = one skill. Adapters are hot-swappable and can be archived if unused.
+
+Use `/new-skill <name>` or `symb skill new <name>` to create one, `/skill-adapters` to list them, and `/archive` / `/restore` to manage idle notes and adapters.
 ## Hardware prerequisites 
 Symbio (for now) runs on Apple Silicon using MLX and Metal performance shaders
 - **Recommended Unified RAM requirements** 16gb (the program itself takes 8 but overhead and expansion so comfortably would be 16)
@@ -482,3 +481,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and how to open issue
 - [ ] **Prune Old Weights (Future Milestone)**
 ## Licence
 Apache 2.0
+
+---
+
+⭐ If Symbio is useful to you, a star helps others find it.

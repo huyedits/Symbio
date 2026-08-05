@@ -801,6 +801,12 @@ def main(argv: list[str] | None = None) -> int:
     if command == "chat":
         if is_first_run(config) or getattr(args, "force", False):
             config = run_setup_wizard(config)
+        # Safety gate: never send telemetry until the user has answered the
+        # consent prompt. Existing installs that flipped telemetry.enabled
+        # manually (without consented=True) get silently turned off here.
+        tcfg = config.get("telemetry", {}) or {}
+        if tcfg.get("enabled") and not tcfg.get("consented"):
+            tcfg["enabled"] = False
         chat_loop(config)
         return 0
     if command == "setup":

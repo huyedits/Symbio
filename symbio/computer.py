@@ -125,6 +125,7 @@ class BrowserSession:
         self._confirmed: set[str] = set(_DEFAULT_ALLOWLIST)
         self._confirm_fn = confirm_fn
         self._channel: str = ""
+        self._last_url: str = ""
 
     def _init(self, channel: str = "") -> tuple[Any, Any]:
         if self._page is not None:
@@ -163,34 +164,54 @@ class BrowserSession:
 
     # Errors that mean the Playwright connection itself is wedged (dead
     # greenlet/thread, closed pipe or loop) — no further call can succeed.
+    # These are matched against the *lowercased* exception message.
+    # NOTE: "has been closed" is deliberately NOT here — it matches benign
+    # errors like "Target page has been closed" where only the page died.
+    # Instead we handle page/browser-level closures separately in _fail.
     _FATAL_MARKERS = (
         "cannot switch to a different thread",
-        "has been closed",
-        "connection closed",
         "event loop is closed",
         "pipe closed",
     )
 
     def _reset(self):
-        """Tear down a broken session so the next browser_open starts clean."""
-        for closer in (
-            lambda: self._browser.close() if self._browser else None,
-            lambda: self._playwright.stop() if self._playwright else None,
-        ):
+        """Tear down a broken *browser* so the next browser_open starts clean.
+
+        Only closes the browser (not the Playwright driver) — restarting
+        Playwright is slow and almost never necessary. The driver is only
+        stopped at process exit by _stop_playwright.
+        """
+        if self._browser:
             try:
-                closer()
+                self._browser.close()
             except Exception:
                 pass
         self._browser = None
-        self._playwright = None
         self._page = None
 
     def _fail(self, op: str, e: Exception) -> str:
         msg = str(e).lower()
+        # Truly fatal (thread/loop/pipe dead): full teardown.
         if any(marker in msg for marker in self._FATAL_MARKERS):
             self._reset()
+            if self._playwright:
+                try:
+                    self._playwright.stop()
+                except Exception:
+                    pass
+                self._playwright = None
             return (
                 f"Browser {op} error: the browser session broke and was reset. "
+                "Use browser_open to reopen the page."
+            )
+        # Page or browser was closed (user closed window, page crashed, etc.):
+        # tear down the browser so the next browser_open starts a fresh one,
+        # but keep the Playwright driver alive for a fast restart.
+        if "has been closed" in msg or "connection closed" in msg:
+            self._reset()
+            last_url_hint = f" The last opened URL was {self._last_url}." if self._last_url else ""
+            return (
+                f"Browser {op} error: the browser was closed.{last_url_hint} "
                 "Use browser_open to reopen the page."
             )
         return f"Browser {op} error: {_short_error(e)}"
@@ -218,6 +239,7 @@ class BrowserSession:
             _, page = self._init(channel=channel)
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             title = page.title()
+            self._last_url = url
             return f"Opened browser at {url}. Page title: {title}"
         except Exception as e:
             return self._fail("open", e)
@@ -369,6 +391,7 @@ class BrowserSession:
                 self._browser.close()
                 self._browser = None
             self._page = None
+            self._last_url = ""
             return "Browser closed."
         except Exception as e:
             return f"Browser close error: {e}"
@@ -383,7 +406,10 @@ class BrowserSession:
                 self._playwright.stop()
                 self._playwright = None
             self._page = None
-        except Exception:
+        except BaseException:
+            # Catch KeyboardInterrupt and SystemExit too — this is an atexit
+            # handler; if the user is already trying to quit, a cascading
+            # interrupt inside browser.close() must not print a traceback.
             pass
 
     def _register_exit_cleanup(self):

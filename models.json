@@ -5,6 +5,12 @@
     "adapter_compatible": true,
     "memory_note": "~4.6 GB on disk, ~6-8 GB RAM at runtime"
   },
+  "dense_7b_3bit": {
+    "model_name": "mlx-community/Qwen3-8B-3bit",
+    "description": "Dense 8B, 3-bit — lighter/faster than 4-bit, more headroom on 16 GB",
+    "adapter_compatible": true,
+    "memory_note": "~3.6 GB on disk, ~5-7 GB RAM at runtime"
+  },
   "dense_3b": {
     "model_name": "mlx-community/Qwen2.5-3B-Instruct-4bit",
     "description": "Dense 3B — smaller fallback, does not match the current LoRA adapter",
@@ -22,5 +28,11 @@
     "description": "Dense 1.5B — smallest/fastest dense option, no matching LoRA adapter",
     "adapter_compatible": false,
     "memory_note": "~1 GB on disk, ~2-3 GB RAM at runtime"
+  },
+  "phi4_mini_4bit": {
+    "model_name": "mlx-community/Phi-4-mini-instruct-4bit",
+    "description": "Dense 3.8B Phi-4-mini instruct, 4-bit — strong tool/tag following, LoRA-compatible footprint",
+    "adapter_compatible": false,
+    "memory_note": "~2.2 GB on disk, ~3-4 GB RAM at runtime; LoRA headroom on 16 GB"
   }
 }

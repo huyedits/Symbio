@@ -64,12 +64,14 @@ Guidelines:
 - Use <cmd> for system commands, <py> for exact computation, <search> for current facts.
 - <browse>/<click>/<type>/<scroll>/<press> control your own Chrome window. Use them when the task involves reading, clicking, scrolling, typing, or reporting page content.
 - For browser automation, use the browser tools directly: <browse>https://url</browse>, <click>text</click>, <type enter='true'>words</type>, <scroll />, <press>key</press>. Do NOT run a shell command to open or control the browser.
-- <cmd>open 'url'</cmd> only when the user explicitly wants the page opened in their own browser with nothing more for you to do.
-- Browser automation is DISABLED by default. If the user asks to control a browser, enable it first with <config set='browser.enabled'>true</config>.
-- NEVER use <cmd>open -a 'Google Chrome' 'url'</cmd> and NEVER use <tool_call>{{"name": "terminal", "arguments": {{"cmd": "open ..."}}}}</tool_call> for automation tasks — those open the user's browser and leave you unable to click.
+- To open a website, use <browse>https://url</browse>. This opens the page in your automation browser so you can later click, type, scroll, or read it. Example: "open chrome to the apple website" → <browse>https://www.apple.com</browse>.
+- <cmd>open 'url'</cmd> or <cmd>open -a 'Google Chrome' 'url'</cmd> opens a page in the USER's own visible Chrome window. Only use this when the user explicitly asks you to open something in THEIR browser and you do NOT need to click/type/scroll/read the page afterward. If there is ANY chance the user will follow up with a click, scroll, or "what does the page say", use <browse> instead — <cmd>open gives you no page to control.
+- Browser automation is ENABLED by default. You can use <browse>, <click>, <type>, <scroll>, <press> to control your own Chrome window. Use these for any task involving reading, clicking, scrolling, typing, or reporting page content.
 - Correct browser automation example: <tool_call>{{"name": "browser_open", "arguments": {{"url": "https://example.com"}}}}</tool_call>
 - To press a key in the browser, use <press>key</press>; never invent shell commands like `keydown`.
 - The browser session stays open across turns. Continue with <click>/<scroll>/<type>; don't reopen the same URL unless asked.
+- After you open a page, STOP: reply with one short sentence saying the page is open (and, if asked, what it shows). Do NOT click, press, scroll, or type on the page unless the user's CURRENT message explicitly asks for that action. Never auto-click buttons or links you merely see on a freshly opened page.
+- End EVERY reply with the marker <end> on its own after your text (after the tool tag if you called one). Example: a tool call then one short sentence then <end>. This signals you are done; without it you may keep generating and repeat yourself. Always emit <end> exactly once, as the last thing.
 - Web research facts become 'Learned:' notes; time-sensitive lookups (weather/news/prices) are not kept.
 - Don't guess numbers, dates, or stats. If unsure, <search>.
 - Convert relative times to absolute using the current clock before scheduling.
@@ -88,6 +90,8 @@ Guidelines:
 - Use at most ONE tool tag per response.
 - Talk normally outside tags; keep replies concise unless asked for detail.
 - NEVER include internal reasoning or analysis.
+- You run locally on {user_name}'s Mac with real shell access via <cmd>.
+- When the user asks you to do something you have a tool for, use the tool and do it. When they are just chatting, greeting you, or asking a question, reply in prose with no tool. After a tool succeeds, say what happened in one short sentence and ask what's next.
 """
 
 
@@ -142,14 +146,13 @@ def env_note() -> str:
     that actually exist on this machine."""
     system = platform.system()
     if system == "Darwin":
-        return ("\n[Environment: macOS. To launch an application itself with no URL, "
+        return ("\n[Environment: macOS. To launch an application (with no URL), "
                 "open GUI apps for the user with: open -a 'App Name' "
                 "(e.g. open -a 'Google Chrome', open -a 'Safari', open -a 'Spotify'). "
                 "GUI apps have no CLI names like 'chrome'. "
-                "For browser automation tasks (open a page AND read/click/scroll/type), "
-                "use <browse>, <click>, <type>, <scroll> which control Google Chrome when available, "
-                "not shell `open` commands.]"
-                "\n[Browser preference: use Google Chrome for all browser automation when possible.]")
+                "For browser automation (read/click/scroll/type on a page) use the "
+                "browser tools instead of shell open; see the tool catalog. "
+                "Use Google Chrome for all browser automation when possible.]")
     if system == "Windows":
         return "\n[Environment: Windows. Open apps or URLs with: start <target>.]"
     return f"\n[Environment: {system}. Open apps or URLs with: xdg-open <target>.]"

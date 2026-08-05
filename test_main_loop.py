@@ -86,9 +86,18 @@ class ScriptedSession:
             # ChatSession construction touches the real adapters/ directory
             # (checks adapter_config.json, marks it used) even with load()
             # faked out — guard it the same way training runs already are.
+            # Scripted replies are shared by the agent loop AND any tag-LLM
+            # call, so a tag-index query would consume a scripted reply and
+            # misalign them. Force the tag index off here — the tag path is
+            # exercised directly in test_tag_rag.py with a stubbed LLM.
+            cfg = dict(self.config or app_config.load_config())
+            rag_cfg = dict(cfg.get("rag", {}))
+            rag_cfg["tag_index_enabled"] = False
+            rag_cfg["auto_index_enabled"] = False
+            cfg["rag"] = rag_cfg
             with preserve_training_state(adapters=True):
                 chat.chat_loop(
-                    self.config or app_config.load_config(),
+                    cfg,
                     model=object(),
                     tokenizer=FakeTokenizer(),
                     adapter_loaded=False,
@@ -402,15 +411,16 @@ def test_agent_loop_self_corrects_malformed_tag():
     real_search = web.web_search
     web.web_search = lambda q, c, max_results=5: (True, "1. Some result\n   https://example.com\n   Info.")
     try:
-        session = ScriptedSession(
-            user_inputs=["Search for something.", "/quit", "n"],
-            model_replies=[
-                "Let me check that. <search>who won the",  # truncated, no close
-                "<search>who won the 2031 prize</search> Checking now.",  # retried, well-formed
-                "It was won by nobody in particular.",  # final answer after the search executes
-            ],
-        )
-        session.run()
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["Search for something.", "/quit", "n"],
+                model_replies=[
+                    "Let me check that. <search>who won the",  # truncated, no close
+                    "<search>who won the 2031 prize</search> Checking now.",  # retried, well-formed
+                    "It was won by nobody in particular.",  # final answer after the search executes
+                ],
+            )
+            session.run()
     finally:
         web.web_search = real_search
     # Round 1: malformed -> self-correct. Round 2: well-formed <search> ->
@@ -422,20 +432,233 @@ def test_agent_loop_self_corrects_malformed_tag():
     print("test_agent_loop_self_corrects_malformed_tag passed")
 
 
+def test_is_greeting():
+    assert chat._is_greeting("hi")
+    assert chat._is_greeting("Hi Caine")
+    assert chat._is_greeting("hello there")
+    assert chat._is_greeting("Hey")
+    assert chat._is_greeting("good morning")
+    assert chat._is_greeting("yo")
+    # Not greetings: real questions, or words that merely contain "hi".
+    assert not chat._is_greeting("what is 2+2")
+    assert not chat._is_greeting("this is a question")
+    assert not chat._is_greeting("")
+    assert not chat._is_greeting("hi what's the weather")  # > greeting-only
+    print("test_is_greeting passed")
+
+
+def test_greeting_blank_reply_does_not_search():
+    """A blank reply to a greeting (e.g. "hi" where the model emitted only a
+    <mood> tag, stripped to nothing) must NOT auto-search the web — we'd
+    "search" the word hi and answer with random results — and must NOT be
+    learned as research. The blank-reply nudge fires so the model gets a
+    second chance to actually greet back."""
+    calls = []
+    real_search = web.web_search
+    web.web_search = lambda q, c, max_results=5: (
+        calls.append(q) or (True, "1. Hawaii is 2000 miles away.\n   https://example.com"))
+    try:
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["hi", "/quit", "n"],
+                model_replies=[
+                    "",  # blank first reply (a lone mood tag stripped to nothing)
+                    "Hello! What can I help you with?",  # greets back after the nudge
+                ],
+            )
+            session.run()
+            learned = list(constants.NOTES_DIR.glob("*Learned*.md"))
+        assert calls == [], f"web_search must not run for a greeting, got {calls}"
+        # The nudge gave the model a second round instead of searching.
+        assert len(session.prompts_seen) >= 2, len(session.prompts_seen)
+        assert learned == [], f"no junk research note should be created, got {learned}"
+    finally:
+        web.web_search = real_search
+    print("test_greeting_blank_reply_does_not_search passed")
+
+
+def test_subjectless_search_command():
+    # Bare "go search" phrasings with no topic -> subjectless.
+    for s in ("check online", "check online.", "search it", "look it up",
+              "just google it", "search the web", "check the web",
+              "look online", "verify online", "just search",
+              # An assertion + bare command still has no searchable subject;
+              # "it" refers to the previous topic, so use that question.
+              "it has check online", "it has, check online",
+              "it already happened check online"):
+        assert chat._subjectless_search_command(s), s
+    # A real subject is present -> NOT subjectless (model can bind the topic).
+    for s in ("search for windows 11 pricing", "look up the ceo of apple",
+              "check online who won the world cup", "google the weather in tokyo",
+              "how much does windows 11 cost", "search windows 11 cost",
+              # A content noun ("score") survives after dropping the command
+              # phrase, so this is NOT subjectless even with filler around it.
+              "it has the score check online",
+              "hi", ""):
+        assert not chat._subjectless_search_command(s), s
+    print("test_subjectless_search_command passed")
+
+
+def test_queries_overlap():
+    subj = "how much does windows 11 cost"
+    # Hallucinated, off-topic query -> no overlap -> caller overrides.
+    assert not chat._queries_overlap("Who is the CEO of Apple Inc.", subj)
+    # On-topic query -> overlap -> trust the model's query.
+    assert chat._queries_overlap("windows 11 home price usd", subj)
+    assert chat._queries_overlap("cost of windows 11 pro", subj)
+    # No signature words to compare -> can't tell, trust the model.
+    assert chat._queries_overlap("anything", "??")
+    print("test_queries_overlap passed")
+
+
+def test_sounds_evasive():
+    # A price/figure question deflected with no number -> evasive.
+    for question, reply in [
+        ("How much does Windows 11 cost?",
+         "The cost depends on the device. Check the official Microsoft website."),
+        ("What's the price of an iPhone 16?",
+         "Pricing may vary by region; for exact pricing visit the official store."),
+        ("How much is a Tesla Model 3?",
+         "It varies by configuration, check with the retailer for details."),
+    ]:
+        assert learn.sounds_evasive(question, reply), (question, reply)
+    for question, reply in [
+        # Commits to a number -> not evasive (wrong numbers are handled elsewhere).
+        ("How much does Windows 11 cost?", "Windows 11 Home costs $139."),
+        # No deflection phrase.
+        ("How much does Windows 11 cost?", "I don't know the exact price."),
+        # Not a price/figure question.
+        ("What is the capital of France?", "It depends on the region."),
+        # Empty reply.
+        ("How much does Windows 11 cost?", ""),
+    ]:
+        assert not learn.sounds_evasive(question, reply), (question, reply)
+    print("test_sounds_evasive passed")
+
+
+def test_remember_research_rejects_bare_command():
+    """A bare 'check online' command must never become a Learned note title —
+    it's a command, not a question, and would train a command string in."""
+    cfg = app_config.load_config()
+    with scratch_notes_dir():
+        note = learn.remember_research(
+            "check online.",
+            "Windows 11 Home costs $139 and Pro costs $199 — a real, long answer.",
+            cfg)
+        assert note is None, "bare search command was saved as research"
+        note2 = learn.remember_research(
+            "look it up",
+            "Windows 11 Home costs $139 and Pro costs $199 — a real, long answer.",
+            cfg)
+        assert note2 is None
+        # A real question is still saved.
+        note3 = learn.remember_research(
+            "how much does windows 11 cost",
+            "Windows 11 Home costs $139 and Pro costs $199 — a real, long answer.",
+            cfg)
+        assert note3 is not None
+    print("test_remember_research_rejects_bare_command passed")
+
+
+def test_subjectless_search_uses_previous_question():
+    """The bug from the log: user asks 'how much does windows 11 cost', gets a
+    non-answer, says 'check online.' with no subject, and the model emits a
+    web_search for an unrelated hallucinated query ('Who is the CEO of Apple
+    Inc.'). The tool layer must override the query with the previous question,
+    and no 'Learned: check online' junk note must be filed."""
+    calls = []
+    real_search = web.web_search
+    web.web_search = lambda q, c, max_results=5: (
+        calls.append(q) or (True,
+        "1. Windows 11 pricing - Microsoft\n   https://example.com/win11\n"
+        "   Windows 11 Home costs $139, Pro costs $199."))
+    try:
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["how much does windows 11 cost", "check online.",
+                             "/quit", "n"],
+                model_replies=[
+                    # Turn 1: confident numbers, no hedge/deflection -> no search.
+                    "Windows 11 Home is $139 and Pro is $199.",
+                    # Turn 2 round 1: hallucinated, off-topic search query.
+                    "<search>Who is the CEO of Apple Inc.</search>",
+                    # Turn 2 round 2: answer from the (overridden) results.
+                    "Windows 11 Home costs $139.",
+                ],
+            )
+            session.run()
+            # The hallucinated query must be overridden with the previous
+            # question — never sent to the search engine as-is.
+            assert calls, "web_search was never called"
+            assert "Who is the CEO of Apple Inc." not in calls, calls
+            assert any("windows 11" in q.lower() for q in calls), calls
+            # No junk note titled with the bare command.
+            junk = [f.name for f in constants.NOTES_DIR.glob("*Learned*.md")
+                    if "check_online" in f.name.lower()]
+            assert junk == [], f"junk 'check online' note created: {junk}"
+    finally:
+        web.web_search = real_search
+    print("test_subjectless_search_uses_previous_question passed")
+
+
+def test_verification_followup_keeps_role_alternation():
+    """Regression: a verification follow-up ('no. check again') used to append
+    the re-check nudge as a SEPARATE user message right after the user's input,
+    yielding two consecutive user turns. The Mistral chat template requires
+    strict user/assistant alternation and raises
+    'After the optional system message, conversation roles must alternate
+    user/assistant/user/assistant/...' — which crashed every turn after the
+    first. The nudge must fold into the user's own turn so roles stay strictly
+    alternating. The stray second user message also persisted in history, so
+    every later turn crashed too; this test runs a third turn to catch that."""
+    captured = []
+    orig_act = FakeTokenizer.apply_chat_template
+
+    def capturing(self, messages, **kw):
+        captured.append([m["role"] for m in messages])
+        return orig_act(self, messages, **kw)
+
+    FakeTokenizer.apply_chat_template = capturing
+    try:
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["who is the ceo of apple", "no. check again",
+                             "are you sure", "/quit", "n"],
+                model_replies=[
+                    "Tim Cook is the CEO of Apple.",
+                    "Tim Cook is the CEO of Apple.",
+                    "Yes — Tim Cook is the CEO of Apple.",
+                ],
+            )
+            session.run()
+    finally:
+        FakeTokenizer.apply_chat_template = orig_act
+
+    assert captured, "no prompt was fed to the chat template"
+    for roles in captured:
+        # Drop the single optional leading system message, then require strict
+        # user/assistant alternation: no two adjacent same-role messages.
+        seq = roles[1:] if roles and roles[0] == "system" else roles
+        for prev, cur in zip(seq, seq[1:]):
+            assert prev != cur, f"consecutive same-role messages: {roles}"
+    print("test_verification_followup_keeps_role_alternation passed")
+
+
 def test_agent_loop_self_corrects_only_once_per_turn():
     """A persistently malformed reply doesn't burn every round on retries —
     self-correction fires once, then normal end-of-turn handling resumes."""
-    session = ScriptedSession(
-        user_inputs=["Search for something.", "/quit", "n"],
-        model_replies=[
-            "<search>always truncated",
-            # Still malformed, but with visible prose this time so the
-            # (unrelated) blank-reply auto-search fallback doesn't also
-            # kick in and add a third round — isolates just this behavior.
-            "I couldn't complete that search. <search>still truncated",
-        ],
-    )
-    session.run()
+    with scratch_notes_dir():
+        session = ScriptedSession(
+            user_inputs=["Search for something.", "/quit", "n"],
+            model_replies=[
+                "<search>always truncated",
+                # Still malformed, but with visible prose this time so the
+                # (unrelated) blank-reply auto-search fallback doesn't also
+                # kick in and add a third round — isolates just this behavior.
+                "I couldn't complete that search. <search>still truncated",
+            ],
+        )
+        session.run()
     # One self-correction retry, then the second (still-malformed) reply
     # ends the turn normally rather than retrying forever.
     assert len(session.prompts_seen) == 2, len(session.prompts_seen)
@@ -844,6 +1067,9 @@ def test_agent_loop_browses():
         with scratch_notes_dir():
             config = app_config.load_config()
             config["browser"]["enabled"] = True
+            _eg = config.setdefault("tools", {}).setdefault("enabled_groups", [])
+            if "browser" not in _eg:
+                _eg.append("browser")
             session = ScriptedSession(
                 user_inputs=["Look up the MLX docs yourself.", "/quit", "n"],
                 model_replies=[
@@ -877,6 +1103,9 @@ def test_agent_loop_survives_tool_exception():
         with scratch_notes_dir():
             config = app_config.load_config()
             config["browser"]["enabled"] = True
+            _eg = config.setdefault("tools", {}).setdefault("enabled_groups", [])
+            if "browser" not in _eg:
+                _eg.append("browser")
             session = ScriptedSession(
                 user_inputs=["Open youtube and click the first video.", "/quit", "n"],
                 model_replies=[
@@ -1536,6 +1765,14 @@ def _run_all_inner():
         test_agent_loop_breaks_on_repeated_tool_call()
         test_agent_loop_self_corrects_malformed_tag()
         test_agent_loop_self_corrects_only_once_per_turn()
+        test_is_greeting()
+        test_greeting_blank_reply_does_not_search()
+        test_subjectless_search_command()
+        test_queries_overlap()
+        test_sounds_evasive()
+        test_remember_research_rejects_bare_command()
+        test_subjectless_search_uses_previous_question()
+        test_verification_followup_keeps_role_alternation()
         test_strip_unterminated_tag()
         test_agent_loop_schedules_job_from_tag()
     print("\nAll agent-loop tests passed.")

@@ -7,6 +7,7 @@ from typing import Any
 
 from symbio import constants
 
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "model_name": "Qwen/Qwen3-0.6B",
     "assistant_name": "",
@@ -185,6 +186,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "worker_golden_retry_enabled": True,
         "worker_golden_retry_max_extra_iters": 50,
         "worker_golden_retry_samples_per_case": 3,
+    },
+    # Anonymous telemetry + /feedback. Off by default; requires an explicit
+    # Y/N consent (run_setup_wizard or /telemetry) before anything is sent.
+    # No endpoint -> records are kept locally under telemetry/ and never sent.
+    "telemetry": {
+        "enabled": False,          # collection+send allowed (set by consent)
+        "consented": False,        # user has answered the Y/N (Y or N both -> True)
+        "endpoint": "",            # Cloudflare Worker URL, https://x.workers.dev/ingest
+        "shared_secret": "",       # bearer key sent as the X-Telemetry-Secret header
+        "feedback_enabled": True,  # /feedback toggle (/feedback on|off)
+        "ping_daily": True,        # auto telemetry ping at most once per day
     },
 }
 

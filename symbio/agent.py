@@ -293,12 +293,13 @@ class AIAgent:
 
             messages.extend(self.history[-history_limit:])
 
+            native_tools = self.config.get("agent", {}).get("native_tools", False)
             prompt = self.tokenizer.apply_chat_template(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
                 enable_thinking=False,
-                tools=self._openai_tool_schemas(),
+                **({"tools": self._openai_tool_schemas()} if native_tools else {}),
             )
 
             reply = ""
