@@ -91,10 +91,41 @@ def _skill_slug(name: str) -> str:
     return s or "skill"
 
 
-def _build_skill_system_prompt(name: str, steps: str) -> str:
-    """A concise worker system prompt derived from the skill's steps."""
+def _skill_prompt_opener(name: str) -> str:
+    """The one sentence shared by both skill prompt forms.
+
+    Training and evaluation must agree on this framing, so it lives in one
+    place rather than being written out twice.
+    """
+    return f"You are the specialist worker for the skill '{name}'."
+
+
+def build_worker_system_prompt(name: str) -> str:
+    """The prompt a skill worker is TRAINED under: names the skill, withholds
+    the procedure.
+
+    The steps are deliberately absent. If they were present here, the adapter
+    would only ever learn to copy a procedure out of its own context, and no
+    later evaluation could tell weight-learning apart from prompt-following.
+    Keeping them out is what makes 'the skill lives in the weights' a claim
+    that can be tested — see symbio.app.skill_eval.
+    """
     return (
-        f"You are the specialist worker for the skill '{name}'. "
+        f"{_skill_prompt_opener(name)} "
+        "Follow the steps for that skill exactly, produce only the requested "
+        "output, and do not add extra commentary."
+    )
+
+
+def _build_skill_system_prompt(name: str, steps: str) -> str:
+    """The prompt a skill worker is SERVED under: includes the steps.
+
+    Production keeps its safety net — a weak adapter still behaves because
+    the procedure is right there. Serving with more context than training is
+    harmless; the reverse would not be.
+    """
+    return (
+        f"{_skill_prompt_opener(name)} "
         "Follow the steps below exactly, produce only the requested output, "
         "and do not add extra commentary.\n\n"
         f"Steps:\n{steps}\n\n"
@@ -143,17 +174,39 @@ def _ensure_skill_catalog_entry(
     return role
 
 
+def _seed_user_turns(name: str) -> list[str]:
+    """Ways a user might ask for this skill, for the seed samples.
+
+    Kept deliberately distinct from skill_eval.default_tasks: if the seeds
+    and the eval prompts were the same strings, a passing score would only
+    show memorisation of the training set.
+    """
+    lower = name.lower()
+    return [
+        f"Apply the skill '{name}'.",
+        f"How do I perform '{name}'?",
+        f"What are the steps for {lower}?",
+        f"Can you take care of {lower}?",
+        f"Use your {lower} skill on this.",
+        f"Time for {lower}.",
+    ]
+
+
 def _seed_skill_training_data(
-    role: str, system_prompt: str, name: str, steps: str, tokenizer: Any
+    role: str, name: str, steps: str, tokenizer: Any
 ) -> int:
-    """Write a few synthetic training samples for a brand-new skill worker.
+    """Write synthetic training samples for a brand-new skill worker.
+
+    The system turn names the skill but withholds the procedure; the steps
+    appear only in the assistant turn. That is what pushes the procedure into
+    the weights instead of teaching the adapter to copy it out of context.
 
     Returns the number of samples written. Real usage samples accumulate
     automatically in dispatch.WorkerPool.run_delegated_task.
     """
     data_dir = constants.data_dir_for(role)
     data_dir.mkdir(parents=True, exist_ok=True)
-    train_file = constants.data_dir_for(role) / "train.jsonl"
+    train_file = data_dir / "train.jsonl"
 
     # Clear any stale auto-seeded samples so re-saving a skill refreshes the seed.
     if train_file.exists():
@@ -164,49 +217,77 @@ def _seed_skill_training_data(
     else:
         lines = []
 
-    samples = [
-        {
-            "role": "system",
-            "content": system_prompt,
-        },
-        {
-            "role": "user",
-            "content": f"Apply the skill '{name}'.",
-        },
-        {
-            "role": "assistant",
-            "content": f"Using skill '{name}':\n{steps}",
-        },
-    ]
-    text = tokenizer.apply_chat_template(
-        samples, tokenize=False, add_generation_prompt=False, enable_thinking=False
-    )
-    seed = {"text": text, "metadata": {"skill_seed": True, "skill": name}}
-    lines.append(json.dumps(seed))
-
-    # Also seed a generic "how do I do X?" sample pointing at the skill.
-    samples2 = [
-        {
-            "role": "system",
-            "content": system_prompt,
-        },
-        {
-            "role": "user",
-            "content": f"How do I perform '{name}'?",
-        },
-        {
-            "role": "assistant",
-            "content": steps,
-        },
-    ]
-    text2 = tokenizer.apply_chat_template(
-        samples2, tokenize=False, add_generation_prompt=False, enable_thinking=False
-    )
-    seed2 = {"text": text2, "metadata": {"skill_seed": True, "skill": name}}
-    lines.append(json.dumps(seed2))
+    system_prompt = build_worker_system_prompt(name)
+    # Chat templates are model-specific: ChatML turn markers mean nothing to a
+    # Mistral tokenizer and vice versa. Record which model's template rendered
+    # these samples so training can refuse a mismatched pairing instead of
+    # burning an hour learning noise. See seed_model_mismatch().
+    tokenized_for = getattr(tokenizer, "name_or_path", None) or ""
+    written = 0
+    for user_turn in _seed_user_turns(name):
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_turn},
+            {"role": "assistant", "content": steps},
+        ]
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=False, enable_thinking=False
+        )
+        lines.append(json.dumps({
+            "text": text,
+            "metadata": {
+                "skill_seed": True,
+                "skill": name,
+                "tokenized_for": tokenized_for,
+            },
+        }))
+        written += 1
 
     train_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return 2
+    return written
+
+
+def _model_stem(model_name: str) -> str:
+    """Bare model id, ignoring the publishing org.
+
+    'Qwen/Qwen3-8B-MLX-4bit' and 'mlx-community/Qwen3-8B-MLX-4bit' are the
+    same weights republished; comparing full paths would flag them as a
+    mismatch and block a training run that is actually fine.
+    """
+    return model_name.rsplit("/", 1)[-1].strip().lower()
+
+
+def seed_model_mismatch(role: str, model_name: str) -> str | None:
+    """Explain why a role's seed data cannot train `model_name`, or None.
+
+    The seeds are rendered by the headmaster's tokenizer at skill-creation
+    time, but training uses the model recorded in the worker catalog. When a
+    skill outlives a model switch those two drift apart, and the mismatch is
+    invisible: training runs happily to completion on samples whose turn
+    markers the model has never seen.
+    """
+    train_file = constants.data_dir_for(role) / "train.jsonl"
+    if not train_file.exists():
+        return None
+    for raw in train_file.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        try:
+            meta = json.loads(raw).get("metadata", {})
+        except json.JSONDecodeError:
+            continue
+        stamped = meta.get("tokenized_for")
+        if not stamped:
+            continue
+        if _model_stem(stamped) != _model_stem(model_name):
+            return (
+                f"Training data for role '{role}' was tokenized for "
+                f"'{stamped}' but the worker is configured to train "
+                f"'{model_name}'. Their chat templates differ, so this run "
+                f"would learn nothing useful. Re-save the skill to re-seed "
+                f"it for the current model."
+            )
+    return None
 
 
 def save_skill_adapter(
@@ -227,7 +308,7 @@ def save_skill_adapter(
     # Refresh dispatch's in-memory view of the catalog.
     # (load_catalog is lazy, so stale disk state is harmless on next call.)
 
-    seeded = _seed_skill_training_data(role, system_prompt, name, steps, tokenizer)
+    seeded = _seed_skill_training_data(role, name, steps, tokenizer)
     adapter_dir = constants.adapter_dir_for(role)
 
     result = {

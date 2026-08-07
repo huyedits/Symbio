@@ -2783,6 +2783,7 @@ class ChatSession:
         pending_browser_error: str | None = None
         browser_retry_nudged = False
         blank_retry_nudged = False
+        echo_retry_nudged = False
         for _ in range(max_rounds):
             # Once we are inside a tool-followup round, lower the temperature
             # so the model sticks to the tag grammar instead of drifting into
@@ -2977,6 +2978,29 @@ class ChatSession:
                 # auto-searching the greeting and answer with random web results.
                 # A non-greeting first-round blank is left to the auto-search path
                 # below — a real question that blanks should search, not nudge.
+                # The model wrote the harness's own scaffold, or looped one
+                # line. Either way this is not a reply: it must not reach the
+                # user and must not be logged, because a logged copy comes
+                # back through retrieval and reinforces the habit.
+                if (not echo_retry_nudged
+                        and (learn.looks_like_observation_echo(display)
+                             or learn.looks_degenerate(display))):
+                    echo_retry_nudged = True
+                    self.output_fn(
+                        "  [Echo] Reply impersonated a system observation; "
+                        "regenerating...")
+                    self.history.append({"role": "user", "content": (
+                        "[System observation: your last reply was discarded. "
+                        "You wrote text in the '[System observation: ...]' "
+                        "form, or repeated one line over and over. That form "
+                        "is how the system speaks to you — it is never part "
+                        "of your reply, and you must never invent one. "
+                        "Answer the user directly now, in your own voice, "
+                        "once.]"
+                    )})
+                    self._trim_history()
+                    continue
+
                 action_req = _is_action_request(user_input)
                 if (not display.strip() and not blank_retry_nudged
                         and (executed_calls or _is_greeting(user_input)

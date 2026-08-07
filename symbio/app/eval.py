@@ -12,6 +12,7 @@ tags but no tool is executed, so the benchmark is safe to run unattended.
 
 import gc
 import json
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone

@@ -114,6 +114,112 @@ def test_save_skill_adapter_seeds_training_data(isolated_skill_env, config):
     assert all(ln.get("metadata", {}).get("skill_seed") for ln in lines)
 
 
+def test_seed_samples_keep_steps_out_of_the_system_turn(isolated_skill_env, config):
+    """The procedure must be the training target, not context to copy.
+
+    If the steps appear in the system turn, the adapter learns to echo what
+    it was handed and no evaluation can distinguish that from real learning.
+    """
+    from symbio.app import skills
+
+    steps = "1. Find smells.\n2. Simplify."
+    result = skills.save_skill_adapter(
+        "Refactor Code", steps, config, FakeTokenizer(), auto_train=False,
+    )
+    train_file = isolated_skill_env["data_dir"] / "workers" / result["role"] / "train.jsonl"
+    lines = [json.loads(ln) for ln in train_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    for line in lines:
+        # FakeTokenizer renders turns as "<role>: <content>".
+        system_turn = line["text"].split("user:")[0]
+        assert "Find smells" not in system_turn
+        assert "Steps:" not in system_turn
+        # ...and the steps must still be present as the assistant target.
+        assert "assistant:" in line["text"]
+        assert "Find smells" in line["text"].split("assistant:")[1]
+
+
+def test_seed_user_turns_do_not_collide_with_eval_tasks():
+    """Overlap would turn the eval into a memorisation check."""
+    from symbio.app import skill_eval, skills
+
+    name = "Refactor Code"
+    seeds = {t.strip().lower() for t in skills._seed_user_turns(name)}
+    evals = {t.prompt.strip().lower() for t in skill_eval.default_tasks(name)}
+    assert not (seeds & evals)
+
+
+def test_seeds_record_the_tokenizer_they_were_rendered_with(
+        isolated_skill_env, config):
+    from symbio.app import skills
+
+    tok = FakeTokenizer()
+    tok.name_or_path = "org/ModelA"
+    result = skills.save_skill_adapter(
+        "Refactor Code", "1. Find smells.", config, tok, auto_train=False)
+    train_file = isolated_skill_env["data_dir"] / "workers" / result["role"] / "train.jsonl"
+    lines = [json.loads(ln) for ln in train_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert all(ln["metadata"]["tokenized_for"] == "org/ModelA" for ln in lines)
+
+
+def test_mismatched_tokenizer_is_detected(isolated_skill_env, config):
+    """Training data from one chat template must not train another model."""
+    from symbio.app import skills
+
+    tok = FakeTokenizer()
+    tok.name_or_path = "org/Qwen3-8B-MLX-4bit"
+    result = skills.save_skill_adapter(
+        "Refactor Code", "1. Find smells.", config, tok, auto_train=False)
+
+    assert skills.seed_model_mismatch(result["role"], "org/Qwen3-8B-MLX-4bit") is None
+    msg = skills.seed_model_mismatch(result["role"], "mlx/Mistral-Nemo-3bit")
+    assert msg and "Mistral-Nemo-3bit" in msg and "Qwen3-8B-MLX-4bit" in msg
+
+
+def test_republished_model_is_not_a_mismatch(isolated_skill_env, config):
+    """Same weights under a different org must not block training."""
+    from symbio.app import skills
+
+    tok = FakeTokenizer()
+    tok.name_or_path = "Qwen/Qwen3-8B-MLX-4bit"
+    result = skills.save_skill_adapter(
+        "Refactor Code", "1. Find smells.", config, tok, auto_train=False)
+    assert skills.seed_model_mismatch(
+        result["role"], "mlx-community/Qwen3-8B-MLX-4bit") is None
+
+
+def test_guarded_train_refuses_mismatched_seed_data(isolated_skill_env, config, monkeypatch):
+    from symbio.app import dispatch, skills
+
+    tok = FakeTokenizer()
+    tok.name_or_path = "org/Qwen3-8B-MLX-4bit"
+    result = skills.save_skill_adapter(
+        "Refactor Code", "1. Find smells.", config, tok, auto_train=False)
+    role = result["role"]
+
+    monkeypatch.setattr(dispatch, "catalog_entry_for_role",
+                        lambda r: {"model_name": "mlx/Mistral-Nemo-3bit", "role": r})
+
+    def _boom(*a, **k):
+        raise AssertionError("training must not start on mismatched data")
+
+    monkeypatch.setattr(dispatch.training, "run_training", _boom)
+    trained, msg = dispatch.guarded_train_worker(role, config)
+    assert trained is False
+    assert "tokenized for" in msg
+
+
+def test_worker_and_served_prompts_share_one_opener(isolated_skill_env, config):
+    from symbio.app import skills
+
+    name, steps = "Refactor Code", "1. Find smells."
+    trained = skills.build_worker_system_prompt(name)
+    served = skills._build_skill_system_prompt(name, steps)
+    opener = skills._skill_prompt_opener(name)
+    assert trained.startswith(opener) and served.startswith(opener)
+    assert steps in served and steps not in trained
+
+
 def test_list_skill_adapters_reports_entries(isolated_skill_env, config):
     from symbio.app import skills
 

@@ -220,6 +220,49 @@ def _is_system_observation(content: str) -> bool:
     return content.startswith("[System observation")
 
 
+def looks_like_observation_echo(text: str) -> bool:
+    """True when an assistant reply is impersonating the harness.
+
+    "[System observation: ...]" is a user-role scaffold the agent uses to
+    hand tool results back to the model. It appears in a sixth of the
+    training corpus, always immediately followed by an assistant turn, so
+    the model can learn to emit the scaffold itself and then answer its own
+    invented observation — usually on repeat until the token budget runs out.
+
+    The existing guards all test `startswith("[System observation")`, which
+    a near-miss walks straight past: no bracket, lowercase, or a stray word
+    in front. This normalises before matching so the variants are caught too.
+    """
+    for line in text.splitlines():
+        stripped = line.strip().lstrip("[({*->#\"' \t")
+        if stripped.casefold().startswith("system observation"):
+            return True
+    return False
+
+
+def _collapse_ws(line: str) -> str:
+    return " ".join(line.split()).casefold()
+
+
+def looks_degenerate(text: str, min_repeats: int = 3) -> bool:
+    """True when a reply is the same non-trivial line repeated.
+
+    A looping generation is not a reply, and logging one poisons retrieval:
+    it is stored as a normal assistant turn and comes back as context later.
+    """
+    lines = [_collapse_ws(ln) for ln in text.splitlines() if ln.strip()]
+    if len(lines) < min_repeats:
+        return False
+    counts: dict[str, int] = {}
+    for line in lines:
+        if len(line) < 12:
+            continue
+        counts[line] = counts.get(line, 0) + 1
+        if counts[line] >= min_repeats:
+            return True
+    return False
+
+
 def _is_real_user_turn(turn: dict[str, str]) -> bool:
     return turn.get("role") == "user" and not _is_system_observation(turn.get("content", ""))
 
