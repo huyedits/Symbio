@@ -310,6 +310,15 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
     if entry is None:
         return False, f"No worker configured for role '{role}'."
 
+    # Refuse a run whose data was rendered by a different model's chat
+    # template. Without this the run completes normally and produces an
+    # adapter that has learned another model's turn markers.
+    from symbio.app import skills as _skills
+
+    mismatch = _skills.seed_model_mismatch(role, entry["model_name"])
+    if mismatch:
+        return False, mismatch
+
     dispatch_cfg = config.get("dispatch", {})
     golden_on = dispatch_cfg.get("worker_golden_set_enabled", True)
     cases = WORKER_GOLDEN_CASES.get(role)
@@ -341,7 +350,11 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
         trained = training.run_training(
             config, iters=iters, role=role, model_name=entry["model_name"])
         if not trained:
-            return False, "Training skipped (no new data or failed)."
+            return False, (
+                f"Training for '{role}' produced no usable adapter. Check the "
+                f"log above: either there was no new data, or the run ended "
+                f"before any checkpoint was written."
+            )
 
         new_model, new_tok = load(entry["model_name"], adapter_path=str(adapter_dir))
         training.mark_adapter_used(role=role)

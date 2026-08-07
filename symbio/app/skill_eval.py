@@ -1,0 +1,526 @@
+"""Three-way evaluation of a single skill adapter.
+
+symbio.app.eval answers "is the headmaster adapter better than the base
+model on general tasks". This module answers the sharper question the
+project actually exists to demonstrate: *did the weights learn the skill,
+or would a system prompt have done the same job?*
+
+It runs one skill's task battery under three conditions:
+
+  base      base model, generic assistant prompt, no skill steps anywhere.
+            Establishes what the model already knew. Expected to score low.
+
+  prompted  base model, skill prompt WITH the steps pasted in.
+            The "you could have just prompted it" control. This is the arm
+            a skeptic will point at, so it is measured, not argued with.
+
+  adapter   skill adapter loaded, skill prompt with the steps STRIPPED OUT.
+            The model is told which skill it is and nothing else. Any score
+            above `base` here came from the weights, because the procedure
+            was never in the context.
+
+The comparison that matters is adapter vs base (did training add anything)
+read alongside adapter vs prompted (how close to having been told). Both
+numbers go in the report; neither is spun.
+
+Grading is mechanical: each task is scored by how much of the skill's own
+step vocabulary the reply reproduces. That is deliberately dumb — it cannot
+flatter the adapter, and the raw replies are saved so the number can be
+audited by hand.
+"""
+
+import gc
+import json
+import re
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+from symbio import constants
+from symbio.app import prompts
+
+# Arm names, in report order.
+ARM_BASE = "base"
+ARM_PROMPTED = "prompted"
+ARM_ADAPTER = "adapter"
+ARMS = (ARM_BASE, ARM_PROMPTED, ARM_ADAPTER)
+
+# A reply must reproduce this fraction of the skill's step vocabulary to
+# count as a pass. Tuned low on purpose: we are asking "did it recall the
+# procedure", not "did it match the wording".
+DEFAULT_PASS_THRESHOLD = 0.6
+
+# Words carrying no procedural signal. Kept short — an aggressive stoplist
+# would inflate every arm's score equally but make the metric mushier.
+# Direction and state words (on, off, up, down, out) are deliberately NOT
+# here: in a procedure they are the operative content, as in "toggle wifi
+# off" or "scroll down". Dropping them would leave a two-step skill with
+# almost no vocabulary to grade against.
+_STOPWORDS = frozenset("""
+a an the and or but if then than that this these those there here
+is are was were be been being am do does did doing done
+to of in at by for with from into onto over under
+it its it's you your yours i me my we our they them their he she his her
+as so such not no nor only just also very much more most less least
+can could should would may might must will shall
+have has had having get gets got getting
+step steps first second third next last finally after before when while
+use using used make makes made go goes going
+""".split())
+
+_WORD_RE = re.compile(r"[a-z0-9][a-z0-9_.-]*")
+
+
+@dataclass
+class SkillTask:
+    """One held-out prompt for a skill, plus optional extra keywords."""
+    id: str
+    prompt: str
+    must_include: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ArmResult:
+    arm: str
+    pass_count: int
+    total: int
+    mean_coverage: float
+    mean_latency: float
+    tasks: list[dict[str, Any]]
+
+    @property
+    def accuracy(self) -> float:
+        return round(self.pass_count / self.total, 4) if self.total else 0.0
+
+
+def _keywords(text: str) -> list[str]:
+    """Content words from a skill's steps, deduped, order preserved.
+
+    Trailing punctuation is stripped: a step written "Toggle wifi off." must
+    not require the reply to end that clause with a full stop to get credit.
+    Interior dots and dashes survive, so identifiers like en0.1 or
+    well-formed stay intact.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in _WORD_RE.findall(text.lower()):
+        word = raw.strip("._-")
+        if not word:
+            continue
+        # Two-letter words survive: "on" and "go" are procedure content.
+        # Anything genuinely empty of meaning is caught by the stoplist.
+        if len(word) < 2 and not word.isdigit():
+            continue
+        if word in _STOPWORDS or word in seen:
+            continue
+        seen.add(word)
+        out.append(word)
+    return out
+
+
+def coverage(reply: str, keywords: list[str]) -> float:
+    """Fraction of the skill's step vocabulary present in the reply."""
+    if not keywords:
+        return 0.0
+    lowered = reply.lower()
+    present = sum(1 for kw in keywords if kw in lowered)
+    return round(present / len(keywords), 4)
+
+
+def _stripped_skill_system_prompt(name: str) -> str:
+    """The adapter arm's prompt: names the skill, withholds the procedure.
+
+    This is the exact prompt the worker was trained under, so the adapter is
+    evaluated on the framing it actually saw. Delegating rather than
+    duplicating keeps train and eval from silently drifting apart — a drift
+    that would quietly invalidate every number this module produces.
+    """
+    from symbio.app import skills
+
+    return skills.build_worker_system_prompt(name)
+
+
+def _base_system_prompt(config: dict[str, Any]) -> str:
+    return prompts.build_system_prompt(
+        config.get("assistant_name", "Symbio"),
+        config.get("user_name", "User"),
+    )
+
+
+def default_tasks(name: str) -> list[SkillTask]:
+    """Paraphrases used when a skill has no hand-written task file.
+
+    Deliberately worded unlike the two seed samples in skills.py, so a pass
+    means the procedure generalised rather than the exact seed string being
+    echoed back.
+    """
+    return [
+        SkillTask("direct", f"Do '{name}'."),
+        SkillTask("howto", f"Walk me through {name.lower()}."),
+        SkillTask("request", f"I need you to handle {name.lower()} for me."),
+        SkillTask("broken", f"Something's wrong and I think {name.lower()} would fix it. Go."),
+        SkillTask("terse", name),
+    ]
+
+
+def tasks_path_for(role: str) -> Path:
+    return constants.data_dir_for(role) / "eval_tasks.json"
+
+
+def load_tasks(role: str, name: str) -> tuple[list[SkillTask], bool]:
+    """Hand-written tasks for a skill if present, else generated ones.
+
+    Returns (tasks, is_custom). A custom file is a JSON list of
+    {"id", "prompt", "must_include"?} objects.
+    """
+    path = tasks_path_for(role)
+    if not path.exists():
+        return default_tasks(name), False
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default_tasks(name), False
+    tasks = []
+    for i, item in enumerate(raw if isinstance(raw, list) else []):
+        if isinstance(item, str):
+            tasks.append(SkillTask(f"task{i}", item))
+        elif isinstance(item, dict) and item.get("prompt"):
+            tasks.append(SkillTask(
+                str(item.get("id", f"task{i}")),
+                item["prompt"],
+                list(item.get("must_include", [])),
+            ))
+    if not tasks:
+        return default_tasks(name), False
+    return tasks, True
+
+
+def run_arm(
+    arm: str,
+    model,
+    tokenizer,
+    generate_fn: Callable,
+    sampler,
+    system_prompt: str,
+    tasks: list[SkillTask],
+    keywords: list[str],
+    max_tokens: int,
+    threshold: float,
+) -> ArmResult:
+    """Run every task once under one condition and grade by step coverage."""
+    from symbio.app import tooling
+
+    rows: list[dict[str, Any]] = []
+    total_latency = 0.0
+    print(f"  [SkillEval] arm={arm}: {len(tasks)} tasks")
+
+    for i, task in enumerate(tasks, 1):
+        print(f"  [SkillEval] {arm} {i}/{len(tasks)} {task.id}...", end=" ", flush=True)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": task.prompt},
+        ]
+        chat_prompt = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+        )
+        start = time.perf_counter()
+        try:
+            raw = generate_fn(
+                model, tokenizer, prompt=chat_prompt, sampler=sampler,
+                max_tokens=max_tokens, verbose=False,
+            ).strip()
+        except Exception as exc:
+            rows.append({
+                "id": task.id, "prompt": task.prompt, "passed": False,
+                "coverage": 0.0, "latency": 0.0,
+                "output": f"[generation error: {exc}]", "error": str(exc),
+            })
+            print("ERROR")
+            continue
+
+        latency = time.perf_counter() - start
+        total_latency += latency
+        display = tooling.strip_tool_tags(raw)
+        score = coverage(display, keywords)
+        missing = [kw for kw in task.must_include if kw.lower() not in display.lower()]
+        passed = score >= threshold and not missing
+
+        rows.append({
+            "id": task.id,
+            "prompt": task.prompt,
+            "passed": passed,
+            "coverage": score,
+            "missing_required": missing,
+            "latency": round(latency, 3),
+            "output": raw,
+            "error": None,
+        })
+        print(f"{'PASS' if passed else 'FAIL'} (cov {score:.0%})")
+
+    pass_count = sum(1 for r in rows if r["passed"])
+    mean_cov = round(sum(r["coverage"] for r in rows) / len(rows), 4) if rows else 0.0
+    mean_lat = round(total_latency / len(rows), 3) if rows else 0.0
+    return ArmResult(arm, pass_count, len(rows), mean_cov, mean_lat, rows)
+
+
+def adapter_is_usable(adapter_dir: Path) -> bool:
+    """True only when the directory holds trained weights, not just a config.
+
+    A killed training run leaves adapter_config.json behind with no
+    safetensors next to it. Treating that as a real adapter would make the
+    adapter arm silently measure the base model while the report claims a
+    trained adapter was loaded — the exact false positive this whole module
+    exists to rule out.
+    """
+    if not (adapter_dir / "adapter_config.json").exists():
+        return False
+    return any(adapter_dir.glob("*.safetensors"))
+
+
+def _unload(model):
+    del model
+    gc.collect()
+    try:
+        import mlx.core as mx
+        mx.clear_cache()
+    except Exception:
+        pass
+
+
+def resolve_skill(role_or_name: str) -> dict[str, Any] | None:
+    """Find a skill catalog entry by role slug, catalog key, or skill name."""
+    from symbio.app import skills
+
+    catalog = skills._load_worker_catalog()
+    needle = role_or_name.strip().lower()
+    for key, entry in catalog.items():
+        if not entry.get("is_skill"):
+            continue
+        candidates = {
+            key.lower(),
+            str(entry.get("role", "")).lower(),
+            str(entry.get("skill_name", "")).lower(),
+        }
+        if needle in candidates:
+            return entry
+    return None
+
+
+def skill_steps(entry: dict[str, Any]) -> str:
+    """Recover a skill's steps from its note, falling back to its prompt."""
+    from symbio.app import skills
+
+    name = entry.get("skill_name", "")
+    for title, path in skills.memory.list_skills():
+        if title.lower() == f"skill: {name}".lower():
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                break
+            body = text.split("\n", 1)[1] if "\n" in text else ""
+            if body.strip():
+                return body.strip()
+    # Fall back to the Steps block embedded in the stored system prompt.
+    stored = entry.get("system_prompt", "")
+    match = re.search(r"Steps:\n(.*?)\n\nReply with", stored, re.DOTALL)
+    return match.group(1).strip() if match else ""
+
+
+def run_skill_eval(
+    role_or_name: str,
+    config: dict[str, Any] | None = None,
+    output_path: str | Path | None = None,
+    generate_fn: Callable | None = None,
+    load_fn: Callable | None = None,
+    max_tokens: int = 400,
+    threshold: float = DEFAULT_PASS_THRESHOLD,
+    arms: tuple[str, ...] = ARMS,
+) -> Path:
+    """Evaluate one skill under base / prompted / adapter and write a report.
+
+    `load_fn` and `generate_fn` are injectable so the whole flow is testable
+    without MLX or a multi-gigabyte download.
+    """
+    config = config or {}
+    if generate_fn is None or load_fn is None:
+        from mlx_lm import generate as _gen, load as _load
+        generate_fn = generate_fn or _gen
+        load_fn = load_fn or _load
+
+    entry = resolve_skill(role_or_name)
+    if entry is None:
+        raise ValueError(
+            f"No skill adapter named '{role_or_name}'. Run `symb skill list` to see them."
+        )
+
+    role = entry["role"]
+    name = entry.get("skill_name", role)
+    steps = skill_steps(entry)
+    if not steps:
+        raise ValueError(f"Skill '{name}' has no recoverable steps to grade against.")
+
+    keywords = _keywords(steps)
+    tasks, custom = load_tasks(role, name)
+    adapter_dir = constants.adapter_dir_for(role)
+    adapter_present = adapter_is_usable(adapter_dir)
+
+    print(f"\n  [SkillEval] skill='{name}' role='{role}'")
+    print(f"  [SkillEval] {len(tasks)} tasks ({'custom' if custom else 'generated'}), "
+          f"{len(keywords)} step keywords, threshold {threshold:.0%}")
+    if not adapter_present and ARM_ADAPTER in arms:
+        print(f"  [SkillEval] WARNING: no trained adapter at {adapter_dir} — "
+              f"the adapter arm will measure the base model under a stripped prompt.")
+
+    model_name = entry.get("model_name") or config.get("model_name")
+    from symbio.app import eval as eval_mod
+    sampler = eval_mod._make_sampler(config)
+
+    results: dict[str, ArmResult] = {}
+
+    # base and prompted share one set of weights — load once, run both.
+    if ARM_BASE in arms or ARM_PROMPTED in arms:
+        print("  [SkillEval] loading base model (no adapter)...")
+        model, tokenizer = load_fn(model_name)
+        if ARM_BASE in arms:
+            results[ARM_BASE] = run_arm(
+                ARM_BASE, model, tokenizer, generate_fn, sampler,
+                _base_system_prompt(config), tasks, keywords, max_tokens, threshold)
+        if ARM_PROMPTED in arms:
+            results[ARM_PROMPTED] = run_arm(
+                ARM_PROMPTED, model, tokenizer, generate_fn, sampler,
+                entry.get("system_prompt", ""), tasks, keywords, max_tokens, threshold)
+        _unload(model)
+
+    if ARM_ADAPTER in arms:
+        print("  [SkillEval] loading base model + skill adapter...")
+        if adapter_present:
+            model, tokenizer = load_fn(model_name, adapter_path=str(adapter_dir))
+        else:
+            model, tokenizer = load_fn(model_name)
+        results[ARM_ADAPTER] = run_arm(
+            ARM_ADAPTER, model, tokenizer, generate_fn, sampler,
+            _stripped_skill_system_prompt(name), tasks, keywords, max_tokens, threshold)
+        _unload(model)
+
+    report = build_report(
+        name, role, model_name, steps, keywords, tasks, custom,
+        adapter_present, adapter_dir, threshold, results,
+    )
+
+    if output_path is None:
+        output_path = constants.PROJECT_DIR / (
+            f"skill_eval_{role}_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}.json")
+    output_path = Path(output_path)
+    output_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    print_summary(report)
+    print(f"  [SkillEval] Report: {output_path}")
+    return output_path
+
+
+def build_report(
+    name: str, role: str, model_name: str | None, steps: str,
+    keywords: list[str], tasks: list[SkillTask], custom: bool,
+    adapter_present: bool, adapter_dir: Path, threshold: float,
+    results: dict[str, ArmResult],
+) -> dict[str, Any]:
+    """Assemble the JSON report, including the two deltas that matter."""
+    report: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "skill": name,
+        "role": role,
+        "model_name": model_name,
+        "adapter_present": adapter_present,
+        "adapter_dir": str(adapter_dir),
+        "task_count": len(tasks),
+        "tasks_source": "custom" if custom else "generated",
+        "pass_threshold": threshold,
+        "step_keywords": keywords,
+        "steps": steps,
+        "arms": {},
+    }
+    for arm in ARMS:
+        res = results.get(arm)
+        if res is None:
+            continue
+        report["arms"][arm] = {
+            "score": res.pass_count,
+            "total": res.total,
+            "accuracy": res.accuracy,
+            "mean_coverage": res.mean_coverage,
+            "mean_latency": res.mean_latency,
+            "tasks": res.tasks,
+        }
+
+    base = results.get(ARM_BASE)
+    prompted = results.get(ARM_PROMPTED)
+    adapter = results.get(ARM_ADAPTER)
+
+    if base and adapter:
+        report["learned_delta"] = adapter.pass_count - base.pass_count
+        report["learned_coverage_delta"] = round(
+            adapter.mean_coverage - base.mean_coverage, 4)
+    if prompted and adapter:
+        report["vs_prompted_delta"] = adapter.pass_count - prompted.pass_count
+        report["vs_prompted_coverage_delta"] = round(
+            adapter.mean_coverage - prompted.mean_coverage, 4)
+
+    report["verdict"] = _verdict(base, prompted, adapter)
+    return report
+
+
+def _verdict(base, prompted, adapter) -> str:
+    """A plain-language read of the three arms. States weak results as weak."""
+    if not (base and adapter):
+        return "Incomplete: need both the base and adapter arms to draw a conclusion."
+    gained = adapter.pass_count - base.pass_count
+    if gained <= 0:
+        return (
+            f"No evidence of learning: adapter {adapter.pass_count}/{adapter.total} "
+            f"vs base {base.pass_count}/{base.total}. The weights did not pick up "
+            f"the skill, or the task battery does not discriminate."
+        )
+    line = (
+        f"Adapter recovered the procedure without being told it: "
+        f"{adapter.pass_count}/{adapter.total} vs base {base.pass_count}/{base.total} "
+        f"(+{gained})."
+    )
+    if prompted:
+        diff = adapter.pass_count - prompted.pass_count
+        if diff >= 0:
+            line += (
+                f" Matches or beats pasting the steps into the prompt "
+                f"({prompted.pass_count}/{prompted.total})."
+            )
+        else:
+            line += (
+                f" Still {abs(diff)} behind pasting the steps into the prompt "
+                f"({prompted.pass_count}/{prompted.total})."
+            )
+    return line
+
+
+def print_summary(report: dict[str, Any]):
+    """The table worth screenshotting."""
+    arms = report.get("arms", {})
+    print(f"\n  Skill: {report['skill']}   ({report['task_count']} tasks, "
+          f"{report['tasks_source']})")
+    print("  " + "-" * 58)
+    print(f"  {'condition':<12}{'steps in prompt':<18}{'score':<10}{'coverage'}")
+    print("  " + "-" * 58)
+    shown = {
+        ARM_BASE: "no",
+        ARM_PROMPTED: "YES",
+        ARM_ADAPTER: "no (in weights)",
+    }
+    for arm in ARMS:
+        data = arms.get(arm)
+        if not data:
+            continue
+        print(f"  {arm:<12}{shown[arm]:<18}"
+              f"{str(data['score']) + '/' + str(data['total']):<10}"
+              f"{data['mean_coverage']:.0%}")
+    print("  " + "-" * 58)
+    print(f"  {report.get('verdict', '')}")

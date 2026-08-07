@@ -878,24 +878,51 @@ def _run_training_with_early_stop(
     seen so far; if validation loss does not improve for `patience` eval
     steps within `min_delta`, kills the subprocess and restores the best
     checkpoint, then removes intermediate step files.
+
+    Two details matter and are easy to get wrong:
+
+    * Checkpoints are named by mlx_lm after the *training iteration*, not
+      after how many validations have happened. Tracking the wrong counter
+      makes _restore_best look for a file that never existed and fail
+      silently, leaving whatever happened to be on disk.
+    * Evaluation starts before the first checkpoint is written, so a run can
+      satisfy the patience rule while nothing has been saved yet. Killing it
+      there destroys the run: no best checkpoint to restore, no final save.
+      We refuse to stop until at least one checkpoint exists.
     """
     patience = max(1, int(lora.get("early_stop_patience", 2)))
     min_delta = float(lora.get("early_stop_min_delta", 0.005))
-    val_re = re.compile(r"Iter\s+\d+:\s+Val\s+loss\s+([0-9.eE+-]+)")
+    save_every = int(lora.get("save_every", 100))
+    val_re = re.compile(r"Iter\s+(\d+):\s+Val\s+loss\s+([0-9.eE+-]+)")
 
     best_loss: float | None = None
     best_step: int | None = None
     steps_without_improvement = 0
-    current_step = 0
     process: subprocess.Popen | None = None
     stopped_early = False
 
-    def _restore_best(step: int) -> None:
-        src = adapter_dir / f"{step:07d}_adapters.safetensors"
+    def _checkpoints() -> list[Path]:
+        return sorted(adapter_dir.glob("[0-9]*_adapters.safetensors"))
+
+    def _restore_best(step: int | None) -> None:
+        """Promote the best checkpoint to adapters.safetensors.
+
+        Falls back to the newest checkpoint on disk when the best step has
+        no file of its own — better to keep a slightly worse adapter than to
+        finish a training run with nothing.
+        """
         dst = adapter_dir / "adapters.safetensors"
-        if src.exists():
-            shutil.copy2(src, dst)
-            print(f"  [Train] Restored best checkpoint (step {step}).")
+        src = adapter_dir / f"{step:07d}_adapters.safetensors" if step else None
+        if src is None or not src.exists():
+            available = _checkpoints()
+            if not available:
+                print("  [Train] No checkpoint to restore; keeping current adapter.")
+                return
+            src = available[-1]
+            print(f"  [Train] Best step {step} has no checkpoint; "
+                  f"falling back to {src.name}.")
+        shutil.copy2(src, dst)
+        print(f"  [Train] Restored checkpoint {src.name}.")
 
     try:
         process = subprocess.Popen(
@@ -912,22 +939,32 @@ def _run_training_with_early_stop(
 
             match = val_re.search(line)
             if match:
-                loss = float(match.group(1))
-                current_step += 1
+                iteration = int(match.group(1))
+                loss = float(match.group(2))
                 improved = best_loss is None or loss < (best_loss - min_delta)
                 if improved:
                     best_loss = loss
-                    best_step = current_step
+                    best_step = iteration
                     steps_without_improvement = 0
                 else:
                     steps_without_improvement += 1
 
                 print(
-                    f"  [Train] Early stop monitor: val_loss={loss:.4f} "
-                    f"best={best_loss:.4f} patience={steps_without_improvement}/{patience}"
+                    f"  [Train] Early stop monitor: iter={iteration} "
+                    f"val_loss={loss:.4f} best={best_loss:.4f} "
+                    f"patience={steps_without_improvement}/{patience}"
                 )
 
                 if steps_without_improvement >= patience:
+                    if not _checkpoints():
+                        # Stopping now would leave the run with no weights at
+                        # all. Let it reach the first save point instead.
+                        print(
+                            f"  [Train] Plateau at iter {iteration}, but no "
+                            f"checkpoint saved yet (save_every={save_every}). "
+                            f"Continuing until one exists."
+                        )
+                        continue
                     print(
                         f"  [Train] Validation loss stalled for {patience} eval steps. "
                         "Stopping early and keeping best checkpoint."
@@ -939,8 +976,7 @@ def _run_training_with_early_stop(
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait()
-                    if best_step is not None:
-                        _restore_best(best_step)
+                    _restore_best(best_step)
                     break
 
         if not stopped_early:

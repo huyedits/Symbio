@@ -89,6 +89,16 @@ def _build_parser() -> argparse.ArgumentParser:
     skill_sub.add_parser("list", help="List active skill adapters")
     skill_rm = skill_sub.add_parser("rm", help="Delete a skill adapter")
     skill_rm.add_argument("role", help="Worker role slug of the skill")
+    skill_eval = skill_sub.add_parser(
+        "eval", help="Measure a skill adapter against base and prompt-only baselines")
+    skill_eval.add_argument("name", help="Skill name or worker role slug")
+    skill_eval.add_argument("--output", default=None, help="Path to write the JSON report")
+    skill_eval.add_argument("--max-tokens", type=int, default=400,
+                            help="Max reply tokens per task (default 400)")
+    skill_eval.add_argument("--threshold", type=float, default=None,
+                            help="Step-coverage fraction required to pass (default 0.6)")
+    skill_eval.add_argument("--arms", default=None,
+                            help="Comma-separated subset of: base,prompted,adapter")
     skill_parser.set_defaults(skill_command="list")
 
     archive_parser = sub.add_parser("archive", help="Archive or restore idle notes and adapters")
@@ -518,6 +528,33 @@ def _cmd_skill(config: dict[str, Any], args: argparse.Namespace) -> int:
     if sub == "rm":
         result = skills.delete_skill_adapter(args.role)
         print(f"Removed {len(result['removed_entries'])} catalog entry(s) for role {result['role']}.")
+        return 0
+
+    if sub == "eval":
+        from symbio.app import skill_eval as skill_eval_mod
+
+        arms = skill_eval_mod.ARMS
+        if args.arms:
+            requested = tuple(a.strip() for a in args.arms.split(",") if a.strip())
+            unknown = [a for a in requested if a not in skill_eval_mod.ARMS]
+            if unknown:
+                print(f"Unknown arm(s): {', '.join(unknown)}. "
+                      f"Valid: {', '.join(skill_eval_mod.ARMS)}")
+                return 1
+            arms = requested
+        try:
+            skill_eval_mod.run_skill_eval(
+                args.name,
+                config=config,
+                output_path=args.output,
+                max_tokens=args.max_tokens,
+                threshold=(args.threshold if args.threshold is not None
+                           else skill_eval_mod.DEFAULT_PASS_THRESHOLD),
+                arms=arms,
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 1
         return 0
 
     if sub == "new":

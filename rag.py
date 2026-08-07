@@ -259,7 +259,7 @@ class Retriever:
             return []
         # Imported here, not at module scope: symbio.app's package __init__
         # pulls in chat, which imports this module back.
-        from symbio.app import tooling
+        from symbio.app import learn, tooling
 
         rows = self.session_store.search(
             query,
@@ -274,7 +274,13 @@ class Retriever:
             if r["role"] == "tool":
                 continue
             content = r["content"]
-            if content.startswith("[System observation"):
+            # Catches both the real user-role scaffold and an assistant reply
+            # that impersonated it — the latter is already logged as a normal
+            # turn, so without this it feeds straight back in as context and
+            # teaches the model the habit all over again.
+            if learn.looks_like_observation_echo(content):
+                continue
+            if learn.looks_degenerate(content):
                 continue
             # Any tool-call syntax, not just <tool_call>: a reply logged in
             # its raw form still carries legacy short tags (<click>, <browse>,

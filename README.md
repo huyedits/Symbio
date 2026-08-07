@@ -28,6 +28,57 @@ Symbio has a **MOA** (Mixture of Agents) mode. Instead of fine-tuning one big mo
 Symbio can learn **skills** on the fly. A skill starts as a simple markdown note with step-by-step instructions. As errors and corrections accumulate, they are logged in a hidden `.md.health.jsonl` sidecar so the note itself stays clean and readable. Once the mistake threshold is reached, the collected examples are fed into a LoRA fine-tune that creates a dedicated worker adapter for that skill — one adapter = one skill. Adapters are hot-swappable and can be archived if unused.
 
 Use `/new-skill <name>` or `symb skill new <name>` to create one, `/skill-adapters` to list them, and `/archive` / `/restore` to manage idle notes and adapters.
+
+### Proving the skill is actually in the weights
+
+The obvious objection to "the model learned a skill" is *you could have just put the steps in the prompt*. `symb skill eval <name>` answers that with a number instead of an argument. It runs the same task battery three times:
+
+| condition | steps in prompt? | what it measures |
+|---|---|---|
+| `base` | no | what the model already knew |
+| `prompted` | **yes** | the "just prompt it" baseline |
+| `adapter` | no — stripped out | what the LoRA weights hold |
+
+The `adapter` arm gets the exact system prompt the worker was **trained** under, which deliberately names the skill but withholds the procedure. If it scores above `base`, the procedure came from the weights, because it was never in the context.
+
+```bash
+symb skill eval "Fix wifi"
+symb skill eval fix_wifi --threshold 0.7 --arms base,adapter
+```
+
+```
+Skill: Fix wifi   (5 tasks, generated)
+----------------------------------------------------------
+condition   steps in prompt   score     coverage
+----------------------------------------------------------
+base        no                0/5         0%
+prompted    YES               5/5        93%
+adapter     no (in weights)   5/5       100%
+----------------------------------------------------------
+```
+
+Grading is deliberately dumb — the fraction of the skill's own step vocabulary the reply reproduces — so it cannot flatter the adapter, and every raw reply is written to the JSON report so the score can be audited by hand. A null result is reported as a null result.
+
+Read the numbers honestly: `base 0/5` does **not** mean the base model is useless at the task. In the run above it answered with real `networksetup` commands, which is arguably better — it just isn't *your* saved procedure. And on a two-step skill this is memorisation, which is the claim being tested but the weakest form of it. Skills with a substantial procedure give a far more meaningful delta.
+
+By default the harness generates five task phrasings, deliberately worded unlike the training seeds so a pass means recall rather than memorised strings. Drop your own in `training_data/workers/<role>/eval_tasks.json` to use a real battery:
+
+```json
+[
+  {"id": "no_wifi", "prompt": "wifi's dead again", "must_include": ["toggle"]},
+  "the network dropped, sort it out"
+]
+```
+
+| Flag | Default | Note |
+|---|---|---|
+| `--output` | timestamped file | Where to write the JSON report |
+| `--threshold` | `0.6` | Step-coverage fraction required to pass |
+| `--max-tokens` | `400` | Max reply tokens per task |
+| `--arms` | all three | Subset of `base,prompted,adapter` |
+
+Because the seeds are rendered with the headmaster's chat template but a worker trains the model named in its own catalog entry, the two can drift apart after a model switch. Training now refuses to run on data tokenized for a different model rather than silently learning another model's turn markers.
+
 ## Hardware prerequisites 
 Symbio (for now) runs on Apple Silicon using MLX and Metal performance shaders
 - **Recommended Unified RAM requirements** 16gb (the program itself takes 8 but overhead and expansion so comfortably would be 16)
@@ -95,19 +146,27 @@ symb config set telegram.allowed_chat_ids '[123456789]'
 
 | Key | Default | Note |
 |---|---|---|
-| `model_name` | `mlx-community/Qwen3-8B-4bit` | Base MLX model |
+| `model_name` | `Qwen/Qwen3-0.6B` | Base MLX model (the setup wizard offers larger presets) |
 | `assistant_name` | `Symbio` | What the assistant calls itself |
 | `user_name` | *(asked at first run)* | Your name |
-| `agent.max_turns` | `5` | Max tool rounds per user turn |
-| `agent.temperature` | `0.1` | Sampling temperature (low for deterministic tool use) |
+| `agent.max_tool_rounds` | `3` | Max tool rounds per user turn |
+| `agent.temperature` | `0.7` | Sampling temperature |
+| `agent.tool_use_temperature` | `0.2` | Lower temperature used when a tool call is expected |
+| `agent.max_reply_tokens` | `128` | Max tokens generated per reply |
+| `agent.prompt_cache_enabled` | `true` | Reuse the warmed system-prompt KV cache across turns |
+| `agent.persist_prompt_cache` | `true` | Save that cache to `cache/` and reload it on start |
 | `lora.rank` | `8` | LoRA rank (adapter width) |
-| `lora.dropout` | `0.1` | LoRA dropout to reduce overfitting |
-| `lora.scale` | `5.0` | LoRA adapter scale |
+| `lora.dropout` | `0.0` | LoRA dropout to reduce overfitting |
+| `lora.scale` | `20.0` | LoRA adapter scale |
 | `lora.num_layers` | `8` | Number of layers to attach adapters to |
-| `lora.iters` | `50` | LoRA iterations per `/train` run |
-| `lora.max_seq_length` | `2048` | Maximum sequence length during training |
+| `lora.iters` | `300` | LoRA iterations per `/train` run |
+| `lora.max_seq_length` | `512` | Maximum sequence length during training |
 | `lora.learning_rate` | `1e-4` | LoRA learning rate |
-| `lora.save_every` | `50` | Checkpoint frequency during training |
+| `lora.save_every` | `100` | Checkpoint frequency during training |
+| `lora.steps_per_eval` | `100` | Iterations between validation passes |
+| `lora.early_stop_enabled` | `true` | Stop once validation loss plateaus |
+| `lora.early_stop_patience` | `2` | Validation passes without improvement before stopping |
+| `lora.early_stop_min_delta` | `0.005` | Improvement below this counts as no improvement |
 | `learn.boost_factor` | `3` | Copies of a correction sample written to training data |
 | `learn.batch_train_iters` | `25` | Iterations for threshold-triggered correction training |
 | `learn.mistake_threshold` | `5` | Mistake notes collected before auto-training runs |
@@ -129,6 +188,8 @@ symb train              # Run LoRA training
 symb skill list         # List saved skills and their adapter status
 symb skill new <name>   # Create a new skill (interactive steps)
 symb skill rm <role>   # Delete a skill, adapter, and training data
+symb skill eval <name>  # Score a skill: base vs prompt-only vs adapter
+symb eval-lora          # Benchmark the headmaster adapter against the base model
 symb archive            # Run auto-archive for idle notes/adapters
 symb archive --dry-run  # Preview what would be archived
 symb archive --restore note|adapter <name>
@@ -211,6 +272,7 @@ Dangerous actions from Telegram — blocked shell commands, new browser domains,
 | `/run <cmd>` | Run a sandboxed shell command |
 | `/forget_last` | Remove the last exchange from history |
 | `/prune` | Remove stale adapter checkpoints |
+| `/tidy` | Prune junk notes and duplicate session turns (`/tidy dry` to preview) |
 
 ## Learning from corrections
 
@@ -279,12 +341,14 @@ The resulting adapter is saved to `adapters/` and loaded automatically on the ne
 |---|---|---|
 | `lora.rank` | `8` | Width of the low-rank matrices |
 | `lora.num_layers` | `8` | How many transformer layers get adapters |
-| `lora.scale` | `5.0` | Adapter output scaling |
-| `lora.dropout` | `0.1` | Dropout for regularization |
+| `lora.scale` | `20.0` | Adapter output scaling |
+| `lora.dropout` | `0.0` | Dropout for regularization |
 | `lora.learning_rate` | `1e-4` | Training step size |
-| `lora.iters` | `50` | Iterations for `/train` |
-| `lora.max_seq_length` | `2048` | Training context length |
-| `lora.save_every` | `50` | Checkpoint frequency |
+| `lora.iters` | `300` | Iterations for `/train` |
+| `lora.max_seq_length` | `512` | Training context length |
+| `lora.save_every` | `100` | Checkpoint frequency |
+
+Training stops early once validation loss plateaus for `lora.early_stop_patience` passes, then promotes the best checkpoint to `adapters.safetensors`. It will not stop before a checkpoint exists — with `save_every` at 100, a run that plateaus at iteration 60 keeps going rather than ending with no weights at all.
 
 ### Golden set: catching a fine-tune that silently breaks things
 
@@ -305,6 +369,33 @@ Run it manually anytime with `/golden` to see the current pass/fail breakdown wi
 | `learn.golden_rollback_on_regression` | `true` | Automatically restore the previous adapter on a regression |
 | `learn.golden_regression_threshold` | `0` | Newly-failing cases allowed before it counts as a regression |
 | `learn.golden_max_tokens` | `150` | Max tokens generated per golden-set case |
+
+### Keeping the corpus clean
+
+A self-training agent has a failure mode a normal chatbot doesn't: its own bad output becomes tomorrow's input. A junk note gets retrieved, echoed, logged, and retrieved again — and if it survives to a digest, it gets trained in. Two mechanisms push back.
+
+**Self-pruning.** On boot (and on demand with `/tidy`) Symbio archives notes that carry no information — empty bodies, degenerate titles, questions with no subject — and collapses duplicate session turns down to `prune.session_max_copies`. Notes are moved to `notes/archive/`, never deleted, and `# Skill:` and identity notes are protected. Preview first with `/tidy dry`.
+
+**Retrieval hygiene.** Anything that looks like machinery is excluded from retrieval rather than fed back as prose: tool transcripts, any tool-call syntax (including the legacy short tags), and the `[System observation: ...]` scaffold the agent uses internally to hand tool results back to the model.
+
+That last one matters more than it sounds. The scaffold appears in a sixth of the seed training corpus — always as a *user* turn, always followed by an assistant reply — so a model can learn to write the scaffold itself and then answer its own invented observation, on repeat:
+
+```
+Huy     : yo
+Caine   : system observation: User says 'yo' — how can I help?
+          system observation: User says 'yo' — how can I help?
+          system observation: User says 'yo' — how can I help?
+```
+
+Symbio now detects a reply impersonating the scaffold (matching case- and bracket-insensitively, so near-misses like the one above are caught) or looping a single line, discards it, and regenerates once. Such a turn is never shown, never logged, and never retrievable.
+
+| Key | Default | Note |
+|---|---|---|
+| `prune.enabled` | `true` | Enable self-pruning |
+| `prune.on_boot` | `true` | Run a prune pass at startup |
+| `prune.notes` | `true` | Archive junk notes |
+| `prune.sessions` | `true` | Collapse duplicate session turns |
+| `prune.session_max_copies` | `2` | Copies of a repeated turn kept |
 
 ### Idle-adapter reminders
 
@@ -429,6 +520,9 @@ The project is organized as a `symbio/` Python package with a thin `main.py` wra
 │   │   ├── training.py    # Training data and LoRA fine-tuning via mlx_lm
 │   │   ├── learn.py       # Correction detection and batch learning
 │   │   ├── golden.py      # Golden set: regression checks around every LoRA update
+│   │   ├── eval.py        # Held-out eval set: headmaster adapter vs base model
+│   │   ├── skill_eval.py  # Three-way skill scoring: base vs prompted vs adapter
+│   │   ├── prune.py       # Self-pruning of junk notes and duplicate session turns
 │   │   ├── dispatch.py    # MoA: WorkerPool, delegated tasks, worker fine-tuning
 │   │   ├── worker_models.json  # Catalog of available worker models/roles
 │   │   ├── memory.py      # Notes, memory, profile management
@@ -449,6 +543,8 @@ The project is organized as a `symbio/` Python package with a thin `main.py` wra
 ├── notes/               # Markdown notes / memory
 ├── training_data/       # train.jsonl and valid.jsonl (workers/<role>/ for MoA workers)
 ├── adapters/            # LoRA adapter weights (workers/<role>/ for MoA workers)
+├── cache/               # Persisted system-prompt KV cache
+
 ├── logs/                # Session logs
 ├── sessions/            # Session stores
 ├── screenshots/         # Browser screenshots
