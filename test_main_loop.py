@@ -95,6 +95,15 @@ class ScriptedSession:
             rag_cfg["tag_index_enabled"] = False
             rag_cfg["auto_index_enabled"] = False
             cfg["rag"] = rag_cfg
+            # These scripted tests assert the agent loop's own behaviour, so
+            # they must not inherit whatever the developer happens to have in
+            # config.json — a local auto_search_when_unsure=false silently
+            # turns the auto-search assertions into failures. Pin the knobs
+            # the loop branches on to the code defaults.
+            web_cfg = dict(cfg.get("web", {}))
+            web_cfg.setdefault("auto_search_session_cap", 20)
+            web_cfg["auto_search_when_unsure"] = True
+            cfg["web"] = web_cfg
             with preserve_training_state(adapters=True):
                 chat.chat_loop(
                     cfg,
@@ -651,17 +660,25 @@ def test_agent_loop_self_corrects_only_once_per_turn():
         session = ScriptedSession(
             user_inputs=["Search for something.", "/quit", "n"],
             model_replies=[
+                # Nothing visible reached the screen, so this one is quietly
+                # resampled rather than spending the self-correction.
                 "<search>always truncated",
                 # Still malformed, but with visible prose this time so the
                 # (unrelated) blank-reply auto-search fallback doesn't also
-                # kick in and add a third round — isolates just this behavior.
+                # kick in — and prose already on screen rules out another
+                # silent resample, so this is what triggers self-correction.
                 "I couldn't complete that search. <search>still truncated",
+                # Malformed a third time: self-correction has already fired,
+                # so the turn ends here instead of retrying forever.
+                "Still stuck on it. <search>truncated once more",
             ],
         )
         session.run()
-    # One self-correction retry, then the second (still-malformed) reply
-    # ends the turn normally rather than retrying forever.
-    assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+    # One silent resample, then one self-correction retry, then the still-
+    # malformed reply ends the turn normally rather than retrying forever.
+    assert len(session.prompts_seen) == 3, len(session.prompts_seen)
+    corrections = [p for p in session.prompts_seen if "Check your tag" in p]
+    assert len(corrections) == 1, len(corrections)
     print("test_agent_loop_self_corrects_only_once_per_turn passed")
 
 
@@ -1016,25 +1033,55 @@ class FakeBrowser:
     def __init__(self, confirm_fn=None):
         self.actions = []
         self.confirm_fn = confirm_fn
+        self._url = ""
+
+    @property
+    def is_open(self):
+        return bool(self._url)
+
+    def status(self):
+        if not self._url:
+            return "No browser page is currently open."
+        return f'Browser is open at {self._url} (page title: "Fake").'
 
     def open(self, url):
         self.actions.append(("open", url))
+        self._url = url
         return f"Opened browser at {url}. Page title: Fake"
 
     def get_text(self):
         return "Fake page text about MLX."
 
+    def _closed(self, op):
+        """Mirror BrowserSession: acting on no page returns an error string
+        (never raises), and the message is what chat.py pattern-matches on."""
+        return (f"Browser {op} error: Browser is not open. "
+                f"Load the target URL first, then retry the action.")
+
     def click(self, selector="", text=""):
-        self.actions.append(("click", selector or text))
-        return "Clicked element containing text 'More'."
+        target = selector or text
+        self.actions.append(("click", target))
+        if not self._url:
+            return self._closed("click")
+        return f"Clicked element containing text '{target}'."
 
     def type_text(self, text, selector="", press_enter=False):
+        if not self._url:
+            return self._closed("type")
         return f"Typed '{text}'."
 
+    def press(self, key=""):
+        if not self._url:
+            return self._closed("press")
+        return f"Pressed {key}."
+
     def scroll(self, direction="down", amount=0):
+        if not self._url:
+            return self._closed("scroll")
         return f"Scrolled {direction} 800px."
 
     def close(self):
+        self._url = ""
         return "Browser closed."
 
 
@@ -1058,6 +1105,104 @@ def test_parse_browser_tags():
     assert tools[5][1] == {}
     assert tooling.strip_tool_tags(reply) == "", repr(tooling.strip_tool_tags(reply))
     print("test_parse_browser_tags passed")
+
+
+def test_parse_tool_name_used_as_a_tag():
+    """A tag named after the tool runs the tool.
+
+    The model meets the real tool names in the <tools> catalog and in system
+    observations, so it reaches for <browser_open>...</browser_open> instead
+    of the taught <browse>. That parsed as nothing and was not stripped, so
+    the raw tag printed to the screen and the turn silently did nothing —
+    which is exactly how a browser session got stuck: every recovery attempt
+    was a no-op.
+    """
+    cases = {
+        "<browser_open>https://www.apple.com</browser_open>":
+            ("browser_open", {"url": "https://www.apple.com"}),
+        "<browser_click>Continue</browser_click>":
+            ("browser_click", {"target": "Continue"}),
+        "<browser_press>Enter</browser_press>":
+            ("browser_press", {"key": "Enter"}),
+        "<browser_type>hello</browser_type>":
+            ("browser_type", {"text": "hello"}),
+        "<browser_scroll>down</browser_scroll>":
+            ("browser_scroll", {"direction": "down"}),
+        "<read_page>https://x.com</read_page>":
+            ("read_page", {"url": "https://x.com"}),
+        "<web_search>ai news</web_search>":
+            ("web_search", {"query": "ai news"}),
+        "<run_command>ls -la</run_command>":
+            ("run_command", {"cmd": "ls -la"}),
+        "<terminal>df -h</terminal>":
+            ("run_command", {"cmd": "df -h"}),
+    }
+    for tag, expected in cases.items():
+        assert tooling.parse_tools(tag) == [expected], (tag, tooling.parse_tools(tag))
+        # And it must not survive into the visible reply.
+        assert tooling.strip_tool_tags(tag) == "", (tag, tooling.strip_tool_tags(tag))
+    print("test_parse_tool_name_used_as_a_tag passed")
+
+
+def test_tool_name_tag_is_not_double_counted():
+    """The short tags keep their own parsers; a name that is both must run once."""
+    for tag in ("<cmd>ls</cmd>", "<click>Go</click>", "<browse>https://a.b</browse>",
+                "<search>news</search>", "<press>Enter</press>"):
+        assert len(tooling.parse_tools(tag)) == 1, (tag, tooling.parse_tools(tag))
+
+
+def test_tool_name_tag_respects_enabled_groups():
+    assert tooling.parse_tools(
+        "<browser_open>https://a.b</browser_open>", enabled_groups={"terminal"}) == []
+    assert tooling.parse_tools(
+        "<browser_open>https://a.b</browser_open>", enabled_groups={"browser"}) == [
+            ("browser_open", {"url": "https://a.b"})]
+
+
+def test_prose_is_not_mistaken_for_a_tool_name_tag():
+    for prose in ("I will open the file and run it.",
+                  "The command failed, so I will read the page.",
+                  "if x < 5 then y"):
+        assert tooling.parse_tools(prose) == [], prose
+        assert tooling.strip_tool_tags(prose) == prose, prose
+
+
+def test_agent_loop_recovers_when_model_uses_the_tool_name_as_a_tag():
+    """End-to-end replay of the stuck session: a browser action fails because
+    the page was opened in the user's own browser, and the model recovers with
+    a <browser_open> tag. That recovery must actually open the page."""
+    real_browser = chat.BrowserSession
+    chat.BrowserSession = FakeBrowser
+    try:
+        with scratch_notes_dir():
+            config = app_config.load_config()
+            config["browser"]["enabled"] = True
+            _eg = config.setdefault("tools", {}).setdefault("enabled_groups", [])
+            if "browser" not in _eg:
+                _eg.append("browser")
+            session = ScriptedSession(
+                user_inputs=["open apple.com then click continue", "/quit", "n"],
+                model_replies=[
+                    # The tool name as a tag — previously a silent no-op.
+                    "<browser_open>https://www.apple.com</browser_open> Opening Apple.com.",
+                    "Opened it.",
+                ],
+                config=config,
+            )
+            session.run()
+            # A second round happened at all, and it carries the observation
+            # of a real open — so the tag ran instead of silently doing
+            # nothing. Before the alias existed the turn ended after round 1.
+            assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+            obs = session.prompts_seen[1]
+            assert "Opened browser at https://www.apple.com" in obs, obs
+            # (The tag itself still appears in this prompt — history keeps the
+            # assistant's reply verbatim so the model sees its own call. What
+            # must not show it is the *display* text, covered by the
+            # strip_tool_tags assertions in test_parse_tool_name_used_as_a_tag.)
+    finally:
+        chat.BrowserSession = real_browser
+    print("test_agent_loop_recovers_when_model_uses_the_tool_name_as_a_tag passed")
 
 
 def test_agent_loop_browses():
@@ -1090,6 +1235,123 @@ def test_agent_loop_browses():
     finally:
         chat.BrowserSession = real_browser
     print("test_agent_loop_browses passed")
+
+
+def test_capability_notes_are_seeded_even_when_notes_already_exist():
+    """ensure_seed_notes only fires on an empty notes/, so an existing user
+    would never receive a note added in a later version. The capability notes
+    are seeded independently and idempotently."""
+    with scratch_notes_dir():
+        memory.save_note("Coffee", "Huy takes it black.")
+
+        created = memory.ensure_capability_notes()
+        assert "Browser Control" in created, created
+
+        titles = {p.read_text().splitlines()[0] for p in constants.NOTES_DIR.glob("*.md")}
+        assert "# Browser Control" in titles, titles
+        assert "# Coffee" in titles, titles
+
+        # Running again must not add a second copy.
+        assert memory.ensure_capability_notes() == []
+        assert len(list(constants.NOTES_DIR.glob("*.md"))) == 2
+    print("test_capability_notes_are_seeded_even_when_notes_already_exist passed")
+
+
+def test_capability_note_teaches_tags_not_tool_names():
+    """The note exists for the moment the model has forgotten how to act on an
+    open page — naming tools instead of tags is what produced <browser_open>."""
+    body = memory._CAPABILITY_NOTES["Browser Control"]
+    for tag in ("<browse>", "<click>", "<type>", "<press>", "<scroll />", "<browser_close />"):
+        assert tag in body, tag
+
+
+def test_failed_tool_call_can_be_retried_after_the_blocker_is_fixed():
+    """Replay of the stuck browser turn.
+
+    The click fails because the page was opened in the user's own browser, the
+    model recovers by opening it in the controllable one, then re-issues the
+    same click. Calls are remembered as "already done" so a repetitive model
+    can't loop — but remembering a *failed* call swallowed the retry, and the
+    turn ended on a bare "Clicking the Continue button." with nothing clicked.
+    """
+    real_browser = chat.BrowserSession
+    chat.BrowserSession = FakeBrowser
+    try:
+        with scratch_notes_dir():
+            config = app_config.load_config()
+            config["browser"]["enabled"] = True
+            # Recovering from the failure costs a round; give the turn enough
+            # budget that this test measures the dedupe, not max_tool_rounds.
+            config["agent"]["max_tool_rounds"] = 5
+            _eg = config.setdefault("tools", {}).setdefault("enabled_groups", [])
+            if "browser" not in _eg:
+                _eg.append("browser")
+            session = ScriptedSession(
+                user_inputs=["now click continue button", "/quit", "n"],
+                model_replies=[
+                    # Fails: nothing is open yet.
+                    "<click>Continue</click> Clicking the Continue button.",
+                    # Recovers.
+                    "<browse>https://www.apple.com</browse> Opening the page first.",
+                    # The identical click again — this must actually run.
+                    "<click>Continue</click> Clicking the Continue button.",
+                    "Clicked it.",
+                ],
+                config=config,
+            )
+            session.run()
+    finally:
+        chat.BrowserSession = real_browser
+    # Four prompts means the retried click really executed and produced an
+    # observation; before the fix the turn died at three.
+    assert len(session.prompts_seen) == 4, len(session.prompts_seen)
+    assert "Clicked element containing text 'Continue'" in session.prompts_seen[3], \
+        session.prompts_seen[3]
+    print("test_failed_tool_call_can_be_retried_after_the_blocker_is_fixed passed")
+
+
+def test_a_persistently_failing_tool_call_still_stops():
+    """The retry allowance must not become a loop: a call that keeps failing
+    is blocked once it has been attempted _MAX_TOOL_RETRIES times."""
+    real_browser = chat.BrowserSession
+    chat.BrowserSession = FakeBrowser
+    try:
+        with scratch_notes_dir():
+            config = app_config.load_config()
+            config["browser"]["enabled"] = True
+            _eg = config.setdefault("tools", {}).setdefault("enabled_groups", [])
+            if "browser" not in _eg:
+                _eg.append("browser")
+            session = ScriptedSession(
+                user_inputs=["click continue", "/quit", "n"],
+                model_replies=["<click>Continue</click> Clicking."] * 6,
+                config=config,
+            )
+            session.run()
+    finally:
+        chat.BrowserSession = real_browser
+    # Bounded by the retry cap and max_tool_rounds, not spinning to max_rounds.
+    assert len(session.prompts_seen) <= chat._MAX_TOOL_RETRIES + 2, \
+        len(session.prompts_seen)
+    print("test_a_persistently_failing_tool_call_still_stops passed")
+
+
+def test_successful_tool_call_is_still_deduped():
+    """A call that worked must not run twice just because the model repeats
+    the tag — that is the loop the dedupe exists to stop."""
+    session = ScriptedSession(
+        user_inputs=["run it", "/quit", "n"],
+        model_replies=[
+            "<cmd>echo hi</cmd> Running.",
+            "<cmd>echo hi</cmd> Running again.",
+            "Done.",
+        ],
+    )
+    session.run()
+    # Round 2's repeat is filtered out, so the turn ends there rather than
+    # executing the same command a second time.
+    assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+    print("test_successful_tool_call_is_still_deduped passed")
 
 
 def test_agent_loop_survives_tool_exception():

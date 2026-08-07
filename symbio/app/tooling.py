@@ -474,8 +474,9 @@ def _truncate_repetition(text: str) -> str:
     This finds the longest suffix that is a pure repetition of a shorter prefix
     and cuts it off, keeping only the first occurrence.
     """
-    # Only check reasonably long text — short replies can't meaningfully loop.
-    if len(text) < 120:
+    # Only check reasonably long text. 60 chars catches 5+ repetitions of
+    # a 12-char tag like </tool_call> while leaving short legitimate replies alone.
+    if len(text) < 60:
         return text
 
     # The repetition may be followed by a short non-repeating suffix (e.g. a
@@ -491,7 +492,7 @@ def _truncate_repetition(text: str) -> str:
                 continue
             candidate = text[:-strip_len]
 
-        if len(candidate) < 120:
+        if len(candidate) < 60:
             continue
 
         # Strategy: look for a substring of length 8-80 chars that, when repeated
@@ -519,6 +520,11 @@ def clean_response(text: str) -> str:
     text = END_TURN_RE.sub("", text)
     text = re.sub(r"^Assistant:\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^user:\s*", "", text, flags=re.IGNORECASE)
+    # Strip stray Qwen3 think delimiters that strip_reasoning_block missed —
+    # it only unwraps blocks anchored at the start of the reply, so a lone
+    # delimiter the adapter emits mid-answer survives it.
+    text = text.replace(_QWEN_THINK_CLOSE, "")
+    text = text.replace(_QWEN_THINK_OPEN, "")
     # Collapse multiple blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
     # Detect and truncate repetition loops: the small quantized model at low
@@ -764,6 +770,16 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     for m in re.finditer(r'<press>(.*?)</press>', reply, re.DOTALL):
         tools.append(("browser_press", {"key": m.group(1).strip()}))
 
+    # A tag named after the tool itself: <browser_open>url</browser_open>.
+    # Not the taught syntax, but the obvious guess once the model has seen
+    # the tool's real name (in the <tools> catalog, a tool_response, or a
+    # system observation), and it used to parse as nothing at all — the tag
+    # was left in the visible reply and the turn quietly did nothing. The
+    # intent is unambiguous, so honour it.
+    for m in _ALIAS_TAG_RE.finditer(reply):
+        tool = _ALIAS_TO_TOOL[m.group(1)]
+        tools.append((tool, {_PRIMARY_ARG[tool]: m.group(2).strip()}))
+
     if re.search(r'<browser_close\s*/>', reply) or re.search(r'<browser_close></browser_close>', reply):
         tools.append(("browser_close", {}))
 
@@ -932,6 +948,7 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
     r'<delegate\s+role=[\'"][^\'"]*?[\'"]>(.*?)</delegate>',
     r'<mood>(.*?)</mood>',
     r'<tool_call>\s*.*?\s*</tool_call>',
+    r'</tool_call>',
     r'<read_file[^>]*>.*?</read_file>',
     r'<edit_file[^>]*/?>',
     r'<write_file[^>]*>.*?</write_file>',
@@ -947,10 +964,63 @@ _KNOWN_TAG_NAMES: tuple[str, ...] = (
     "read_file", "edit_file", "write_file", "mood",
 )
 
+# The single argument each tool takes when it is called as a bare
+# <tool_name>value</tool_name> tag. Only tools whose one meaningful argument
+# is unambiguous are listed — anything needing two (write_note, config_set)
+# has no sensible bare form and is left to its own syntax.
+_PRIMARY_ARG: dict[str, str] = {
+    "run_command": "cmd",
+    "execute_code": "code",
+    "web_search": "query",
+    "read_page": "url",
+    "browser_open": "url",
+    "browser_click": "target",
+    "browser_type": "text",
+    "browser_press": "key",
+    "browser_scroll": "direction",
+}
+
+# Tool-name aliases usable as tags: every canonical name above plus the
+# Hermes spellings that resolve to one (_HERMES_NAME_MAP does not list every
+# canonical name as its own key, so seed the table with them). Short tags
+# that already have their own, richer parsers are excluded — matching both
+# would double-count the call and run the tool twice.
+_ALIAS_TO_TOOL: dict[str, str] = {
+    name: tool
+    for name, tool in ({t: t for t in _PRIMARY_ARG} | {
+        n: t for n, t in _HERMES_NAME_MAP.items() if t in _PRIMARY_ARG
+    }).items()
+    if name not in _KNOWN_TAG_NAMES
+}
+_ALIAS_TAG_NAMES: tuple[str, ...] = tuple(sorted(_ALIAS_TO_TOOL))
+_ALIAS_TAG_RE = re.compile(
+    r'<(' + '|'.join(_ALIAS_TAG_NAMES) + r')>(.*?)</\1>', re.DOTALL,
+)
+# Now that they execute, they must also be stripped from the visible reply.
+_COMPLETE_TAG_PATTERNS.append(
+    r'<(' + '|'.join(_ALIAS_TAG_NAMES) + r')>.*?</\1>'
+)
+
+# Every tag name the display/streaming layers must recognise, taught syntax
+# and tool-name aliases alike.
+_ALL_TAG_NAMES: tuple[str, ...] = _KNOWN_TAG_NAMES + _ALIAS_TAG_NAMES
+
 # A reply cut off mid-tag leaves an unterminated tag; never show it.
 _UNTERMINATED_TAG_RE = re.compile(
-    r'<(?:' + '|'.join(_KNOWN_TAG_NAMES) + r')\b[^>]*>[^<]*$', re.DOTALL,
+    r'<(?:' + '|'.join(_ALL_TAG_NAMES) + r')\b[^>]*>[^<]*$', re.DOTALL,
 )
+
+# Any known tag, open or close. Used to recognise text that still carries
+# tool-call syntax — retrieved context in that shape teaches the model to
+# emit tags where prose belongs, so callers filter on it.
+_ANY_TAG_RE = re.compile(
+    r'</?(?:' + '|'.join(_ALL_TAG_NAMES) + r')\b[^>]*/?>',
+)
+
+
+def contains_tool_tag(text: str) -> bool:
+    """True if `text` still contains tool-call syntax of any known form."""
+    return bool(_ANY_TAG_RE.search(text)) or bool(_extract_bare_tool_calls(text))
 
 
 def _strip_complete_tag_pairs(text: str) -> str:
@@ -1013,12 +1083,21 @@ class StreamingStripper:
 
     def __init__(self):
         self._buffer = ""
-        # Qwen3 think block: with enable_thinking=True the generation prompt
-        # ends with the open think delimiter, so the model streams reasoning
-        # text then the close delimiter then the answer. We hold the whole
-        # reasoning block back until the close delimiter arrives so it never
-        # flashes on screen; only the answer (after it) is shown live.
-        self._think_done = False
+        # Qwen3 think block. With enable_thinking=True the generation prompt
+        # ends at "<|im_start|>assistant\n" — the open delimiter is NOT part
+        # of the prefix. So a reasoning reply *generates* its own
+        # open...close block and a non-reasoning reply starts straight into
+        # the answer (and with enable_thinking=False the template pre-closes
+        # an empty block, so nothing is generated either).
+        #
+        # That means the block has to be detected, not assumed: hold text
+        # back only once the stream actually opens with the delimiter (the
+        # same rule strip_reasoning_block applies to the finished text). A
+        # stream that never opens one — a direct answer, or a second-stage
+        # stripper such as Telegram's, which is fed text the chat stripper
+        # already de-thought — streams normally instead of being swallowed
+        # whole while waiting for a close delimiter that never comes.
+        self._think_state = "undecided"  # -> "inside" -> "done"
         # Leading whitespace (newlines left after the think block, or after a
         # re-opened delim the adapter drops) is discarded until the first real
         # answer character is shown, so the reply starts flush on its line.
@@ -1027,17 +1106,30 @@ class StreamingStripper:
     def feed(self, chunk: str) -> str:
         """Add newly generated text; return the text now safe to display."""
         self._buffer += chunk
-        if not self._think_done:
+        if self._think_state == "undecided":
+            head = self._buffer.lstrip("\n")
+            if head.startswith(_QWEN_THINK_OPEN):
+                # A real reasoning block is starting — hide it from here.
+                self._think_state = "inside"
+                self._buffer = head[len(_QWEN_THINK_OPEN):]
+            elif _QWEN_THINK_OPEN.startswith(head):
+                # Still an unresolved prefix of the open delimiter ("<thi"),
+                # which streams a character at a time — wait before showing
+                # anything, so the delimiter never flashes on screen.
+                return ""
+            else:
+                # This reply has no reasoning block; it is answer text.
+                self._think_state = "done"
+        if self._think_state == "inside":
             cidx = self._buffer.find(_QWEN_THINK_CLOSE)
             if cidx == -1:
-                # Still inside the reasoning block (or a degenerate reply
-                # with no think block at all) — show nothing yet. finish()
-                # flushes any leftover once generation ends.
+                # Still inside the reasoning block — show nothing yet.
+                # finish() drops the leftover once generation ends.
                 return ""
             # Drop the reasoning block and everything up through the close
             # delimiter; what remains is the answer.
             self._buffer = self._buffer[cidx + len(_QWEN_THINK_CLOSE):]
-            self._think_done = True
+            self._think_state = "done"
             # The answer may still carry think-delimiter artifacts (the
             # adapter sometimes emits an empty think block, then re-opens an
             # unclosed one around the answer). Both delimiters are fixed
@@ -1074,14 +1166,20 @@ class StreamingStripper:
         """Call once generation ends; returns any remaining safe text —
         plain prose with a stray '<' that never became a tag, or a
         genuinely truncated tag, either way handled by strip_tool_tags.
-        If the close think delimiter never arrived, the buffer is still
-        reasoning and is discarded (the authoritative reply is computed
-        separately via strip_reasoning_block, so dropping it here only
-        affects the live display tail)."""
-        if not self._think_done:
+        If the reply opened a think block whose close delimiter never
+        arrived, the buffer is still reasoning and is discarded (the
+        authoritative reply is computed separately via
+        strip_reasoning_block, and the caller falls back to printing the
+        consolidated reply, so dropping it here only affects the live
+        display tail)."""
+        if self._think_state == "inside":
             # Pure reasoning, no answer yet — never show it.
             self._buffer = ""
             return ""
+        # "undecided" here means the whole reply was a short prefix of the
+        # open delimiter ("<th") that never resolved — that is prose, not
+        # reasoning, so fall through and flush it.
+        self._think_state = "done"
         remaining = strip_tool_tags(
             self._buffer.replace(_QWEN_THINK_OPEN, "").replace(_QWEN_THINK_CLOSE, ""))
         self._buffer = ""

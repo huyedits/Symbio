@@ -29,6 +29,53 @@ def ensure_seed_notes(config: dict[str, Any]):
     save_note("User Identity", f"My user's name is {config['user_name']}.")
 
 
+# Facts about the agent's own tools that it cannot work out from the
+# conversation and keeps getting wrong. These live as notes rather than in the
+# system prompt so RAG surfaces them exactly when the topic comes up, instead
+# of spending prefix tokens on every unrelated turn.
+_CAPABILITY_NOTES: dict[str, str] = {
+    "Browser Control": (
+        "I have my own controllable Chrome window, separate from the user's browser.\n\n"
+        "- `<browse>https://...</browse>` opens a page in it. This is the ONLY way to\n"
+        "  open a page I can then act on.\n"
+        "- Once a page is open it stays open across turns. I do not need to reopen it\n"
+        "  to keep working on it.\n"
+        "- On the open page I can use `<click>visible text</click>`,\n"
+        "  `<type>words</type>`, `<press>Enter</press>`, `<scroll />`, and\n"
+        "  `<browser_close />`.\n\n"
+        "Running a shell command like `open -a 'Google Chrome' <url>` opens the page in\n"
+        "the user's own browser, which I cannot see or click. If I have done that and\n"
+        "the user asks me to click something, I must open the page with `<browse>`\n"
+        "first, then click.\n\n"
+        "If a browser action fails with \"Browser is not open\", the fix is to\n"
+        "`<browse>` the URL and then retry the same action — not to explain the error."
+    ),
+}
+
+
+def ensure_capability_notes():
+    """Create any missing capability note, matched by title.
+
+    Unlike ensure_seed_notes this runs even when notes/ already has content:
+    an existing user would otherwise never receive a note added in a later
+    version. Idempotent, so it is safe on every boot.
+    """
+    existing: set[str] = set()
+    for path in constants.NOTES_DIR.glob("*.md"):
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").lstrip().splitlines()
+        except OSError:
+            continue
+        if lines and lines[0].startswith("# "):
+            existing.add(lines[0][2:].strip())
+    created = []
+    for title, body in _CAPABILITY_NOTES.items():
+        if title not in existing:
+            save_note(title, body)
+            created.append(title)
+    return created
+
+
 def save_skill(
     name: str,
     steps: str,

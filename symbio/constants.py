@@ -41,8 +41,14 @@ SESSIONS_DIR = PROJECT_DIR / "sessions"
 # when the user has not customized it.
 PROMPT_DEFAULT_FILE = PROJECT_DIR / "prompt.md.default"
 GOLDEN_CASES_FILE = PROJECT_DIR / "golden_cases.json"
+# Warmed KV cache for the system+tools prefix, reused across restarts. Its own
+# directory rather than adapters/: it is large (hundreds of MB) and would
+# otherwise be counted in the adapter footprint that /prune reports.
+CACHE_DIR = PROJECT_DIR / "cache"
+PROMPT_CACHE_FILE = CACHE_DIR / "system_prompt.safetensors"
 
 for d in (
+    CACHE_DIR,
     LOG_DIR,
     DATA_DIR,
     ADAPTER_DIR,
@@ -134,6 +140,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "repetition_penalty": 1.15,
         "max_reply_tokens": 256,
         "prompt_cache_enabled": True,
+        "persist_prompt_cache": True,
         "stream_output": True,
         "max_tool_rounds": 3,
     },
