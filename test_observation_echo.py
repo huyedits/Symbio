@@ -109,3 +109,51 @@ def test_rag_filters_an_assistant_turn_that_impersonated_the_scaffold(monkeypatc
     joined = " ".join(r["text"] for r in results)
     assert "system observation" not in joined.lower()
     assert "Wifi is back up." in joined
+
+
+# --- loop-level: the reply must never be shown or logged ---------------
+
+
+def test_degenerate_reply_is_neither_displayed_nor_logged(monkeypatch):
+    """The guard must run before the display/log block, not after it.
+
+    Filtering only at retrieval time would leave the bad turn printed to the
+    user and written to sessions/, where a later digest could still train on
+    it. This pins the ordering, which is the part that was wrong.
+    """
+    import test_main_loop as tml
+    from symbio.app import chat as chat_mod
+    from symbio.app import sessions as sessions_mod
+
+    logged: list[tuple[str, str]] = []
+    shown: list[str] = []
+
+    real_store = sessions_mod.SessionStore
+
+    class RecordingStore(real_store):
+        def log(self, role, content, *a, **kw):
+            logged.append((role, str(content)))
+            return super().log(role, content, *a, **kw)
+
+    monkeypatch.setattr(sessions_mod, "SessionStore", RecordingStore)
+
+    session = tml.ScriptedSession(
+        user_inputs=["yo"],
+        model_replies=[OBSERVED, "Hey — what do you need?"],
+    )
+    real_loop = chat_mod.chat_loop
+
+    def capturing_loop(*args, **kwargs):
+        kwargs["output_fn"] = lambda t: shown.append(str(t))
+        return real_loop(*args, **kwargs)
+
+    monkeypatch.setattr(chat_mod, "chat_loop", capturing_loop)
+    session.run()
+
+    assistant_logged = " ".join(c for r, c in logged if r == "assistant")
+    assert "system observation" not in assistant_logged.lower(), assistant_logged
+    assert "Hey — what do you need?" in assistant_logged
+
+    displayed = " ".join(shown)
+    assert "User says 'yo'" not in displayed, displayed
+    assert any("[Echo]" in s for s in shown), shown

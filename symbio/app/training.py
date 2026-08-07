@@ -40,12 +40,21 @@ def append_training_text(text: str, role: str | None = None):
         f.write("\n")
 
 
+# Whether prompts invite a real Qwen3 reasoning block. Training and serving
+# MUST use the same value: the corpus rendered with False contains only empty
+# <think></think> blocks, which fine-tunes the model to answer directly. Serving
+# with True then asks for a behaviour the adapter was trained out of, and the
+# reasoning surfaces as the reply. chat.py imports this rather than repeating
+# the literal, so the two cannot drift apart.
+THINKING_ENABLED = False
+
+
 def build_chat_training_sample(messages: list[dict[str, str]], tokenizer) -> str:
     return tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=False,
-        enable_thinking=False,
+        enable_thinking=THINKING_ENABLED,
     )
 
 
