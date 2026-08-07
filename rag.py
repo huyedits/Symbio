@@ -257,6 +257,10 @@ class Retriever:
     def search_sessions(self, query: str, top_k: int | None = None) -> list[dict[str, Any]]:
         if "sessions" not in self._enabled_sources() or self.session_store is None:
             return []
+        # Imported here, not at module scope: symbio.app's package __init__
+        # pulls in chat, which imports this module back.
+        from symbio.app import tooling
+
         rows = self.session_store.search(
             query,
             limit=top_k or self._top_k(),
@@ -270,7 +274,13 @@ class Retriever:
             if r["role"] == "tool":
                 continue
             content = r["content"]
-            if "<tool_call" in content or content.startswith("[System observation"):
+            if content.startswith("[System observation"):
+                continue
+            # Any tool-call syntax, not just <tool_call>: a reply logged in
+            # its raw form still carries legacy short tags (<click>, <browse>,
+            # <search>), and feeding those back as retrieved prose is exactly
+            # what teaches the model to emit stray tags mid-answer.
+            if tooling.contains_tool_tag(content):
                 continue
             # A past turn that just repeats the current question adds nothing
             # and echoing it back destabilizes the model.

@@ -127,6 +127,31 @@ class BrowserSession:
         self._channel: str = ""
         self._last_url: str = ""
 
+    @property
+    def is_open(self) -> bool:
+        """True if a browser page is currently open and ready for actions."""
+        return self._page is not None
+
+    def status(self) -> str:
+        """Human-readable browser state for the model's context block."""
+        if self._page is None:
+            return "No browser page is currently open."
+        try:
+            title = self._page.title()
+        except Exception:
+            title = "unknown"
+        # Spell the tags out rather than naming the tools. Naming them is what
+        # taught the model to invent <browser_open>; and this note exists
+        # precisely for the moment it has forgotten how to act on the page.
+        return (
+            f"Browser is open at {self._last_url} "
+            f"(page title: \"{title}\"). "
+            f"Act on THIS page directly — do not reopen it and do not use a "
+            f"shell command. Emit exactly one of: "
+            f"<click>visible text</click>, <type>words</type>, "
+            f"<press>Enter</press>, <scroll />, <browser_close />."
+        )
+
     def _init(self, channel: str = "") -> tuple[Any, Any]:
         if self._page is not None:
             return self._browser, self._page
@@ -157,8 +182,12 @@ class BrowserSession:
 
     def _ensure_open(self) -> Any:
         if self._page is None:
+            # Deliberately names no specific call syntax: this layer has no
+            # opinion on tags, and naming the tool ("use browser_open") taught
+            # the model to invent a <browser_open> tag. The app layer appends
+            # the exact tag to emit.
             raise RuntimeError(
-                "Browser is not open. Use browser_open to load the target URL first, then retry the action."
+                "Browser is not open. Load the target URL first, then retry the action."
             )
         return self._page
 

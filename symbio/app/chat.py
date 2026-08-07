@@ -1,6 +1,7 @@
 """The interactive chat REPL: slash commands, the autonomous agent loop,
 and the growth loop (memory nudges, exit flush, cron surfacing)."""
 
+import hashlib
 import json
 import logging
 import re
@@ -15,7 +16,10 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx_lm import load
 from mlx_lm.generate import generate, generate_step, stream_generate
-from mlx_lm.models.cache import can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache
+from mlx_lm.models.cache import (
+    can_trim_prompt_cache, load_prompt_cache, make_prompt_cache,
+    save_prompt_cache, trim_prompt_cache,
+)
 from mlx_lm.sample_utils import make_sampler
 
 from rag import Retriever
@@ -24,7 +28,7 @@ from symbio.config import _adapter_matches_model
 from symbio.computer import BrowserSession
 from symbio import safety
 from symbio.tools import tool_few_shots
-from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, prompts, sandbox, sessions, setup, skills, tooling, training, web
+from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, prompts, prune, sandbox, sessions, setup, skills, tooling, training, web
 from symbio.app.config import config_show, set_config_value
 from tag_rag import TagIndex
 
@@ -653,6 +657,12 @@ _BROWSER_ACTION_TOOLS = {
     "browser_click", "browser_type", "browser_scroll", "browser_press",
 }
 
+# How many times one identical tool call may be attempted in a single turn.
+# 2 lets the model retry a call whose precondition it has since fixed (the
+# click that failed before the page was open) without letting a call that
+# keeps failing spin for the whole round budget.
+_MAX_TOOL_RETRIES = 2
+
 # Tools that require explicit approval when running from a non-terminal
 # front-end (e.g. Telegram) because they mutate state or run user-supplied code.
 _TELEGRAM_CONFIRM_TOOLS = frozenset({
@@ -803,6 +813,13 @@ class ChatSession:
             after_worker_fn=self._wake_headmaster,
         )
         self.logger = _make_chat_logger()
+        # Tidy the retrieval stores once the pieces it reports through exist
+        # (session_id to skip the live log, retriever to drop its note cache,
+        # logger to swallow a failure). Deliberately not in
+        # _finish_model_setup: this is pure file maintenance and must still
+        # happen when the model is loaded lazily or never.
+        if self.config.get("prune", {}).get("on_boot", True):
+            self._self_prune()
         self.user_turns = 0
         self.auto_searches = 0
         # Resolved subject for a subjectless "check online"-style command this
@@ -1006,6 +1023,7 @@ class ChatSession:
 
         # Seed identity notes + clean training corpus on first run.
         memory.ensure_seed_notes(self.config)
+        memory.ensure_capability_notes()
         training.seed_training_data(self.tokenizer, self.system_prompt, self.config)
         training.clean_training_duplicates(max_copies=3)
 
@@ -1014,6 +1032,36 @@ class ChatSession:
         # No inner spinner: when called from _ensure_model_loaded() the outer
         # 'Waking model...' spinner is already active.
         self._prefill_system_prompt_cache(show_spinner=False)
+
+    def _self_prune(self, dry_run: bool = False,
+                    announce: bool = True) -> dict[str, Any]:
+        """Drop junk out of the stores RAG reads back.
+
+        Notes and past sessions are retrieval sources, so a bad write keeps
+        costing the agent long after the turn that made it. Pruning at boot
+        means each start is a little cleaner than the last. Never fatal: a
+        failure here must not stop the session from coming up. The live
+        session is excluded — it is still being appended to.
+        """
+        cfg = self.config.get("prune", {})
+        if not cfg.get("enabled", True):
+            return {"notes": [], "sessions": [], "total": 0}
+        try:
+            report = prune.prune_all(
+                self.config, dry_run=dry_run, exclude_session=self.session_id)
+        except Exception as e:
+            self.logger.warning(f"Self-prune failed: {e}")
+            return {"notes": [], "sessions": [], "total": 0}
+        if report["total"] and announce:
+            self.output_fn(
+                f"  [Tidy] Pruned {len(report['notes'])} junk note(s) and "
+                f"{report['total'] - len(report['notes'])} duplicate log "
+                f"entr(ies) from retrieval.")
+        # Retrieval caches the note list; drop it so the pruned notes stop
+        # being served from memory for the rest of the session.
+        if report["total"] and not dry_run:
+            self.retriever.invalidate_cache()
+        return report
 
     def _run_post_load_self_check(self):
         """AI-driven feature verification after the model has finished loading.
@@ -1082,6 +1130,11 @@ class ChatSession:
                 system_ids = self.tokenizer.encode(templated)
                 if not system_ids:
                     return
+                # A cache saved by an earlier run covers this exact prefix and
+                # these exact weights — load it and skip the prefill entirely.
+                if (self.config.get("agent", {}).get("persist_prompt_cache", True)
+                        and self._load_persisted_prompt_cache(system_ids)):
+                    return
                 self._prompt_cache = make_prompt_cache(self.model)
                 # max_tokens=0 processes the prompt into the KV cache and stops
                 # before generating any output tokens.
@@ -1094,6 +1147,11 @@ class ChatSession:
                 ):
                     pass
                 self._cached_prompt_ids = list(system_ids)
+                # Persist the cache while it holds exactly the system prefix.
+                # Saving at exit instead would store the whole conversation,
+                # which the next run's prefix diff could not reuse.
+                if self.config.get("agent", {}).get("persist_prompt_cache", True):
+                    self._save_persisted_prompt_cache(system_ids)
             except Exception:
                 # Prefill is an optimization, never a hard requirement. Clear any
                 # partial state so the next generation rebuilds cleanly.
@@ -1104,6 +1162,92 @@ class ChatSession:
 
         self._prefill_thread = threading.Thread(target=_prefill, daemon=True)
         self._prefill_thread.start()
+
+    def _log_info(self, message: str):
+        """Log only once the session logger exists.
+
+        Model setup — and the prefill it starts — runs from __init__ before
+        self.logger is assigned, so an unguarded log call here raises
+        AttributeError. That used to be swallowed by the prefill's own
+        catch-all, which then cleared the freshly warmed cache: a logging
+        detail silently undoing the whole optimization.
+        """
+        logger = getattr(self, "logger", None)
+        if logger is not None:
+            logger.info(message)
+
+    def _prompt_cache_signature(self, system_ids: list[int]) -> dict[str, str]:
+        """Identity of the prefix a persisted cache was built from.
+
+        A KV cache is only reusable if both the tokens *and* the weights that
+        produced it are unchanged. The token ids cover the system prompt,
+        prompt.md edits, the tool catalog and the user's names; the model name
+        and adapter fingerprint cover the weights — swapping an adapter leaves
+        the ids identical while making every cached value wrong.
+        """
+        adapter_sig = "none"
+        if self.adapter_loaded:
+            weights = constants.ADAPTER_DIR / "adapters.safetensors"
+            try:
+                st = weights.stat()
+                adapter_sig = f"{st.st_mtime_ns}:{st.st_size}"
+            except OSError:
+                adapter_sig = "missing"
+        ids_bytes = ",".join(map(str, system_ids)).encode()
+        return {
+            "model_name": str(self.config.get("model_name", "")),
+            "adapter_sig": adapter_sig,
+            "ids_sha": hashlib.sha256(ids_bytes).hexdigest(),
+            "n_tokens": str(len(system_ids)),
+        }
+
+    def _load_persisted_prompt_cache(self, system_ids: list[int]) -> bool:
+        """Restore the warmed system-prefix cache from disk.
+
+        Returns True if the cache was loaded and is safe to use. Reading a few
+        hundred MB off an SSD is roughly an order of magnitude cheaper than
+        re-running the prefill through the model, which is the whole point.
+        """
+        path = constants.PROMPT_CACHE_FILE
+        if not path.exists():
+            return False
+        want = self._prompt_cache_signature(system_ids)
+        try:
+            cache, meta = load_prompt_cache(str(path), return_metadata=True)
+        except Exception as e:
+            # A truncated or version-mismatched file is not worth keeping.
+            self._log_info(f"Prompt cache unreadable, discarding: {e}")
+            path.unlink(missing_ok=True)
+            return False
+        if any(meta.get(k) != v for k, v in want.items()):
+            # The model, adapter or prompt changed since it was written.
+            path.unlink(missing_ok=True)
+            return False
+        self._prompt_cache = cache
+        self._cached_prompt_ids = list(system_ids)
+        return True
+
+    def _save_persisted_prompt_cache(self, system_ids: list[int]):
+        """Write the freshly warmed cache so the next start can skip prefill."""
+        path = constants.PROMPT_CACHE_FILE
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Write beside the target and rename, so a crash mid-write can
+            # never leave a half-file that the next boot would try to load.
+            # The temp name must already end in .safetensors: save_prompt_cache
+            # appends that extension itself, so a plain ".tmp" would land on a
+            # different path than the one being renamed.
+            tmp = path.with_name(f"{path.stem}.tmp{path.suffix}")
+            save_prompt_cache(str(tmp), self._prompt_cache,
+                              self._prompt_cache_signature(system_ids))
+            tmp.replace(path)
+            self._log_info(
+                f"Saved prompt cache: {len(system_ids)} tokens, "
+                f"{path.stat().st_size / 1e6:.0f} MB")
+        except Exception as e:
+            # Purely an optimization — a failed write must not affect the run.
+            self._log_info(f"Could not save prompt cache: {e}")
+            path.with_name(f"{path.stem}.tmp{path.suffix}").unlink(missing_ok=True)
 
     def _await_prefill(self):
         """Block until the background system-prompt prefill (if any) has
@@ -1186,9 +1330,15 @@ class ChatSession:
                         max_tokens=max_tokens, verbose=False,
                     )
                     # Cut at the end-of-turn marker (mirrors the streaming stop).
+                    # Only cut if the think block is closed — <end> inside an
+                    # unclosed think block is mid-reasoning, not the real end.
                     m = tooling.END_TURN_RE.search(text)
                     if m:
-                        text = text[:m.start()]
+                        think_open = tooling._QWEN_THINK_OPEN
+                        think_close = tooling._QWEN_THINK_CLOSE
+                        prefix = text[:m.start()]
+                        if prefix.count(think_open) <= prefix.count(think_close):
+                            text = prefix
                 finally:
                     self._indexing_now = False
                 if timings is not None:
@@ -1218,7 +1368,19 @@ class ChatSession:
                     reused = 0
                 feed = ids[reused:] if reused else ids
             if not feed:
-                feed = ids[-1:]
+                # The new prompt is exactly what the cache already holds —
+                # a resample of an unchanged prompt. Generation still needs
+                # at least one input token, so hand back the last one; but
+                # evict it from the cache first, otherwise the cache would
+                # hold ids[-1] twice while _cached_prompt_ids below records
+                # it once, and every later prefix diff would trim against a
+                # length that is off by one.
+                if can_trim_prompt_cache(self._prompt_cache):
+                    trim_prompt_cache(self._prompt_cache, 1)
+                    feed = ids[-1:]
+                else:
+                    self._prompt_cache = make_prompt_cache(self.model)
+                    feed = ids
         finally:
             tokenizing_spinner.stop()
 
@@ -1276,8 +1438,21 @@ class ChatSession:
                 # so a model that forgets <|im_end|> can't loop, repeating tool
                 # calls, until max_tokens. The marker is stripped from display
                 # by StreamingStripper/strip_tool_tags, so it never shows.
+                # BUT: only stop if the think block is closed. A model that
+                # emits <end> inside an unclosed think block is still mid-
+                # reasoning — stopping there leaves a partial JSON fragment
+                # that strip_reasoning_block treats as the answer, causing
+                # spurious "malformed tool call" errors on every turn.
                 if tooling.END_TURN_RE.search(raw_acc):
-                    break
+                    # Count think open/close delimiters in raw_acc. If there
+                    # are more opens than closes, the think block is unclosed
+                    # and <end> is inside reasoning — ignore it.
+                    think_open = tooling._QWEN_THINK_OPEN
+                    think_close = tooling._QWEN_THINK_CLOSE
+                    opens = raw_acc.count(think_open)
+                    closes = raw_acc.count(think_close)
+                    if opens <= closes:
+                        break
         except BaseException:
             # The real MLX cache may already be mutated beyond what our
             # bookkeeping reflects (interrupted mid-token) — never trust a
@@ -2047,6 +2222,25 @@ class ChatSession:
         elif cmd.startswith("/cron"):
             self._cmd_cron(user_input)
 
+        elif cmd.startswith("/tidy"):
+            # /prune is adapter checkpoints; this prunes what RAG reads back.
+            dry = user_input[len("/tidy"):].strip().lower() in ("dry", "--dry", "dry-run")
+            report = self._self_prune(dry_run=dry, announce=False)
+            if not report["total"]:
+                self.output_fn("  Nothing to tidy — notes and session logs are clean.")
+            else:
+                verb = "Would archive" if dry else "Archived"
+                for n in report["notes"]:
+                    self.output_fn(f"    note: {n['name']} — {n['reason']}")
+                dropped = report["total"] - len(report["notes"])
+                self.output_fn(
+                    f"  {verb} {len(report['notes'])} note(s); "
+                    f"{'would drop' if dry else 'dropped'} {dropped} "
+                    f"duplicate log entr(ies) across "
+                    f"{len(report['sessions'])} session file(s).")
+                if dry:
+                    self.output_fn("  (dry run — nothing was changed. Run /tidy to apply.)")
+
         elif cmd == "/prune":
             info = training.prune_adapters()
             if info["removed"]:
@@ -2564,6 +2758,9 @@ class ChatSession:
 
         max_rounds = self.config["agent"]["max_tool_rounds"]
         executed_calls: set[str] = set()
+        # How many times each call has failed this turn, so a retry after a
+        # fixed precondition is allowed but a persistently failing call is not.
+        failed_calls: dict[str, int] = {}
         web_used = False
         auto_searched = False
         self_corrected = False
@@ -2598,12 +2795,28 @@ class ChatSession:
             # the latest real user message, so the fixed system prompt stays
             # identical and chat-template role alternation remains strict.
             messages = [{"role": "system", "content": self.system_prompt}]
+            # Browser state: tell the model what page is open so it doesn't
+            # forget between turns and try to reopen or use run_command.
+            browser_note = ""
+            if self.browser.is_open:
+                browser_note = "\n\n[" + self.browser.status() + "]"
             context_block = (
                 memory.curated_memory_block(self.config) + rag_block
                 + prompts.env_note() + prompts.time_note() + nudge_block
+                + browser_note
             ).lstrip()
+            # Greeting guard: the small model sometimes invents random tool
+            # calls for "hi" instead of just greeting back. Prepend a one-
+            # line nudge that anchors it to the greeting few-shot example.
+            if _is_greeting(user_input) and not executed_calls:
+                context_block = (
+                    "[This is a greeting. Reply with a short friendly greeting "
+                    "and ask what the user needs. Do NOT call any tool — just "
+                    "say hi back.]\n\n" + context_block
+                ).lstrip()
             working_history = list(self.history[-self.config["agent"]["history_limit"]:])
             if context_block:
+                attached = False
                 for i in range(len(working_history) - 1, -1, -1):
                     if (
                         working_history[i]["role"] == "user"
@@ -2613,7 +2826,16 @@ class ChatSession:
                             "role": "user",
                             "content": context_block + "\n\n" + working_history[i]["content"],
                         }
+                        attached = True
                         break
+                # First turn: no user message in history yet. Prepend the
+                # context block as a standalone system-observation user turn
+                # so greeting guards and env notes actually reach the model.
+                if not attached:
+                    working_history.insert(0, {
+                        "role": "user",
+                        "content": f"[System observation: {context_block}]",
+                    })
             # Canonical tool-use examples (open/close an app, disk space,
             # weather, post-tool acknowledgement, etc.). The agent stack
             # (symbio/agent.py) always injects these; the app stack did not,
@@ -2624,23 +2846,38 @@ class ChatSession:
             messages.extend(working_history)
 
             chunk_prefix = f"{self.config['assistant_name']:8}: " if self.stream_prefix else ""
-            try:
-                raw_reply, streamed_live = self._generate_reply(
-                    messages, chunk_prefix=chunk_prefix, timings=timings)
-                # Thinking is ON: the generated reply may start with a Qwen3
-                # reasoning block (the open delimiter is in the prompt prefix, so
-                # raw_reply holds reasoning + close delimiter then the answer).
-                # Strip the reasoning so display/history/parse_tools see only the
-                # answer; raw_reply is preserved for the RAW_REPLY debug log.
-                reply = tooling.clean_response(
-                    tooling.strip_reasoning_block(raw_reply)).strip()
-                self.logger.info(f"RAW_REPLY: {raw_reply!r}")
-            except KeyboardInterrupt:
-                # Ctrl-C during a slow generation abandons the turn, not the app.
-                self.output_fn("\n  [Generation interrupted.]")
-                break
-            except Exception as e:
-                self.output_fn(f"[MLX Error: {e}]")
+            # Resample once if the reply has a dangling (truncated) tool call —
+            # the model started emitting a tool tag but hit max_tokens or got
+            # cut off. A fresh sample usually completes it, avoiding a system-
+            # observation round-trip that pollutes history.
+            gen_aborted = False
+            for _sample_attempt in range(2):
+                try:
+                    raw_reply, streamed_live = self._generate_reply(
+                        messages, chunk_prefix=chunk_prefix, timings=timings)
+                    reply = tooling.clean_response(
+                        tooling.strip_reasoning_block(raw_reply)).strip()
+                    self.logger.info(f"RAW_REPLY: {raw_reply!r}")
+                except KeyboardInterrupt:
+                    self.output_fn("\n  [Generation interrupted.]")
+                    gen_aborted = True
+                    break
+                except Exception as e:
+                    self.output_fn(f"[MLX Error: {e}]")
+                    gen_aborted = True
+                    break
+                # Check for dangling tool calls (truncated mid-JSON or
+                # unterminated tag). If clean, stop; otherwise resample.
+                if not tooling.detect_malformed_tag(reply):
+                    break
+                # Only a sample that showed the user nothing can be quietly
+                # retried. Once text has streamed to the screen, a second
+                # sample would print a whole second reply underneath the
+                # first — so leave it to the self-correction observation
+                # below, which repairs the turn without duplicating output.
+                if streamed_live:
+                    break
+            if gen_aborted:
                 break
 
             # The model emits <mood>tag</mood> at the start of its reply to show
@@ -2696,11 +2933,17 @@ class ChatSession:
                     # model via the system observation below for self-correction.
                     snippet = " ".join(malformed.split())[:80]
                     self.output_fn(f"  [Format] malformed tool call ({snippet}) — retrying.")
+                    # Include the user's original request so the model
+                    # doesn't lose context and invent a random action.
+                    user_reminder = (
+                        f" The user said: \"{user_input.strip()}\". "
+                        f"Respond to THAT request."
+                    )
                     self.history.append({"role": "user", "content": (
                         f"[System observation: {malformed} Check your tag "
                         f"syntax (matching open/close tags, valid JSON "
                         f"inside <tool_call>) and try again, or continue "
-                        f"without it.]"
+                        f"without it.{user_reminder}]"
                     )})
                     self._trim_history()
                     continue
@@ -2746,9 +2989,11 @@ class ChatSession:
                         act_hint = (
                             "The user asked you to perform an action (open/go to/"
                             "click/press/read a page) but you emitted no tool call. "
-                            "Use the matching tool now — browser_open to navigate to "
-                            "a URL, read_page to read one, browser_click/press/scroll "
-                            "to act on the open page. Then answer in one short line. "
+                            "Emit one of these tags exactly, on its own: "
+                            "<browse>https://...</browse> to open a page, "
+                            "<read>https://...</read> to read one, "
+                            "<click>visible text</click>, <press>Enter</press>, "
+                            "<scroll />. Then answer in one short line. "
                         )
                     else:
                         act_hint = ""
@@ -2847,6 +3092,27 @@ class ChatSession:
                     self._trim_history()
                     continue
                 # Normal turn (or pure repetition): stop.
+                # BUT: if the user asked for an action (open/click/type/etc.)
+                # and the model only talked about doing it without actually
+                # calling a tool, nudge it once to use the right tool.
+                if action_req and not executed_calls and not blank_retry_nudged:
+                    blank_retry_nudged = True
+                    self.output_fn(
+                        "  [Action] Model described the action but didn't "
+                        "call a tool — prompting to retry...")
+                    self.history.append({"role": "user", "content": (
+                        "[System observation: you described what you would do "
+                        "but did not actually call a tool. The user asked you "
+                        "to perform an action. Emit one of these tags exactly, "
+                        "on its own: <browse>https://...</browse> to open a "
+                        "page, <click>visible text</click> to click, "
+                        "<type>words</type> to type, <press>Enter</press> to "
+                        "press a key, <read>https://...</read> to read a page. "
+                        "Then answer in one short line. Do not just describe "
+                        "what you will do — actually do it.]"
+                    )})
+                    self._trim_history()
+                    continue
                 break
 
             # Only execute the first fresh tool per response. Multiple tools in
@@ -2859,6 +3125,13 @@ class ChatSession:
 
             # There are tools to execute
             self.history.append({"role": "assistant", "content": reply})
+            # The visible part of this reply was already logged to the session
+            # store above; logging the raw form here too would write a second,
+            # near-identical entry for every tool turn and let RAG retrieve
+            # both. It would also put literal tool-call tags into retrievable
+            # context, which the model can echo back as if they were its own.
+            # The tool's observation is logged below — that is the part of a
+            # tool turn worth recalling later.
             consecutive_tool_rounds += 1
 
             self.output_fn(f"  [Tool: {name}]")
@@ -2906,6 +3179,18 @@ class ChatSession:
                     telemetry.save_state(_tstate)
                 except Exception:
                     pass
+            # A call is remembered as "already done" so a repetitive model
+            # can't loop on it — but only once it actually worked. A call that
+            # failed because of a precondition the model then fixed (clicking
+            # before the page was open, the common case) must be allowed to
+            # run again, or the retry is silently swallowed by the fresh-tool
+            # filter and the turn ends on a bare "Clicking the button." with
+            # nothing clicked. Retries stay capped so a call that keeps
+            # failing still can't spin.
+            if learn.sounds_like_tool_error(observation):
+                failed_calls[tool_key] = failed_calls.get(tool_key, 0) + 1
+                if failed_calls[tool_key] < _MAX_TOOL_RETRIES:
+                    executed_calls.discard(tool_key)
             # Track browser-action failures so we can force a retry if the
             # model tries to end the turn without another tool tag.
             if name in _BROWSER_ACTION_TOOLS and learn.sounds_like_tool_error(observation):
@@ -2935,6 +3220,9 @@ class ChatSession:
                 f"[System observation: {observation}]\n"
                 f"<tool_response>{response_json}</tool_response>"
             )})
+            # Log the tool result to the session store so RAG can retrieve
+            # past observations (e.g. "what did the page say last time").
+            self.session_store.log("tool", f"{name}: {observation}")
             self._trim_history()
 
             # Pure navigation is complete the moment the page is open. Stop
@@ -3499,13 +3787,20 @@ class ChatSession:
 
         # ---- End of Session ----
         if self.history:
-            save = self.input_fn("\n Save conversation for training? [y/N]: ").strip().lower()
+            try:
+                save = self.input_fn("\n Save conversation for training? [y/N]: ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                save = "n"
             if save in ("y", "yes"):
                 saved_count = training.save_history_pairs(
                     self.history, self.tokenizer, self.system_prompt)
                 self.output_fn(f"    Appended {saved_count} exchange(s) to {constants.TRAIN_FILE}")
 
-                if self.input_fn("  Train now? [y/N]: ").strip().lower() in ("y", "yes"):
+                try:
+                    train_now = self.input_fn("  Train now? [y/N]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    train_now = "n"
+                if train_now in ("y", "yes"):
                     self._guarded_train()
 
 

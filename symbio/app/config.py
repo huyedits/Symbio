@@ -43,6 +43,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "cron_poll_seconds": 20,
         "stream_output": True,
         "prompt_cache_enabled": True,
+        # Keep the warmed system-prefix KV cache on disk between runs, so a
+        # restart reloads it instead of re-prefilling ~4.3k tokens through the
+        # model. Costs a few hundred MB in cache/ (KV for the whole prefix);
+        # set false to trade the faster start back for the disk.
+        "persist_prompt_cache": True,
         # How long a chat front-end should wait before showing a "thinking…"
         # placeholder if the model has not emitted a visible token yet.
         "first_chunk_timeout_ms": 600,
@@ -105,6 +110,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "top_k": 3,
         "max_context_tokens": 800,
         "sources": ["notes", "sessions"],
+    },
+    # Self-pruning of the stores RAG reads back (see symbio/app/prune.py).
+    # Runs once per boot so junk the agent wrote down stops being retrieved
+    # as context on every later turn.
+    "prune": {
+        "enabled": True,
+        "on_boot": True,
+        "notes": True,
+        "sessions": True,
+        # Identical (role, content) entries kept per session before the rest
+        # are treated as a stuck loop and dropped.
+        "session_max_copies": 2,
     },
     "memory": {
         "enabled": True,
@@ -256,7 +273,7 @@ def load_config() -> dict[str, Any]:
         try:
             user_config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
             config.update(user_config)
-            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn", "telegram", "tools", "dispatch", "archive"):
+            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn", "telegram", "tools", "dispatch", "archive", "prune"):
                 if section in user_config:
                     config[section] = {**DEFAULT_CONFIG[section], **user_config[section]}
         except Exception as e:
