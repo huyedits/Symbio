@@ -387,7 +387,9 @@ Caine   : system observation: User says 'yo' — how can I help?
           system observation: User says 'yo' — how can I help?
 ```
 
-Symbio now detects a reply impersonating the scaffold (matching case- and bracket-insensitively, so near-misses like the one above are caught) or looping a single line, discards it, and regenerates once. Such a turn is never shown, never logged, and never retrievable.
+Symbio now detects a reply impersonating the scaffold (matching case- and bracket-insensitively, so near-misses like the one above are caught) or looping a single line, discards it, and regenerates once. The check runs *before* the reply is printed or written to the session store, so a discarded turn never reaches `sessions/` and can never be retrieved or digested into training data later.
+
+The one exception is streaming: with `agent.stream_output` on, tokens have already been emitted to your terminal by the time the reply can be judged, so you may briefly see the start of a bad reply before the `[Echo]` notice replaces it. Nothing is persisted either way.
 
 | Key | Default | Note |
 |---|---|---|

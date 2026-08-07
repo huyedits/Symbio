@@ -1302,8 +1302,18 @@ class ChatSession:
         tokenizing_spinner = _Spinner("thinking…")
         tokenizing_spinner.start()
         try:
+            # enable_thinking must match how the adapter was TRAINED.
+            # training.build_chat_training_sample renders every sample with
+            # enable_thinking=False, so the corpus contains only empty think
+            # blocks — the model is fine-tuned to skip reasoning and answer
+            # directly. Inviting real reasoning here creates a train/serve
+            # mismatch whose failure mode is reasoning text surfacing as the
+            # reply ("The assistant already greeted the user." in place of a
+            # greeting). The golden set and eval both grade with False too,
+            # so a mismatch here is invisible to the regression net.
             prompt_text = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=True,
+                messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=training.THINKING_ENABLED,
             )
             # Encode the FULL templated prompt (system + tools + conversation).
             # The Mistral chat template only renders the system message inside a
@@ -2904,6 +2914,31 @@ class ChatSession:
             tools = tooling.parse_tools(reply, self.enabled_groups)
             display = tooling.strip_tool_tags(reply)
 
+            # The model wrote the harness's own scaffold, or looped one line.
+            # Either way this is not a reply. Checked here, ahead of the
+            # display/log block below, because a copy written to the session
+            # store comes back through retrieval later and reinforces the
+            # habit — catching it further down would filter the symptom while
+            # still recording the cause.
+            if (not echo_retry_nudged
+                    and (learn.looks_like_observation_echo(display)
+                         or learn.looks_degenerate(display))):
+                echo_retry_nudged = True
+                self.output_fn(
+                    "  [Echo] Reply impersonated a system observation; "
+                    "regenerating...")
+                self.history.append({"role": "user", "content": (
+                    "[System observation: your last reply was discarded. "
+                    "You wrote text in the '[System observation: ...]' "
+                    "form, or repeated one line over and over. That form "
+                    "is how the system speaks to you — it is never part "
+                    "of your reply, and you must never invent one. "
+                    "Answer the user directly now, in your own voice, "
+                    "once.]"
+                )})
+                self._trim_history()
+                continue
+
             if display.strip():
                 final_display = display
                 if not streamed_live:
@@ -2978,28 +3013,6 @@ class ChatSession:
                 # auto-searching the greeting and answer with random web results.
                 # A non-greeting first-round blank is left to the auto-search path
                 # below — a real question that blanks should search, not nudge.
-                # The model wrote the harness's own scaffold, or looped one
-                # line. Either way this is not a reply: it must not reach the
-                # user and must not be logged, because a logged copy comes
-                # back through retrieval and reinforces the habit.
-                if (not echo_retry_nudged
-                        and (learn.looks_like_observation_echo(display)
-                             or learn.looks_degenerate(display))):
-                    echo_retry_nudged = True
-                    self.output_fn(
-                        "  [Echo] Reply impersonated a system observation; "
-                        "regenerating...")
-                    self.history.append({"role": "user", "content": (
-                        "[System observation: your last reply was discarded. "
-                        "You wrote text in the '[System observation: ...]' "
-                        "form, or repeated one line over and over. That form "
-                        "is how the system speaks to you — it is never part "
-                        "of your reply, and you must never invent one. "
-                        "Answer the user directly now, in your own voice, "
-                        "once.]"
-                    )})
-                    self._trim_history()
-                    continue
 
                 action_req = _is_action_request(user_input)
                 if (not display.strip() and not blank_retry_nudged

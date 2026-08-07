@@ -62,3 +62,16 @@ worker_models.suite.json
 
 # Warmed system-prefix KV cache (hundreds of MB, machine- and model-specific).
 cache/
+
+# SQLite stores (memory.db, logs/sessions.db, logs/planner.db, notes/tags.db).
+# Every install creates its own schema on first run, and the contents are the
+# user's conversations and notes — never ship them. The -wal/-shm siblings are
+# live journal files and are worse than useless in a checkout.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Skill evaluation reports embed the skill's own steps and model replies.
+skill_eval_*.json
