@@ -20,7 +20,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "batch_size": 1,
         "learning_rate": 1e-4,
         "iters": 300,
-        "max_seq_length": 512,
+        # Must exceed a whole sample: system prompt (tool catalog stripped by
+        # training.strip_tool_catalog) + user turn + assistant turn. Seed
+        # samples run ~2,200 tokens, so anything under ~2,560 silently cuts the
+        # assistant turn off and the sample teaches nothing. run_training warns
+        # when the corpus does not fit.
+        "max_seq_length": 3072,
         "steps_per_eval": 100,
         "save_every": 100,
         # Early stopping: kill training if validation loss stops improving.
@@ -111,6 +116,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_context_tokens": 800,
         "sources": ["notes", "sessions"],
     },
+    # Metal/unified-memory ceilings for the long-lived chat process. MLX keeps
+    # freed GPU buffers in a cache for reuse, which is the right default for a
+    # process that owns the GPU alone — but this one spawns `mlx_lm lora` as a
+    # second Metal client during training, and a hoarded cache in the parent is
+    # memory the trainer cannot have. Capping it trades a little allocator churn
+    # for far less pressure during the window that has the most of it.
+    "gpu": {
+        # MLX buffer cache ceiling, in MB. 0 disables caching entirely,
+        # -1 leaves MLX's default alone.
+        "cache_limit_mb": 1024,
+        # Wired (non-swappable) memory ceiling, in MB. -1 leaves the default.
+        # Only raise this if you know the machine's headroom.
+        "wired_limit_mb": -1,
+        # Drop the in-process model before spawning the LoRA trainer, so only
+        # one copy of the weights is resident at a time.
+        "unload_model_during_training": True,
+    },
     # Self-pruning of the stores RAG reads back (see symbio/app/prune.py).
     # Runs once per boot so junk the agent wrote down stops being retrieved
     # as context on every later turn.
@@ -146,6 +168,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         ],
         "golden_set_enabled": True,
         "golden_max_tokens": 150,
+        # Held-out generalisation check after each training round. Measures
+        # only — never rolls back, since failing these early is normal.
+        "wildcard_check_enabled": True,
+        "wildcard_max_tokens": 200,
         "golden_regression_threshold": 0,
         "golden_rollback_on_regression": True,
         "golden_retry_enabled": True,
@@ -273,14 +299,47 @@ def load_config() -> dict[str, Any]:
         try:
             user_config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
             config.update(user_config)
-            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn", "telegram", "tools", "dispatch", "archive", "prune"):
+            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn", "telegram", "tools", "dispatch", "archive", "prune", "gpu"):
                 if section in user_config:
-                    config[section] = {**DEFAULT_CONFIG[section], **user_config[section]}
+                    config[section] = {**DEFAULT_CONFIG.get(section, {}), **user_config[section]}
         except Exception as e:
             print(f"[Config warning] Could not read {constants.CONFIG_FILE}: {e}")
     _apply_env_overrides(config)
     _apply_speed_mode(config)
     return config
+
+
+def apply_gpu_limits(config: dict[str, Any]) -> None:
+    """Apply the config's Metal memory ceilings to this process.
+
+    Safe to call more than once, and a no-op when the limits are set to -1 or
+    when the installed MLX predates these calls. Importing mlx.core lazily
+    keeps config loading usable in processes that never touch the GPU.
+    """
+    gpu = config.get("gpu", {})
+    try:
+        import mlx.core as mx
+    except Exception:
+        return
+
+    for key, setter_name, scale in (
+        ("cache_limit_mb", "set_cache_limit", 1024 * 1024),
+        ("wired_limit_mb", "set_wired_limit", 1024 * 1024),
+    ):
+        value = gpu.get(key, -1)
+        if value is None or int(value) < 0:
+            continue
+        setter = getattr(mx, setter_name, None)
+        if setter is None:
+            # Older MLX exposed these under mx.metal.
+            setter = getattr(getattr(mx, "metal", None), setter_name, None)
+        if setter is None:
+            continue
+        try:
+            setter(int(value) * scale)
+        except Exception:
+            # A ceiling we could not set is not worth failing a startup over.
+            pass
 
 
 # Speed preset: applied after user config/env overrides so the user can still

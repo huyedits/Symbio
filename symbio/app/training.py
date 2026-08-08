@@ -6,13 +6,14 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -49,9 +50,36 @@ def append_training_text(text: str, role: str | None = None):
 THINKING_ENABLED = False
 
 
+def strip_tool_catalog(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Drop the <tools> JSON catalog from a system turn destined for training.
+
+    The catalog is ~2,200 tokens and byte-identical in every sample, so it
+    contributes no gradient signal for behaviour — but it does consume the
+    entire training window. With it present, samples ran ~4,400 tokens against
+    a 768-token limit and mlx_lm truncated each one long before the assistant
+    turn, so the answers were never learned from at all.
+
+    Removing it leaves a strict prefix of the served prompt: training sees
+    less context than inference, never different context, which is the same
+    direction skills.py takes for worker prompts. Applied here, at the single
+    point every training sample passes through, so seeding, note digestion,
+    and correction capture all benefit without changing their call sites.
+    """
+    cleaned = []
+    for message in messages:
+        if message.get("role") == "system":
+            content = message.get("content", "")
+            # rfind: the prompt text mentions "<tools>" before the real block.
+            index = content.rfind("<tools>")
+            if index != -1:
+                message = {**message, "content": content[:index].rstrip() + "\n"}
+        cleaned.append(message)
+    return cleaned
+
+
 def build_chat_training_sample(messages: list[dict[str, str]], tokenizer) -> str:
     return tokenizer.apply_chat_template(
-        messages,
+        strip_tool_catalog(messages),
         tokenize=False,
         add_generation_prompt=False,
         enable_thinking=THINKING_ENABLED,
@@ -236,50 +264,246 @@ def digest_notes_to_training(tokenizer, system_prompt: str,
     return added
 
 
-def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) -> int:
-    """Seed a minimal clean corpus so the model has correct identity/tool examples
-    even before any real conversation is saved.
+# Anchored on the opening bracket of the JSON array, which only the real
+# catalog has. The prompt also *mentions* "<tools>" in its prose ("the <tools>
+# catalog at the bottom of this message"), and a pattern that starts there
+# instead runs non-greedily to the closing tag at the very end — deleting every
+# instruction in between. That is not hypothetical: it wiped the behaviour
+# rules out of all 114 samples before this anchor was added.
+_CATALOG_RE = re.compile(r"<tools>\[.*?\]</tools>\s*", re.DOTALL)
 
-    Appends seed samples to the existing training file. A manifest keyed by the
-    rendered sample text prevents duplicates, so improved seed examples are
-    added on upgrade while existing samples are not re-written.
+
+def compact_existing_samples(role: str | None = None) -> dict[str, int]:
+    """Strip the embedded <tools> catalog out of already-written samples.
+
+    strip_tool_catalog only affects samples written from now on. A corpus
+    built before it still carries ~2,200 tokens of catalog per sample and
+    still truncates. Rewriting in place preserves everything that corpus
+    represents — mined corrections, digested notes, real conversations —
+    which regenerating from seed would throw away.
+
+    Returns per-file counts of samples rewritten.
     """
-    seed_manifest_path = constants.DATA_DIR / "seed_manifest.json"
+    counts: dict[str, int] = {}
+    for path in (_train_file_for(role), _valid_file_for(role)):
+        if not path.exists():
+            continue
+        rewritten = 0
+        lines = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                lines.append(line)
+                continue
+            text = record.get("text", "")
+            compacted = _CATALOG_RE.sub("", text)
+            if compacted != text:
+                record["text"] = compacted
+                rewritten += 1
+            lines.append(json.dumps(record))
+        if rewritten:
+            backup = path.with_suffix(path.suffix + f".precompact.{datetime.now():%Y%m%d_%H%M%S}")
+            shutil.copy2(path, backup)
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        counts[path.name] = rewritten
+    return counts
+
+
+# A real sample carries a full chat template (role markers, a system turn) and
+# runs to hundreds of characters. This floor only ever catches empty and
+# near-empty junk, so it is safe to apply without a tokenizer.
+_MIN_SAMPLE_CHARS = 16
+
+
+def _is_degenerate(text: str, tokenizer, min_tokens: int) -> bool:
+    """True when a sample is too short to yield a single training target."""
+    stripped = (text or "").strip()
+    if len(stripped) < _MIN_SAMPLE_CHARS:
+        return True
+    if tokenizer is None:
+        return False
     try:
-        manifest = json.loads(seed_manifest_path.read_text(encoding="utf-8"))
+        return len(tokenizer.encode(stripped)) < min_tokens
     except Exception:
-        manifest = {}
+        # An unusable tokenizer is not evidence the sample is bad.
+        return False
 
-    # If assistant/user/system prompt changed, wipe the manifest so the fresh
-    # seed corpus is fully re-injected.
-    assistant = config["assistant_name"]
-    user = config["user_name"]
-    run_key = hashlib.sha256(
-        f"{assistant}:{user}:{system_prompt}".encode("utf-8")
-    ).hexdigest()[:16]
-    if manifest.get("run_key") != run_key:
-        manifest = {"run_key": run_key, "samples": {}}
 
-    seen: dict[str, set[str]] = {
-        k: set(v) for k, v in manifest.get("samples", {}).items()
-    }
+def drop_degenerate_samples(tokenizer=None, role: str | None = None,
+                            min_tokens: int = 2) -> dict[str, list[tuple[int, str]]]:
+    """Remove samples too short to train on, from both train and valid.
 
-    # Bootstrap the seen set from the existing training file so we never
-    # duplicate samples when the manifest is empty or was written by an older
-    # version that only tracked the run_key.
-    if constants.TRAIN_FILE.exists():
-        path_str = str(constants.TRAIN_FILE)
-        existing = seen.setdefault(path_str, set())
-        for line in constants.TRAIN_FILE.read_text(encoding="utf-8").splitlines():
+    Training is next-token prediction, so a sample contributes `len(tokens)-1`
+    trained tokens. At one token that is zero, and with batch_size 1 the sample
+    *is* the batch: the loss denominator goes to zero and the token counter
+    underflows. The run does not fail — it reports garbage (loss ~1e8, negative
+    token counts) for every iteration and trains on noise, which is far worse
+    than stopping.
+
+    Such a sample carries no signal by definition, so it is dropped rather than
+    merely reported — but never silently: each removal is returned with its
+    file and 1-based line number for the caller to print.
+
+    This catches corruption, not contamination. A well-formed sample with junk
+    content (a leaked test fixture, say) is indistinguishable from a real short
+    exchange and is left alone deliberately.
+
+    Returns {path: [(lineno, preview), ...]} for files that changed.
+    """
+    removed: dict[str, list[tuple[int, str]]] = {}
+    for path in (_train_file_for(role), _valid_file_for(role)):
+        if not path.exists():
+            continue
+        kept: list[str] = []
+        dropped: list[tuple[int, str]] = []
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1):
             if not line.strip():
                 continue
             try:
                 text = json.loads(line).get("text", "")
-            except Exception:
+            except (json.JSONDecodeError, AttributeError):
+                dropped.append((lineno, "<unparseable line>"))
                 continue
-            if text:
-                existing.add(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16])
+            if _is_degenerate(text, tokenizer, min_tokens):
+                dropped.append((lineno, (text or "").strip()[:60]))
+                continue
+            kept.append(line)
+        if dropped:
+            path.write_text(
+                ("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+            removed[str(path)] = dropped
+    return removed
 
+
+def check_sample_lengths(
+    tokenizer, config: dict[str, Any], role: str | None = None,
+    sample_limit: int = 400,
+) -> dict[str, Any]:
+    """Report how much of the corpus the training window will actually see.
+
+    mlx_lm prints a truncation WARNING per oversized batch and trains anyway.
+    Buried in a wall of progress bars that is effectively silent, and the
+    consequence is not mild: a sample whose assistant turn sits past the cutoff
+    contributes nothing to learn from. Every sample in this corpus was in that
+    state — 114 of 114 over the limit, assistant turns beginning around token
+    4,382 against a 768-token window — which is why fine-tunes appeared to
+    memorise triggers rather than learn behaviour. They were never shown the
+    behaviour.
+
+    Returns counts plus `truncated_answers`: samples where the assistant turn
+    begins beyond the window and is therefore lost entirely. That number, not
+    the raw over-limit count, is the one that means the run is wasted.
+    """
+    train_file = _train_file_for(role)
+    limit = int(config.get("lora", {}).get("max_seq_length", 768))
+    result = {
+        "limit": limit, "total": 0, "over_limit": 0,
+        "truncated_answers": 0, "longest": 0,
+    }
+    if not train_file.exists():
+        return result
+
+    for i, line in enumerate(train_file.read_text(encoding="utf-8").splitlines()):
+        if not line.strip() or i >= sample_limit:
+            continue
+        try:
+            text = json.loads(line).get("text", "")
+        except json.JSONDecodeError:
+            continue
+        if not text:
+            continue
+        result["total"] += 1
+        length = len(tokenizer.encode(text))
+        result["longest"] = max(result["longest"], length)
+        if length <= limit:
+            continue
+        result["over_limit"] += 1
+        # Where does the answer start? Anything past the window is unlearnable.
+        for marker in ("<|im_start|>assistant", "[/INST]", "assistant\n"):
+            index = text.find(marker)
+            if index != -1:
+                if len(tokenizer.encode(text[:index])) >= limit:
+                    result["truncated_answers"] += 1
+                break
+    return result
+
+
+def format_length_warning(stats: dict[str, Any]) -> str | None:
+    """A one-paragraph explanation, or None when the corpus fits."""
+    if not stats["total"] or not stats["over_limit"]:
+        return None
+    lines = [
+        f"{stats['over_limit']}/{stats['total']} training samples exceed "
+        f"lora.max_seq_length ({stats['limit']}); longest is {stats['longest']} tokens."
+    ]
+    if stats["truncated_answers"]:
+        lines.append(
+            f"{stats['truncated_answers']} of them lose their assistant turn "
+            f"entirely — those samples teach nothing. Raise lora.max_seq_length "
+            f"above {stats['longest']}, or shorten what precedes the answer."
+        )
+    return " ".join(lines)
+
+
+def expand_intent(
+    phrasings: list[str],
+    slots: list[str],
+    render: Callable[[str], str],
+    rationale: str | None = None,
+) -> list[tuple[str, str]]:
+    """Build (user, assistant) pairs that teach a rule instead of a constant.
+
+    One intent, many *different* argument values. `phrasings` are templates
+    containing `{slot}`; `render` turns a slot value into the assistant turn.
+    Phrasings cycle across slots so each sample pairs a different wording with
+    a different argument.
+
+    This exists because the opposite arrangement — several phrasings all
+    answering with one hardcoded argument — is what makes a fine-tune memorise
+    triggers. If six differently-worded requests all reply with the same URL,
+    the only invariant available to learn is that URL, and the model emits it
+    for anything vaguely resembling the request. Varying the slot while holding
+    the intent fixed makes the *tool choice* the invariant and forces the
+    argument to be read from the user's turn — the behaviour that generalises
+    to inputs the corpus never contained.
+
+    `rationale` states, in one short clause, WHY this intent takes this tool.
+    It is held constant while the slot varies, which is the whole point: the
+    argument changes every sample, so the reason becomes the only repeated
+    content, and the rule stops being something the model must infer from a
+    dozen examples and becomes something it is told outright. Verbalising the
+    decision is also what lets the rule transfer to inputs that resemble none
+    of the samples — a model that has learned "prices change, so search" can
+    apply it to a product the corpus never mentioned, whereas one that has
+    only seen question/tool pairs is matching surface forms.
+
+    Keep it to a clause. agent.max_reply_tokens defaults to 128, and a long
+    preamble in every sample teaches the model to pad.
+
+    Build every tool's samples through here rather than hand-listing them, so
+    the property survives tools added later. Enforced by test_corpus_shape.py.
+    """
+    if not phrasings or not slots:
+        return []
+    pairs = []
+    for i, slot in enumerate(slots):
+        action = render(slot)
+        assistant = f"{rationale} {action}" if rationale else action
+        pairs.append((phrasings[i % len(phrasings)].format(slot=slot), assistant))
+    return pairs
+
+
+def build_seed_pairs(assistant: str, user: str) -> list[tuple[str, str]]:
+    """The (user, assistant) pairs that make up the seed corpus.
+
+    Split out from seed_training_data so the corpus SHAPE can be checked
+    without writing any files — see test_corpus_shape.py, which asserts the
+    property that makes these samples teach a rule rather than a constant.
+    """
     samples = [
         # Identity
         (
@@ -524,15 +748,74 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
             "Who won the Tour de France in 2031?",
             "I don't have that memorized — checking. <search>Tour de France 2031 winner</search>",
         ),
-        # Just opening a search for the user to look at themselves = <cmd>open>,
-        # since nothing more is needed from the agent afterward.
+        # Prices, plans, and product facts change constantly, so they are
+        # search questions — not browser errands. Without these the corpus
+        # answers "how much does X cost" from its browse samples and opens
+        # whatever URL it has seen most, which is how a pricing question ends
+        # up launching Chrome at an unrelated site.
+        # Same treatment as <browse>: one wording per distinct subject, so the
+        # rule ("a current-fact question -> <search>, query built from what was
+        # asked") is the invariant rather than any one search string.
+        *expand_intent(
+            [
+                "How much does {slot} cost?",
+                "What's the price of {slot}?",
+                "how much is {slot} per month",
+                "What does {slot} cost these days?",
+                "Is {slot} still free?",
+                "Look up the current price of {slot}.",
+            ],
+            [
+                "a Netflix subscription", "GitHub Copilot", "a Spotify family plan",
+                "the Pro plan", "AWS S3 storage", "a Raspberry Pi 5",
+                "Adobe Photoshop", "a domain on Cloudflare", "Notion for teams",
+                "JetBrains All Products Pack",
+            ],
+            lambda thing: (
+                f"<search>{thing} current price</search> "
+                f"Checking what {thing} costs right now."
+            ),
+            rationale="Prices change, so I check rather than answer from memory.",
+        ),
         (
-            "Search YouTube for lofi beats.",
+            "[System observation: Web search for 'Netflix subscription price' succeeded.\n"
+            "Results:\n1. Netflix plans and pricing\n   https://example.com/plans\n"
+            "   Standard is $15.49 a month; Premium is $22.99.]",
+            f"Standard is $15.49/month and Premium is $22.99/month, {user} (example.com).",
+        ),
+        (
+            "What does the Pro plan cost?",
+            "<search>Pro plan pricing</search> Checking what it costs right now.",
+        ),
+        (
+            "how much is copilot per month",
+            "<search>GitHub Copilot monthly price</search> Checking the current price.",
+        ),
+        (
+            "Is there a free tier?",
+            "<search>free tier availability pricing</search> Let me check the current plans.",
+        ),
+        # The wrong instinct, corrected in-sample: a pricing question is not a
+        # reason to open a browser.
+        (
+            "[System observation: Command 'open -a 'Google Chrome'' exited ok.\nOutput:\n]",
+            "Opening a browser doesn't answer a pricing question — I should have "
+            "searched. <search>current subscription pricing</search>",
+        ),
+        # Opening a results page for the user to look at themselves =
+        # <cmd>open>, since nothing more is needed from the agent afterward.
+        # The user turns here must say so explicitly ("open ... in my browser").
+        # A bare "search the web for X" is a request for the ANSWER and belongs
+        # to <search> above — phrasing one of these as "Search the web for the
+        # weather in Sydney" put it in direct conflict with the Tokyo weather
+        # sample, teaching two different tools for the same intent.
+        (
+            "Open a YouTube search for lofi beats in my browser.",
             f"<cmd>{url_opener} 'https://www.youtube.com/results?search_query=lofi+beats'</cmd> "
             f"Opening YouTube results for lofi beats, {user}.",
         ),
         (
-            "Search the web for the weather in Sydney.",
+            "Pull up a Google search for the weather in Sydney so I can look myself.",
             f"<cmd>{url_opener} 'https://www.google.com/search?q=weather+in+Sydney'</cmd> "
             "Here's a web search for Sydney weather.",
         ),
@@ -556,21 +839,30 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
         # because the user may ask to click/scroll next. Use <browse>, not <cmd>open>.
         # The native macOS opener with a URL opens the user's browser and leaves
         # the agent unable to click, so this is a mistake pattern to recover from.
-        (
-            "Open apple.com in Chrome and click the first button.",
-            "<browse>https://www.apple.com</browse> Opening apple.com in the controllable browser — I'll click the first button once it loads.",
-        ),
-        (
-            "Open cloudflare.com in Chrome and click the first button.",
-            "<browse>https://www.cloudflare.com</browse> Opening Cloudflare in the controllable browser — I'll click the first button once it loads.",
-        ),
-        (
-            "Read what apple.com says.",
-            "<browse>https://www.apple.com</browse> Opening apple.com so I can read its contents.",
-        ),
-        (
-            "What does apple.com say?",
-            "<browse>https://www.apple.com</browse> Opening apple.com to read its contents.",
+        # Generated, not hand-listed: one wording per DISTINCT site, so the only
+        # thing constant across the set is "this request -> <browse>, with the
+        # address taken from the user". Several wordings that all answer with
+        # the same URL teach that URL instead of the rule.
+        *expand_intent(
+            [
+                "Open {slot} in Chrome and click the first button.",
+                "Read what {slot} says.",
+                "What does {slot} say?",
+                "Go to {slot}.",
+                "Can you open {slot}?",
+                "Pull up {slot} so you can read it.",
+            ],
+            [
+                "apple.com", "cloudflare.com", "wikipedia.org",
+                "news.ycombinator.com", "python.org", "example.com",
+                "archive.org", "openstreetmap.org", "gnu.org", "kernel.org",
+                "rust-lang.org", "debian.org",
+            ],
+            lambda site: (
+                f"<browse>https://www.{site}</browse> "
+                f"Opening {site} in the controllable browser."
+            ),
+            rationale="You may want me to click next, so I use my own browser.",
         ),
         (
             "[System observation: Opened browser at https://www.cloudflare.com. "
@@ -701,6 +993,55 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
         ),
     ]
 
+    return samples
+
+
+def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) -> int:
+    """Seed a minimal clean corpus so the model has correct identity/tool examples
+    even before any real conversation is saved.
+
+    Appends seed samples to the existing training file. A manifest keyed by the
+    rendered sample text prevents duplicates, so improved seed examples are
+    added on upgrade while existing samples are not re-written.
+    """
+    seed_manifest_path = constants.DATA_DIR / "seed_manifest.json"
+    try:
+        manifest = json.loads(seed_manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        manifest = {}
+
+    # If assistant/user/system prompt changed, wipe the manifest so the fresh
+    # seed corpus is fully re-injected.
+    assistant = config["assistant_name"]
+    user = config["user_name"]
+    run_key = hashlib.sha256(
+        f"{assistant}:{user}:{system_prompt}".encode("utf-8")
+    ).hexdigest()[:16]
+    if manifest.get("run_key") != run_key:
+        manifest = {"run_key": run_key, "samples": {}}
+
+    seen: dict[str, set[str]] = {
+        k: set(v) for k, v in manifest.get("samples", {}).items()
+    }
+
+    # Bootstrap the seen set from the existing training file so we never
+    # duplicate samples when the manifest is empty or was written by an older
+    # version that only tracked the run_key.
+    if constants.TRAIN_FILE.exists():
+        path_str = str(constants.TRAIN_FILE)
+        existing = seen.setdefault(path_str, set())
+        for line in constants.TRAIN_FILE.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                text = json.loads(line).get("text", "")
+            except Exception:
+                continue
+            if text:
+                existing.add(hashlib.sha256(text.encode("utf-8")).hexdigest()[:16])
+
+    samples = build_seed_pairs(assistant, user)
+
     added = 0
     for user_msg, assistant_msg in samples:
         text = build_chat_training_sample([
@@ -805,6 +1146,40 @@ def run_training(config: dict[str, Any], iters: int | None = None,
         return False
     ensure_validation_split(role=role)
 
+    # One tokenizer for both pre-flight checks below. Best-effort: the length
+    # diagnostic degrades without it, and the degenerate-sample guard falls
+    # back to a character floor.
+    _tok = None
+    try:
+        from transformers import AutoTokenizer
+
+        _tok = AutoTokenizer.from_pretrained(model_name or config["model_name"])
+    except Exception:
+        pass
+
+    # Deliberately NOT inside the diagnostic's try/except below. This one is a
+    # guard, not a report: one sample too short to train on turns every metric
+    # in the run to garbage, so it has to be able to change the outcome.
+    for path, entries in drop_degenerate_samples(_tok, role=role).items():
+        for lineno, preview in entries:
+            print(f"  [Train] Dropped unusable sample {path}:{lineno}: {preview!r}")
+        print(f"  [Train] Removed {len(entries)} unusable sample(s) from {path}.")
+
+    if not train_file.exists() or train_file.stat().st_size == 0:
+        print("  [System] No usable training data left after pre-flight checks.")
+        return False
+
+    # Say plainly how much of the corpus the window can actually reach. mlx_lm
+    # only emits a per-batch WARNING and trains regardless, which is invisible
+    # in practice and hides the case where the answers are cut off entirely.
+    try:
+        stats = check_sample_lengths(_tok, config, role=role)
+        warning = format_length_warning(stats)
+        if warning:
+            print(f"  [Train] WARNING: {warning}")
+    except Exception:
+        pass  # A diagnostic must never block the training it describes.
+
     # Sweep temp LoRA config files left behind by previous crashed runs.
     for stale in data_dir.glob("tmp*.yaml"):
         try:
@@ -873,6 +1248,39 @@ def run_training(config: dict[str, Any], iters: int | None = None,
     adapter_kb = sum(f.stat().st_size for f in adapter_dir.iterdir() if f.is_file()) // 1024
     print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB")
     return trained
+
+
+def _stop_trainer(process: subprocess.Popen, signalled: bool = False) -> None:
+    """Shut down an mlx_lm trainer child, preferring a graceful unwind.
+
+    SIGINT raises KeyboardInterrupt inside the child, which lets Python (and
+    through it Metal) tear down in-flight command buffers in order. SIGTERM
+    kills it outright mid-iteration, and abrupt GPU-client teardown is exactly
+    the shape of the IOGPUFamily prepare/complete refcount panic. SIGKILL stays
+    as the last resort for a child that has stopped responding.
+
+    Pass signalled=True when the child has already received a SIGINT of its
+    own (e.g. a Ctrl-C delivered to the whole process group).
+    """
+    if not signalled:
+        try:
+            process.send_signal(signal.SIGINT)
+        except (ProcessLookupError, OSError):
+            return
+    try:
+        process.wait(timeout=30)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    print("  [Train] Trainer did not exit after SIGINT; escalating.")
+    try:
+        process.terminate()
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    except (ProcessLookupError, OSError):
+        pass
 
 
 def _run_training_with_early_stop(
@@ -979,12 +1387,7 @@ def _run_training_with_early_stop(
                         "Stopping early and keeping best checkpoint."
                     )
                     stopped_early = True
-                    process.terminate()
-                    try:
-                        process.wait(timeout=30)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait()
+                    _stop_trainer(process)
                     _restore_best(best_step)
                     break
 
@@ -995,12 +1398,10 @@ def _run_training_with_early_stop(
     except KeyboardInterrupt:
         print("  [System] Training stopped.")
         if process is not None:
-            process.terminate()
-            try:
-                process.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            # The child shares our process group, so it already took the same
+            # SIGINT from the terminal and is unwinding. Sending another signal
+            # here would interrupt that cleanup; just wait it out.
+            _stop_trainer(process, signalled=True)
         return False
     finally:
         try:

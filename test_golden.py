@@ -5,6 +5,8 @@ repetition gets caught and rolled back instead of shipping quietly."""
 
 import json
 
+import pytest
+
 from symbio import constants
 from symbio.app import chat, golden, training
 from symbio.app import config as app_config
@@ -282,8 +284,49 @@ def test_guarded_train_no_op_when_training_produces_nothing(tmp_path, monkeypatc
 
     assert trained is False
     assert len(golden_calls) == 1  # baseline only; training failed before the recheck
-    assert len(load_calls) == 0  # never reloads on failed training
+    # Training unloads our copy of the weights so the trainer subprocess isn't
+    # competing with it for unified memory, so a failed run has to put a model
+    # back — leaving the session with none would break the next turn.
+    assert len(load_calls) == 1
+    assert session.model is not None
     assert session._last_train_note == "Training skipped (no new data or failed)."
+
+
+def test_guarded_train_restores_model_when_training_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants, "ADAPTER_DIR", tmp_path / "adapters")
+
+    def boom(cfg, iters=None):
+        raise RuntimeError("trainer died")
+
+    monkeypatch.setattr(training, "run_training", boom)
+    monkeypatch.setattr(golden, "run_golden_set",
+                        lambda *a, **k: golden.GoldenResult({}, {}))
+
+    config = _base_config()
+    load_calls: list[int] = []
+    session = _make_session(config, monkeypatch, load_calls)
+
+    with pytest.raises(RuntimeError):
+        session._guarded_train()
+
+    assert len(load_calls) == 1
+    assert session.model is not None
+
+
+def test_train_unloaded_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants, "ADAPTER_DIR", tmp_path / "adapters")
+    monkeypatch.setattr(training, "run_training", lambda cfg, iters=None: False)
+
+    config = _base_config()
+    config["gpu"] = {"unload_model_during_training": False}
+    load_calls: list[int] = []
+    session = _make_session(config, monkeypatch, load_calls)
+    before = session.model
+
+    assert session._train_unloaded() is False
+    # Opted out: the model was never dropped, so nothing had to be reloaded.
+    assert load_calls == []
+    assert session.model is before
 
 
 # ---- Golden retry + remedy helpers ----

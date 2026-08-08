@@ -134,6 +134,34 @@ def build_system_prompt(assistant_name: str, user_name: str) -> str:
     return prompt_text.rstrip() + "\n\n" + tooling.build_tools_block() + "\n"
 
 
+def build_training_system_prompt(assistant_name: str, user_name: str) -> str:
+    """The system prompt used when writing TRAINING samples.
+
+    Identical to build_system_prompt() except the <tools> JSON catalog is left
+    off, making this an exact prefix of what the model is served at inference.
+
+    The catalog is ~2,200 tokens and byte-identical in every sample, so it
+    carries no gradient signal for behaviour — it is pure prefix. Including it
+    made every sample ~4,400 tokens against a 768-token training window, so
+    mlx_lm truncated each one long before reaching the assistant turn: the
+    corpus never reached the model at all, and no amount of corpus design
+    could have mattered while that was true.
+
+    Dropping it is safe in the direction that matters. Training sees a prefix
+    of what serving sees, never the reverse — the same rule skills.py follows
+    for worker prompts. The model still learns the tool syntax, because that
+    lives in the assistant turns it is actually trained on, and the catalog is
+    present at inference where it is needed to resolve schemas.
+    """
+    full = build_system_prompt(assistant_name, user_name)
+    # rfind, not find: the prompt *mentions* "<tools>" in its prose ("The
+    # <tools> catalog at the bottom of this message...") long before the real
+    # block is appended at the end. Cutting at the first match silently threw
+    # away almost all of the behaviour instructions.
+    index = full.rfind("<tools>")
+    return full[:index].rstrip() + "\n" if index != -1 else full
+
+
 def time_note(now: datetime | None = None) -> str:
     """Appended to the system prompt each round so the model can align
     schedules with the computer clock (or defer to a time the user states)."""

@@ -173,6 +173,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "note_idle_days": 30,
         "adapter_idle_days": 30,
     },
+    # Metal/unified-memory ceilings for the long-lived chat process. MLX keeps
+    # freed GPU buffers in a cache for reuse, which is the right default for a
+    # process that owns the GPU alone — but this one spawns `mlx_lm lora` as a
+    # second Metal client during training, and a hoarded cache in the parent is
+    # memory the trainer cannot have. Capping it trades a little allocator churn
+    # for far less pressure during the window that has the most of it.
+    "gpu": {
+        # MLX buffer cache ceiling, in MB. 0 disables caching entirely,
+        # -1 leaves MLX's default alone.
+        "cache_limit_mb": 1024,
+        # Wired (non-swappable) memory ceiling, in MB. -1 leaves the default.
+        # Only raise this if you know the machine's headroom.
+        "wired_limit_mb": -1,
+        # Drop the in-process model before spawning the LoRA trainer, so only
+        # one copy of the weights is resident at a time.
+        "unload_model_during_training": True,
+    },
     "training_planner": {
         "enabled": True,
         "min_turns": 200,

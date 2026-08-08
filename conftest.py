@@ -34,7 +34,7 @@ import pytest
 from symbio import constants
 from symbio.app import health, prune
 from symbio.app.config import DEFAULT_CONFIG
-from test_utils import preserve_training_state
+from test_utils import preserve_training_state, recover_interrupted_training_state
 
 # Absolute paths of the user's real stores, resolved once at import before
 # any fixture moves the constants.
@@ -73,6 +73,25 @@ prune.prune_sessions = _guard(
 
 @pytest.fixture(autouse=True, scope="session")
 def isolate_runtime_state():
+    # Repair before snapshotting. A run killed outright (SIGKILL, OOM, kernel
+    # panic) never reaches preserve_training_state's `finally`, so it leaves
+    # test junk in the real corpus — and every later run then snapshots that
+    # junk and dutifully restores it, which is how a single crash quietly
+    # becomes permanent. Undo it here, while we can still tell it apart from
+    # the user's own data.
+    for path in recover_interrupted_training_state():
+        print(f"\n[conftest] Recovered {path} from an interrupted previous run.")
+    # Adapter backups from a crashed run can't be auto-restored: with more than
+    # one orphan there is no way to tell which predates the other. Say so
+    # loudly instead of leaving them to be found months later.
+    orphans = sorted(constants.ADAPTER_DIR.parent.glob(
+        constants.ADAPTER_DIR.name + ".testbak.*"))
+    if orphans:
+        print(f"\n[conftest] {len(orphans)} orphaned adapter backup(s) from "
+              f"interrupted run(s); inspect and remove manually:")
+        for o in orphans:
+            print(f"             {o}")
+
     real_sessions = constants.SESSIONS_DIR
     real_logs = constants.LOG_DIR
     real_workers = constants.WORKER_MODELS_FILE
@@ -107,6 +126,13 @@ def isolate_runtime_state():
     constants.NOTES_ARCHIVE_DIR = constants.NOTES_DIR / "archive"
     constants.NOTES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
     _rag.NOTES_DIR = constants.NOTES_DIR
+    # The wildcard history is the user's real record of how generalisation is
+    # trending across retrains. A scripted session that reaches _guarded_train
+    # appends to it like any other run, and fifteen fake 0/9 entries drown the
+    # signal the file exists to carry. Point it at a throwaway path instead.
+    real_wildcard_history = getattr(constants, "WILDCARD_HISTORY_FILE", None)
+    wildcard_suite_file = constants.PROJECT_DIR / "wildcard_history.suite.json"
+    constants.WILDCARD_HISTORY_FILE = wildcard_suite_file
     mistakes_before = set(constants.MISTAKES_DIR.glob("*.md")) if constants.MISTAKES_DIR.exists() else set()
     try:
         with preserve_training_state(adapters=True):
@@ -126,6 +152,11 @@ def isolate_runtime_state():
         constants.NOTES_DIR = real_notes
         constants.NOTES_ARCHIVE_DIR = real_notes_archive
         _rag.NOTES_DIR = real_rag_notes
+        wildcard_suite_file.unlink(missing_ok=True)
+        if real_wildcard_history is None:
+            delattr(constants, "WILDCARD_HISTORY_FILE")
+        else:
+            constants.WILDCARD_HISTORY_FILE = real_wildcard_history
         # Drop mistake notes created by tests (e.g. the "Alice" correction).
         if constants.MISTAKES_DIR.exists():
             for f in set(constants.MISTAKES_DIR.glob("*.md")) - mistakes_before:
