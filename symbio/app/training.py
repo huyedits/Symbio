@@ -1250,6 +1250,24 @@ def run_training(config: dict[str, Any], iters: int | None = None,
     return trained
 
 
+# Cross-entropy on a vocab of ~150k tops out near ln(150000) ~= 11.9 for a
+# model predicting uniformly at random, and a fine-tune starts well below that.
+# Anything past this ceiling is not a bad fine-tune, it is a broken number.
+_MAX_PLAUSIBLE_LOSS = 20.0
+
+
+def _plausible_loss(loss: float) -> bool:
+    """False for losses that cannot come from a working training run.
+
+    Exact zero counts as implausible: cross-entropy reaches it only if the
+    model predicts every token with certainty, which does not happen, and it
+    is one of the values a broken run reports.
+    """
+    if loss != loss or loss in (float("inf"), float("-inf")):  # nan / inf
+        return False
+    return 0.0 < loss < _MAX_PLAUSIBLE_LOSS
+
+
 def _stop_trainer(process: subprocess.Popen, signalled: bool = False) -> None:
     """Shut down an mlx_lm trainer child, preferring a graceful unwind.
 
@@ -1310,7 +1328,14 @@ def _run_training_with_early_stop(
     patience = max(1, int(lora.get("early_stop_patience", 2)))
     min_delta = float(lora.get("early_stop_min_delta", 0.005))
     save_every = int(lora.get("save_every", 100))
-    val_re = re.compile(r"Iter\s+(\d+):\s+Val\s+loss\s+([0-9.eE+-]+)")
+    # nan/inf must be matchable. A numeric-only class silently fails to match
+    # the "Val loss nan" line, so the monitor never sees the one value that
+    # most clearly means the run is broken and keeps going as if fine.
+    val_re = re.compile(
+        r"Iter\s+(\d+):\s+Val\s+loss\s+"
+        r"([-+]?(?:nan|inf|\d+(?:\.\d*)?(?:[eE][-+]?\d+)?))",
+        re.IGNORECASE,
+    )
 
     best_loss: float | None = None
     best_step: int | None = None
@@ -1357,7 +1382,21 @@ def _run_training_with_early_stop(
             match = val_re.search(line)
             if match:
                 iteration = int(match.group(1))
-                loss = float(match.group(2))
+                try:
+                    loss = float(match.group(2))
+                except ValueError:
+                    continue
+                if not _plausible_loss(loss):
+                    # Observed in practice: mlx_lm reporting nan, 0.000, or
+                    # values like 7.7e8 while the batches feeding it were
+                    # verified sane. Whatever produced that number, an adapter
+                    # built under it is not trustworthy, and the plateau logic
+                    # would happily "improve" its way to a best checkpoint.
+                    print(f"  [Train] Implausible validation loss {loss!r} at "
+                          f"iter {iteration}. Aborting; the adapter from this "
+                          f"run is not trustworthy.")
+                    _stop_trainer(process)
+                    return False
                 improved = best_loss is None or loss < (best_loss - min_delta)
                 if improved:
                     best_loss = loss
