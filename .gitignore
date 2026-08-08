@@ -75,3 +75,7 @@ cache/
 
 # Skill evaluation reports embed the skill's own steps and model replies.
 skill_eval_*.json
+
+# Crash mirror written by preserve_training_state so an interrupted run
+# can be repaired by the next one.
+.pytest-training-backup/

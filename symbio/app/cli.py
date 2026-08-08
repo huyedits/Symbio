@@ -190,6 +190,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Max reply tokens per eval task (default 512)",
     )
+    eval_lora_parser.add_argument(
+        "--wildcards",
+        action="store_true",
+        help="Use the held-out wildcard set (subjects absent from the training "
+             "corpus) instead of the standard eval set — measures whether a "
+             "rule generalises rather than whether a sample was memorised",
+    )
 
     return parser
 
@@ -921,7 +928,15 @@ def main(argv: list[str] | None = None) -> int:
     if command == "eval-lora":
         from symbio.app.eval import run_lora_benchmark
 
-        run_lora_benchmark(config, output_path=args.output, max_tokens=args.max_tokens)
+        cases = None
+        if getattr(args, "wildcards", False):
+            from symbio.app.wildcards import WILDCARD_CASES
+
+            cases = WILDCARD_CASES
+            print(f"  [Eval] Using {len(cases)} held-out wildcard case(s): "
+                  f"subjects absent from the training corpus.")
+        run_lora_benchmark(config, output_path=args.output,
+                           max_tokens=args.max_tokens, cases=cases)
         return 0
     if command == "gateway":
         sub = getattr(args, "gateway_command", None) or "start"

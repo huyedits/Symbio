@@ -320,6 +320,7 @@ def run_lora_benchmark(
     output_path: str | Path | None = None,
     generate_fn: Callable | None = None,
     max_tokens: int | None = None,
+    cases: list[EvalCase] | None = None,
 ) -> Path:
     """Benchmark the current LoRA adapter against the base model.
 
@@ -338,13 +339,15 @@ def run_lora_benchmark(
     # Adapter run
     model, tokenizer = _load_model_with_adapter(config)
     adapter_result = run_eval_set(
-        model, tokenizer, generate_fn, sampler, system_prompt, config, max_tokens=max_tokens)
+        model, tokenizer, generate_fn, sampler, system_prompt, config,
+        max_tokens=max_tokens, cases=cases)
     _unload_model(model)
 
     # Base run
     model, tokenizer = _load_base_model(config)
     base_result = run_eval_set(
-        model, tokenizer, generate_fn, sampler, system_prompt, config, max_tokens=max_tokens)
+        model, tokenizer, generate_fn, sampler, system_prompt, config,
+        max_tokens=max_tokens, cases=cases)
     _unload_model(model)
 
     adapter_exists = (constants.ADAPTER_DIR / "adapter_config.json").exists()

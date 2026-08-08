@@ -1,6 +1,7 @@
 """The interactive chat REPL: slash commands, the autonomous agent loop,
 and the growth loop (memory nudges, exit flush, cron surfacing)."""
 
+import gc
 import hashlib
 import json
 import logging
@@ -29,7 +30,7 @@ from symbio.computer import BrowserSession
 from symbio import safety
 from symbio.tools import tool_few_shots
 from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, prompts, prune, sandbox, sessions, setup, skills, tooling, training, web
-from symbio.app.config import config_show, set_config_value
+from symbio.app.config import apply_gpu_limits, config_show, set_config_value
 from tag_rag import TagIndex
 
 
@@ -884,11 +885,32 @@ class ChatSession:
             except Exception:
                 pass
 
-    def _reload_model(self) -> str | None:
-        """Reload model+adapter after training; returns an error message or None."""
-        # New weights make any existing KV cache meaningless.
+    def _unload_model(self):
+        """Drop the in-process model and release its GPU buffers.
+
+        The caller is responsible for getting a model back before the next
+        generation (_reload_model, _wake_headmaster, or _ensure_model_loaded,
+        all of which reload from nothing).
+        """
+        # Whatever the KV cache holds refers to weights we are about to drop.
         self._prompt_cache = None
         self._cached_prompt_ids = None
+        if getattr(self, "model", None) is not None:
+            del self.model
+        self.model = None
+        self.tokenizer = None
+        gc.collect()
+        try:
+            mx.clear_cache()
+        except Exception:
+            pass
+
+    def _reload_model(self) -> str | None:
+        """Reload model+adapter after training; returns an error message or None."""
+        # Free the old weights *before* loading the new ones. Loading first
+        # leaves both copies resident at once, which on an 8B model is a
+        # multi-gigabyte spike in unified memory for no benefit.
+        self._unload_model()
         try:
             self.model, self.tokenizer = load(
                 self.config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
@@ -897,6 +919,14 @@ class ChatSession:
             training.mark_adapter_used()
             return None
         except Exception as e:
+            # We already dropped the previous model, so returning here would
+            # leave the session with no model at all. Fall back to the base
+            # weights and report the adapter failure.
+            try:
+                self.model, self.tokenizer = load(self.config["model_name"])
+                self.adapter_loaded = False
+            except Exception as base_exc:
+                return f"{e} (base model reload also failed: {base_exc})"
             return str(e)
 
     def _sleep_headmaster(self):
@@ -908,20 +938,7 @@ class ChatSession:
         if not getattr(self, "model", None):
             return
         self._status("  [Dispatch] Headmaster going to sleep (unloading 8B model)...")
-        self._prompt_cache = None
-        self._cached_prompt_ids = None
-        # Drop the MLX model reference. Garbage collection / metal cache
-        # cleanup happens automatically once nothing references the arrays.
-        del self.model
-        self.model = None
-        self.tokenizer = None
-        import gc
-        gc.collect()
-        try:
-            import mlx.core as mx
-            mx.clear_cache()
-        except Exception:
-            pass
+        self._unload_model()
         self._status("  [Dispatch] Headmaster asleep.")
 
     def _wake_headmaster(self):
@@ -963,6 +980,10 @@ class ChatSession:
                 return
             if self._model_load_error is not None:
                 raise RuntimeError(self._model_load_error)
+
+            # Cap MLX's buffer cache before the first allocation, so a long
+            # chat session doesn't sit on GPU memory a training run needs.
+            apply_gpu_limits(self.config)
 
             # Don't spin during load(): HuggingFace's download progress bar
             # animates the same terminal line via \r, and the two carriages
@@ -1663,6 +1684,41 @@ class ChatSession:
             training.mark_adapter_used()
             self.output_fn("  Keeping the adapter.")
 
+    def _restore_model(self):
+        """Reload the model if something unloaded it. No-op when one is loaded."""
+        if getattr(self, "model", None) is not None:
+            return
+        err = self._reload_model()
+        if err:
+            self.output_fn(f"  [Train] Model reload failed: {err}")
+
+    def _train_unloaded(self, iters: int | None = None) -> bool:
+        """Run LoRA training with our own copy of the weights evicted first.
+
+        `mlx_lm lora` runs as a child process and is a second, independent
+        Metal client: it loads the same model again and adds optimizer state
+        on top. Holding our copy for the duration means two full models plus
+        gradients compete for unified memory, which is how these runs end up
+        swapping — and memory pressure is the condition under which Apple's
+        GPU driver has been observed to fall over.
+
+        On success the model is left unloaded, because every caller reloads
+        the freshly trained adapter anyway. On a skipped run, a failure, or
+        an exception, the previous model is restored before returning.
+        """
+        if not self.config.get("gpu", {}).get("unload_model_during_training", True):
+            return training.run_training(self.config, iters=iters)
+
+        self.output_fn("  [Train] Unloading model so the trainer has the GPU to itself...")
+        self._unload_model()
+        trained = False
+        try:
+            trained = training.run_training(self.config, iters=iters)
+            return trained
+        finally:
+            if not trained:
+                self._restore_model()
+
     def _guarded_train(self, config: dict[str, Any] | None = None, iters: int | None = None) -> bool:
         """Run LoRA training, reload the adapter, then check it against the
         golden set (a fixed battery of prompts covering identity and
@@ -1693,9 +1749,12 @@ class ChatSession:
         backup_dir = training.backup_adapter() if golden_on else None
 
         try:
-            trained = training.run_training(self.config, iters=iters)
+            trained = self._train_unloaded(iters=iters)
             local_telemetry.log_event("train", iters=iters, ok=bool(trained))
             if not trained or not self.adapter_config.exists():
+                # Covers the "trained but no adapter on disk" case, which
+                # _train_unloaded treats as success and so leaves unloaded.
+                self._restore_model()
                 self._last_train_note = "Training skipped (no new data or failed)."
                 return trained
 
@@ -1753,7 +1812,7 @@ class ChatSession:
                             f"  [Train] Injected {added} remedy sample(s) for consistent failures.")
                         self.output_fn(
                             f"  [Train] Running targeted remedy training ({extra_iters} iters)...")
-                        trained2 = training.run_training(self.config, iters=extra_iters)
+                        trained2 = self._train_unloaded(iters=extra_iters)
                         if trained2:
                             reload_err2 = self._reload_model()
                             if reload_err2:
@@ -1804,10 +1863,42 @@ class ChatSession:
                     f"Training complete. Adapter reloaded "
                     f"({after.pass_count}/{after.total} golden checks passing, no regression)."
                 )
+            self._run_wildcard_check(learn_cfg)
             self.output_fn(f"  [Train] {adapter_status_value(self.config, self.adapter_loaded)}")
             return True
         finally:
             training.discard_adapter_backup(backup_dir)
+
+    def _run_wildcard_check(self, learn_cfg: dict[str, Any]):
+        """Score the reloaded adapter on subjects absent from the corpus.
+
+        Runs here because the model is already loaded — the check costs a
+        handful of short generations and no extra load. It never rolls back:
+        the golden set guards against breaking known behaviour, while this
+        only reports whether a rule reached past the samples that taught it.
+        Failing wildcards early is expected, so treating them as a gate would
+        block nearly every retrain.
+        """
+        if not learn_cfg.get("wildcard_check_enabled", True):
+            return
+        try:
+            from symbio.app import wildcards
+
+            self.output_fn("  [Wild] Checking held-out cases...")
+            result = wildcards.run_check(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config)
+            failed = [t["id"] for t in result.tasks if not t["passed"]]
+            entry = wildcards.record_run(
+                result.pass_count, result.total, failed,
+                note=self._last_train_note or "")
+            self.output_fn(f"  [Wild] {wildcards.format_result(entry)}")
+            if entry.get("delta") is not None and entry["delta"] > 0:
+                self.output_fn(
+                    "  [Wild] Generalising better than the last adapter.")
+        except Exception as exc:
+            # A measurement must never break the training it is measuring.
+            self.output_fn(f"  [Wild] Held-out check skipped: {exc}")
 
     def _trim_history(self):
         """Keep the most recent messages, but also cap the total token
@@ -1902,6 +1993,24 @@ class ChatSession:
             for case in golden.GOLDEN_CASES:
                 mark = "PASS" if result.results.get(case.id) else "FAIL"
                 self.output_fn(f"    [{mark}] {case.id} — {case.description}")
+
+        elif cmd == "/wildcards":
+            from symbio.app import wildcards as _wild
+
+            result = _wild.run_check(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config)
+            failed = [t["id"] for t in result.tasks if not t["passed"]]
+            entry = _wild.record_run(result.pass_count, result.total, failed,
+                                     note="manual /wildcards run")
+            self.output_fn(f"  [Wild] {_wild.format_result(entry)}")
+            for task in result.tasks:
+                mark = "PASS" if task["passed"] else "FAIL"
+                self.output_fn(f"    [{mark}] {task['id']}")
+            history = _wild.load_history()
+            if len(history) > 1:
+                trend = " → ".join(str(h["score"]) for h in history[-6:])
+                self.output_fn(f"  [Wild] Trend (last {min(6, len(history))}): {trend}")
 
         elif cmd == "/digest":
             self._decay_stale_notes()

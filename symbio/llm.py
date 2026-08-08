@@ -311,8 +311,14 @@ def _run_lora_chunk(cmd: list[str]) -> tuple[bool, float | None]:
                 last_val = float(m.group(1))
         proc.wait()
     except KeyboardInterrupt:
-        proc.terminate()
-        proc.wait()
+        # The child shares our process group and already took the same SIGINT,
+        # so it is unwinding its Metal state. Give it a bounded window rather
+        # than killing it mid-teardown, then escalate if it hangs.
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
         raise
     return proc.returncode == 0, last_val
 
