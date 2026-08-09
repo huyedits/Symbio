@@ -89,6 +89,8 @@ class ArmResult:
     mean_coverage: float
     mean_latency: float
     tasks: list[dict[str, Any]]
+    # None when the procedure has too few anchorable steps to judge order.
+    mean_order: float | None = None
 
     @property
     def accuracy(self) -> float:
@@ -129,6 +131,76 @@ def coverage(reply: str, keywords: list[str]) -> float:
     return round(present / len(keywords), 4)
 
 
+_STEP_SPLIT_RE = re.compile(r"(?:^|\s)\d+\.\s+")
+
+
+def split_steps(steps: str) -> list[str]:
+    """A numbered procedure broken into its individual steps."""
+    parts = [p.strip() for p in _STEP_SPLIT_RE.split(steps) if p.strip()]
+    return parts
+
+
+def step_anchors(steps: str) -> list[str]:
+    """One distinguishing word per step, or None for steps that have none.
+
+    A step is anchored by a content word that appears in no other step, which
+    is what lets a reply be located in the procedure rather than merely
+    matched against it.
+    """
+    parts = split_steps(steps)
+    if len(parts) < 2:
+        return []
+    per_step = [set(_keywords(p)) for p in parts]
+    anchors = []
+    for i, words in enumerate(per_step):
+        others = set().union(*(per_step[:i] + per_step[i + 1:]))
+        unique = [w for w in _keywords(parts[i]) if w in words - others]
+        anchors.append(unique[0] if unique else None)
+    return anchors
+
+
+def order_score(reply: str, steps: str) -> float | None:
+    """How much of the procedure's ordering the reply preserves, 0..1.
+
+    `coverage` is set membership and cannot see sequence: a runbook recited
+    with steps 4 and 5 swapped, or looping over the same two steps, contains
+    every keyword and scores a perfect 100%. For a procedure that is the
+    difference between working and not, so this measures the longest run of
+    steps appearing in their true relative order, over the number of steps
+    actually mentioned.
+
+    Returns None when the procedure has too few anchorable steps to judge.
+    """
+    anchors = step_anchors(steps)
+    if not anchors:
+        return None
+    lowered = reply.lower()
+    positions = []
+    for index, anchor in enumerate(anchors):
+        if anchor is None:
+            continue
+        # Whole-token match, not substring: a two-letter anchor like "on" is
+        # inside "configuration", and this score now decides whether a retrain
+        # is rolled back. Lookarounds rather than \b because anchors carry
+        # punctuation of their own — `symb-keyctl`, `secret/edge/rotating`.
+        found = re.search(
+            r"(?<![a-z0-9])" + re.escape(anchor) + r"(?![a-z0-9])", lowered)
+        if found:
+            positions.append((found.start(), index))
+    if len(positions) < 2:
+        return None
+    positions.sort()                      # order the reply presents them in
+    presented = [index for _, index in positions]
+    # Longest increasing subsequence: the biggest subset of mentioned steps
+    # that are in the right relative order.
+    best = [1] * len(presented)
+    for i in range(len(presented)):
+        for j in range(i):
+            if presented[j] < presented[i]:
+                best[i] = max(best[i], best[j] + 1)
+    return round(max(best) / len(presented), 4)
+
+
 def _stripped_skill_system_prompt(name: str) -> str:
     """The adapter arm's prompt: names the skill, withholds the procedure.
 
@@ -163,6 +235,69 @@ def default_tasks(name: str) -> list[SkillTask]:
         SkillTask("broken", f"Something's wrong and I think {name.lower()} would fix it. Go."),
         SkillTask("terse", name),
     ]
+
+
+# A derived case passes when the reply recalls enough of the procedure and
+# keeps it in order. Both are needed: coverage alone scores a scrambled runbook
+# at 100%, and order alone scores a two-word answer that happens to be
+# monotonic. Set below the eval module's own pass mark because this is a
+# *regression* gate — it should fire when a retrain breaks a skill, not police
+# how well it was learned in the first place.
+GOLDEN_COVERAGE_FLOOR = 0.5
+GOLDEN_ORDER_FLOOR = 0.6
+
+
+def skill_golden_cases(name: str, steps: str) -> list[Any]:
+    """Regression cases for a skill, derived from its own procedure.
+
+    The headmaster's golden set has to be hand-written because "sounds like
+    Caine" is not mechanically checkable. A skill is the opposite: its correct
+    answer is its steps, so its cases can be generated — which is what makes it
+    practical to guard the workers that retrain themselves unattended off
+    accumulated usage samples, and which is why they had none until now.
+
+    `ideal_reply` is the procedure itself, so golden's remedy path can inject
+    real training samples when a case regresses rather than only reporting it.
+    """
+    from symbio.app import golden
+
+    if not steps.strip():
+        return []
+    keywords = _keywords(steps)
+    if not keywords:
+        return []
+
+    def _make(task):
+        def check(display, tools, cfg, _steps=steps, _kw=keywords):
+            if not golden.sane_reply(display):
+                return False
+            if coverage(display, _kw) < GOLDEN_COVERAGE_FLOOR:
+                return False
+            order = order_score(display, _steps)
+            # None means the procedure has too few anchorable steps to judge
+            # sequence, which is not a failure — coverage carries the case.
+            return order is None or order >= GOLDEN_ORDER_FLOOR
+
+        return golden.GoldenCase(
+            f"skill_{task.id}",
+            f"Recalls '{name}' in order when asked: {task.prompt!r}",
+            lambda cfg, _p=task.prompt: _p,
+            check,
+            ideal_reply=steps,
+        )
+
+    return [_make(task) for task in default_tasks(name)]
+
+
+def golden_cases_for_role(role: str) -> list[Any] | None:
+    """Derived golden cases for a skill role, or None if it is not a skill."""
+    entry = resolve_skill(role)
+    if entry is None or not entry.get("is_skill"):
+        return None
+    steps = skill_steps(entry)
+    if not steps:
+        return None
+    return skill_golden_cases(entry.get("skill_name", role), steps) or None
 
 
 def tasks_path_for(role: str) -> Path:
@@ -208,6 +343,7 @@ def run_arm(
     keywords: list[str],
     max_tokens: int,
     threshold: float,
+    steps: str = "",
 ) -> ArmResult:
     """Run every task once under one condition and grade by step coverage."""
     from symbio.app import tooling
@@ -244,6 +380,7 @@ def run_arm(
         total_latency += latency
         display = tooling.strip_tool_tags(raw)
         score = coverage(display, keywords)
+        order = order_score(display, steps) if steps else None
         missing = [kw for kw in task.must_include if kw.lower() not in display.lower()]
         passed = score >= threshold and not missing
 
@@ -252,17 +389,21 @@ def run_arm(
             "prompt": task.prompt,
             "passed": passed,
             "coverage": score,
+            "step_order": order,
             "missing_required": missing,
             "latency": round(latency, 3),
             "output": raw,
             "error": None,
         })
-        print(f"{'PASS' if passed else 'FAIL'} (cov {score:.0%})")
+        order_note = "" if order is None else f", order {order:.0%}"
+        print(f"{'PASS' if passed else 'FAIL'} (cov {score:.0%}{order_note})")
 
     pass_count = sum(1 for r in rows if r["passed"])
     mean_cov = round(sum(r["coverage"] for r in rows) / len(rows), 4) if rows else 0.0
     mean_lat = round(total_latency / len(rows), 3) if rows else 0.0
-    return ArmResult(arm, pass_count, len(rows), mean_cov, mean_lat, rows)
+    ordered = [r["step_order"] for r in rows if r.get("step_order") is not None]
+    mean_order = round(sum(ordered) / len(ordered), 4) if ordered else None
+    return ArmResult(arm, pass_count, len(rows), mean_cov, mean_lat, rows, mean_order)
 
 
 def adapter_is_usable(adapter_dir: Path) -> bool:
@@ -386,11 +527,13 @@ def run_skill_eval(
         if ARM_BASE in arms:
             results[ARM_BASE] = run_arm(
                 ARM_BASE, model, tokenizer, generate_fn, sampler,
-                _base_system_prompt(config), tasks, keywords, max_tokens, threshold)
+                _base_system_prompt(config), tasks, keywords, max_tokens,
+                threshold, steps=steps)
         if ARM_PROMPTED in arms:
             results[ARM_PROMPTED] = run_arm(
                 ARM_PROMPTED, model, tokenizer, generate_fn, sampler,
-                entry.get("system_prompt", ""), tasks, keywords, max_tokens, threshold)
+                entry.get("system_prompt", ""), tasks, keywords, max_tokens,
+                threshold, steps=steps)
         _unload(model)
 
     if ARM_ADAPTER in arms:
@@ -401,7 +544,8 @@ def run_skill_eval(
             model, tokenizer = load_fn(model_name)
         results[ARM_ADAPTER] = run_arm(
             ARM_ADAPTER, model, tokenizer, generate_fn, sampler,
-            _stripped_skill_system_prompt(name), tasks, keywords, max_tokens, threshold)
+            _stripped_skill_system_prompt(name), tasks, keywords, max_tokens,
+            threshold, steps=steps)
         _unload(model)
 
     report = build_report(
@@ -450,6 +594,7 @@ def build_report(
             "total": res.total,
             "accuracy": res.accuracy,
             "mean_coverage": res.mean_coverage,
+            "mean_order": res.mean_order,
             "mean_latency": res.mean_latency,
             "tasks": res.tasks,
         }
@@ -507,9 +652,10 @@ def print_summary(report: dict[str, Any]):
     arms = report.get("arms", {})
     print(f"\n  Skill: {report['skill']}   ({report['task_count']} tasks, "
           f"{report['tasks_source']})")
-    print("  " + "-" * 58)
-    print(f"  {'condition':<12}{'steps in prompt':<18}{'score':<10}{'coverage'}")
-    print("  " + "-" * 58)
+    print("  " + "-" * 72)
+    print(f"  {'condition':<12}{'steps in prompt':<18}{'score':<10}"
+          f"{'coverage':<12}{'step order'}")
+    print("  " + "-" * 72)
     shown = {
         ARM_BASE: "no",
         ARM_PROMPTED: "YES",
@@ -519,8 +665,13 @@ def print_summary(report: dict[str, Any]):
         data = arms.get(arm)
         if not data:
             continue
+        order = data.get("mean_order")
+        # Coverage says the right words are present; order says they are in
+        # the right sequence. A procedure can score 100% on the first while
+        # being unrunnable, so both are shown side by side.
+        order_text = "-" if order is None else f"{order:.0%}"
         print(f"  {arm:<12}{shown[arm]:<18}"
               f"{str(data['score']) + '/' + str(data['total']):<10}"
-              f"{data['mean_coverage']:.0%}")
+              f"{data['mean_coverage']:.0%}".ljust(54) + order_text)
     print("  " + "-" * 58)
     print(f"  {report.get('verdict', '')}")

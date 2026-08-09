@@ -16,10 +16,34 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "rank": 8,
         "dropout": 0.0,
         "scale": 20.0,
+        # How many transformer blocks get adapters, counted from the output
+        # end — mlx_lm always takes a trailing run, never a chosen set. Note
+        # that 0 (or negative) means ALL blocks, not none.
         "num_layers": 8,
+        # Which modules inside those blocks get adapters. Empty = every
+        # projection (mlx_lm's default). Block-relative names such as
+        # "self_attn.q_proj" narrow it; full paths such as
+        # "model.layers.12.mlp.up_proj" are matched against the whole model
+        # and are the only way to target specific blocks. See
+        # training.validate_lora_keys for what is checked before a run.
+        "keys": [],
+        # Trade compute for activation memory. Worth turning on before
+        # lowering max_seq_length, since activations are what scale with it.
+        "grad_checkpoint": False,
         "batch_size": 1,
         "learning_rate": 1e-4,
+        # Floor for a full retrain, not the count itself: run_training scales
+        # iterations to cover the corpus `epochs` times (see
+        # training.iters_for_corpus), because a fixed count over a growing
+        # corpus means each retrain sees an arbitrary subset of it.
         "iters": 300,
+        "epochs": 2,
+        "max_iters": 2000,
+        # Compute the loss only over the assistant's answer. Without this the
+        # system prompt — ~99% of every sample's tokens, and identical across
+        # all of them — dominates the gradient, and the run measures how well
+        # the model memorised a constant it is handed at inference anyway.
+        "mask_prompt": True,
         # Must exceed a whole sample: system prompt (tool catalog stripped by
         # training.strip_tool_catalog) + user turn + assistant turn. Seed
         # samples run ~2,200 tokens, so anything under ~2,560 silently cuts the
@@ -27,7 +51,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # when the corpus does not fit.
         "max_seq_length": 3072,
         "steps_per_eval": 100,
-        "save_every": 100,
+        # Validation batches per evaluation. mlx_lm's own default of 25 rescores
+        # the whole split every time, which on ~2k-token samples costs minutes
+        # per check and can dominate a run. This is a plateau detector, not a
+        # benchmark.
+        "val_batches": 8,
+        # Checkpoint interval. A crash between checkpoints destroys everything
+        # since the last one, and an 8B LoRA step runs ~20s here, so 100 iters
+        # is a ~33 minute hole. Writing a ~19 MB adapter every 25 steps costs
+        # almost nothing next to what it saves.
+        "save_every": 25,
         # Early stopping: kill training if validation loss stops improving.
         "early_stop_enabled": True,
         "early_stop_patience": 2,
@@ -132,6 +165,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Drop the in-process model before spawning the LoRA trainer, so only
         # one copy of the weights is resident at a time.
         "unload_model_during_training": True,
+        # Refuse to spawn a trainer when free RAM cannot hold it. What this
+        # prevents is not a failed run: a trainer the machine cannot hold gets
+        # Jetsam-killed, and on a 16 GB Mac that has already cost a reboot.
+        # Set false to train anyway on a machine you have measured yourself.
+        "memory_preflight": True,
     },
     # Self-pruning of the stores RAG reads back (see symbio/app/prune.py).
     # Runs once per boot so junk the agent wrote down stops being retrieved
@@ -217,6 +255,35 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # on your machine, which is a bigger behavior/resource change than
         # anything else here — opt in deliberately.
         "enabled": False,
+        # The model a worker runs. Deliberately smaller than the headmaster:
+        # a worker does one narrow job under a short prompt, and running it at
+        # headmaster size means a second full-size copy of the weights resident
+        # beside the one already loaded. Set to null to use model_name instead.
+        "worker_model_name": "mlx-community/Qwen3-4B-4bit",
+        # Switch between workers that share a base model by replacing only
+        # their LoRA tensors, instead of loading a second copy of the weights.
+        # Skill workers all run the headmaster's own model, so this turns a
+        # multi-gigabyte reload into a ~19 MB one. Refuses the swap and falls
+        # back to a full load whenever the adapter's shape does not match.
+        # When retrieval matches a skill that has its own trained worker, tell
+        # the model the worker exists instead of leaving it to infer that from
+        # the tool schema. A suggestion, not a route: retrieval is fuzzy, and a
+        # wrong hard route costs the whole turn where a wrong hint costs a line.
+        "suggest_skill_workers": True,
+        # Unload the headmaster before a worker runs and reload it afterwards.
+        # A skill worker runs the headmaster's own model and the headmaster is
+        # never a hot-swap donor (its model lives in ChatSession, not the pool),
+        # so without this every skill dispatch holds two full copies of those
+        # weights. Costs a reload per delegation; that is the price of a skill
+        # worker at headmaster size on a machine that cannot hold both.
+        "headmaster_deep_sleep_while_workers": False,
+        "hot_swap_adapters": True,
+        # When a headmaster-sized worker cannot be hot-swapped, the fallback is
+        # a second full copy of the headmaster's weights. That is correct and
+        # unaffordable: on 16 GB, beside a training run, it is what takes the
+        # machine down rather than the turn. Refuse by default and say why;
+        # turn this on only if you have the RAM to hold both.
+        "allow_second_headmaster_copy": False,
         "max_resident_workers": 1,
         "worker_idle_unload_minutes": 10,
         "max_worker_rounds": 4,

@@ -791,6 +791,13 @@ class ChatSession:
             tooling.refresh_mcp_tools(self.config)
         except Exception:
             pass
+        # Advertise the workers that actually exist. Without this the model is
+        # shown a made-up example role and cannot reliably delegate to a skill
+        # at all, which is what kept saved skills reachable only through RAG.
+        try:
+            tooling.refresh_delegate_roles()
+        except Exception:
+            pass
         # Skill notes touched this session; used to append health errors and
         # user corrections to the matching sidecar files.
         self._skill_notes_used: set[Path] = set()
@@ -2835,6 +2842,8 @@ class ChatSession:
         # context. Retrieval text never enters history or training data.
         rag_context = self.retriever.build_context(user_input)
         rag_results: list[dict[str, Any]] = []
+        # Skill workers whose notes retrieval matched this turn.
+        suggested_roles: list[str] = []
         if self.retriever.rag_cfg.get("enabled", True):
             for r in self.retriever.retrieve(user_input):
                 rag_results.append(r)
@@ -2847,7 +2856,29 @@ class ChatSession:
                     if skills._is_skill_note(note_path):
                         self._skill_notes_used.add(note_path)
                         self._record_health_errors_for_skill(note_path)
+                        role = None
+                        try:
+                            role = skills.delegatable_role_for_note(
+                                note_path, self.config)
+                        except Exception:
+                            pass
+                        if role and role not in suggested_roles:
+                            suggested_roles.append(role)
         rag_block = f"\n\n{rag_context}" if rag_context else ""
+        # Retrieval matched a skill that has its own trained worker. Say so
+        # rather than routing on it: a suggestion the model can decline costs a
+        # line of context when retrieval is wrong, where hard routing would
+        # hand the whole turn to the wrong specialist.
+        if suggested_roles and self.config.get("dispatch", {}).get(
+                "suggest_skill_workers", True):
+            offers = ", ".join(f"<delegate role='{r}'>the task</delegate>"
+                               for r in suggested_roles)
+            rag_block += (
+                f"\n\n[System note: this request matches a skill that has its own "
+                f"trained worker. The procedure is in that worker's weights, so "
+                f"prefer handing it over with {offers} rather than answering from "
+                f"memory. Ignore this if the request is not actually about that skill.]"
+            )
         rag_ms = (time.perf_counter() - turn_start) * 1000
         timings["rag_ms"] = rag_ms
         # Surface that retrieval ran and what it pulled in, so the user can see

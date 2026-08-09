@@ -312,17 +312,19 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "delegate_task",
         "description": (
-            "Hand a bounded sub-task off to a smaller, faster worker model "
-            "instead of doing it yourself — use for narrow, repetitive "
-            "decisions (e.g. summarizing a page, picking the next browser "
-            "click) where a lightweight specialist is enough. "
-            "Saved skills are also available as worker roles named skill_<slug>, "
-            "e.g. skill_summarize_news."
+            "Hand a bounded sub-task off to a specialist worker instead of "
+            "doing it yourself — use for narrow, repetitive decisions (e.g. "
+            "summarizing a page, picking the next browser click), and for any "
+            "saved skill, whose procedure lives in that worker's weights. "
+            "Call refresh_delegate_roles() to list the workers that exist."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "role": {"type": "string", "description": "Which worker to use, e.g. 'summarize', 'browser', or a saved skill like 'skill_summarize_news'."},
+                # Both the description and the enum are rewritten from the real
+                # catalog by refresh_delegate_roles(); this is only the fallback
+                # wording for a session where no catalog could be read.
+                "role": {"type": "string", "description": "Which worker to use, e.g. 'summarize' or 'browser'."},
                 "task": {"type": "string", "description": "The sub-task text to hand to the worker."},
             },
             "required": ["role", "task"],
@@ -605,6 +607,50 @@ def build_tools_block(groups: set[str] | None = None) -> str:
 def tool_schemas() -> list[dict[str, Any]]:
     """Return the tool registry as a list of JSON schemas."""
     return list(_TOOLS)
+
+
+def refresh_delegate_roles() -> list[str]:
+    """Point delegate_task at the workers that actually exist.
+
+    The schema used to name a worked example — "a saved skill like
+    skill_summarize_news" — and never list the real catalog, so the model had
+    to guess a slug to route anything. Worse, the example was wrong: a skill is
+    catalogued under the key `skill_<slug>` but its `role` is the bare slug, so
+    a model that followed the description emitted a role the dispatcher could
+    never resolve. Skills were effectively unreachable by delegation.
+
+    Returns the role names now advertised.
+    """
+    from symbio.app import dispatch
+
+    roles: list[str] = []
+    described: list[str] = []
+    try:
+        catalog = dispatch.load_catalog()
+    except Exception:
+        return []
+    for entry in catalog.values():
+        role = entry.get("role")
+        if not role or role in roles:
+            continue
+        roles.append(role)
+        label = entry.get("skill_name") or entry.get("description") or role
+        described.append(f"'{role}' ({label})")
+    if not roles:
+        return []
+
+    for tool in _TOOLS:
+        if tool["name"] != "delegate_task":
+            continue
+        role_schema = tool["parameters"]["properties"]["role"]
+        # An enum is the strongest signal available in a JSON schema that the
+        # value is drawn from a fixed set, and it is what stops the model
+        # inventing a plausible-looking slug.
+        role_schema["enum"] = list(roles)
+        role_schema["description"] = (
+            "Which worker to use. Must be one of: " + ", ".join(described) + "."
+        )
+    return roles
 
 
 def refresh_mcp_tools(config: dict[str, Any] | None = None) -> list[dict[str, Any]]:
