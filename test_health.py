@@ -236,3 +236,68 @@ def test_chat_session_persists_health_report(isolated_health_env, monkeypatch):
         assert data["healthy"] is True
     finally:
         chat.load = chat.__dict__.get("load")
+
+
+# ---- dispatch readiness ----
+#
+# This check used to test Ollama reachability and a frontier API key. Neither
+# is involved in delegation: WorkerPool loads local MLX models and makes no
+# network call. So it passed whenever Ollama happened to be running, and would
+# have called delegation broken the moment Ollama was quit.
+
+def _dispatch_env(monkeypatch, tmp_path, catalog, adapters=None):
+    catalog_file = tmp_path / "worker_models.json"
+    catalog_file.write_text(json.dumps(catalog), encoding="utf-8")
+    monkeypatch.setattr(constants, "WORKER_MODELS_FILE", catalog_file)
+    monkeypatch.setattr(constants, "ADAPTER_DIR", tmp_path / "adapters")
+    monkeypatch.setattr(constants, "WORKER_ADAPTERS_DIR", tmp_path / "adapters" / "workers")
+    for role, trained_for in (adapters or {}).items():
+        d = tmp_path / "adapters" / "workers" / role
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "adapter_config.json").write_text(
+            json.dumps({"model": trained_for}), encoding="utf-8")
+    return {"dispatch": {"enabled": True},
+            "tools": {"enabled_groups": ["delegate"]}}
+
+
+def test_dispatch_ready_when_every_role_resolves(monkeypatch, tmp_path):
+    config = _dispatch_env(monkeypatch, tmp_path, {
+        "w": {"model_name": "m/4b", "role": "summarize"},
+    })
+    result = health._check_dispatch(config)
+    assert result.ok is True
+    assert "summarize" in result.message
+
+
+def test_dispatch_flags_the_missing_tool_group(monkeypatch, tmp_path):
+    """Two switches gate delegation; only one of them is called 'enabled'."""
+    config = _dispatch_env(monkeypatch, tmp_path, {
+        "w": {"model_name": "m/4b", "role": "summarize"},
+    })
+    config["tools"]["enabled_groups"] = []
+    result = health._check_dispatch(config)
+    assert result.ok is False
+    assert "delegate" in result.message
+
+
+def test_dispatch_flags_an_adapter_from_another_model(monkeypatch, tmp_path):
+    config = _dispatch_env(
+        monkeypatch, tmp_path,
+        {"w": {"model_name": "mlx-community/Qwen3-4B-4bit", "role": "fix_wifi"}},
+        adapters={"fix_wifi": "Qwen/Qwen3-8B-MLX-4bit"})
+    result = health._check_dispatch(config)
+    assert result.ok is False
+    assert "different model" in result.message
+
+
+def test_dispatch_flags_an_empty_catalog(monkeypatch, tmp_path):
+    config = _dispatch_env(monkeypatch, tmp_path, {})
+    result = health._check_dispatch(config)
+    assert result.ok is False
+    assert "nothing to delegate" in result.message
+
+
+def test_dispatch_check_is_skipped_when_disabled(monkeypatch, tmp_path):
+    config = _dispatch_env(monkeypatch, tmp_path, {})
+    config["dispatch"]["enabled"] = False
+    assert health._check_dispatch(config).severity == "info"

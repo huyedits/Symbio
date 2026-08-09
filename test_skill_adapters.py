@@ -134,8 +134,14 @@ def test_seed_samples_keep_steps_out_of_the_system_turn(isolated_skill_env, conf
         system_turn = line["text"].split("user:")[0]
         assert "Find smells" not in system_turn
         assert "Steps:" not in system_turn
-        # ...and the steps must still be present as the assistant target.
         assert "assistant:" in line["text"]
+
+    # ...and the steps must still be present as the assistant target. Only for
+    # the recall samples: contrast samples answer with a decline by design, and
+    # step samples answer with one step rather than the whole procedure.
+    recall = [ln for ln in lines if ln["metadata"].get("seed_kind") == "recall"]
+    assert recall
+    for line in recall:
         assert "Find smells" in line["text"].split("assistant:")[1]
 
 
@@ -464,3 +470,184 @@ def test_delete_skill_adapter_removes_note_and_sidecar(isolated_skill_env, confi
 
     assert not note.exists()
     assert not sidecar.exists()
+
+
+# ---- seed composition ----
+#
+# Seeds are recall-only by measurement: richer seed kinds were tried and lost
+# badly (see the note in skills._seed_skill_training_data).
+
+def test_seed_samples_carry_messages_for_prompt_masking(
+        isolated_skill_env, config):
+    """Without this the loss covers the system turn too, and these samples are
+    almost entirely system turn."""
+    from symbio.app import skills
+
+    result = skills.save_skill_adapter(
+        "Refactor Code", "1. Find smells. 2. Simplify.", config,
+        FakeTokenizer(), auto_train=False)
+    train_file = (isolated_skill_env["data_dir"] / "workers"
+                  / result["role"] / "train.jsonl")
+    lines = [json.loads(ln) for ln in
+             train_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+    assert lines
+    for line in lines:
+        roles = [m["role"] for m in line["messages"]]
+        assert roles == ["system", "user", "assistant"]
+
+
+# ---- worker model sizing ----
+#
+# A worker answers one narrow question under a short prompt. Running it at
+# headmaster size meant a second full-size copy of the weights resident beside
+# the one already loaded.
+
+def test_worker_model_defaults_to_the_configured_worker(config):
+    from symbio.app import skills
+
+    cfg = {**config, "dispatch": {"worker_model_name": "org/Small-4B"}}
+    assert skills.worker_model_name(cfg) == "org/Small-4B"
+
+
+def test_worker_model_falls_back_to_the_headmaster(config):
+    """Unset or null means "same model as the agent itself"."""
+    from symbio.app import skills
+
+    assert skills.worker_model_name(config) == config["model_name"]
+    cfg = {**config, "dispatch": {"worker_model_name": None}}
+    assert skills.worker_model_name(cfg) == config["model_name"]
+
+
+def test_new_skills_are_catalogued_against_the_worker_model(
+        isolated_skill_env, config, monkeypatch):
+    from symbio.app import skills
+
+    tok = FakeTokenizer()
+    tok.name_or_path = "org/Small-4B"
+    monkeypatch.setattr(skills, "worker_tokenizer", lambda name, fallback: tok)
+    cfg = {**config, "dispatch": {"worker_model_name": "org/Small-4B"}}
+
+    result = skills.save_skill_adapter(
+        "Refactor Code", "1. Find smells.", cfg, FakeTokenizer(),
+        auto_train=False)
+
+    catalog = json.loads(
+        isolated_skill_env["worker_models"].read_text(encoding="utf-8"))
+    entry = catalog[f"skill_{result['role']}"]
+    assert entry["model_name"] == "org/Small-4B"
+    assert entry["model_name"] != cfg["model_name"]
+
+
+def test_seeds_are_stamped_for_the_worker_not_the_headmaster(
+        isolated_skill_env, config, monkeypatch):
+    """The invariant that makes the first training run possible.
+
+    Seeds carry the tokenizer that rendered them, and seed_model_mismatch
+    refuses to train when that disagrees with the worker's model. Seeding a
+    smaller worker with the headmaster's tokenizer would block every new
+    skill's first fine-tune.
+    """
+    from symbio.app import skills
+
+    worker_tok = FakeTokenizer()
+    worker_tok.name_or_path = "org/Small-4B"
+    monkeypatch.setattr(skills, "worker_tokenizer",
+                        lambda name, fallback: worker_tok)
+    headmaster_tok = FakeTokenizer()
+    headmaster_tok.name_or_path = "org/Big-8B"
+    cfg = {**config, "dispatch": {"worker_model_name": "org/Small-4B"}}
+
+    result = skills.save_skill_adapter(
+        "Refactor Code", "1. Find smells.", cfg, headmaster_tok,
+        auto_train=False)
+
+    catalog = json.loads(
+        isolated_skill_env["worker_models"].read_text(encoding="utf-8"))
+    entry = catalog[f"skill_{result['role']}"]
+    assert skills.seed_model_mismatch(result["role"], entry["model_name"]) is None
+
+
+def test_worker_tokenizer_reuses_a_matching_one_without_loading(config):
+    """Republished weights share a stem, so no download is needed."""
+    from symbio.app import skills
+
+    tok = FakeTokenizer()
+    tok.name_or_path = "Qwen/Qwen3-4B-4bit"
+    assert skills.worker_tokenizer("mlx-community/Qwen3-4B-4bit", tok) is tok
+
+
+# ---- routing signal from retrieval ----
+#
+# Retrieval already scores the user's message against every note, and skills
+# are notes, so a skill-note hit is a routing signal. It was computed on every
+# turn and never consulted for dispatch, leaving the model to infer from the
+# tool schema alone that a matching specialist existed.
+
+def _skill_note(tmp_path, name, body="1. Toggle wifi off. 2. Toggle it on."):
+    p = tmp_path / f"{name.replace(' ', '_')}.md"
+    p.write_text(f"# Skill: {name}\n\n{body}\n", encoding="utf-8")
+    return p
+
+
+def _catalogued(monkeypatch, isolated_skill_env, role, model_name, trained_for=None):
+    isolated_skill_env["worker_models"].write_text(json.dumps({
+        f"skill_{role}": {"model_name": model_name, "role": role,
+                          "is_skill": True, "skill_name": "Fix wifi"},
+    }), encoding="utf-8")
+    if trained_for is not None:
+        d = isolated_skill_env["adapter_dir"] / "workers" / role
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "adapters.safetensors").write_bytes(b"w")
+        (d / "adapter_config.json").write_text(
+            json.dumps({"model": trained_for}), encoding="utf-8")
+
+
+def test_a_matched_skill_note_offers_its_worker(isolated_skill_env, monkeypatch, tmp_path):
+    from symbio.app import skills
+
+    _catalogued(monkeypatch, isolated_skill_env, "fix_wifi", "m/4b", trained_for="m/4b")
+    note = _skill_note(tmp_path, "Fix wifi")
+    config = {"dispatch": {"enabled": True}}
+
+    assert skills.delegatable_role_for_note(note, config) == "fix_wifi"
+
+
+def test_no_offer_when_dispatch_is_off(isolated_skill_env, monkeypatch, tmp_path):
+    from symbio.app import skills
+
+    _catalogued(monkeypatch, isolated_skill_env, "fix_wifi", "m/4b", trained_for="m/4b")
+    note = _skill_note(tmp_path, "Fix wifi")
+
+    assert skills.delegatable_role_for_note(note, {"dispatch": {"enabled": False}}) is None
+
+
+def test_no_offer_when_the_worker_has_no_trained_weights(
+        isolated_skill_env, monkeypatch, tmp_path):
+    """Handing the turn to an untrained worker is worse than answering."""
+    from symbio.app import skills
+
+    _catalogued(monkeypatch, isolated_skill_env, "fix_wifi", "m/4b")
+    note = _skill_note(tmp_path, "Fix wifi")
+
+    assert skills.delegatable_role_for_note(note, {"dispatch": {"enabled": True}}) is None
+
+
+def test_no_offer_when_the_adapter_belongs_to_another_model(
+        isolated_skill_env, monkeypatch, tmp_path):
+    from symbio.app import skills
+
+    _catalogued(monkeypatch, isolated_skill_env, "fix_wifi",
+                "mlx-community/Qwen3-4B-4bit", trained_for="Qwen/Qwen3-8B-MLX-4bit")
+    note = _skill_note(tmp_path, "Fix wifi")
+
+    assert skills.delegatable_role_for_note(note, {"dispatch": {"enabled": True}}) is None
+
+
+def test_a_plain_note_is_never_offered(isolated_skill_env, tmp_path):
+    from symbio.app import skills
+
+    plain = tmp_path / "plain.md"
+    plain.write_text("# Groceries\n\nmilk\n", encoding="utf-8")
+
+    assert skills.delegatable_role_for_note(plain, {"dispatch": {"enabled": True}}) is None

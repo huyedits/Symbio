@@ -91,6 +91,109 @@ WORKER_GOLDEN_CASES: dict[str, list[golden.GoldenCase]] = {
 }
 
 
+def adapter_matches_model(adapter_dir: Path, model_name: str) -> bool:
+    """True when a worker's adapter was trained for the model about to load it.
+
+    mlx_lm attaches LoRA layers sized to the *new* model and then loads the
+    adapter with strict=False, so weights from a different base are silently
+    discarded rather than rejected — a 4B loaded with an 8B adapter (hidden
+    2560 against 4096) comes up as an untrained model with no error anywhere.
+    Nothing downstream can tell that apart from a genuinely weak fine-tune, so
+    a golden baseline measured that way is measuring the base model while
+    reporting the adapter's name.
+
+    Missing or unreadable provenance is treated as a match: older adapters
+    predate the stamp, and refusing them would be a regression.
+    """
+    config_file = adapter_dir / "adapter_config.json"
+    if not config_file.exists():
+        return False
+    try:
+        trained_for = json.loads(config_file.read_text(encoding="utf-8")).get("model")
+    except (OSError, json.JSONDecodeError):
+        return True
+    if not trained_for:
+        return True
+    from symbio.app.skills import _model_stem
+
+    return _model_stem(trained_for) == _model_stem(model_name)
+
+
+def _adapter_fits_model(model: Any, adapter_file: Path) -> bool:
+    """True when every tensor in the adapter has a same-shaped home in `model`.
+
+    This check is the whole safety of hot-swapping. `load_weights(strict=False)`
+    silently ignores keys it cannot place, so an adapter trained with a
+    different rank, num_layers or target `keys` would load nothing at all and
+    leave the previous worker's weights sitting in the model — which does not
+    raise, does not warn, and answers confidently as the wrong specialist.
+    Refusing the swap costs one full load; getting it wrong costs correctness.
+    """
+    try:
+        import mlx.core as mx
+        from mlx.utils import tree_flatten
+
+        weights = mx.load(str(adapter_file))
+        if not weights:
+            return False
+        params = dict(tree_flatten(model.parameters()))
+        for key, value in weights.items():
+            current = params.get(key)
+            if current is None or tuple(current.shape) != tuple(value.shape):
+                return False
+        return True
+    except Exception:
+        # Any doubt at all falls back to the full load, which is always correct.
+        return False
+
+
+def _adapter_recipe(adapter_dir: Path) -> dict[str, Any]:
+    """The LoRA knobs that decide which tensors an adapter contains.
+
+    Two adapters over the same base weights are only interchangeable in a
+    resident model when these agree: they determine which modules get LoRA
+    layers attached and how big those layers are.
+    """
+    try:
+        cfg = json.loads((adapter_dir / "adapter_config.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    lora = cfg.get("lora_parameters") or {}
+    return {
+        "num_layers": cfg.get("num_layers"),
+        "rank": lora.get("rank"),
+        "keys": tuple(lora.get("keys") or ()) or ("<all projections>",),
+    }
+
+
+def describe_recipe_drift(worker_dir: Path, headmaster_dir: Path) -> str | None:
+    """Human-readable diff of a worker's LoRA recipe against the headmaster's.
+
+    Skill workers share the headmaster's base weights and are meant to cost
+    only an adapter swap. Retraining the headmaster with different targets
+    silently makes every older skill adapter unswappable, and the fallback is
+    a second full copy of the headmaster-sized weights. Naming the drift is
+    the difference between a one-line fix and hunting an OOM.
+    """
+    worker, headmaster = _adapter_recipe(worker_dir), _adapter_recipe(headmaster_dir)
+    if not worker or not headmaster:
+        return None
+    drift = [f"{k}: worker={worker[k]!r} vs headmaster={headmaster[k]!r}"
+             for k in worker if worker[k] != headmaster[k]]
+    return "; ".join(drift) or None
+
+
+class SecondHeadmasterCopyRefused(RuntimeError):
+    """Raised rather than putting a second copy of the headmaster's weights in RAM.
+
+    A worker running the headmaster's own model is supposed to arrive by
+    adapter swap. When the swap is refused the fallback is a full load, which
+    is correct but doubles the largest allocation on the machine — on a 16 GB
+    box, beside a training run, that is the difference between working and a
+    kernel panic. Failing the delegation loudly beats taking the machine down.
+    """
+
+
 class WorkerPool:
     """Lazy-loads worker models on first delegated task, evicts by LRU once
     dispatch.max_resident_workers is exceeded, and unloads anything idle
@@ -157,11 +260,25 @@ class WorkerPool:
         if entry is None:
             return None
 
+        swapped = self._try_hot_swap(role, entry)
+        if swapped is not None:
+            return swapped
+
+        refusal = self._second_headmaster_copy_refusal(role, entry)
+        if refusal:
+            raise SecondHeadmasterCopyRefused(refusal)
+
         self._evict_lru_if_needed()
         adapter_dir = constants.adapter_dir_for(role)
-        adapter_config = adapter_dir / "adapter_config.json"
+        use_adapter = (adapter_dir / "adapter_config.json").exists()
+        if use_adapter and not adapter_matches_model(adapter_dir, entry["model_name"]):
+            use_adapter = False
+            self._status(
+                f"  [Dispatch] Worker '{role}' has an adapter trained for a "
+                f"different model; loading base weights only. Retrain the "
+                f"worker to rebuild it for {entry['model_name']}.")
         self._status(f"  [Dispatch] Loading worker '{role}' ({entry['model_name']})...")
-        if adapter_config.exists():
+        if use_adapter:
             model, tokenizer = load(entry["model_name"], adapter_path=str(adapter_dir))
         else:
             model, tokenizer = load(entry["model_name"])
@@ -169,6 +286,92 @@ class WorkerPool:
         training.mark_adapter_used(role=role)
         self._status(f"  [Dispatch] Worker '{role}' ready.")
         return model, tokenizer, entry
+
+    def _second_headmaster_copy_refusal(self, role: str, entry: dict[str, Any]) -> str | None:
+        """Message explaining why `role` must not be loaded, or None to allow it.
+
+        Only fires for workers on the headmaster's own model, which are exactly
+        the ones hot-swapping exists to make free. Deep sleep unloads the
+        headmaster first, so one copy is resident either way and there is
+        nothing to refuse.
+        """
+        cfg = self._dispatch_cfg()
+        if cfg.get("allow_second_headmaster_copy", False):
+            return None
+        if cfg.get("headmaster_deep_sleep_while_workers", False):
+            return None
+        headmaster_model = self.config.get("model_name")
+        if not headmaster_model:
+            return None
+        from symbio.app.skills import _model_stem
+
+        if _model_stem(entry.get("model_name") or "") != _model_stem(headmaster_model):
+            return None
+        drift = describe_recipe_drift(constants.adapter_dir_for(role), constants.ADAPTER_DIR)
+        return (
+            f"Worker '{role}' runs the headmaster's own model ({headmaster_model}) "
+            f"and its adapter could not be hot-swapped"
+            + (f" ({drift})" if drift else "")
+            + ". Loading it would hold two full copies of those weights at once. "
+            f"Retrain '{role}' with the headmaster's current LoRA recipe, or set "
+            f"dispatch.headmaster_deep_sleep_while_workers to unload the "
+            f"headmaster first, or dispatch.allow_second_headmaster_copy if you "
+            f"have the RAM to spare."
+        )
+
+    def _try_hot_swap(self, role: str, entry: dict[str, Any]):
+        """Reuse a resident model by replacing only its LoRA tensors.
+
+        Skill workers all run the headmaster's own base weights and differ
+        only by a ~19 MB adapter, so loading a second full copy to switch
+        between them costs gigabytes and tens of seconds to change nothing but
+        that adapter. Swapping the tensors in place is effectively free, which
+        is what makes per-turn routing to a skill affordable at all.
+
+        Returns the same triple as get(), or None when a swap is not safe and
+        the caller should fall back to a full load.
+        """
+        if not self._dispatch_cfg().get("hot_swap_adapters", True):
+            return None
+        adapter_file = constants.adapter_dir_for(role) / "adapters.safetensors"
+        if not adapter_file.exists():
+            # Nothing to swap in. Reusing a model would silently leave the
+            # previous worker's adapter attached and answer as the wrong
+            # specialist, so this has to be a full load of the base weights.
+            return None
+
+        for donor, (model, tokenizer, _) in list(self._resident.items()):
+            donor_entry = catalog_entry_for_role(donor)
+            if not donor_entry:
+                continue
+            if donor_entry.get("model_name") != entry.get("model_name"):
+                continue  # different base weights; nothing to reuse
+            if not _adapter_fits_model(model, adapter_file):
+                drift = describe_recipe_drift(
+                    constants.adapter_dir_for(role), constants.ADAPTER_DIR)
+                self._status(
+                    f"  [Dispatch] Cannot swap '{donor}' -> '{role}': the adapter "
+                    f"does not fit the resident model's LoRA layers"
+                    + (f" ({drift})" if drift else "")
+                    + f". Retrain worker '{role}' with the headmaster's current "
+                    f"recipe; until then it needs a second full copy of "
+                    f"{entry.get('model_name')}.")
+                continue
+            try:
+                model.load_weights(str(adapter_file), strict=False)
+            except Exception as exc:
+                self._status(f"  [Dispatch] Adapter swap for '{role}' failed "
+                             f"({exc}); loading the worker in full.")
+                return None
+            # The donor's model now carries someone else's adapter, so its
+            # residency moves rather than being copied.
+            del self._resident[donor]
+            self._resident[role] = (model, tokenizer, time.time())
+            training.mark_adapter_used(role=role)
+            self._status(f"  [Dispatch] Swapped adapter '{donor}' -> '{role}' "
+                         f"(no model reload).")
+            return model, tokenizer, entry
+        return None
 
     def _worker_system_prompt(self, role: str, entry: dict[str, Any]) -> str:
         """Return the system prompt for a worker role.
@@ -202,7 +405,11 @@ class WorkerPool:
             self.before_worker_fn()
 
         try:
-            loaded = self.get(role)
+            try:
+                loaded = self.get(role)
+            except SecondHeadmasterCopyRefused as exc:
+                self._status(f"  [Dispatch] Refused to load '{role}': {exc}")
+                return (f"Worker '{role}' was not run: {exc}")
             if loaded is None:
                 known = sorted({e.get("role") for e in load_catalog().values() if e.get("role")})
                 return f"No worker configured for role '{role}'. Known roles: {', '.join(known) or 'none'}."
@@ -321,14 +528,41 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
 
     dispatch_cfg = config.get("dispatch", {})
     golden_on = dispatch_cfg.get("worker_golden_set_enabled", True)
-    cases = WORKER_GOLDEN_CASES.get(role)
     sampler = make_sampler(temp=0.2, top_p=0.9)
     entry = catalog_entry_for_role(role)
+
+    cases = WORKER_GOLDEN_CASES.get(role)
+    skill_cases = False
+    if cases is None:
+        # Skills had no hand-written cases, so every skill retrained with no
+        # regression check and no rollback at all — the workers that retrain
+        # themselves unattended were the only ones unguarded. Their cases can
+        # be derived, because unlike the headmaster a skill's correct answer
+        # is known: it is its own steps.
+        from symbio.app import skill_eval as _skill_eval
+
+        try:
+            cases = _skill_eval.golden_cases_for_role(role)
+            skill_cases = cases is not None
+        except Exception:
+            cases = None
+
     if entry and "system_prompt" in entry:
         system_prompt = entry["system_prompt"]
     else:
         system_prompt = ROLE_SYSTEM_PROMPTS.get(
             role, "Complete the following task concisely and directly.")
+
+    if skill_cases and entry:
+        # A skill's *served* prompt contains its steps, as a safety net for a
+        # weak adapter. Grading against that prompt would measure whether the
+        # model can copy a procedure out of its own context, so a broken
+        # adapter would pass and ship. Grade under the stripped prompt the
+        # adapter was trained on instead, where only the weights can answer.
+        from symbio.app import skills as _skills
+
+        system_prompt = _skills.build_worker_system_prompt(
+            entry.get("skill_name", role))
 
     def _run_golden(model, tokenizer):
         if not (golden_on and cases):
@@ -341,10 +575,23 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
     baseline = None
     backup_dir = None
     adapter_dir = constants.adapter_dir_for(role)
-    if adapter_dir.exists() and (adapter_dir / "adapter_config.json").exists():
+    # A baseline is only meaningful against weights this model can actually
+    # load. An adapter from a different base is discarded silently, so the
+    # "before" score would be the base model wearing the adapter's name — and
+    # every later comparison would be against that fiction.
+    if (adapter_dir.exists()
+            and (adapter_dir / "adapter_config.json").exists()
+            and adapter_matches_model(adapter_dir, entry["model_name"])):
         base_model, base_tok = load(entry["model_name"], adapter_path=str(adapter_dir))
         baseline = _run_golden(base_model, base_tok)
         backup_dir = training.backup_adapter(role=role)
+        # The baseline scores are all we need from these weights, and the
+        # trainer below loads its own full copy. Holding this one until the
+        # function returns would mean two copies resident across the whole
+        # run — on a unified-memory Mac that is the difference between a slow
+        # fine-tune and an out-of-memory kill.
+        base_model, base_tok = None, None
+        training.release_model()
 
     try:
         trained = training.run_training(
@@ -414,6 +661,12 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
                         f"  [Train] Running targeted remedy training ({extra_iters} "
                         f"iters) for worker '{role}'..."
                     )
+                    # Same reason as the baseline model above: the remedy
+                    # trainer loads its own copy of the weights, so this one
+                    # has to go first. Everything still needed from it — the
+                    # remedy samples — has already been written out.
+                    new_model, new_tok = None, None
+                    training.release_model()
                     trained2 = training.run_training(
                         config, iters=extra_iters, role=role, model_name=entry["model_name"])
                     if trained2:

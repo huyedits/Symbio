@@ -221,3 +221,141 @@ def test_nested_guard_does_not_overwrite_the_outer_mirror(tmp_path, monkeypatch)
     recover_interrupted_training_state()
 
     assert _texts(train) == ["PRISTINE"]
+
+
+# ---- implausible-loss guard ----
+
+def test_plausible_loss_accepts_normal_range():
+    for v in (0.05, 1.177, 2.795, 11.9, 19.99):
+        assert training._plausible_loss(v), v
+
+
+def test_plausible_loss_rejects_broken_numbers():
+    """Every value here was actually emitted by a run on this machine."""
+    for v in (float("nan"), float("inf"), float("-inf"),
+              -1.0, 773094195.2, 8.678e25, 386547097.6):
+        assert not training._plausible_loss(v), v
+        assert not training._plausible_loss(v, after_learning=True), v
+
+
+def test_zero_before_any_learning_is_garbage():
+    """A run reporting 0.000 from its first evaluation never learned it."""
+    assert not training._plausible_loss(0.0)
+
+
+def test_zero_after_a_real_descent_is_believed():
+    """A six-sample skill corpus genuinely reaches zero.
+
+    Masked loss covers ~40 answer tokens; after twenty epochs the model
+    predicts them exactly and mlx_lm's three decimals print 0.000. Rejecting
+    that aborts a good fine-tune and discards its adapter.
+    """
+    assert training._plausible_loss(0.0, after_learning=True)
+
+
+def test_early_stop_aborts_on_implausible_val_loss(tmp_path, monkeypatch):
+    """A garbage loss must abort the run, not become a 'best' checkpoint."""
+    import subprocess as sp
+
+    adapter_dir = tmp_path / "adapters"
+    adapter_dir.mkdir()
+    (adapter_dir / "0000100_adapters.safetensors").write_bytes(b"checkpoint")
+    stopped = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = iter([
+            "Iter 1: Val loss 2.795, Val took 88s\n",
+            "Iter 30: Val loss nan, Val took 88s\n",
+            "Iter 60: Val loss 1.000, Val took 88s\n",   # must never be reached
+        ])
+        def wait(self, timeout=None): return 0
+        def send_signal(self, sig): stopped.append(sig)
+
+    monkeypatch.setattr(sp, "Popen", lambda *a, **k: FakeProc())
+    monkeypatch.setattr(training.subprocess, "Popen", lambda *a, **k: FakeProc())
+
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text("{}", encoding="utf-8")
+
+    ok = training._run_training_with_early_stop(
+        ["echo"], {"early_stop_patience": 2, "save_every": 100},
+        adapter_dir, str(cfg_path))
+
+    assert ok is False, "a run reporting nan must not report success"
+    assert stopped, "the trainer subprocess should have been signalled"
+    # The garbage run must not be promoted into the live adapter.
+    assert not (adapter_dir / "adapters.safetensors").exists()
+
+
+def test_val_loss_regex_matches_broken_values():
+    """The monitor has to be able to *see* nan/inf to react to them."""
+    import re
+    pat = re.compile(r"Iter\s+(\d+):\s+Val\s+loss\s+"
+                     r"([-+]?(?:nan|inf|\d+(?:\.\d*)?(?:[eE][-+]?\d+)?))", re.IGNORECASE)
+    for text, expect in [("Iter 30: Val loss nan, Val took 8s", "nan"),
+                         ("Iter 30: Val loss inf, Val took 8s", "inf"),
+                         ("Iter 30: Val loss -inf, Val took 8s", "-inf"),
+                         ("Iter 30: Val loss 2.795, Val took 8s", "2.795"),
+                         ("Iter 30: Val loss 7.7e8, Val took 8s", "7.7e8")]:
+        m = pat.search(text)
+        assert m and m.group(2) == expect, (text, m and m.group(2))
+
+
+def test_a_run_that_descends_to_zero_is_not_aborted(tmp_path, monkeypatch):
+    """End to end: 5.153 -> 0.000 is what a skill worker actually does."""
+    import subprocess as sp
+
+    adapter_dir = tmp_path / "adapters"
+    adapter_dir.mkdir()
+    (adapter_dir / "0000060_adapters.safetensors").write_bytes(b"checkpoint")
+    stopped = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = iter([
+            "Iter 1: Val loss 5.153, Val took 0.7s\n",
+            "Iter 60: Val loss 0.000, Val took 0.4s\n",
+            "Iter 120: Val loss 0.000, Val took 0.4s\n",
+        ])
+        def wait(self, timeout=None): return 0
+        def send_signal(self, sig): stopped.append(sig)
+
+    monkeypatch.setattr(training.subprocess, "Popen", lambda *a, **k: FakeProc())
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text("{}", encoding="utf-8")
+
+    ok = training._run_training_with_early_stop(
+        ["echo"], {"early_stop_patience": 2, "save_every": 60},
+        adapter_dir, str(cfg_path))
+
+    assert ok is not False, "a genuine descent to zero must not be thrown away"
+
+
+def test_a_run_starting_at_zero_is_still_aborted(tmp_path, monkeypatch):
+    import subprocess as sp
+
+    adapter_dir = tmp_path / "adapters"
+    adapter_dir.mkdir()
+    (adapter_dir / "0000060_adapters.safetensors").write_bytes(b"checkpoint")
+    stopped = []
+
+    class FakeProc:
+        returncode = 0
+        stdout = iter([
+            "Iter 1: Val loss 0.000, Val took 0.4s\n",
+            "Iter 60: Val loss 0.000, Val took 0.4s\n",
+        ])
+        def wait(self, timeout=None): return 0
+        def send_signal(self, sig): stopped.append(sig)
+
+    monkeypatch.setattr(training.subprocess, "Popen", lambda *a, **k: FakeProc())
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text("{}", encoding="utf-8")
+
+    ok = training._run_training_with_early_stop(
+        ["echo"], {"early_stop_patience": 2, "save_every": 60},
+        adapter_dir, str(cfg_path))
+
+    assert ok is False
+    assert stopped, "the trainer should have been signalled"
