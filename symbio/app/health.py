@@ -391,28 +391,64 @@ def _check_telegram(config: dict[str, Any]) -> _CheckResult:
 
 
 def _check_dispatch(config: dict[str, Any]) -> _CheckResult:
-    """If MoA dispatch is enabled, verify Ollama/frontier is reachable."""
+    """Verify the things delegation actually depends on.
+
+    This used to test whether Ollama was reachable or a frontier API key was
+    set. Neither is involved: WorkerPool loads local MLX models and never makes
+    a network call. So the check passed whenever Ollama happened to be running
+    — a green light that meant nothing — and would have reported delegation
+    broken the moment Ollama was quit, while it worked perfectly.
+
+    What it verifies now is the chain a delegation actually travels: the tool
+    reaches the model, the catalog resolves the roles it is told about, and
+    each worker's adapter belongs to the model that will load it.
+    """
     if not config.get("dispatch", {}).get("enabled", False):
-        return _CheckResult("dispatch", False, message="Dispatch disabled; skipped.", severity="info")
+        return _CheckResult("dispatch", False, message="Dispatch disabled; skipped.",
+                            severity="info")
 
-    frontier_key = bool(settings.frontier_api_key)
+    from symbio.app import dispatch as _dispatch
+    from symbio.app import tooling as _tooling
+
+    problems: list[str] = []
+
+    # Two switches gate delegation, and only one of them is named "enabled".
+    # Without the tool group the schema never reaches the model at all.
+    if "delegate" not in set(config.get("tools", {}).get("enabled_groups", [])):
+        problems.append(
+            "the 'delegate' tool group is off, so the model is never shown "
+            "delegate_task")
+
     try:
-        url = settings.ollama_base_url.rstrip("/") + "/api/tags"
-        httpx.get(url, timeout=5.0).raise_for_status()
-        ollama_ok = True
-    except Exception:
-        ollama_ok = False
+        roles = _tooling.refresh_delegate_roles()
+    except Exception as exc:
+        return _CheckResult("dispatch", False, severity="error",
+                            message=f"Worker catalog unreadable: {exc}")
 
-    if ollama_ok:
-        return _CheckResult("dispatch", True, message="Ollama reachable for dispatch.")
-    if frontier_key:
-        return _CheckResult("dispatch", True, message="Frontier API key set for dispatch fallback.")
+    if not roles:
+        problems.append("no workers are configured, so there is nothing to delegate to")
+
+    for role in roles:
+        entry = _dispatch.catalog_entry_for_role(role)
+        if entry is None:
+            # The advertised name and the dispatcher's lookup key have drifted.
+            problems.append(f"role '{role}' is advertised but does not resolve")
+            continue
+        adapter_dir = constants.adapter_dir_for(role)
+        if ((adapter_dir / "adapter_config.json").exists()
+                and not _dispatch.adapter_matches_model(adapter_dir, entry["model_name"])):
+            problems.append(
+                f"worker '{role}' has an adapter trained for a different model; "
+                f"it will run on base weights until retrained")
+
+    if problems:
+        return _CheckResult(
+            "dispatch", False, severity="warning",
+            message="Delegation is enabled but " + "; ".join(problems) + ".")
     return _CheckResult(
-        "dispatch",
-        False,
-        message="Dispatch enabled but neither Ollama is reachable nor a frontier API key is set. Delegation will fail.",
-        severity="error",
-    )
+        "dispatch", True,
+        message=f"Delegation ready: {len(roles)} worker(s) resolvable "
+                f"({', '.join(roles)}).")
 
 
 def _check_cron(config: dict[str, Any]) -> _CheckResult:

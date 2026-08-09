@@ -161,11 +161,11 @@ def _ensure_skill_catalog_entry(
             del catalog[key]
 
     catalog[f"skill_{role}"] = {
-        "model_name": config["model_name"],
+        "model_name": worker_model_name(config),
         "role": role,
         "description": f"Skill: {name}",
         "adapter_compatible": True,
-        "memory_note": "~1 GB on disk, headmaster-size RAM at runtime",
+        "memory_note": "worker-size RAM at runtime, alongside the headmaster",
         "system_prompt": system_prompt,
         "is_skill": True,
         "skill_name": name,
@@ -192,6 +192,28 @@ def _seed_user_turns(name: str) -> list[str]:
     ]
 
 
+# Two seed kinds were tried here and reverted, because they were measured and
+# they lost. Adding per-step questions ("what comes after X?") plus contrast
+# samples pairing off-topic asks with a decline did stop the adapter reciting
+# the procedure for "how do I reset my bluetooth headphones?" — and cost far
+# more than it bought. On the same held-out battery, recall coverage fell from
+# ~98% to ~38%: legitimate requests ("keys expired, what do I run first?") were
+# declined, single steps came back in place of the procedure, and the decline
+# string itself became an attractor strong enough to degrade unrelated
+# generation into "That that that".
+#
+# The cause is structural, not a bad word list. A specialist worker only ever
+# sees "fix my X" shaped prompts, so "my printer is offline" and "my keys
+# expired" are the same shape to it, and 20-odd synthetic samples at several
+# epochs cannot draw that boundary — whichever behaviour is repeated most just
+# wins. Over-triggering inside a worker is also the cheaper failure: the
+# headmaster decides what reaches it, so a false decline loses the skill
+# outright while a false recite is merely noise.
+#
+# Worth revisiting with real usage samples rather than synthetic contrast, or
+# with fewer iterations over a tiny corpus. Not worth shipping as it stood.
+
+
 def _seed_skill_training_data(
     role: str, name: str, steps: str, tokenizer: Any
 ) -> int:
@@ -200,6 +222,12 @@ def _seed_skill_training_data(
     The system turn names the skill but withholds the procedure; the steps
     appear only in the assistant turn. That is what pushes the procedure into
     the weights instead of teaching the adapter to copy it out of context.
+
+    Known limits, measured rather than assumed: with these seeds the procedure
+    is recalled reliably for held-out phrasings, but its steps transpose on
+    unusually worded requests (~80% step order), and an unrelated
+    troubleshooting question can draw the whole procedure. See the note above
+    for what was tried against that and why it was reverted.
 
     Returns the number of samples written. Real usage samples accumulate
     automatically in dispatch.WorkerPool.run_delegated_task.
@@ -223,21 +251,30 @@ def _seed_skill_training_data(
     # these samples so training can refuse a mismatched pairing instead of
     # burning an hour learning noise. See seed_model_mismatch().
     tokenized_for = getattr(tokenizer, "name_or_path", None) or ""
+
+    samples = [(turn, steps, "recall") for turn in _seed_user_turns(name)]
+
     written = 0
-    for user_turn in _seed_user_turns(name):
+    for user_turn, answer, kind in samples:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_turn},
-            {"role": "assistant", "content": steps},
+            {"role": "assistant", "content": answer},
         ]
         text = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=False, enable_thinking=False
         )
         lines.append(json.dumps({
             "text": text,
+            # Carried alongside the rendered text so mlx_lm selects ChatDataset
+            # and can mask the prompt out of the loss. Without it these samples
+            # depend on training.upgrade_corpus_to_messages recovering the
+            # structure by re-parsing, which only works for templates it knows.
+            "messages": messages,
             "metadata": {
                 "skill_seed": True,
                 "skill": name,
+                "seed_kind": kind,
                 "tokenized_for": tokenized_for,
             },
         }))
@@ -255,6 +292,80 @@ def _model_stem(model_name: str) -> str:
     mismatch and block a training run that is actually fine.
     """
     return model_name.rsplit("/", 1)[-1].strip().lower()
+
+
+def delegatable_role_for_note(note_path: Path, config: dict[str, Any]) -> str | None:
+    """The worker role a retrieved skill note can be handed to, if any.
+
+    Retrieval already does the matching work: it scores the user's message
+    against every note, and skills *are* notes. When "my wifi is broken" pulls
+    up the 'Skill: Fix wifi' note, that hit is a routing signal — it was simply
+    never consulted for dispatch, so the model had to rediscover from the tool
+    schema alone that a matching specialist existed.
+
+    Returns None unless the skill has a trained adapter that belongs to the
+    model that would load it: suggesting a worker whose weights are absent or
+    were built for another model would send the turn somewhere worse than
+    answering directly.
+    """
+    if not config.get("dispatch", {}).get("enabled", False):
+        return None
+    if not _is_skill_note(note_path):
+        return None
+    try:
+        heading = note_path.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, IndexError):
+        return None
+    name = heading.split(":", 1)[1].strip() if ":" in heading else ""
+    if not name:
+        return None
+    role = _skill_slug(name)
+
+    from symbio.app import dispatch
+
+    entry = dispatch.catalog_entry_for_role(role)
+    if entry is None:
+        return None
+    adapter_dir = constants.adapter_dir_for(role)
+    if not (adapter_dir / "adapters.safetensors").exists():
+        return None
+    if not dispatch.adapter_matches_model(adapter_dir, entry["model_name"]):
+        return None
+    return role
+
+
+def worker_model_name(config: dict[str, Any]) -> str:
+    """Which model a skill worker should run.
+
+    Defaults to `dispatch.worker_model_name` so a worker is not a second copy
+    of the headmaster's weights — a skill answers one narrow question under a
+    short prompt, and does not need the size the general agent does. Falls back
+    to the headmaster's own model when unset.
+    """
+    configured = config.get("dispatch", {}).get("worker_model_name")
+    return configured or config["model_name"]
+
+
+def worker_tokenizer(model_name: str, fallback: Any) -> Any:
+    """The tokenizer of the model this worker will actually be trained on.
+
+    Seeds are stamped with the tokenizer that rendered them and
+    seed_model_mismatch refuses to train when that disagrees with the worker's
+    model. Once workers stopped sharing the headmaster's model, seeding with
+    the headmaster's tokenizer would stamp every new skill with the wrong name
+    and block its first training run. Falls back to the caller's tokenizer if
+    the worker's cannot be loaded — a mismatch is then reported honestly rather
+    than being silently papered over.
+    """
+    current = getattr(fallback, "name_or_path", "") or ""
+    if current and _model_stem(current) == _model_stem(model_name):
+        return fallback
+    try:
+        from transformers import AutoTokenizer
+
+        return AutoTokenizer.from_pretrained(model_name)
+    except Exception:
+        return fallback
 
 
 def seed_model_mismatch(role: str, model_name: str) -> str | None:
@@ -308,7 +419,25 @@ def save_skill_adapter(
     # Refresh dispatch's in-memory view of the catalog.
     # (load_catalog is lazy, so stale disk state is harmless on next call.)
 
-    seeded = _seed_skill_training_data(role, name, steps, tokenizer)
+    # Make the new role visible to delegate_task in this session rather than
+    # at the next restart — a skill the model is not told about is one it
+    # cannot route to.
+    try:
+        from symbio.app import tooling
+
+        tooling.refresh_delegate_roles()
+    except Exception:
+        pass
+
+    # Seed with the tokenizer of the model the worker will be trained on, not
+    # the headmaster's: the samples are stamped with it, and training refuses
+    # to run when that stamp disagrees with the worker's model.
+    worker_model = worker_model_name(config)
+    seed_tokenizer = tokenizer
+    if worker_model != config.get("model_name"):
+        seed_tokenizer = worker_tokenizer(worker_model, tokenizer)
+
+    seeded = _seed_skill_training_data(role, name, steps, seed_tokenizer)
     adapter_dir = constants.adapter_dir_for(role)
 
     result = {

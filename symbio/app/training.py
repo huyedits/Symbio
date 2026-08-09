@@ -1,7 +1,9 @@
 """Training-data accumulation, note/memory digestion, and LoRA fine-tuning."""
 
+import gc
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -22,6 +24,70 @@ from symbio.app import config as app_config
 from symbio.app.tooling import clean_response
 
 
+# Only one LoRA trainer may exist at a time, process-wide.
+#
+# `mlx_lm lora` is a second Metal client that loads its own full copy of the
+# weights. Two of them, or one of them alongside a resident chat model, is not
+# a slowdown on a unified-memory Mac — it is the machine going down. A 16 GB
+# Mac was lost this way: the skill-adapter background thread spawned a trainer
+# while the headmaster 8B was still resident, and the process peaked at 16.2 GB
+# against 15.7 GB of RAM. macOS Jetsam killed it and the machine rebooted.
+#
+# Held for the whole lifetime of the child process, not just its spawn, so a
+# second caller waits for the first trainer to *exit* rather than joining it.
+TRAINER_LOCK = threading.Lock()
+
+
+def release_model() -> None:
+    """Hand freed model memory back to the system immediately.
+
+    The caller must drop its own references first — this cannot do that for
+    it, since rebinding a name in another frame is not something a callee can
+    reach. What it does do is force the collection that would otherwise happen
+    at an arbitrary later point, which matters because the window being closed
+    is exactly the one where the *next* full copy of the weights is loaded.
+
+    Reassignment alone is not enough on MLX: the weights sit in unified memory
+    that stays charged to the process until the allocator reclaims it, so a
+    "replaced" model is still resident RAM while its replacement loads.
+    """
+    gc.collect()
+    try:
+        import mlx.core as mx
+
+        mx.clear_cache()
+    except Exception:
+        # No MLX (or a build without clear_cache) is not worth failing over;
+        # the gc.collect() above is still the part that matters.
+        pass
+
+
+def free_ram_bytes() -> int | None:
+    """Physically free + reclaimable RAM, or None when it cannot be read.
+
+    Counts inactive and speculative pages alongside free ones: macOS keeps
+    those populated but they are reclaimable under pressure, so treating them
+    as unavailable would refuse training on a machine that is actually idle.
+    """
+    try:
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True,
+                             timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    page_size, pages = 4096, {}
+    match = re.search(r"page size of (\d+) bytes", out)
+    if match:
+        page_size = int(match.group(1))
+    for line in out.splitlines():
+        found = re.match(r'"?Pages ([^:"]+)"?:\s+(\d+)', line.strip())
+        if found:
+            pages[found.group(1).strip()] = int(found.group(2))
+    if not pages:
+        return None
+    reclaimable = sum(pages.get(k, 0) for k in ("free", "inactive", "speculative"))
+    return reclaimable * page_size
+
+
 def _train_file_for(role: str | None) -> Path:
     # role=None reads constants.TRAIN_FILE directly (not re-derived from
     # constants.DATA_DIR) so code/tests that monkeypatch TRAIN_FILE alone
@@ -33,11 +99,27 @@ def _valid_file_for(role: str | None) -> Path:
     return constants.VALID_FILE if role is None else constants.data_dir_for(role) / "valid.jsonl"
 
 
-def append_training_text(text: str, role: str | None = None):
+def append_training_text(text: str, role: str | None = None,
+                         messages: list[dict[str, str]] | None = None):
+    """Append one sample, carrying its message structure when we have it.
+
+    Records are written with both keys on purpose. `messages` is what mlx_lm
+    reads: it selects ChatDataset, which is the only path that supports prompt
+    masking (see `_supports_prompt_masking`). `text` is what the rest of this
+    module reads — length checks, de-duplication, the degenerate-sample guard —
+    all of which match on rendered strings and keep working untouched.
+
+    mlx_lm picks the dataset class from the *first* record alone, so a file
+    must not mix the two shapes; `upgrade_corpus_to_messages` exists to keep
+    that true for corpora written before this.
+    """
     train_file = _train_file_for(role)
     train_file.parent.mkdir(parents=True, exist_ok=True)
+    record: dict[str, Any] = {"text": text}
+    if messages:
+        record["messages"] = messages
     with open(train_file, "a", encoding="utf-8") as f:
-        json.dump({"text": text}, f)
+        json.dump(record, f)
         f.write("\n")
 
 
@@ -77,13 +159,26 @@ def strip_tool_catalog(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     return cleaned
 
 
-def build_chat_training_sample(messages: list[dict[str, str]], tokenizer) -> str:
+def render_messages(messages: list[dict[str, str]], tokenizer) -> str:
+    """Apply the chat template to messages that are already training-ready.
+
+    Split out from build_chat_training_sample because strip_tool_catalog is
+    not idempotent: it cuts at the last "<tools>" in the system turn, and the
+    prompt text mentions the catalog again above the block itself, so a second
+    pass over already-stripped content removes real instructions. Anything
+    re-rendering stored messages — which were stripped when written — must
+    come through here instead.
+    """
     return tokenizer.apply_chat_template(
-        strip_tool_catalog(messages),
+        messages,
         tokenize=False,
         add_generation_prompt=False,
         enable_thinking=THINKING_ENABLED,
     )
+
+
+def build_chat_training_sample(messages: list[dict[str, str]], tokenizer) -> str:
+    return render_messages(strip_tool_catalog(messages), tokenizer)
 
 
 def append_chat_pair(user_msg: str, assistant_msg: str, tokenizer, system_prompt: str,
@@ -93,7 +188,202 @@ def append_chat_pair(user_msg: str, assistant_msg: str, tokenizer, system_prompt
         {"role": "user", "content": user_msg},
         {"role": "assistant", "content": clean_response(assistant_msg)},
     ]
-    append_training_text(build_chat_training_sample(messages, tokenizer), role=role)
+    # Store the catalog-stripped messages, not the originals: they must be the
+    # exact ones the rendered text came from, or the masked prefix mlx_lm
+    # computes would not line up with the sample it computes loss over.
+    stripped = strip_tool_catalog(messages)
+    append_training_text(build_chat_training_sample(messages, tokenizer),
+                         role=role, messages=stripped)
+
+
+# Qwen/ChatML turn markers, used to recover message structure from a sample
+# that was stored as rendered text only. Kept narrow deliberately: a corpus
+# rendered by some other family's template will simply fail to parse, which
+# leaves masking off rather than producing a mis-aligned mask.
+_TURN_RE = re.compile(
+    r"<\|im_start\|>(system|user|assistant)\n(.*?)<\|im_end\|>",
+    re.DOTALL,
+)
+
+# A reasoning block the template itself emits at the head of an assistant turn.
+_THINK_PREFIX_RE = re.compile(r"\A<think>.*?</think>\n*", re.DOTALL)
+
+
+def messages_from_rendered(text: str) -> list[dict[str, str]] | None:
+    """Recover a ChatML sample's messages, or None if it does not round-trip.
+
+    Only returns a result when re-rendering the parsed messages reproduces the
+    original string. That check is the whole point: a mask computed from
+    messages that render differently would cover the wrong span, and silently
+    training on a mis-masked corpus is worse than not masking at all.
+    """
+    turns = _TURN_RE.findall(text or "")
+    if not turns:
+        return None
+    messages = [{"role": role, "content": content} for role, content in turns]
+    if messages[-1]["role"] != "assistant":
+        # Nothing to train on: masking keeps only the final assistant turn.
+        return None
+    # The template emits the (empty, since THINKING_ENABLED is False) reasoning
+    # block itself, so it is part of the rendered text but not of the content
+    # it was rendered from. Carrying it back into the content would re-render
+    # into two stacked blocks and fail the round-trip check below.
+    last = messages[-1]["content"]
+    unthought = _THINK_PREFIX_RE.sub("", last, count=1)
+    messages[-1] = {**messages[-1], "content": unthought}
+    return messages
+
+
+def upgrade_corpus_to_messages(tokenizer, role: str | None = None) -> dict[str, int]:
+    """Give legacy text-only samples the `messages` key, in place.
+
+    Corpora written before prompt masking hold only rendered text, and mlx_lm
+    chooses its dataset class from the first record in the file — so a corpus
+    that is even partly legacy silently disables masking for all of it, or
+    worse, crashes on the records that lack the key. Upgrading is what makes
+    the run consistent.
+
+    A sample that cannot be parsed back into messages is left exactly as it
+    was; `_supports_prompt_masking` then reports the file as unmaskable and
+    the run proceeds unmasked rather than wrongly masked.
+
+    Returns {"upgraded": n, "left": n} counted across train and valid.
+    """
+    counts = {"upgraded": 0, "left": 0}
+    for path in (_train_file_for(role), _valid_file_for(role)):
+        if not path.exists():
+            continue
+        out, changed = [], False
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                out.append(line)
+                counts["left"] += 1
+                continue
+            if "messages" in record or "text" not in record:
+                out.append(line)
+                continue
+            messages = messages_from_rendered(record.get("text", ""))
+            if not messages or not _renders_back(messages, record["text"], tokenizer):
+                out.append(line)
+                counts["left"] += 1
+                continue
+            record["messages"] = messages
+            out.append(json.dumps(record))
+            counts["upgraded"] += 1
+            changed = True
+        if changed:
+            path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return counts
+
+
+def _renders_back(messages: list[dict[str, str]], text: str, tokenizer) -> bool:
+    """True when `messages` re-render to exactly `text`.
+
+    Without a tokenizer there is no template to check against, so we decline
+    rather than assume: an unverified upgrade is the one case that could
+    misplace a mask.
+    """
+    if tokenizer is None:
+        return False
+    try:
+        # render_messages, not build_chat_training_sample: these messages came
+        # out of an already-stripped sample, and stripping again would cut
+        # into the prompt (see render_messages).
+        return render_messages(messages, tokenizer) == text
+    except Exception:
+        return False
+
+
+def drop_foreign_template_samples(tokenizer, role: str | None = None) -> dict[str, list[int]]:
+    """Remove samples this model's chat template would never have produced.
+
+    A corpus accumulated across model switches ends up holding more than one
+    template. This one was found carrying three at once: current Qwen turns,
+    older Qwen turns rendered before the reasoning block was emitted, and
+    Phi-style `<|user|>`/`<|end|>` markers left over from a different model
+    entirely. All three train against the same weights.
+
+    Foreign markers are not a mild inconsistency. The model is being taught to
+    produce turn boundaries it will never be shown at inference, and the loss
+    over them is noise — which is the likeliest source of the implausible
+    validation numbers `_plausible_loss` was added to catch, since the eval
+    split is small enough that a few such samples dominate it.
+
+    The test is a round-trip: parse the rendered text back into messages, and
+    re-render. Anything that does not reproduce itself byte-for-byte came from
+    a different template. Dropped samples are regenerable — seeding rewrites
+    them, and the validation split refills from the training file.
+
+    Returns {path: [line numbers]} for what was removed.
+    """
+    removed: dict[str, list[int]] = {}
+    if tokenizer is None:
+        return removed  # No template to check against; assume nothing.
+    train_file = _train_file_for(role)
+    for path in (train_file, _valid_file_for(role)):
+        if not path.exists():
+            continue
+        kept, dropped = [], []
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                kept.append(line)  # left for drop_degenerate_samples to judge
+                continue
+            if record.get("messages"):
+                kept.append(line)  # already structured: nothing to re-derive
+                continue
+            text = record.get("text", "")
+            messages = messages_from_rendered(text)
+            if messages and _renders_back(messages, text, tokenizer):
+                kept.append(line)
+            else:
+                dropped.append(lineno)
+        if not dropped:
+            continue
+        # Emptying the validation file is fine — it is derived, and
+        # ensure_validation_split refills it from the cleaned training data.
+        # Emptying the *training* file is not: a rule that rejects every
+        # sample is far more likely to be a broken rule than a corpus made
+        # entirely of junk, so leave it be and let the caller notice.
+        if not kept and path == train_file:
+            continue
+        path.write_text(("\n".join(kept) + "\n") if kept else "",
+                        encoding="utf-8")
+        removed[str(path)] = dropped
+    return removed
+
+
+def _supports_prompt_masking(role: str | None = None) -> bool:
+    """True when every sample in the corpus carries `messages`.
+
+    All-or-nothing by necessity, not caution: mlx_lm inspects only the first
+    record to choose a dataset class, so one legacy record at the top turns
+    masking off for the whole run, and one legacy record *below* a structured
+    first record makes ChatDataset raise on it mid-run.
+    """
+    seen = False
+    for path in (_train_file_for(role), _valid_file_for(role)):
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                return False
+            if not record.get("messages"):
+                return False
+            seen = True
+    return seen
 
 
 def _note_timestamp(f: Path) -> datetime:
@@ -1118,6 +1408,40 @@ def clean_training_duplicates(train_file: Path | None = None,
     return kept, dropped
 
 
+def iters_for_corpus(lora: dict[str, Any], sample_count: int) -> int:
+    """How many steps it takes to see the corpus `lora.epochs` times.
+
+    A fixed iteration count is a bug that hides as a setting. At batch_size 1,
+    the configured 150 iters over a 219-sample corpus is 0.68 of an epoch: each
+    retrain sees a random two-thirds of the data and never sees the rest, so
+    teaching a new behaviour silently drops older ones and the loss looks fine
+    throughout. Scaling with the corpus is what makes a retrain reproducible
+    as the corpus grows.
+
+    `lora.iters` is kept as a floor rather than dropped, so a small corpus
+    still gets enough steps to converge, and `lora.max_iters` caps the top end
+    so a large one cannot run away.
+    """
+    epochs = float(lora.get("epochs", 2))
+    batch_size = max(1, int(lora.get("batch_size", 1)))
+    floor = int(lora.get("iters", 150))
+    cap = int(lora.get("max_iters", 2000))
+    if sample_count <= 0 or epochs <= 0:
+        return min(cap, floor)
+    needed = math.ceil(epochs * sample_count / batch_size)
+    # The cap is applied last so it is a real ceiling: a floor that could
+    # override it would make `max_iters` unable to do the one thing it is for.
+    return min(cap, max(floor, needed))
+
+
+def count_samples(role: str | None = None) -> int:
+    path = _train_file_for(role)
+    if not path.exists():
+        return 0
+    return sum(1 for line in path.read_text(encoding="utf-8").splitlines()
+               if line.strip())
+
+
 def ensure_validation_split(every_nth: int = 10, max_samples: int = 24,
                             role: str | None = None):
     """mlx_lm silently skips evaluation when valid.jsonl is missing, which
@@ -1144,9 +1468,8 @@ def run_training(config: dict[str, Any], iters: int | None = None,
     if not train_file.exists() or train_file.stat().st_size == 0:
         print("  [System] No training data available.")
         return False
-    ensure_validation_split(role=role)
 
-    # One tokenizer for both pre-flight checks below. Best-effort: the length
+    # One tokenizer for the pre-flight checks below. Best-effort: the length
     # diagnostic degrades without it, and the degenerate-sample guard falls
     # back to a character floor.
     _tok = None
@@ -1156,6 +1479,20 @@ def run_training(config: dict[str, Any], iters: int | None = None,
         _tok = AutoTokenizer.from_pretrained(model_name or config["model_name"])
     except Exception:
         pass
+
+    # Before the validation split is built, not after: the split is sampled
+    # from the training file, so clearing foreign-template samples first keeps
+    # them from being copied into it — and a valid.jsonl left empty by this
+    # sweep is then refilled from the cleaned training data.
+    for path, linenos in drop_foreign_template_samples(_tok, role=role).items():
+        print(f"  [Train] Dropped {len(linenos)} sample(s) from {path} rendered "
+              f"with a different chat template; they teach turn markers this "
+              f"model never sees. Seeding will regenerate them.")
+
+    if not train_file.exists() or train_file.stat().st_size == 0:
+        print("  [System] No training data left after the template check.")
+        return False
+    ensure_validation_split(role=role)
 
     # Deliberately NOT inside the diagnostic's try/except below. This one is a
     # guard, not a report: one sample too short to train on turns every metric
@@ -1188,19 +1525,91 @@ def run_training(config: dict[str, Any], iters: int | None = None,
             pass
 
     lora = config["lora"]
-    print("\n  [System] Starting MLX LoRA Fine-Tuning\n")
 
-    # mlx_lm only accepts rank/dropout/scale via a config file, not CLI flags.
+    # Bring legacy text-only samples up to the structured shape, then decide
+    # whether the loss can be restricted to the assistant's answer.
+    #
+    # This is the difference between training and not training. Every sample
+    # here carries the full system prompt, so unmasked the loss is dominated
+    # by it: measured on this corpus, 2,148 of 2,160 tokens per sample are the
+    # prompt and 12 are the answer. 99.4% of the gradient went into
+    # reproducing a constant the model is handed at inference anyway, which is
+    # why past fine-tunes drove validation loss to ~0.005 while behaving as if
+    # they had learned nothing. They had learned the prompt.
+    mask_prompt = False
+    if lora.get("mask_prompt", True):
+        try:
+            counts = upgrade_corpus_to_messages(_tok, role=role)
+            if counts["upgraded"]:
+                print(f"  [Train] Upgraded {counts['upgraded']} legacy sample(s) "
+                      f"to structured messages for prompt masking.")
+            mask_prompt = _supports_prompt_masking(role=role)
+            if not mask_prompt and counts["left"]:
+                print(f"  [Train] {counts['left']} sample(s) could not be parsed "
+                      f"back into messages; training without prompt masking so "
+                      f"the mask cannot land on the wrong tokens.")
+                # When it is *every* sample, the corpus was almost certainly
+                # rendered by a different model's chat template — switching
+                # models invalidates it wholesale. Worth saying outright,
+                # because the run otherwise proceeds and teaches turn markers
+                # this model will never emit.
+                if not counts["upgraded"]:
+                    print(f"  [Train] Not one sample matched this model's chat "
+                          f"template. If you changed models, the corpus still "
+                          f"belongs to the old one — delete train/valid.jsonl "
+                          f"and let seeding rebuild it before trusting this "
+                          f"adapter.")
+        except Exception as e:
+            print(f"  [Train] Prompt-masking preflight failed ({e}); "
+                  f"training unmasked.")
+            mask_prompt = False
+
+    print("\n  [System] Starting MLX LoRA Fine-Tuning\n")
+    if mask_prompt:
+        print("  [Train] Loss is masked to the assistant turn.")
+
+    # mlx_lm only accepts rank/dropout/scale, the LoRA target keys, and
+    # mask_prompt via a config file, not CLI flags.
+    lora_parameters: dict[str, Any] = {
+        "rank": lora["rank"],
+        "dropout": lora["dropout"],
+        "scale": lora["scale"],
+    }
+
+    # Which modules get an adapter. Unset means every projection in the last
+    # `num_layers` blocks, which is mlx_lm's default. Block-relative names
+    # ("self_attn.q_proj") narrow that to chosen projections; full paths
+    # ("model.layers.12.mlp.up_proj") are matched against the whole model and
+    # are the only way to reach specific blocks rather than a trailing run of
+    # them. Validated first because a key matching nothing is not an error in
+    # mlx_lm — the run just trains less than asked, or nothing at all, and
+    # still reports a loss and saves an adapter.
+    keys = lora.get("keys") or None
+    if keys:
+        problems = validate_lora_keys(
+            keys, model_block_count(model_name or config.get("model_name")))
+        for problem in problems:
+            print(f"  [Train] WARNING: lora.keys {problem}")
+        lora_parameters["keys"] = list(keys)
+        print(f"  [Train] LoRA targets {len(keys)} module pattern(s) "
+              f"instead of every projection.")
+
     lora_config = {
-        "lora_parameters": {
-            "rank": lora["rank"],
-            "dropout": lora["dropout"],
-            "scale": lora["scale"],
-        }
+        "mask_prompt": mask_prompt,
+        "lora_parameters": lora_parameters,
     }
     config_fd, config_path = tempfile.mkstemp(suffix=".yaml", dir=str(data_dir))
     with os.fdopen(config_fd, "w") as f:
         yaml.dump(lora_config, f)
+
+    # An explicit `iters` is a caller asking for a short, targeted pass (a
+    # correction batch, a golden-set remedy) and is taken as given. A full
+    # retrain instead covers the corpus a whole number of times.
+    if iters is None:
+        samples = count_samples(role=role)
+        iters = iters_for_corpus(lora, samples)
+        print(f"  [Train] {iters} iters for {samples} sample(s) at batch "
+              f"{lora['batch_size']} (~{lora.get('epochs', 2)} epochs).")
 
     cmd = [
         sys.executable, "-m", "mlx_lm", "lora",
@@ -1209,35 +1618,64 @@ def run_training(config: dict[str, Any], iters: int | None = None,
         "--data", str(data_dir),
         "--batch-size", str(lora["batch_size"]),
         "--num-layers", str(lora["num_layers"]),
-        "--iters", str(iters if iters is not None else lora["iters"]),
+        "--iters", str(iters),
         "--learning-rate", str(lora["learning_rate"]),
         "--steps-per-eval", str(lora["steps_per_eval"]),
+        # Without this mlx_lm defaults to 25 batches and re-scores the whole
+        # validation split on every evaluation. At this corpus's ~2,160-token
+        # samples that is ~11s per batch on an 8B, so a 438-iteration run spent
+        # about an hour inside evaluation alone. The point of the number is to
+        # spot a plateau or a divergence, and a handful of batches carries that
+        # signal — it is a progress check, not a benchmark.
+        "--val-batches", str(lora.get("val_batches", 8)),
         "--max-seq-length", str(lora["max_seq_length"]),
         "--adapter-path", str(adapter_dir),
         "--save-every", str(lora["save_every"]),
         "--config", config_path,
     ]
 
+    # Recompute activations in the backward pass instead of holding them.
+    # Activation memory scales with the sequence window, and this corpus runs
+    # a 3k window on an 8B, so this is the lever that actually moves peak
+    # memory — far more than the trainable-layer count does.
+    if lora.get("grad_checkpoint", False):
+        cmd.append("--grad-checkpoint")
+        print("  [Train] Gradient checkpointing on: less memory, slower steps.")
+
     early_stop = lora.get("early_stop_enabled", False)
-    if early_stop:
-        trained = _run_training_with_early_stop(
-            cmd, lora, adapter_dir, config_path,
-        )
-    else:
-        try:
-            subprocess.run(cmd, check=True)
-            trained = True
-        except subprocess.CalledProcessError:
-            print("  [System] Training failed.")
-            trained = False
-        except KeyboardInterrupt:
-            print("  [System] Training stopped.")
-            trained = False
-        finally:
+    # One trainer at a time, and only with room for it. Both guards wrap the
+    # child's whole lifetime: the trainer is a second Metal client holding its
+    # own copy of the weights, and overlapping it with another trainer or a
+    # resident chat model is what took the machine down (see TRAINER_LOCK).
+    with TRAINER_LOCK:
+        shortfall = _memory_shortfall(config, model_name)
+        if shortfall:
+            print(f"  [Train] {shortfall}")
             try:
                 os.unlink(config_path)
             except OSError:
                 pass
+            return False
+
+        if early_stop:
+            trained = _run_training_with_early_stop(
+                cmd, lora, adapter_dir, config_path,
+            )
+        else:
+            try:
+                subprocess.run(cmd, check=True)
+                trained = True
+            except subprocess.CalledProcessError:
+                print("  [System] Training failed.")
+                trained = False
+            except KeyboardInterrupt:
+                print("  [System] Training stopped.")
+                trained = False
+            finally:
+                try:
+                    os.unlink(config_path)
+                except OSError:
+                    pass
 
     config_file = adapter_dir / "adapter_config.json"
     weight_files = list(adapter_dir.glob("adapters.*"))
@@ -1248,6 +1686,232 @@ def run_training(config: dict[str, Any], iters: int | None = None,
     adapter_kb = sum(f.stat().st_size for f in adapter_dir.iterdir() if f.is_file()) // 1024
     print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB")
     return trained
+
+
+def _model_repo_dir(model_name: str | None) -> Path | None:
+    """Where a model's files live locally, or None if it is not cached."""
+    if not model_name:
+        return None
+    cache = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    repo = cache / "hub" / ("models--" + model_name.replace("/", "--"))
+    if repo.exists():
+        return repo
+    local = Path(model_name)
+    return local if local.is_dir() else None
+
+
+def model_block_count(model_name: str | None) -> int | None:
+    """How many transformer blocks a model has, read from its config.json."""
+    repo = _model_repo_dir(model_name)
+    if repo is None:
+        return None
+    for path in sorted(repo.rglob("config.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        # Multimodal checkpoints keep the text stack's depth under
+        # `text_config` and leave the top level describing the wrapper, so a
+        # top-level-only read reports nothing for exactly the models whose
+        # layer naming is least obvious (e.g. Qwen3.5-9B).
+        for scope in (data, data.get("text_config") or {}):
+            count = scope.get("num_hidden_layers")
+            if isinstance(count, int):
+                return count
+    return None
+
+
+# A LoRA target naming a specific block. The block index is what matters, and
+# it sits under different roots depending on the model: "model.layers.12..."
+# for a plain text model, "language_model.model.layers.3..." for a multimodal
+# one whose text stack is nested inside a wrapper.
+_BLOCK_KEY_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.")
+
+# The rooted form that actually matches a module path in either layout.
+_ROOTED_BLOCK_KEY_RE = re.compile(r"^(?:[\w.]+\.)?model\.layers\.\d+\.")
+
+
+def validate_lora_keys(keys: list[str] | None,
+                       block_count: int | None) -> list[str]:
+    """Problems that would make `keys` silently train nothing.
+
+    mlx_lm matches LoRA targets in two separate passes with two different
+    namespaces, and a key that fits neither is not an error there — it simply
+    matches nothing. The run then completes, saves an adapter, and reports a
+    loss, having attached LoRA to fewer modules than asked for or none at all.
+    Given how many of this project's training failures were silent, that is
+    worth catching before the trainer starts rather than after.
+
+    Block-relative keys ("self_attn.q_proj") are matched inside each of the
+    last `num_layers` blocks. Full paths ("model.layers.12.mlp.up_proj") are
+    matched against the whole model, which is what makes targeting specific
+    blocks possible at all. Mixing them in one list is legal but almost never
+    intended: the relative ones apply across every selected block as well.
+
+    Returns a list of human-readable problems; empty means the keys are sane.
+    """
+    if not keys:
+        return []
+    problems = []
+    full = [k for k in keys if _BLOCK_KEY_RE.search(k)]
+    relative = [k for k in keys if k not in full]
+
+    if full and relative:
+        problems.append(
+            f"mixes block-specific paths ({full[0]}) with block-relative names "
+            f"({relative[0]}); the relative ones also apply to every block "
+            f"lora.num_layers selects, which is probably not intended.")
+
+    for key in full:
+        if not _ROOTED_BLOCK_KEY_RE.match(key):
+            problems.append(
+                f"{key!r} names a block but is not rooted at the module tree; "
+                f"it needs the model's own prefix, e.g. 'model.layers.<n>.…' "
+                f"or 'language_model.model.layers.<n>.…'. As written it will "
+                f"match nothing.")
+        elif block_count is not None:
+            index = int(_BLOCK_KEY_RE.search(key).group(1))
+            if index >= block_count:
+                problems.append(
+                    f"{key!r} targets block {index}, but the model has "
+                    f"{block_count} blocks (0-{block_count - 1}).")
+
+    for key in relative:
+        if key.startswith("model.") or key.startswith("language_model."):
+            problems.append(
+                f"{key!r} looks like a rooted path but names no block, so it "
+                f"matches neither namespace and will train nothing.")
+        elif "." not in key:
+            problems.append(
+                f"{key!r} has no module path (expected something like "
+                f"'self_attn.q_proj'), so it will match nothing.")
+    return problems
+
+
+def _model_weight_bytes(model_name: str | None) -> int | None:
+    """On-disk size of a model's weights, or None if it is not cached locally.
+
+    The trainer must materialise every one of these bytes, so this is the floor
+    of what a run needs — the true figure adds optimiser state and activations
+    on top. Read from the HuggingFace cache rather than guessed from the name:
+    "8B" says nothing about the quantisation that determines actual size.
+    """
+    repo = _model_repo_dir(model_name)
+    if repo is None:
+        return None
+    try:
+        return sum(f.stat().st_size for f in repo.rglob("*.safetensors")
+                   if f.is_file())
+    except OSError:
+        return None
+
+
+# Headroom over the raw weight size, measured rather than guessed. On a 4-bit
+# 8B (4.35 GB of weights) at this corpus's 3k window:
+#
+#   all projections, no checkpointing   15.583 GB   3.58x
+#   q+v only,        no checkpointing   12.524 GB   2.88x
+#   all projections, checkpointing       8.216 GB   1.89x
+#   q+v only,        checkpointing        7.535 GB   1.73x
+#
+# Activation retention dominates, and gradient checkpointing is what moves it,
+# so the multiplier keys off that rather than off model size. The narrower
+# `keys` cases are deliberately not discounted: this is a refusal threshold,
+# and being pessimistic costs a retry while being optimistic costs the machine.
+# Indexed [grad_checkpoint][attention_only], rounded up from the table above.
+_TRAINING_OVERHEAD = {
+    (False, False): 3.6,   # 15.583 GB measured
+    (False, True):  2.9,   # 12.524 GB measured
+    (True,  False): 2.0,   #  8.216 GB measured
+    (True,  True):  1.8,   #  7.535 GB measured
+}
+
+
+def _attention_only(lora: dict[str, Any]) -> bool:
+    """True when LoRA skips the MLP projections.
+
+    They are what dominates activation retention — `gate/up/down` run through a
+    12,288-wide intermediate while the attention projections stay at hidden
+    size — so leaving them out is worth 3 GB, not the ~50 MB of optimiser state
+    a parameter count alone would suggest.
+    """
+    keys = lora.get("keys") or []
+    return bool(keys) and not any("mlp" in str(k) for k in keys)
+
+
+def _training_overhead(config: dict[str, Any]) -> float:
+    """How much more than the raw weights a run is expected to need.
+
+    Keyed off the two settings that actually move it. An earlier version looked
+    only at checkpointing, which meant narrowing `keys` — a measured 3 GB saving
+    — could not lower the estimate, and a run that would comfortably have fit
+    was refused anyway. A guard that cannot see the lever that fixes it just
+    reads as broken.
+    """
+    lora = config.get("lora", {}) or {}
+    return _TRAINING_OVERHEAD[
+        (bool(lora.get("grad_checkpoint", False)), _attention_only(lora))
+    ]
+
+
+def _memory_shortfall(config: dict[str, Any],
+                      model_name: str | None = None) -> str | None:
+    """A message explaining why there is not room to train, or None to proceed.
+
+    Refusing a run is not the failure mode this prevents. Spawning a trainer
+    the machine cannot hold does not produce a failed run — it produces a
+    Jetsam kill and, in the case this was written for, a reboot that takes
+    every other application down with it. A refused run costs the user a
+    retry; an accepted one cost them the machine.
+    """
+    if not config.get("gpu", {}).get("memory_preflight", True):
+        return None
+    weights = _model_weight_bytes(model_name or config.get("model_name"))
+    free = free_ram_bytes()
+    if weights is None or free is None:
+        return None  # Unknown on either side is not evidence of a problem.
+    needed = int(weights * _training_overhead(config))
+    if free >= needed:
+        return None
+    hint = ("" if config.get("lora", {}).get("grad_checkpoint", False) else
+            " Setting lora.grad_checkpoint to true nearly halves what this run "
+            "needs, at the cost of slower steps.")
+    return (
+        f"Not enough free memory to train safely: the run needs about "
+        f"{needed / 1e9:.1f} GB ({weights / 1e9:.1f} GB of weights plus "
+        f"optimiser state and retained activations) and only "
+        f"{free / 1e9:.1f} GB is free. Skipping rather than risking an "
+        f"out-of-memory kill.{hint}"
+    )
+
+
+# Cross-entropy on a vocab of ~150k tops out near ln(150000) ~= 11.9 for a
+# model predicting uniformly at random, and a fine-tune starts well below that.
+# Anything past this ceiling is not a bad fine-tune, it is a broken number.
+_MAX_PLAUSIBLE_LOSS = 20.0
+
+
+def _plausible_loss(loss: float, after_learning: bool = False) -> bool:
+    """False for losses that cannot come from a working training run.
+
+    Zero is the hard case, because it arrives two completely different ways.
+    A broken run reports 0.000 from the very first evaluation, alongside the
+    nan and 1e8 values this guard exists to catch. But a *legitimate* run over
+    a tiny corpus reaches it too: a skill worker trains on six samples with a
+    masked loss covering ~40 answer tokens, and after twenty epochs it predicts
+    them exactly. mlx_lm prints three decimals, so anything under 0.0005 shows
+    as 0.000. Observed in practice at 5.153 -> 0.000 by iteration 20.
+
+    `after_learning` is what separates them: it says a plausible loss has
+    already been seen in this run, so the descent to zero was earned rather
+    than reported out of nowhere. Rejecting zero unconditionally aborts a
+    perfectly good skill fine-tune and throws its adapter away.
+    """
+    if loss != loss or loss in (float("inf"), float("-inf")):  # nan / inf
+        return False
+    if loss == 0.0:
+        return after_learning
+    return 0.0 < loss < _MAX_PLAUSIBLE_LOSS
 
 
 def _stop_trainer(process: subprocess.Popen, signalled: bool = False) -> None:
@@ -1310,7 +1974,14 @@ def _run_training_with_early_stop(
     patience = max(1, int(lora.get("early_stop_patience", 2)))
     min_delta = float(lora.get("early_stop_min_delta", 0.005))
     save_every = int(lora.get("save_every", 100))
-    val_re = re.compile(r"Iter\s+(\d+):\s+Val\s+loss\s+([0-9.eE+-]+)")
+    # nan/inf must be matchable. A numeric-only class silently fails to match
+    # the "Val loss nan" line, so the monitor never sees the one value that
+    # most clearly means the run is broken and keeps going as if fine.
+    val_re = re.compile(
+        r"Iter\s+(\d+):\s+Val\s+loss\s+"
+        r"([-+]?(?:nan|inf|\d+(?:\.\d*)?(?:[eE][-+]?\d+)?))",
+        re.IGNORECASE,
+    )
 
     best_loss: float | None = None
     best_step: int | None = None
@@ -1357,7 +2028,24 @@ def _run_training_with_early_stop(
             match = val_re.search(line)
             if match:
                 iteration = int(match.group(1))
-                loss = float(match.group(2))
+                try:
+                    loss = float(match.group(2))
+                except ValueError:
+                    continue
+                # best_loss is set by the first plausible evaluation, so it
+                # doubles as "this run has demonstrably been learning" — which
+                # is what makes a later zero credible rather than garbage.
+                if not _plausible_loss(loss, after_learning=best_loss is not None):
+                    # Observed in practice: mlx_lm reporting nan, 0.000, or
+                    # values like 7.7e8 while the batches feeding it were
+                    # verified sane. Whatever produced that number, an adapter
+                    # built under it is not trustworthy, and the plateau logic
+                    # would happily "improve" its way to a best checkpoint.
+                    print(f"  [Train] Implausible validation loss {loss!r} at "
+                          f"iter {iteration}. Aborting; the adapter from this "
+                          f"run is not trustworthy.")
+                    _stop_trainer(process)
+                    return False
                 improved = best_loss is None or loss < (best_loss - min_delta)
                 if improved:
                     best_loss = loss
