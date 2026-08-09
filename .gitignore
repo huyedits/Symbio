@@ -23,7 +23,7 @@ adapters.testbak.*/
 benchmark_lora_*.json
 training_data/*.bak.*
 training_data/tmp*.yaml
-
+adapters.premask.*
 # Per-user data: every install generates its own config, notes,
 # training corpus, and LoRA adapter on first run — never ship them.
 # prompt.md is seeded from DEFAULT_SYSTEM_PROMPT in main.py on first run.

@@ -5,6 +5,8 @@ task execution, the <delegate> tag, and guarded_train_worker's golden-check
 
 import json
 
+import pytest
+
 from symbio import constants
 from symbio.app import chat, dispatch, golden, tooling, training
 from symbio.app import config as app_config
@@ -499,3 +501,510 @@ def test_status_shows_dispatch_state(monkeypatch, tmp_path):
 
     session._handle_command("/status")
     assert any("dispatch" in o.lower() for o in outputs)
+
+
+# ---- adapter hot-swap ----
+#
+# Skill workers all run the headmaster's own base weights and differ only by a
+# ~19 MB adapter, so loading a second full copy to switch between them costs
+# gigabytes to change nothing else. These cover the swap and, more importantly,
+# the cases where it must refuse: load_weights(strict=False) drops keys it
+# cannot place, so a wrong-shaped adapter would leave the previous worker's
+# weights attached and answer as the wrong specialist without any error.
+
+class _FakeModel:
+    """Stands in for an MLX model with LoRA layers already attached.
+
+    The default fake in this file is a bare object(), which has no
+    load_weights and so silently sends every swap down the fallback path.
+    """
+
+    def __init__(self):
+        self.loaded = []
+
+    def load_weights(self, path, strict=True):
+        self.loaded.append(path)
+
+
+def _swappable_load_factory(load_calls):
+    def fake_load(model_name, adapter_path=None):
+        load_calls.append((model_name, adapter_path))
+        return (_FakeModel(), FakeTokenizer())
+    return fake_load
+
+
+def _adapter(tmp_path, role, shapes):
+    """Write a stand-in adapter file for `role` and return its directory."""
+    adapter_dir = tmp_path / "adapters" / "workers" / role
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    (adapter_dir / "adapters.safetensors").write_bytes(b"weights")
+    (adapter_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+    return adapter_dir
+
+
+def _stub_shape_check(monkeypatch, verdict):
+    monkeypatch.setattr(dispatch, "_adapter_fits_model",
+                        lambda model, path: verdict)
+
+
+def _two_skill_catalog(monkeypatch, tmp_path):
+    _write_catalog(monkeypatch, tmp_path, {
+        "skill_a": {"model_name": "same/model", "role": "alpha", "is_skill": True},
+        "skill_b": {"model_name": "same/model", "role": "beta", "is_skill": True},
+    })
+
+
+def test_same_base_model_swaps_the_adapter_instead_of_reloading(
+        monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    _two_skill_catalog(monkeypatch, tmp_path)
+    _adapter(tmp_path, "alpha", {})
+    _adapter(tmp_path, "beta", {})
+    load_calls = []
+    monkeypatch.setattr(dispatch, "load", _swappable_load_factory(load_calls))
+    monkeypatch.setattr(dispatch.training, "mark_adapter_used", lambda **k: None)
+    _stub_shape_check(monkeypatch, True)
+
+    pool = dispatch.WorkerPool({"dispatch": {}})
+    pool.get("alpha")
+    assert len(load_calls) == 1
+
+    result = pool.get("beta")
+
+    assert result is not None
+    assert len(load_calls) == 1, "switching skills must not reload the model"
+    # Residency moves: the donor's model now carries beta's adapter.
+    assert pool.loaded_roles() == ["beta"]
+
+
+def test_a_mismatched_adapter_refuses_to_swap(monkeypatch, tmp_path):
+    """The silent-wrong-answer case: strict=False would place nothing."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    _two_skill_catalog(monkeypatch, tmp_path)
+    _adapter(tmp_path, "alpha", {})
+    _adapter(tmp_path, "beta", {})
+    load_calls = []
+    monkeypatch.setattr(dispatch, "load", _swappable_load_factory(load_calls))
+    monkeypatch.setattr(dispatch.training, "mark_adapter_used", lambda **k: None)
+    _stub_shape_check(monkeypatch, False)
+
+    pool = dispatch.WorkerPool({"dispatch": {}})
+    pool.get("alpha")
+    pool.get("beta")
+
+    assert len(load_calls) == 2, "a shape mismatch must fall back to a full load"
+
+
+def test_different_base_models_never_swap(monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    _write_catalog(monkeypatch, tmp_path, {
+        "a": {"model_name": "big/model", "role": "alpha"},
+        "b": {"model_name": "small/model", "role": "beta"},
+    })
+    _adapter(tmp_path, "alpha", {})
+    _adapter(tmp_path, "beta", {})
+    load_calls = []
+    monkeypatch.setattr(dispatch, "load", _swappable_load_factory(load_calls))
+    monkeypatch.setattr(dispatch.training, "mark_adapter_used", lambda **k: None)
+    _stub_shape_check(monkeypatch, True)
+
+    pool = dispatch.WorkerPool({"dispatch": {}})
+    pool.get("alpha")
+    pool.get("beta")
+
+    assert len(load_calls) == 2, "different weights cannot share a model"
+
+
+def test_a_worker_with_no_adapter_is_loaded_in_full(monkeypatch, tmp_path):
+    """Reusing a model here would answer as the previous specialist."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    _two_skill_catalog(monkeypatch, tmp_path)
+    _adapter(tmp_path, "alpha", {})
+    load_calls = []
+    monkeypatch.setattr(dispatch, "load", _swappable_load_factory(load_calls))
+    monkeypatch.setattr(dispatch.training, "mark_adapter_used", lambda **k: None)
+    _stub_shape_check(monkeypatch, True)
+
+    pool = dispatch.WorkerPool({"dispatch": {}})
+    pool.get("alpha")
+    pool.get("beta")          # beta has no adapter on disk
+
+    assert len(load_calls) == 2
+
+
+def test_hot_swap_can_be_switched_off(monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    _two_skill_catalog(monkeypatch, tmp_path)
+    _adapter(tmp_path, "alpha", {})
+    _adapter(tmp_path, "beta", {})
+    load_calls = []
+    monkeypatch.setattr(dispatch, "load", _swappable_load_factory(load_calls))
+    monkeypatch.setattr(dispatch.training, "mark_adapter_used", lambda **k: None)
+    _stub_shape_check(monkeypatch, True)
+
+    pool = dispatch.WorkerPool({"dispatch": {"hot_swap_adapters": False}})
+    pool.get("alpha")
+    pool.get("beta")
+
+    assert len(load_calls) == 2
+
+
+def test_shape_check_rejects_an_adapter_whose_tensors_do_not_fit(tmp_path):
+    """Exercises the real check, not the stub."""
+    import mlx.core as mx
+
+    path = tmp_path / "adapters.safetensors"
+    mx.save_safetensors(str(path), {"layers.0.lora_a": mx.zeros((8, 16))})
+
+    class Model:
+        def __init__(self, shape):
+            self._shape = shape
+
+        def parameters(self):
+            return {"layers": [{"lora_a": mx.zeros(self._shape)}]}
+
+    assert dispatch._adapter_fits_model(Model((8, 16)), path) is True
+    assert dispatch._adapter_fits_model(Model((4, 16)), path) is False
+
+
+# ---- refusing a second copy of the headmaster's weights ----
+#
+# The headmaster's model lives in ChatSession, never in WorkerPool._resident,
+# so it is never a hot-swap donor: a worker on the headmaster's own model is
+# always a full second copy of the largest allocation on the machine. That is
+# what OOM'd a 16 GB Mac mini beside a training run, so it is refused unless
+# the headmaster unloads first or the operator opts in.
+
+def _headmaster_sized_catalog(monkeypatch, tmp_path):
+    _write_catalog(monkeypatch, tmp_path, {
+        "skill_a": {"model_name": "same/model", "role": "alpha", "is_skill": True},
+        "small": {"model_name": "other/small", "role": "summarize"},
+    })
+
+
+def _refusal_pool(monkeypatch, tmp_path, dispatch_cfg):
+    _isolate_dirs(monkeypatch, tmp_path)
+    _headmaster_sized_catalog(monkeypatch, tmp_path)
+    _adapter(tmp_path, "alpha", {})
+    load_calls = []
+    monkeypatch.setattr(dispatch, "load", _swappable_load_factory(load_calls))
+    monkeypatch.setattr(dispatch.training, "mark_adapter_used", lambda **k: None)
+    _stub_shape_check(monkeypatch, False)
+    pool = dispatch.WorkerPool({"model_name": "same/model", "dispatch": dispatch_cfg})
+    return pool, load_calls
+
+
+def test_headmaster_sized_worker_is_refused_instead_of_doubling_ram(
+        monkeypatch, tmp_path):
+    pool, load_calls = _refusal_pool(monkeypatch, tmp_path, {})
+
+    with pytest.raises(dispatch.SecondHeadmasterCopyRefused):
+        pool.get("alpha")
+    assert load_calls == [], "refused worker must not have been loaded anyway"
+
+
+def test_a_worker_smaller_than_the_headmaster_is_never_refused(
+        monkeypatch, tmp_path):
+    pool, load_calls = _refusal_pool(monkeypatch, tmp_path, {})
+
+    assert pool.get("summarize") is not None
+    assert load_calls == [("other/small", None)]
+
+
+def test_deep_sleep_allows_a_headmaster_sized_worker(monkeypatch, tmp_path):
+    """The headmaster unloads itself first, so only one copy is ever resident."""
+    pool, load_calls = _refusal_pool(
+        monkeypatch, tmp_path, {"headmaster_deep_sleep_while_workers": True})
+
+    assert pool.get("alpha") is not None
+    assert len(load_calls) == 1
+
+
+def test_the_second_copy_can_be_allowed_explicitly(monkeypatch, tmp_path):
+    pool, load_calls = _refusal_pool(
+        monkeypatch, tmp_path, {"allow_second_headmaster_copy": True})
+
+    assert pool.get("alpha") is not None
+    assert len(load_calls) == 1
+
+
+def test_delegate_reports_a_refusal_rather_than_raising(monkeypatch, tmp_path):
+    pool, _ = _refusal_pool(monkeypatch, tmp_path, {})
+
+    reply = pool.run_delegated_task("alpha", "do the thing")
+
+    assert "was not run" in reply
+    assert "two full copies" in reply
+
+
+# ---- naming LoRA recipe drift ----
+
+def test_recipe_drift_names_the_mismatched_lora_keys(tmp_path):
+    """The failure that started this: retraining the headmaster with masked
+    prompts and narrower targets left every older skill adapter unswappable,
+    with nothing in the logs saying which knob moved."""
+    worker, headmaster = tmp_path / "w", tmp_path / "h"
+    for d, keys in ((worker, None), (headmaster, ["self_attn.q_proj",
+                                                  "self_attn.v_proj"])):
+        d.mkdir()
+        lora = {"rank": 8}
+        if keys is not None:
+            lora["keys"] = keys
+        (d / "adapter_config.json").write_text(
+            json.dumps({"num_layers": 8, "lora_parameters": lora}), encoding="utf-8")
+
+    drift = dispatch.describe_recipe_drift(worker, headmaster)
+
+    assert drift is not None
+    assert "keys" in drift
+    assert "self_attn.q_proj" in drift
+
+
+def test_matching_recipes_report_no_drift(tmp_path):
+    worker, headmaster = tmp_path / "w", tmp_path / "h"
+    for d in (worker, headmaster):
+        d.mkdir()
+        (d / "adapter_config.json").write_text(
+            json.dumps({"num_layers": 8, "lora_parameters": {"rank": 8}}),
+            encoding="utf-8")
+
+    assert dispatch.describe_recipe_drift(worker, headmaster) is None
+
+
+def test_drift_is_unreported_rather_than_guessed_when_provenance_is_missing(
+        tmp_path):
+    """Older adapters predate the stamp; silence beats a fabricated diff."""
+    worker, headmaster = tmp_path / "w", tmp_path / "h"
+    worker.mkdir()
+    headmaster.mkdir()
+    (worker / "adapter_config.json").write_text("{}", encoding="utf-8")
+
+    assert dispatch.describe_recipe_drift(worker, headmaster) is None
+
+
+# ---- advertising real worker roles ----
+
+def test_delegate_schema_lists_the_workers_that_exist(monkeypatch, tmp_path):
+    """A model shown a made-up example role cannot route to a real skill."""
+    _write_catalog(monkeypatch, tmp_path, {
+        "skill_fix_wifi": {"model_name": "m", "role": "fix_wifi",
+                           "is_skill": True, "skill_name": "Fix wifi"},
+        "summarize_worker": {"model_name": "m", "role": "summarize",
+                             "description": "Condense text."},
+    })
+
+    roles = tooling.refresh_delegate_roles()
+
+    assert set(roles) == {"fix_wifi", "summarize"}
+    schema = next(t for t in tooling.tool_schemas() if t["name"] == "delegate_task")
+    role_schema = schema["parameters"]["properties"]["role"]
+    assert set(role_schema["enum"]) == {"fix_wifi", "summarize"}
+    # The bare slug, not the catalog key: `skill_fix_wifi` is what the old
+    # description told the model to send, and catalog_entry_for_role would
+    # never have resolved it.
+    assert "skill_fix_wifi" not in role_schema["description"]
+    assert "Fix wifi" in role_schema["description"]
+
+
+def test_advertised_roles_are_the_ones_the_pool_can_resolve(monkeypatch, tmp_path):
+    """The advertised name and the dispatcher's lookup key must agree."""
+    _write_catalog(monkeypatch, tmp_path, {
+        "skill_fix_wifi": {"model_name": "m", "role": "fix_wifi",
+                           "is_skill": True, "skill_name": "Fix wifi"},
+    })
+
+    for role in tooling.refresh_delegate_roles():
+        assert dispatch.catalog_entry_for_role(role) is not None
+
+
+def test_an_empty_catalog_leaves_the_schema_alone(monkeypatch, tmp_path):
+    _write_catalog(monkeypatch, tmp_path, {})
+    assert tooling.refresh_delegate_roles() == []
+
+
+# ---- skills are golden-checked at last ----
+#
+# WORKER_GOLDEN_CASES only ever held entries for 'summarize' and 'browser', so
+# guarded_train_worker looked a skill up, got None, and took the early return:
+# no baseline, no recheck, no rollback. The workers that retrain themselves
+# unattended were the only ones with no regression gate.
+
+def _skill_catalog(monkeypatch, tmp_path, steps="1. Toggle wifi off. 2. Toggle it on."):
+    _write_catalog(monkeypatch, tmp_path, {
+        "skill_fix_wifi": {
+            "model_name": "m/8b", "role": "fix_wifi", "is_skill": True,
+            "skill_name": "Fix wifi",
+            # The *served* prompt carries the steps as a safety net.
+            "system_prompt": f"You are the 'Fix wifi' skill.\nSteps:\n{steps}\n\nReply with the steps.",
+        },
+    })
+    return steps
+
+
+def test_a_skill_now_has_golden_cases(monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    _skill_catalog(monkeypatch, tmp_path)
+    from symbio.app import skill_eval
+
+    assert dispatch.WORKER_GOLDEN_CASES.get("fix_wifi") is None, "still none by hand"
+    derived = skill_eval.golden_cases_for_role("fix_wifi")
+    assert derived and len(derived) >= 3
+
+
+def test_a_regressed_skill_retrain_is_rolled_back(monkeypatch, tmp_path):
+    """The whole point: a skill that forgets its steps must not ship."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    _skill_catalog(monkeypatch, tmp_path)
+
+    adapter_dir = tmp_path / "adapters" / "workers" / "fix_wifi"
+    adapter_dir.mkdir(parents=True)
+    (adapter_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (adapter_dir / "adapters.safetensors").write_bytes(b"before")
+
+    monkeypatch.setattr(dispatch, "load",
+                        lambda name, adapter_path=None: (object(), FakeTokenizer()))
+    monkeypatch.setattr(dispatch.training, "run_training", lambda *a, **k: True)
+    monkeypatch.setattr(dispatch.training, "mark_adapter_used", lambda **k: None)
+
+    replies = iter(["1. Toggle wifi off. 2. Toggle it on."] * 5      # healthy baseline
+                   + ["I don't know."] * 20)                        # broken after
+    monkeypatch.setattr(dispatch, "generate",
+                        lambda *a, **k: next(replies))
+
+    restored = []
+    real_restore = dispatch.training.restore_adapter
+    monkeypatch.setattr(dispatch.training, "restore_adapter",
+                        lambda backup, role=None: restored.append(role))
+
+    trained, message = dispatch.guarded_train_worker("fix_wifi", {"dispatch": {}})
+
+    assert trained is True
+    assert restored == ["fix_wifi"], "a regressed skill must be rolled back"
+    assert "regressed" in message and "rolled back" in message
+
+
+def test_a_healthy_skill_retrain_is_kept(monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    _skill_catalog(monkeypatch, tmp_path)
+
+    adapter_dir = tmp_path / "adapters" / "workers" / "fix_wifi"
+    adapter_dir.mkdir(parents=True)
+    (adapter_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (adapter_dir / "adapters.safetensors").write_bytes(b"before")
+
+    monkeypatch.setattr(dispatch, "load",
+                        lambda name, adapter_path=None: (object(), FakeTokenizer()))
+    monkeypatch.setattr(dispatch.training, "run_training", lambda *a, **k: True)
+    monkeypatch.setattr(dispatch.training, "mark_adapter_used", lambda **k: None)
+    monkeypatch.setattr(dispatch, "generate",
+                        lambda *a, **k: "1. Toggle wifi off. 2. Toggle it on.")
+
+    restored = []
+    monkeypatch.setattr(dispatch.training, "restore_adapter",
+                        lambda backup, role=None: restored.append(role))
+
+    trained, message = dispatch.guarded_train_worker("fix_wifi", {"dispatch": {}})
+
+    assert trained is True
+    assert restored == [], "a skill that still recites its steps must be kept"
+
+
+def test_a_skill_is_graded_without_its_steps_in_the_prompt(monkeypatch, tmp_path):
+    """Otherwise the check measures copying, not the weights.
+
+    A skill's served prompt includes the procedure as a safety net for a weak
+    adapter. Grading against that prompt would let a broken adapter pass by
+    reading its answer out of context, which is exactly the failure the gate
+    exists to catch.
+    """
+    _isolate_dirs(monkeypatch, tmp_path)
+    _skill_catalog(monkeypatch, tmp_path)
+
+    adapter_dir = tmp_path / "adapters" / "workers" / "fix_wifi"
+    adapter_dir.mkdir(parents=True)
+    (adapter_dir / "adapter_config.json").write_text("{}", encoding="utf-8")
+    (adapter_dir / "adapters.safetensors").write_bytes(b"before")
+
+    seen_prompts = []
+
+    def fake_generate(model, tokenizer, prompt=None, **kw):
+        seen_prompts.append(prompt or "")
+        return "1. Toggle wifi off. 2. Toggle it on."
+
+    monkeypatch.setattr(dispatch, "load",
+                        lambda name, adapter_path=None: (object(), FakeTokenizer()))
+    monkeypatch.setattr(dispatch.training, "run_training", lambda *a, **k: True)
+    monkeypatch.setattr(dispatch.training, "mark_adapter_used", lambda **k: None)
+    monkeypatch.setattr(dispatch.training, "restore_adapter", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch, "generate", fake_generate)
+
+    dispatch.guarded_train_worker("fix_wifi", {"dispatch": {}})
+
+    assert seen_prompts, "the golden set should have run"
+    for prompt in seen_prompts:
+        assert "Toggle wifi off" not in prompt, (
+            "the procedure leaked into the prompt the adapter is graded under")
+
+
+# ---- worker adapters must match their base model ----
+#
+# mlx_lm sizes LoRA layers to the new model then loads with strict=False, so an
+# adapter from a different base is discarded silently: a 4B loaded with an 8B
+# adapter (hidden 2560 vs 4096) comes up untrained with no error anywhere.
+
+def _stamped_adapter(tmp_path, role, trained_for):
+    d = tmp_path / "adapters" / "workers" / role
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "adapter_config.json").write_text(
+        json.dumps({"model": trained_for, "num_layers": 8}), encoding="utf-8")
+    (d / "adapters.safetensors").write_bytes(b"w")
+    return d
+
+
+def test_an_adapter_from_another_model_is_not_a_match(tmp_path):
+    d = _stamped_adapter(tmp_path, "r", "Qwen/Qwen3-8B-MLX-4bit")
+    assert dispatch.adapter_matches_model(d, "mlx-community/Qwen3-4B-4bit") is False
+
+
+def test_the_same_weights_republished_still_match(tmp_path):
+    d = _stamped_adapter(tmp_path, "r", "Qwen/Qwen3-8B-MLX-4bit")
+    assert dispatch.adapter_matches_model(d, "mlx-community/Qwen3-8B-MLX-4bit") is True
+
+
+def test_an_unstamped_adapter_is_given_the_benefit_of_the_doubt(tmp_path):
+    """Older adapters predate the stamp; refusing them would be a regression."""
+    d = tmp_path / "adapters" / "workers" / "r"
+    d.mkdir(parents=True)
+    (d / "adapter_config.json").write_text("{}", encoding="utf-8")
+    assert dispatch.adapter_matches_model(d, "any/model") is True
+
+
+def test_a_mismatched_worker_adapter_is_not_loaded(monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    _write_catalog(monkeypatch, tmp_path, {
+        "w": {"model_name": "mlx-community/Qwen3-4B-4bit", "role": "r"},
+    })
+    _stamped_adapter(tmp_path, "r", "Qwen/Qwen3-8B-MLX-4bit")
+    calls = []
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory(calls))
+    monkeypatch.setattr(dispatch.training, "mark_adapter_used", lambda **k: None)
+
+    dispatch.WorkerPool({"dispatch": {}}).get("r")
+
+    assert calls == [("mlx-community/Qwen3-4B-4bit", None)], (
+        "the stale adapter should have been skipped, not silently discarded")
+
+
+def test_a_matching_worker_adapter_is_loaded(monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    _write_catalog(monkeypatch, tmp_path, {
+        "w": {"model_name": "mlx-community/Qwen3-4B-4bit", "role": "r"},
+    })
+    d = _stamped_adapter(tmp_path, "r", "mlx-community/Qwen3-4B-4bit")
+    calls = []
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory(calls))
+    monkeypatch.setattr(dispatch.training, "mark_adapter_used", lambda **k: None)
+
+    dispatch.WorkerPool({"dispatch": {}}).get("r")
+
+    assert calls == [("mlx-community/Qwen3-4B-4bit", str(d))]

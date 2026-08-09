@@ -31,6 +31,27 @@ class FakeTokenizer:
         return text.split(" ")
 
 
+def _sample_answers(path):
+    """The assistant turn of every sample in a training file.
+
+    Samples carry their answer in both "text" and "messages", so counting
+    occurrences in the raw file counts each one twice. Reading the structured
+    turn measures what these tests actually mean: how many samples were
+    written.
+    """
+    answers = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        messages = record.get("messages")
+        if messages:
+            answers.append(messages[-1]["content"])
+        else:
+            answers.append(record.get("text", "").rsplit("assistant: ", 1)[-1])
+    return answers
+
+
 class _FakeResponse:
     __slots__ = ("text", "token")
 
@@ -1601,9 +1622,11 @@ def test_mistake_digest_and_threshold_training():
             archived = list(constants.MISTAKES_ARCHIVE_DIR.glob("*.md"))
             assert len(archived) == 2, archived
             assert trained_with == [config["learn"]["batch_train_iters"]], trained_with
-            data = constants.TRAIN_FILE.read_text()
-            # boost=2 -> each corrected answer appears twice.
-            assert data.count("right-a") == 2 and data.count("right-b") == 2, data
+            # boost=2 -> each corrected answer appears in two samples. Counted
+            # per record, not by substring: a sample stores its answer in both
+            # "text" and "messages", so substring counting double-counts.
+            answers = _sample_answers(constants.TRAIN_FILE)
+            assert answers.count("right-a") == 2 and answers.count("right-b") == 2, answers
     finally:
         training.run_training = real_run_training
         constants.TRAIN_FILE = real_train
@@ -1660,8 +1683,8 @@ def test_severity_scales_training_iters():
             # Total severity 5 over 2 notes -> 25 + 5*(5-2) = 40 iters.
             assert trained_with == [40], trained_with
             # Severity multiplies the boost: the severity-3 answer appears 3x.
-            data = constants.TRAIN_FILE.read_text()
-            assert data.count("right-a") == 2 and data.count("right-b") == 3, data
+            answers = _sample_answers(constants.TRAIN_FILE)
+            assert answers.count("right-a") == 2 and answers.count("right-b") == 3, answers
 
         with scratch_mistakes_dir():
             # The cap stops a severe backlog from training forever.

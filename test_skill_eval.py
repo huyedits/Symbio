@@ -365,3 +365,115 @@ def test_half_written_adapter_is_reported_absent_not_loaded(
     assert report["adapter_present"] is False
     assert all(ld["adapter_path"] is None for ld in loads)
     assert "WARNING" in capsys.readouterr().out
+
+
+# ---- step ordering ----
+#
+# coverage is set membership, so a procedure recited out of order scores a
+# perfect 100%. For a runbook that is the difference between working and not.
+
+_PROC = ("1. Freeze the scope with `symb-keyctl freeze --scope edge`. "
+         "2. Wait until the drain counter reads zero. "
+         "3. Mint the replacement with `symb-keyctl mint --ttl 36h`. "
+         "4. Publish it to the vault path secret/edge/rotating. "
+         "5. Release the scope with `symb-keyctl thaw`.")
+
+
+def test_split_steps_finds_every_numbered_step():
+    assert len(skill_eval.split_steps(_PROC)) == 5
+
+
+def test_each_step_gets_a_distinguishing_anchor():
+    assert skill_eval.step_anchors(_PROC) == [
+        "freeze", "wait", "mint", "publish", "release"]
+
+
+def test_a_correctly_ordered_recital_scores_full_marks():
+    assert skill_eval.order_score(_PROC, _PROC) == 1.0
+
+
+def test_swapped_steps_are_caught_even_at_full_coverage():
+    """The exact defect the coverage metric cannot see."""
+    swapped = ("1. Freeze the scope. 2. Wait until the drain counter reads zero. "
+               "3. Mint the replacement with ttl 36h. 4. Release the scope with thaw. "
+               "5. Publish it to the vault path secret/edge/rotating.")
+    keywords = skill_eval._keywords(_PROC)
+    assert skill_eval.coverage(swapped, keywords) > 0.9, "coverage stays high"
+    assert skill_eval.order_score(swapped, _PROC) < 1.0, "order must drop"
+
+
+def test_a_fully_reversed_recital_scores_low():
+    reversed_proc = " ".join(reversed(skill_eval.split_steps(_PROC)))
+    assert skill_eval.order_score(reversed_proc, _PROC) <= 0.4
+
+
+def test_order_is_unjudgeable_when_too_little_is_mentioned():
+    assert skill_eval.order_score("Freeze the scope.", _PROC) is None
+    assert skill_eval.order_score("nothing relevant here", _PROC) is None
+
+
+def test_a_single_step_procedure_has_no_order_to_judge():
+    assert skill_eval.step_anchors("1. Just do the thing.") == []
+    assert skill_eval.order_score("anything", "1. Just do the thing.") is None
+
+
+# ---- derived golden cases for skills ----
+#
+# Skills retrain themselves off accumulated usage samples with nobody watching,
+# and until now had no golden cases at all: guarded_train_worker looked the role
+# up in WORKER_GOLDEN_CASES, got None, and took the early return with no check
+# and no rollback. Unlike the headmaster's, a skill's cases can be derived,
+# because its correct answer is its own steps.
+
+_WIFI = "1. Toggle wifi off. 2. Toggle it on."
+
+
+def test_a_skill_gets_one_case_per_held_out_paraphrase():
+    cases = skill_eval.skill_golden_cases("Fix wifi", _WIFI)
+    assert len(cases) == len(skill_eval.default_tasks("Fix wifi"))
+    assert all(c.id.startswith("skill_") for c in cases)
+
+
+def test_derived_cases_carry_the_steps_as_the_ideal_reply():
+    """Lets golden's remedy path inject real training samples on regression."""
+    for case in skill_eval.skill_golden_cases("Fix wifi", _WIFI):
+        assert case.ideal_reply == _WIFI
+
+
+def test_a_correct_recital_passes():
+    case = skill_eval.skill_golden_cases("Fix wifi", _WIFI)[0]
+    assert case.check("1. Toggle wifi off. 2. Toggle it on.", [], {}) is True
+
+
+def test_a_reversed_procedure_fails_even_though_every_word_is_present():
+    """The regression this gate exists for: right words, unrunnable order."""
+    case = skill_eval.skill_golden_cases("Fix wifi", _WIFI)[0]
+    assert case.check("2. Toggle it on. 1. Toggle wifi off.", [], {}) is False
+
+
+def test_an_unrelated_answer_fails():
+    case = skill_eval.skill_golden_cases("Fix wifi", _WIFI)[0]
+    assert case.check("Have you tried restarting your router?", [], {}) is False
+
+
+def test_a_degenerate_reply_fails():
+    case = skill_eval.skill_golden_cases("Fix wifi", _WIFI)[0]
+    assert case.check("wifi wifi wifi wifi wifi wifi wifi wifi", [], {}) is False
+
+
+def test_a_skill_with_no_recoverable_steps_yields_no_cases():
+    assert skill_eval.skill_golden_cases("Empty", "") == []
+    assert skill_eval.skill_golden_cases("Empty", "   ") == []
+
+
+def test_order_anchors_match_whole_tokens_only():
+    """'on' must not count inside 'configuration'; this gates rollbacks."""
+    steps = "1. Unplug the unit. 2. On."
+    assert skill_eval.step_anchors(steps) == ["unplug", "on"]
+
+    # Step 2's anchor appears only as a substring of an unrelated word, so
+    # only one step is really mentioned and order is unjudgeable.
+    assert skill_eval.order_score(
+        "1. Unplug the unit. 2. Check the configuration.", steps) is None
+    # Spelled as its own token, it counts.
+    assert skill_eval.order_score("Unplug the unit, then switch On.", steps) == 1.0
