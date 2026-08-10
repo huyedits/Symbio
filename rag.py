@@ -8,6 +8,7 @@ No external embedding model or vector DB is required. Retrieval uses:
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from collections import Counter
@@ -199,12 +200,39 @@ class Retriever:
         """Stable key for repeated/rephrased queries."""
         return " ".join(sorted(_normalize(query)))
 
-    def _score(self, query_terms: list[str], text: str) -> float:
+    @staticmethod
+    def _idf(query_terms: list[str], documents) -> dict[str, float]:
+        """How much each query term distinguishes one document from another.
+
+        Without this every term counts the same, so "the" is worth as much as
+        "power". Measured: routing "what is 3 to the power of 27, exactly"
+        scored the Researcher note 27 — of which "the" contributed 12 and no
+        content word contributed anything — over the Device note's 19, which
+        was the only one to match "power" and "exactly" at all. The router was
+        deciding on stopwords.
+
+        A term in every document scores 0; a term in one of many scores high.
+        """
+        docs = [_normalize(d) for d in documents]
+        total = len(docs) or 1
+        idf = {}
+        for term in set(query_terms):
+            appears = sum(1 for d in docs if term in d)
+            # +1 inside the log keeps a term present everywhere at exactly 0
+            # rather than negative, so it is ignored rather than penalised.
+            idf[term] = math.log(1 + (total - appears + 0.5) / (appears + 0.5))
+        return idf
+
+    def _score(self, query_terms: list[str], text: str,
+               idf: dict[str, float] | None = None) -> float:
         terms = _normalize(text)
         if not terms:
             return 0.0
         counts = Counter(terms)
-        score = sum(counts[t] for t in query_terms)
+        if idf is None:
+            score = sum(counts[t] for t in query_terms)
+        else:
+            score = sum(counts[t] * idf.get(t, 0.0) for t in query_terms)
         # Normalize by document length so long docs do not always win.
         return score / (len(terms) ** 0.5 + 1)
 
@@ -240,9 +268,10 @@ class Retriever:
                 pass
 
         notes = self._load_notes()
+        idf = self._idf(query_terms, notes.values())
         scored = []
         for name, text in notes.items():
-            s = self._score(query_terms, text)
+            s = self._score(query_terms, text, idf)
             if s > 0:
                 scored.append({
                     "source": "note",

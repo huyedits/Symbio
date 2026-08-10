@@ -14,13 +14,47 @@
     "memory_note": "~2.3 GB on disk, ~2.5-3 GB RAM at runtime"
   },
   "skill_fix_wifi": {
-    "model_name": "Qwen/Qwen3-8B-MLX-4bit",
+    "model_name": "mlx-community/Qwen3-4B-4bit",
     "role": "fix_wifi",
     "description": "Skill: Fix wifi",
     "adapter_compatible": true,
     "memory_note": "~1 GB on disk, headmaster-size RAM at runtime",
     "system_prompt": "You are the specialist worker for the skill 'Fix wifi'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. Toggle wifi off. 2. Toggle it on.\n\nReply with the result of applying these steps to the user's request.",
     "is_skill": true,
-    "skill_name": "Fix wifi"
+    "skill_name": "Fix wifi",
+    "routing_rationale": "A request belongs to 'fix_wifi' if it describes a wireless connectivity issue that can be resolved by toggling the wifi off and on. The clearest signal is a statement about the wifi or wireless functionality failing, such as \"my wifi is broken\" or \"wireless stopped working.\""
+  },
+  "skill_researcher": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "researcher",
+    "description": "Skill: Researcher",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Researcher'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. When the user asks about a price, a changing fact, current news, or anything that postdates what you know, use <search> rather than answering from memory. 2. Never open a browser for a plain fact lookup. 3. State briefly why you are searching, then search.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Researcher",
+    "routing_rationale": "A request belongs to 'researcher' if it asks for a price, current fact, or real-time information that postdates the model's knowledge. The clearest signal is when the user asks for a price, current event, or real-time data, as opposed to instructions for browsing, noting personal facts, or adjusting device settings."
+  },
+  "skill_browser_driver": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "browser_driver",
+    "description": "Skill: Browser Driver",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Browser Driver'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. If the user wants you to act on a page (click, search within it, navigate), use <browse> so you keep control. 2. If the user only wants to read it themselves, use <cmd>open instead. 3. Always take the address from the request, never from memory.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Browser Driver",
+    "routing_rationale": "A request belongs to 'browser_driver' if it involves interacting with a web page (e.g., clicking, searching, navigating). The clearest signal is the use of commands like \"pull up,\" \"load,\" \"open,\" or \"click through,\" which indicate the user wants to perform an action on a webpage."
+  },
+  "skill_device_awareness": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "device_awareness",
+    "description": "Skill: Device Awareness",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Device Awareness'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. When the user gives you a fact about themselves or their belongings, save it with <note>, whatever words they used to ask. 2. For arithmetic too large to do reliably in your head, use <py>. 3. For small arithmetic, just answer - do not reach for a tool.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Device Awareness",
+    "routing_rationale": "Requests that belong to 'device_awareness' are those that involve noting a fact about the user or their belongings, performing small arithmetic, or using <py> for large arithmetic. The clearest signal distinguishing 'device_awareness' from other workers is the use of <note> for user-provided facts or <py> for arithmetic calculations."
   }
 }
