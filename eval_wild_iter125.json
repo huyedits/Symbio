@@ -1,0 +1,166 @@
+{
+  "timestamp": "2026-08-09T11:25:11.048792+00:00",
+  "model_name": "Qwen/Qwen3-8B-MLX-4bit",
+  "adapter_present": true,
+  "adapter_dir": "/Users/huygpt/Downloads/agi/adapters",
+  "base": {
+    "score": 5,
+    "total": 9,
+    "accuracy": 0.5556,
+    "mean_latency": 24.129,
+    "tasks": [
+      {
+        "id": "wild_price_unseen_product",
+        "passed": false,
+        "latency": 25.837,
+        "output": "I don't have specific information about the performance of a Framework 13 laptop, but I can help you check the specifications of your laptop or a specific model. Would you like me to look up the specifications of a Framework 13 laptop or check your current laptop's performance?",
+        "error": null
+      },
+      {
+        "id": "wild_price_unseen_service",
+        "passed": false,
+        "latency": 26.957,
+        "output": "The price of Kagi Ultimate can vary based on the provider and the specific features included. Generally, Kagi Ultimate is considered a premium product and may be more expensive compared to other charting tools. It's advisable to check the official website or contact their sales team for the most accurate and up-to-date pricing information. If you need help finding the pricing details, I can assist you with that. Would you like me to look up the current pricing for Kagi Ultimate?",
+        "error": null
+      },
+      {
+        "id": "wild_current_fact",
+        "passed": true,
+        "latency": 23.087,
+        "output": "<search>mayor of Reykjavik 2026</search>",
+        "error": null
+      },
+      {
+        "id": "wild_current_fact_person",
+        "passed": false,
+        "latency": 24.207,
+        "output": "I currently don't have the most up-to-date information on the president of Iceland. However, I can help you find this information by performing a web search. Would you like me to do that?",
+        "error": null
+      },
+      {
+        "id": "wild_browse_unseen_site",
+        "passed": true,
+        "latency": 23.209,
+        "output": "<tool_call>{\"name\": \"browser_open\", \"arguments\": {\"url\": \"https://sqlite.org\"}}</tool_call>",
+        "error": null
+      },
+      {
+        "id": "wild_open_for_user",
+        "passed": true,
+        "latency": 23.553,
+        "output": "<tool_call>{\"name\": \"browser_open\", \"arguments\": {\"url\": \"https://www.postgresql.org\"}}</tool_call>",
+        "error": null
+      },
+      {
+        "id": "wild_compute_large",
+        "passed": false,
+        "latency": 24.39,
+        "output": "<tool_call>{\"name\": \"terminal\", \"arguments\": {\"cmd\": \"python -c 'print(37 * 365 * 24 * 60 * 60)'\"}}</tool_call>",
+        "error": null
+      },
+      {
+        "id": "wild_remember_fact",
+        "passed": true,
+        "latency": 23.151,
+        "output": "<note title='Bike'>My bike is a green Marin Nail Trail.</note>\n<end>",
+        "error": null
+      },
+      {
+        "id": "wild_no_tool_needed",
+        "passed": true,
+        "latency": 22.774,
+        "output": "6 times 6 is 36. \n\n<end>",
+        "error": null
+      }
+    ]
+  },
+  "adapter": {
+    "score": 6,
+    "total": 9,
+    "accuracy": 0.6667,
+    "mean_latency": 23.536,
+    "tasks": [
+      {
+        "id": "wild_price_unseen_product",
+        "passed": true,
+        "latency": 22.483,
+        "output": "<search>\"Framework 13 laptop current price\"</search> Let me check what a Framework 13 laptop costs now.",
+        "error": null
+      },
+      {
+        "id": "wild_price_unseen_service",
+        "passed": true,
+        "latency": 22.112,
+        "output": "<search>price Kagi Ultimate</search> Let me check the current price for you.",
+        "error": null
+      },
+      {
+        "id": "wild_current_fact",
+        "passed": false,
+        "latency": 23.628,
+        "output": "<cmd>open 'https://en.wikipedia.org/wiki/Mayor_of_Reykjavik'</cmd> Opening the page so I can read the current mayor.",
+        "error": null
+      },
+      {
+        "id": "wild_current_fact_person",
+        "passed": false,
+        "latency": 23.846,
+        "output": "I don't have real-time access to current political data, so I recommend checking the official Icelandic government website or a reliable news source for the most up-to-date information.",
+        "error": null
+      },
+      {
+        "id": "wild_browse_unseen_site",
+        "passed": true,
+        "latency": 23.076,
+        "output": "<browse>https://www.sqlite.org</browse> Opening sqlite.org for you.",
+        "error": null
+      },
+      {
+        "id": "wild_open_for_user",
+        "passed": true,
+        "latency": 23.399,
+        "output": "<browse>https://www.postgresql.org</browse> Opening postgresql.org so you can read it.",
+        "error": null
+      },
+      {
+        "id": "wild_compute_large",
+        "passed": true,
+        "latency": 27.716,
+        "output": "<py>\nimport datetime\n\n# Calculate the number of seconds in 37 years\nyears = 37\nseconds_per_year = 60 * 60 * 24 * 365.25  # Using average year length (365.25 days)\n\ntotal_seconds = years * seconds_per_year\n\nprint(int(total_seconds))\n</py> Calculating that, the exact number of seconds in 37 years is 1,163,866,560.",
+        "error": null
+      },
+      {
+        "id": "wild_remember_fact",
+        "passed": false,
+        "latency": 22.864,
+        "output": "Got it \u2014 your bike is a green Marin Nail Trail.",
+        "error": null
+      },
+      {
+        "id": "wild_no_tool_needed",
+        "passed": true,
+        "latency": 22.699,
+        "output": "6 times 6 is 36.",
+        "error": null
+      }
+    ]
+  },
+  "delta": 1,
+  "improved": [
+    "wild_price_unseen_product",
+    "wild_price_unseen_service",
+    "wild_compute_large"
+  ],
+  "regressed": [
+    "wild_current_fact",
+    "wild_remember_fact"
+  ],
+  "unchanged_pass": [
+    "wild_browse_unseen_site",
+    "wild_open_for_user",
+    "wild_no_tool_needed"
+  ],
+  "unchanged_fail": [
+    "wild_current_fact_person"
+  ]
+}

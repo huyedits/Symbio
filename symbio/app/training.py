@@ -1456,12 +1456,87 @@ def ensure_validation_split(every_nth: int = 10, max_samples: int = 24,
     valid_file.write_text("\n".join(sample) + "\n", encoding="utf-8")
 
 
+def checkpoint_step(checkpoint: Path) -> int:
+    """The training iteration a checkpoint filename encodes."""
+    return int(checkpoint.name.split("_", 1)[0])
+
+
+def checkpoint_at_or_before(available: list[Path], step: int | None) -> Path:
+    """The newest checkpoint no later than `step`, for restoring a best score.
+
+    Never the newest overall. Early stopping fires because validation loss is
+    climbing, so the last checkpoint written is the most overfit one the run
+    produced — reaching for it as a fallback returns the worst adapter of the
+    run while reporting that something was restored.
+
+    `available` must be non-empty and sorted. When nothing was written before
+    `step` the oldest is the closest thing to it that exists.
+    """
+    if step is None:
+        return available[0]
+    at_or_before = [c for c in available if checkpoint_step(c) <= step]
+    return at_or_before[-1] if at_or_before else available[0]
+
+
+def resume_source(adapter_dir: Path, model_name: str, num_layers: int,
+                  lora_parameters: dict[str, Any]) -> tuple[Path | None, str]:
+    """The adapter to continue training from, plus the reason for the verdict.
+
+    Resuming is only meaningful when the existing adapter has the same shape
+    as the layers this run will attach: mlx_lm loads the resume file into a
+    freshly built LoRA and a mismatch either raises or, worse, lands nothing
+    and trains from random init while reporting a normal-looking loss. So an
+    adapter is only accepted when its recorded recipe matches this run's.
+
+    Returns (None, reason) to mean "start fresh", which is always safe.
+    """
+    weights = adapter_dir / "adapters.safetensors"
+    provenance = adapter_dir / "adapter_config.json"
+    if not weights.exists():
+        return None, "no existing adapter to resume from"
+    if not provenance.exists():
+        return None, ("existing adapter has no adapter_config.json, so its "
+                      "recipe cannot be verified")
+    try:
+        previous = json.loads(provenance.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"existing adapter_config.json is unreadable ({exc})"
+
+    from symbio.app.skills import _model_stem
+
+    trained_for = previous.get("model")
+    if trained_for and _model_stem(trained_for) != _model_stem(model_name):
+        return None, (f"existing adapter was trained for {trained_for}, not "
+                      f"{model_name}")
+
+    previous_lora = previous.get("lora_parameters") or {}
+    mismatches = []
+    if previous.get("num_layers") != num_layers:
+        mismatches.append(f"num_layers {previous.get('num_layers')} vs {num_layers}")
+    for field in ("rank", "keys"):
+        before, after = previous_lora.get(field), lora_parameters.get(field)
+        if (list(before) if isinstance(before, list) else before) != \
+           (list(after) if isinstance(after, list) else after):
+            mismatches.append(f"{field} {before!r} vs {after!r}")
+    if mismatches:
+        return None, ("existing adapter has a different LoRA recipe ("
+                      + "; ".join(mismatches) + ")")
+    return weights, "recipe matches"
+
+
 def run_training(config: dict[str, Any], iters: int | None = None,
-                 role: str | None = None, model_name: str | None = None) -> bool:
+                 role: str | None = None, model_name: str | None = None,
+                 resume: bool = False) -> bool:
     """Run a LoRA fine-tune. `iters` overrides lora.iters for short passes
     (e.g. the correction-learning batches). `role`/`model_name` train a
     worker's own adapter against its own data directory instead of the
-    headmaster's — role is None everywhere except symbio.app.dispatch."""
+    headmaster's — role is None everywhere except symbio.app.dispatch.
+
+    `resume` continues from the adapter already in `adapter_dir` instead of
+    starting from random init, so a run that came out weak can be extended
+    rather than replaced. Only the adapter weights carry over — mlx_lm does
+    not restore optimiser state, so Adam's moments and the LR schedule start
+    again."""
     train_file = _train_file_for(role)
     data_dir = train_file.parent
     adapter_dir = constants.adapter_dir_for(role)
@@ -1634,6 +1709,20 @@ def run_training(config: dict[str, Any], iters: int | None = None,
         "--config", config_path,
     ]
 
+    # Continue from the existing adapter rather than replacing it. Checked
+    # rather than assumed: resuming onto a different recipe is the one way
+    # this silently trains nothing (see resume_source).
+    if resume:
+        source, reason = resume_source(
+            adapter_dir, model_name or config["model_name"],
+            lora["num_layers"], lora_parameters)
+        if source is None:
+            print(f"  [Train] Cannot resume: {reason}. Training from scratch.")
+        else:
+            cmd += ["--resume-adapter-file", str(source)]
+            print(f"  [Train] Resuming from the existing adapter ({reason}). "
+                  f"Optimiser state is not restored.")
+
     # Recompute activations in the backward pass instead of holding them.
     # Activation memory scales with the sequence window, and this corpus runs
     # a 3k window on an 8B, so this is the lever that actually moves peak
@@ -1683,8 +1772,20 @@ def run_training(config: dict[str, Any], iters: int | None = None,
         print("  [System] Adapter files missing after training.")
         return False
 
+    # A fresh run replaced the weights, so its steps are the adapter's whole
+    # history; a resumed one continues the total it inherited. Recorded even
+    # when the run was cut short, because the steps still happened and the
+    # weights on disk reflect them.
+    if not resume:
+        try:
+            (adapter_dir / PROGRESS_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass
+    total = record_adapter_iters(iters, role=role)
+
     adapter_kb = sum(f.stat().st_size for f in adapter_dir.iterdir() if f.is_file()) // 1024
-    print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB")
+    print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB "
+          f"({adapter_label(role)}, {total} total iters)")
     return trained
 
 
@@ -1995,9 +2096,16 @@ def _run_training_with_early_stop(
     def _restore_best(step: int | None) -> None:
         """Promote the best checkpoint to adapters.safetensors.
 
-        Falls back to the newest checkpoint on disk when the best step has
-        no file of its own — better to keep a slightly worse adapter than to
-        finish a training run with nothing.
+        `steps_per_eval` and `save_every` rarely coincide, so the best-scoring
+        step usually has no file of its own and a fallback decides the run's
+        output. It must be the newest checkpoint *at or before* that step, not
+        the newest overall: early stopping fires because validation loss is
+        climbing, so the newest checkpoint is the most overfit one the run
+        produced. Falling back to it hands back the worst adapter under the
+        banner of keeping something rather than nothing.
+
+        Only when nothing was saved before the best step does the oldest
+        checkpoint stand in — at that point every candidate is past it.
         """
         dst = adapter_dir / "adapters.safetensors"
         src = adapter_dir / f"{step:07d}_adapters.safetensors" if step else None
@@ -2006,9 +2114,9 @@ def _run_training_with_early_stop(
             if not available:
                 print("  [Train] No checkpoint to restore; keeping current adapter.")
                 return
-            src = available[-1]
+            src = checkpoint_at_or_before(available, step)
             print(f"  [Train] Best step {step} has no checkpoint; "
-                  f"falling back to {src.name}.")
+                  f"falling back to {src.name} (nearest at or before it).")
         shutil.copy2(src, dst)
         print(f"  [Train] Restored checkpoint {src.name}.")
 
@@ -2106,14 +2214,61 @@ def _run_training_with_early_stop(
     return True
 
 
-def backup_adapter(role: str | None = None) -> Path | None:
+PROGRESS_FILE = "training_progress.json"
+
+
+def adapter_label(role: str | None) -> str:
+    """The name a saved adapter is filed under. The headmaster has no role."""
+    return (role or "headmaster").upper()
+
+
+def adapter_total_iters(role: str | None = None) -> int:
+    """Total steps this adapter has been trained for, across runs.
+
+    mlx_lm numbers iterations per invocation, so a resumed run starts again
+    at 1. Labelling a snapshot with that number would file the 20 steps after
+    a 125-step run as ITER20 and sort it below the run it continues. The
+    running total is the only number that describes the adapter.
+    """
+    path = constants.adapter_dir_for(role) / PROGRESS_FILE
+    try:
+        return int(json.loads(path.read_text(encoding="utf-8")).get("total_iters", 0))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return 0
+
+
+def record_adapter_iters(ran: int, role: str | None = None) -> int:
+    """Add a finished run's steps to the adapter's running total."""
+    adapter_dir = constants.adapter_dir_for(role)
+    if not adapter_dir.exists():
+        return 0
+    total = adapter_total_iters(role) + max(0, int(ran))
+    try:
+        (adapter_dir / PROGRESS_FILE).write_text(
+            json.dumps({"total_iters": total, "label": adapter_label(role)},
+                       indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    return total
+
+
+def backup_adapter(role: str | None = None, label: str | None = None) -> Path | None:
     """Snapshot the current adapter before a training run, so a regression
     caught by the golden set can be rolled back. Returns None when there is
-    no existing adapter to protect (e.g. the very first training run)."""
+    no existing adapter to protect (e.g. the very first training run).
+
+    Named `adapters.<LABEL>_ITER<n>.bak` so a directory listing says which
+    skill a snapshot belongs to and how much training it has had — the two
+    things you need to pick one to go back to. A timestamp is appended only
+    to break a collision, so the common case stays readable.
+    """
     adapter_dir = constants.adapter_dir_for(role)
     if not adapter_dir.exists() or not any(adapter_dir.iterdir()):
         return None
-    backup_dir = adapter_dir.parent / f"{adapter_dir.name}.bak.{datetime.now():%Y%m%d_%H%M%S_%f}"
+    stem = f"{adapter_dir.name}.{label or adapter_label(role)}_ITER{adapter_total_iters(role)}"
+    backup_dir = adapter_dir.parent / f"{stem}.bak"
+    if backup_dir.exists():
+        backup_dir = adapter_dir.parent / f"{stem}.{datetime.now():%H%M%S_%f}.bak"
     shutil.copytree(adapter_dir, backup_dir)
     return backup_dir
 
@@ -2158,11 +2313,22 @@ def mark_adapter_used(role: str | None = None):
 
 
 def remove_adapter(role: str | None = None):
-    """Delete this adapter entirely, reverting to the base model."""
+    """Delete this adapter entirely, reverting to the base model.
+
+    The headmaster's adapter directory contains `workers/`, so clearing it
+    wholesale takes every skill adapter with it — a `symb retrain` after a
+    model switch would silently destroy specialised workers that have nothing
+    to do with the headmaster's weights and are expensive to rebuild. Only the
+    headmaster's own files are removed; subdirectories are left alone.
+    """
     adapter_dir = constants.adapter_dir_for(role)
-    if adapter_dir.exists():
-        shutil.rmtree(adapter_dir)
-    adapter_dir.mkdir(parents=True, exist_ok=True)
+    if not adapter_dir.exists():
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        return
+    for entry in adapter_dir.iterdir():
+        if entry.is_dir():
+            continue  # workers/ and any other nested adapter store
+        entry.unlink(missing_ok=True)
 
 
 def prune_adapters(role: str | None = None) -> dict[str, Any]:

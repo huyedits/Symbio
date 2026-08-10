@@ -23,7 +23,7 @@ from mlx_lm import generate, load
 from mlx_lm.sample_utils import make_sampler
 
 from symbio import constants
-from symbio.app import golden, training
+from symbio.app import golden, tooling, training
 
 
 def load_catalog() -> dict[str, dict[str, Any]]:
@@ -181,6 +181,32 @@ def describe_recipe_drift(worker_dir: Path, headmaster_dir: Path) -> str | None:
     drift = [f"{k}: worker={worker[k]!r} vs headmaster={headmaster[k]!r}"
              for k in worker if worker[k] != headmaster[k]]
     return "; ".join(drift) or None
+
+
+def label_worker_reply(role: str, reply: str) -> str:
+    """Frame a worker's reply so a tool call in it reads as proposed, not done.
+
+    Nothing executes a worker's tool tags. Its reply comes back as the
+    headmaster's observation, and an observation is where *results* live — so
+    a worker that correctly answered "<search>Tallinn mayor current</search>"
+    was read as a search that had already run. The headmaster then answered
+    the question from memory and presented it as looked-up. A specialist whose
+    whole job is choosing the right tool turns into a machine for dressing up
+    recall as research, which is worse than not delegating at all.
+
+    Saying plainly that the call has not run puts it back in the headmaster's
+    hands, which is the same "suggest, don't route" stance the rest of
+    dispatch takes.
+    """
+    if not reply:
+        return f"Worker '{role}' returned nothing."
+    if not tooling.parse_tools(reply):
+        return reply
+    return (
+        f"Worker '{role}' recommends this tool call but it has NOT been run "
+        f"and no result exists yet:\n{reply}\n"
+        f"Issue the call yourself if you agree with it. Do not answer as "
+        f"though it already returned.")
 
 
 class SecondHeadmasterCopyRefused(RuntimeError):
@@ -437,7 +463,7 @@ class WorkerPool:
             self._status(f"  [Dispatch] Worker '{role}' returned {len(reply.split())} word(s).")
             if reply:
                 training.append_chat_pair(task, reply, tokenizer, system_prompt, role=role)
-            return reply or f"Worker '{role}' returned nothing."
+            return label_worker_reply(role, reply)
         finally:
             if deep_sleep and self.after_worker_fn is not None:
                 self._status("  [Dispatch] Waking headmaster back up...")

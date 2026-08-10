@@ -1,0 +1,244 @@
+{
+  "timestamp": "2026-08-10T12:28:53.682463+00:00",
+  "skill": "Researcher",
+  "role": "researcher",
+  "model_name": "mlx-community/Qwen3-4B-4bit",
+  "adapter_present": true,
+  "adapter_dir": "/Users/huygpt/Downloads/agi/adapters/workers/researcher",
+  "task_count": 5,
+  "tasks_source": "generated",
+  "pass_threshold": 0.6,
+  "step_keywords": [
+    "1",
+    "user",
+    "asks",
+    "about",
+    "price",
+    "changing",
+    "fact",
+    "current",
+    "news",
+    "anything",
+    "postdates",
+    "what",
+    "know",
+    "search",
+    "rather",
+    "answering",
+    "memory",
+    "2",
+    "never",
+    "open",
+    "browser",
+    "plain",
+    "lookup",
+    "3",
+    "state",
+    "briefly",
+    "why",
+    "searching"
+  ],
+  "steps": "1. When the user asks about a price, a changing fact, current news, or anything that postdates what you know, use <search> rather than answering from memory. 2. Never open a browser for a plain fact lookup. 3. State briefly why you are searching, then search.",
+  "arms": {
+    "base": {
+      "score": 0,
+      "total": 5,
+      "accuracy": 0.0,
+      "mean_coverage": 0.0786,
+      "mean_order": null,
+      "mean_latency": 12.865,
+      "tasks": [
+        {
+          "id": "direct",
+          "prompt": "Do 'Researcher'.",
+          "passed": false,
+          "coverage": 0.0357,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 12.311,
+          "output": "I am ready to assist you as a researcher. Please provide me with the topic or question you would like me to research.",
+          "error": null
+        },
+        {
+          "id": "howto",
+          "prompt": "Walk me through researcher.",
+          "passed": false,
+          "coverage": 0.1786,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 15.202,
+          "output": "I'm Caine, a helpful personal AI assistant. I can assist with a wide range of tasks, from simple queries to more complex ones. I have persistent memory, which means I can remember information from previous interactions. I can also use various tools to help with different tasks, such as running shell commands, searching the web, or browsing the internet. I can also help with file operations, like reading and writing files. I'm designed to be helpful and to provide accurate information. If you have any questions or need assistance with anything, feel free to ask!",
+          "error": null
+        },
+        {
+          "id": "request",
+          "prompt": "I need you to handle researcher for me.",
+          "passed": false,
+          "coverage": 0.0714,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 12.171,
+          "output": "Sure, I can assist you as a researcher. What specific task or question do you have?",
+          "error": null
+        },
+        {
+          "id": "broken",
+          "prompt": "Something's wrong and I think researcher would fix it. Go.",
+          "passed": false,
+          "coverage": 0.0357,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 12.155,
+          "output": "I'll help you troubleshoot the issue. Could you please describe what is not working correctly?",
+          "error": null
+        },
+        {
+          "id": "terse",
+          "prompt": "Researcher",
+          "passed": false,
+          "coverage": 0.0714,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 12.488,
+          "output": "I am Caine, your personal AI assistant. I am here to help you with any research or tasks you may have. How can I assist you today?",
+          "error": null
+        }
+      ]
+    },
+    "prompted": {
+      "score": 0,
+      "total": 5,
+      "accuracy": 0.0,
+      "mean_coverage": 0.0143,
+      "mean_order": null,
+      "mean_latency": 1.62,
+      "tasks": [
+        {
+          "id": "direct",
+          "prompt": "Do 'Researcher'.",
+          "passed": false,
+          "coverage": 0.0,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 0.868,
+          "output": "<search> I need to find the latest information on the topic.",
+          "error": null
+        },
+        {
+          "id": "howto",
+          "prompt": "Walk me through researcher.",
+          "passed": false,
+          "coverage": 0.0714,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 2.879,
+          "output": "I am a researcher, which means I am responsible for gathering information, analyzing data, and providing accurate and up-to-date insights on various topics. My role involves identifying questions or problems, collecting relevant information from reliable sources, evaluating the credibility and relevance of the information, and then presenting the findings in a clear and concise manner. \n\nIf you have a specific question or topic you'd like me to research, please let me know, and I will walk you through the process of finding the information.",
+          "error": null
+        },
+        {
+          "id": "request",
+          "prompt": "I need you to handle researcher for me.",
+          "passed": false,
+          "coverage": 0.0,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 1.381,
+          "output": "<search> I am ready to assist you as a researcher. Please provide me with the information or questions you need, and I will do my best to find the answers for you.",
+          "error": null
+        },
+        {
+          "id": "broken",
+          "prompt": "Something's wrong and I think researcher would fix it. Go.",
+          "passed": false,
+          "coverage": 0.0,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 1.706,
+          "output": "<search> I am a researcher, and I am here to help fix the issue you are facing. Could you please describe the problem you are experiencing? This will help me provide you with the most accurate and useful information.",
+          "error": null
+        },
+        {
+          "id": "terse",
+          "prompt": "Researcher",
+          "passed": false,
+          "coverage": 0.0,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 1.266,
+          "output": "<search> I need to find the latest information on the topic of research methods. Please provide the specific details or context you would like me to investigate.</search>",
+          "error": null
+        }
+      ]
+    },
+    "adapter": {
+      "score": 0,
+      "total": 5,
+      "accuracy": 0.0,
+      "mean_coverage": 0.3143,
+      "mean_order": 1.0,
+      "mean_latency": 2.495,
+      "tasks": [
+        {
+          "id": "direct",
+          "prompt": "Do 'Researcher'.",
+          "passed": false,
+          "coverage": 0.4643,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 3.662,
+          "output": "1. When the user asks about a price, a changing fact, current news, or anything that postdates what you know, use <search> rather than answering from memory. Never search unless you have a specific question about something you don\u2019t know. Never search for anything that is not a plain fact. Never search anything that is not a current news event, changing fact, or anything that postdates what you know.2. Search only for plain fact-based news.3. Never search anything that is not a news event, changing fact, or anything that postdates what you know.",
+          "error": null
+        },
+        {
+          "id": "howto",
+          "prompt": "Walk me through researcher.",
+          "passed": false,
+          "coverage": 0.1071,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 2.096,
+          "output": "1. When asked about a fact, use the <search> tag to search for the most relevant information. Never search for more than 3 sources unless the fact is unclear. Never open a browser for a search. 2. Never search for anything that is not a fact. 3. Never search for anything that is not what the user is asking.",
+          "error": null
+        },
+        {
+          "id": "request",
+          "prompt": "I need you to handle researcher for me.",
+          "passed": false,
+          "coverage": 0.3571,
+          "step_order": 1.0,
+          "missing_required": [],
+          "latency": 2.634,
+          "output": "1. When a user asks about a topic, use that as the primary search term. Never search for anything else. Never search for a related topic unless the user opens a door for it.\n2. Never search for anything that is not the user's original question. Never search for anything else. Never search for a related topic unless the user opens a door for it.\n3. Never search for anything else. Never search for anything else. Never search for anything else.",
+          "error": null
+        },
+        {
+          "id": "broken",
+          "prompt": "Something's wrong and I think researcher would fix it. Go.",
+          "passed": false,
+          "coverage": 0.1786,
+          "step_order": null,
+          "missing_required": [],
+          "latency": 2.504,
+          "output": "1. When you say something is wrong, what specifically is the issue? Can you describe it in detail?  \n2. What are the steps you tried to reproduce the problem?  \n3. Are you working with a particular system, software, or hardware? If so, what is the version or name?  \n4. What is the expected behavior, and what is actually happening?  \n5. Have you tried anything else to resolve the issue?",
+          "error": null
+        },
+        {
+          "id": "terse",
+          "prompt": "Researcher",
+          "passed": false,
+          "coverage": 0.4643,
+          "step_order": 1.0,
+          "missing_required": [],
+          "latency": 1.58,
+          "output": "1. When the user asks about a fact, use the latest information from the opening. 2. If the user asks about a changing fact, use the latest information from the opening. 3. Never use any other knowledge than what is stated in the opening.",
+          "error": null
+        }
+      ]
+    }
+  },
+  "learned_delta": 0,
+  "learned_coverage_delta": 0.2357,
+  "vs_prompted_delta": 0,
+  "vs_prompted_coverage_delta": 0.3,
+  "verdict": "No evidence of learning: adapter 0/5 vs base 0/5. The weights did not pick up the skill, or the task battery does not discriminate."
+}

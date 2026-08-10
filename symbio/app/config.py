@@ -56,10 +56,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # per check and can dominate a run. This is a plateau detector, not a
         # benchmark.
         "val_batches": 8,
-        # Checkpoint interval. A crash between checkpoints destroys everything
-        # since the last one, and an 8B LoRA step runs ~20s here, so 100 iters
-        # is a ~33 minute hole. Writing a ~19 MB adapter every 25 steps costs
-        # almost nothing next to what it saves.
+        # Checkpoint interval, and it must divide steps_per_eval. A crash
+        # between checkpoints destroys everything since the last one, and an 8B
+        # LoRA step runs ~20s here, so 100 iters is a ~33 minute hole. The
+        # divisibility matters as much as the size: early stopping restores the
+        # best-scoring *evaluated* step, so an interval that never lands on an
+        # eval point leaves every best step without a file and hands the run's
+        # output to _restore_best's fallback.
+        # 25 divides the 100 above; config.json's 30/15 pairing does too.
         "save_every": 25,
         # Early stopping: kill training if validation loss stops improving.
         "early_stop_enabled": True,
