@@ -78,7 +78,27 @@ def _build_parser() -> argparse.ArgumentParser:
     gateway_sub.add_parser("stop", help="Stop the running gateway")
     gateway_parser.set_defaults(gateway_command="status")
 
-    sub.add_parser("train", help="Run LoRA training")
+    train_parser = sub.add_parser("train", help="Run LoRA training")
+    train_parser.add_argument(
+        "skill",
+        nargs="?",
+        help="Skill or worker to train, by name ('fix wifi' or 'fix_wifi'). "
+             "Omit to train the headmaster's own adapter.",
+    )
+    train_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Continue from the existing adapter instead of starting from "
+             "scratch, for when a run came out weak and needs more steps",
+    )
+    train_parser.add_argument(
+        "--iters",
+        type=int,
+        help="Exact iteration count, bypassing corpus scaling. Needed for "
+             "skill workers: lora.iters is a floor, so a 21-sample skill "
+             "would otherwise be forced through seven epochs of its own "
+             "handful of samples.",
+    )
 
     skill_parser = sub.add_parser("skill", help="Manage skill adapters")
     skill_sub = skill_parser.add_subparsers(dest="skill_command")
@@ -653,9 +673,68 @@ def _cmd_archive(config: dict[str, Any], args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_train(config: dict[str, Any]) -> int:
-    run_training(config)
-    return 0
+def _print_category_rates(report_path) -> None:
+    """Per-category pass rates, base against adapter.
+
+    A single overall score hides the thing worth acting on: this adapter is
+    2/2 on browser work and 2/4 on research, and those need opposite
+    responses. Printed base-first so a category the fine-tune made *worse* is
+    visible rather than averaged away by the ones it improved.
+    """
+    import json
+    from pathlib import Path
+
+    from symbio.app.wildcards import category_of
+
+    try:
+        report = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    tallies: dict[str, dict[str, list[int]]] = {}
+    for arm in ("base", "adapter"):
+        for task in report.get(arm, {}).get("tasks", []):
+            slot = tallies.setdefault(category_of(task["id"]), {})
+            slot.setdefault(arm, []).append(1 if task.get("passed") else 0)
+    if not tallies:
+        return
+    print("\n  [Eval] Per-category pass rate:")
+    print(f"    {'category':10} {'base':>12} {'adapter':>12}   delta")
+    for name in sorted(tallies):
+        base, adapter = tallies[name].get("base", []), tallies[name].get("adapter", [])
+        if not base or not adapter:
+            continue
+        b, a = sum(base), sum(adapter)
+        print(f"    {name:10} {b:>4}/{len(base):<3} {b/len(base):>4.0%} "
+              f"{a:>4}/{len(adapter):<3} {a/len(adapter):>4.0%}   {a - b:+d}")
+
+
+def _cmd_train(config: dict[str, Any], skill: str | None = None,
+               resume: bool = False, iters: int | None = None) -> int:
+    """Train the headmaster's adapter, or a named skill's worker adapter.
+
+    Naming the skill is the point: a worker's adapter lives under a slug the
+    user never chose and never sees, so asking them to type a path to it (or
+    to a `0000100_adapters.safetensors` checkpoint) is asking them to look up
+    something the tool already knows.
+    """
+    role = model_name = None
+    if skill:
+        from symbio.app.dispatch import catalog_entry_for_role, load_catalog
+        from symbio.app.skills import _skill_slug
+
+        role = _skill_slug(skill)
+        entry = catalog_entry_for_role(role)
+        if entry is None:
+            known = sorted({e.get("role") for e in load_catalog().values()
+                            if e.get("role")})
+            print(f"No worker named '{skill}' (looked for role '{role}').")
+            print(f"Known: {', '.join(known) or 'none'}")
+            return 1
+        model_name = entry.get("model_name")
+        print(f"  [Train] Training worker '{role}' ({model_name}).")
+
+    return 0 if run_training(config, role=role, model_name=model_name,
+                             resume=resume, iters=iters) else 1
 
 
 def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
@@ -865,7 +944,9 @@ def main(argv: list[str] | None = None) -> int:
     if command == "index-notes":
         return _cmd_index_notes(config, force=getattr(args, "force", False))
     if command == "train":
-        return _cmd_train(config)
+        return _cmd_train(config, skill=getattr(args, "skill", None),
+                          resume=getattr(args, "resume", False),
+                          iters=getattr(args, "iters", None))
     if command == "retrain":
         from symbio.app.retrain import retrain_model
 
@@ -930,13 +1011,15 @@ def main(argv: list[str] | None = None) -> int:
 
         cases = None
         if getattr(args, "wildcards", False):
-            from symbio.app.wildcards import WILDCARD_CASES
+            from symbio.app.wildcards import DEEP_CASES, WILDCARD_CASES
 
-            cases = WILDCARD_CASES
+            cases = WILDCARD_CASES + DEEP_CASES
             print(f"  [Eval] Using {len(cases)} held-out wildcard case(s): "
                   f"subjects absent from the training corpus.")
-        run_lora_benchmark(config, output_path=args.output,
-                           max_tokens=args.max_tokens, cases=cases)
+        report_path = run_lora_benchmark(config, output_path=args.output,
+                                         max_tokens=args.max_tokens, cases=cases)
+        if getattr(args, "wildcards", False):
+            _print_category_rates(report_path)
         return 0
     if command == "gateway":
         sub = getattr(args, "gateway_command", None) or "start"

@@ -2873,11 +2873,28 @@ class ChatSession:
                 "suggest_skill_workers", True):
             offers = ", ".join(f"<delegate role='{r}'>the task</delegate>"
                                for r in suggested_roles)
+            # Retrieval usually surfaces about two candidates, so the offer has
+            # to carry enough to tell them apart. Each worker's own recorded
+            # reason for existing does that; without it the model is choosing
+            # between bare role names it has no basis to rank.
+            reasons = ""
+            if len(suggested_roles) > 1:
+                from symbio.app import dispatch as _dispatch
+
+                lines = []
+                for role in suggested_roles:
+                    entry = _dispatch.catalog_entry_for_role(role) or {}
+                    why = (entry.get("routing_rationale") or "").strip()
+                    if why:
+                        lines.append(f"  - {role}: {why.splitlines()[0]}")
+                if lines:
+                    reasons = "\n Which one:\n" + "\n".join(lines)
             rag_block += (
                 f"\n\n[System note: this request matches a skill that has its own "
                 f"trained worker. The procedure is in that worker's weights, so "
                 f"prefer handing it over with {offers} rather than answering from "
-                f"memory. Ignore this if the request is not actually about that skill.]"
+                f"memory. Ignore this if the request is not actually about that "
+                f"skill.{reasons}]"
             )
         rag_ms = (time.perf_counter() - turn_start) * 1000
         timings["rag_ms"] = rag_ms
@@ -3003,6 +3020,10 @@ class ChatSession:
             # observation round-trip that pollutes history.
             gen_aborted = False
             for _sample_attempt in range(2):
+                # _generate_reply clears the cache in its own error path before
+                # re-raising, so whether one was in play has to be recorded here
+                # or the handler below can never tell.
+                _had_prompt_cache = self._prompt_cache is not None
                 try:
                     raw_reply, streamed_live = self._generate_reply(
                         messages, chunk_prefix=chunk_prefix, timings=timings)
@@ -3014,6 +3035,24 @@ class ChatSession:
                     gen_aborted = True
                     break
                 except Exception as e:
+                    # The warmed prompt cache is an optimization, and the turn
+                    # must not die with it. A cache persisted by an earlier run
+                    # can reference an MLX stream that does not exist in this
+                    # process ("There is no Stream(cpu, N) in current thread");
+                    # loading it succeeds and generation is where it explodes,
+                    # so the prefill guard never sees it. Drop it, delete the
+                    # stale file so the next run does not inherit the same
+                    # crash, and take the second attempt without it.
+                    if _had_prompt_cache and _sample_attempt == 0:
+                        self.output_fn("  [Cache] Warmed prompt cache unusable "
+                                       "here; discarding it and retrying.")
+                        self._prompt_cache = None
+                        self._cached_prompt_ids = None
+                        try:
+                            constants.PROMPT_CACHE_FILE.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        continue
                     self.output_fn(f"[MLX Error: {e}]")
                     gen_aborted = True
                     break
