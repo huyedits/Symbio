@@ -1008,3 +1008,31 @@ def test_a_matching_worker_adapter_is_loaded(monkeypatch, tmp_path):
     dispatch.WorkerPool({"dispatch": {}}).get("r")
 
     assert calls == [("mlx-community/Qwen3-4B-4bit", str(d))]
+
+
+# ---- a worker's tool call is a proposal, not a result ----
+#
+# Nothing executes a worker's tool tags; its reply is handed to the headmaster
+# as an observation, and observations are where results live. A researcher that
+# correctly answered "<search>Tallinn mayor current</search>" was therefore read
+# as a search that had already run, and the headmaster answered from memory and
+# presented it as looked up. Confident fabrication is worse than not delegating.
+
+def test_a_worker_tool_call_is_labelled_as_not_yet_run():
+    out = dispatch.label_worker_reply(
+        "researcher", "<search>Tallinn mayor current</search> Looking it up.")
+
+    assert "NOT been run" in out
+    assert "<search>Tallinn mayor current</search>" in out, "the call itself must survive"
+    assert "Do not answer as though it already returned" in out
+
+
+def test_a_worker_reply_without_tools_is_passed_through_unchanged():
+    """Only tool calls are ambiguous; prose answers are already results."""
+    prose = "The page is about SQLite indexes."
+
+    assert dispatch.label_worker_reply("summarize", prose) == prose
+
+
+def test_an_empty_worker_reply_says_so():
+    assert "returned nothing" in dispatch.label_worker_reply("researcher", "")

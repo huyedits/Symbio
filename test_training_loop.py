@@ -12,10 +12,12 @@ to teach.
 """
 import json
 import threading
+from pathlib import Path
 
 import pytest
 
 from symbio import constants
+from symbio.app import config as app_config
 from symbio.app import training
 
 
@@ -387,7 +389,8 @@ def test_block_count_is_none_for_an_uncached_model(monkeypatch):
     assert training.model_block_count("nope/not-here") is None
 
 
-def _run_and_capture_trainer_args(corpus, monkeypatch, lora_overrides):
+def _run_and_capture_trainer_args(corpus, monkeypatch, lora_overrides,
+                                  resume=False):
     """Run run_training against a stub trainer; return (argv, parsed yaml)."""
     training.append_chat_pair("Q?", "A.", ChatMLTokenizer(), "SYS")
     monkeypatch.setattr(training, "_memory_shortfall", lambda *a, **k: None)
@@ -417,7 +420,8 @@ def _run_and_capture_trainer_args(corpus, monkeypatch, lora_overrides):
             "max_iters": 10, "max_seq_length": 512, "steps_per_eval": 10,
             "save_every": 10, "early_stop_enabled": False}
     lora.update(lora_overrides)
-    training.run_training({"model_name": "m", "gpu": {}, "lora": lora})
+    training.run_training({"model_name": "m", "gpu": {}, "lora": lora},
+                          resume=resume)
     return captured["cmd"], captured["yaml"]
 
 
@@ -542,3 +546,145 @@ def test_validation_batch_count_is_configurable(corpus, monkeypatch):
     cmd, _ = _run_and_capture_trainer_args(corpus, monkeypatch, {"val_batches": 3})
 
     assert cmd[cmd.index("--val-batches") + 1] == "3"
+
+
+# ---- resuming a run that came out weak ----
+#
+# Without --resume-adapter-file every run starts from random init and
+# overwrites adapter_dir, so "train it a bit more" silently threw away the
+# previous run instead of extending it. Resuming is only safe when the
+# existing adapter has the shape this run will attach: mlx_lm loads the
+# resume file into a freshly built LoRA, and a mismatch trains from scratch
+# while still reporting a normal-looking loss.
+
+_RESUME_LORA = {"rank": 8, "keys": ["self_attn.q_proj", "self_attn.v_proj"]}
+
+
+def _adapter_at(tmp_path, name, *, model="Qwen/Qwen3-8B-MLX-4bit",
+                num_layers=8, lora=None, weights=True, provenance=True):
+    d = tmp_path / name
+    d.mkdir(parents=True, exist_ok=True)
+    if weights:
+        (d / "adapters.safetensors").write_bytes(b"weights")
+    if provenance:
+        (d / "adapter_config.json").write_text(json.dumps({
+            "model": model,
+            "num_layers": num_layers,
+            "lora_parameters": _RESUME_LORA if lora is None else lora,
+        }), encoding="utf-8")
+    return d
+
+
+def _resume(adapter_dir):
+    return training.resume_source(
+        adapter_dir, "Qwen/Qwen3-8B-MLX-4bit", 8, _RESUME_LORA)
+
+
+def test_resume_accepts_an_adapter_whose_recipe_matches(tmp_path):
+    source, why = _resume(_adapter_at(tmp_path, "match"))
+
+    assert source is not None
+    assert source.name == "adapters.safetensors"
+    assert why == "recipe matches"
+
+
+def test_resume_refuses_an_adapter_from_a_different_model(tmp_path):
+    source, why = _resume(
+        _adapter_at(tmp_path, "other", model="mlx-community/Qwen3-4B-4bit"))
+
+    assert source is None
+    assert "Qwen3-4B-4bit" in why
+
+
+def test_resume_refuses_an_adapter_with_different_lora_keys(tmp_path):
+    """The drift that caused this whole investigation: narrowing the targets
+    makes every older adapter a different shape."""
+    source, why = _resume(_adapter_at(tmp_path, "keys", lora={"rank": 8}))
+
+    assert source is None
+    assert "keys" in why
+
+
+def test_resume_refuses_an_adapter_with_a_different_rank(tmp_path):
+    source, why = _resume(_adapter_at(
+        tmp_path, "rank", lora={"rank": 16, "keys": _RESUME_LORA["keys"]}))
+
+    assert source is None
+    assert "rank" in why
+
+
+def test_resume_refuses_an_adapter_with_a_different_layer_count(tmp_path):
+    source, why = _resume(_adapter_at(tmp_path, "layers", num_layers=16))
+
+    assert source is None
+    assert "num_layers" in why
+
+
+def test_resume_refuses_an_adapter_it_cannot_verify(tmp_path):
+    """Missing provenance is not evidence the shapes match."""
+    source, why = _resume(_adapter_at(tmp_path, "bare", provenance=False))
+
+    assert source is None
+    assert "cannot be verified" in why
+
+
+def test_resume_is_a_no_op_when_there_is_nothing_to_resume_from(tmp_path):
+    source, why = _resume(_adapter_at(tmp_path, "empty", weights=False))
+
+    assert source is None
+    assert "no existing adapter" in why
+
+
+def test_training_does_not_resume_unless_asked(corpus, monkeypatch):
+    cmd, _ = _run_and_capture_trainer_args(corpus, monkeypatch, {})
+
+    assert "--resume-adapter-file" not in cmd
+
+
+# ---- which checkpoint a stopped run hands back ----
+#
+# steps_per_eval and save_every rarely coincide, so the best-scoring step
+# usually has no file and a fallback decides the run's output. Reaching for
+# the newest checkpoint returns the most overfit adapter of the run, because
+# early stopping fires precisely when validation loss has started climbing.
+
+def _ckpts(*steps):
+    return [Path(f"{s:07d}_adapters.safetensors") for s in steps]
+
+
+def test_fallback_prefers_the_checkpoint_before_the_best_step():
+    """Real case: best val at iter 60, checkpoints at 25/50/75/100.
+
+    Iter 100 is 40 steps past the divergence with validation loss rising;
+    iter 50 is the closest thing to the model that actually scored best.
+    """
+    chosen = training.checkpoint_at_or_before(_ckpts(25, 50, 75, 100), 60)
+
+    assert training.checkpoint_step(chosen) == 50
+
+
+def test_fallback_is_exact_when_the_best_step_was_saved():
+    chosen = training.checkpoint_at_or_before(_ckpts(25, 50, 75, 100), 100)
+
+    assert training.checkpoint_step(chosen) == 100
+
+
+def test_fallback_takes_the_oldest_when_nothing_precedes_the_best_step():
+    """Every candidate is past it, so the oldest is the least overfit."""
+    chosen = training.checkpoint_at_or_before(_ckpts(25, 50), 10)
+
+    assert training.checkpoint_step(chosen) == 25
+
+
+def test_fallback_without_a_best_step_takes_the_oldest():
+    chosen = training.checkpoint_at_or_before(_ckpts(25, 50, 75), None)
+
+    assert training.checkpoint_step(chosen) == 25
+
+
+def test_checkpoint_interval_divides_the_evaluation_interval():
+    """Otherwise no evaluated step ever has a checkpoint of its own, and the
+    fallback above decides every run's output instead of the best score."""
+    lora = app_config.DEFAULT_CONFIG["lora"]
+
+    assert lora["steps_per_eval"] % lora["save_every"] == 0

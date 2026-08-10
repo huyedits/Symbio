@@ -20,6 +20,11 @@ logs/
 *.log
 adapters.bak.*/
 adapters.testbak.*/
+# Labelled snapshots: adapters.RESEARCHER_ITER20.bak and friends. The rule
+# above only matches the timestamped form, and an adapter backup that slips
+# past .gitignore is ~19 MB of per-user weights in the history.
+adapters.*.bak/
+adapters.*.bak.*/
 benchmark_lora_*.json
 training_data/*.bak.*
 training_data/tmp*.yaml
