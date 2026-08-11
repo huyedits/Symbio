@@ -732,6 +732,18 @@ def _cmd_train(config: dict[str, Any], skill: str | None = None,
             return 1
         model_name = entry.get("model_name")
         print(f"  [Train] Training worker '{role}' ({model_name}).")
+        # Through the guarded path, not run_training directly. Calling the
+        # trainer straight left a worker trained here with none of the
+        # protection the same run gets from /train_worker or a resumed task:
+        # no golden baseline, no rollback on regression, and no update to the
+        # journal — so a skill trained this way stayed listed as owed forever
+        # while its adapter sat finished on disk.
+        from symbio.app.dispatch import guarded_train_worker
+
+        trained, message = guarded_train_worker(
+            role, config, iters=iters, resume=resume)
+        print(f"  [Worker] {message}")
+        return 0 if trained else 1
 
     return 0 if run_training(config, role=role, model_name=model_name,
                              resume=resume, iters=iters) else 1

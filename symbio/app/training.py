@@ -1955,6 +1955,45 @@ def _training_overhead(config: dict[str, Any]) -> float:
     ]
 
 
+# A load-and-generate needs the weights plus a KV cache, with no optimiser
+# state and no retained activations, so it sits far below any of the training
+# multipliers above. Kept above 1.0 for the same reason those are pessimistic:
+# refusing a load costs a retry, accepting one the machine cannot hold costs
+# the machine.
+_INFERENCE_OVERHEAD = 1.25
+
+
+def load_memory_shortfall(config: dict[str, Any],
+                          model_name: str | None = None,
+                          purpose: str = "load this model") -> str | None:
+    """A message explaining why there is not room to load a model for
+    inference, or None to proceed.
+
+    _memory_shortfall guards the trainer child, which is only half of what a
+    guarded training run puts in RAM: the baseline and post-training golden
+    runs load their own full copy of the weights in *this* process, and did so
+    with no check at all. On a machine already holding the headmaster and a
+    resident worker, that unchecked load is the allocation that goes over the
+    edge — and it happens before the trainer's own preflight ever runs.
+    """
+    if not config.get("gpu", {}).get("memory_preflight", True):
+        return None
+    weights = _model_weight_bytes(model_name or config.get("model_name"))
+    free = free_ram_bytes()
+    if weights is None or free is None:
+        return None  # Unknown on either side is not evidence of a problem.
+    needed = int(weights * _INFERENCE_OVERHEAD)
+    if free >= needed:
+        return None
+    return (
+        f"Not enough free memory to {purpose}: it needs about "
+        f"{needed / 1e9:.1f} GB ({weights / 1e9:.1f} GB of weights plus a KV "
+        f"cache) and only {free / 1e9:.1f} GB is free. Something else is "
+        f"holding memory — a resident chat model, another worker, or a "
+        f"training run. Skipping rather than risking an out-of-memory kill."
+    )
+
+
 def _memory_shortfall(config: dict[str, Any],
                       model_name: str | None = None) -> str | None:
     """A message explaining why there is not room to train, or None to proceed.
@@ -2269,16 +2308,54 @@ def backup_adapter(role: str | None = None, label: str | None = None) -> Path | 
     backup_dir = adapter_dir.parent / f"{stem}.bak"
     if backup_dir.exists():
         backup_dir = adapter_dir.parent / f"{stem}.{datetime.now():%H%M%S_%f}.bak"
-    shutil.copytree(adapter_dir, backup_dir)
+    shutil.copytree(adapter_dir, backup_dir, ignore=_ignore_nested_workers)
     return backup_dir
 
 
+def _ignore_nested_workers(directory, names):
+    """Keep every worker's adapter out of the headmaster's snapshot.
+
+    The worker adapters live *inside* the headmaster's directory
+    (adapters/workers/<role>), so a plain copytree of adapters/ sweeps them
+    all into the headmaster's backup — and the matching restore then puts that
+    frozen copy back over whatever the workers have learned since. One
+    headmaster rollback would silently revert every skill adapter on the
+    machine to whenever its snapshot was taken, and delete outright any skill
+    trained after it. Worker adapters have their own backups, taken and
+    restored against their own directories; they have no business in this one.
+    """
+    if Path(directory).resolve() != constants.ADAPTER_DIR.resolve():
+        return set()
+    return {n for n in names if n == constants.WORKER_ADAPTERS_DIR.name}
+
+
 def restore_adapter(backup_dir: Path, role: str | None = None):
-    """Replace the current adapter with a previously backed-up one."""
+    """Replace the current adapter with a previously backed-up one.
+
+    Everything the adapter directory holds is replaced except the nested
+    workers/ tree, which belongs to the workers and is left exactly as it is.
+    Older backups, taken before backup_adapter learned to skip it, still carry
+    a stale copy of that tree; it is ignored rather than restored.
+    """
     adapter_dir = constants.adapter_dir_for(role)
+    workers_dir = constants.WORKER_ADAPTERS_DIR if role is None else None
     if adapter_dir.exists():
-        shutil.rmtree(adapter_dir)
-    shutil.copytree(backup_dir, adapter_dir)
+        for item in adapter_dir.iterdir():
+            if workers_dir is not None and item.name == workers_dir.name:
+                continue
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                item.unlink(missing_ok=True)
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    for item in Path(backup_dir).iterdir():
+        if workers_dir is not None and item.name == workers_dir.name:
+            continue
+        target = adapter_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
 
 
 def discard_adapter_backup(backup_dir: Path | None):
