@@ -97,6 +97,22 @@ class ArmResult:
         return round(self.pass_count / self.total, 4) if self.total else 0.0
 
 
+def _step_body(text: str) -> str:
+    """The steps with their "1. " "2. " enumerators removed.
+
+    The numbers are structure, not content, and counting them as keywords
+    hands free credit to any numbered list. Measured on the knife-sharpening
+    skill: the base model answered with a completely different procedure —
+    whetstone, clean the blade, honing rod — and scored 68% against a
+    threshold of 60%, so it passed. Five of its 26 matches were the bare
+    digits 1-5. The adapter's own score is unaffected (it reproduces the
+    steps), so this only stops the baseline being flattered, which is the
+    number the whole comparison rests on.
+    """
+    parts = split_steps(text)
+    return " ".join(parts) if parts else text
+
+
 def _keywords(text: str) -> list[str]:
     """Content words from a skill's steps, deduped, order preserved.
 
@@ -263,7 +279,7 @@ def skill_golden_cases(name: str, steps: str) -> list[Any]:
 
     if not steps.strip():
         return []
-    keywords = _keywords(steps)
+    keywords = _keywords(_step_body(steps))
     if not keywords:
         return []
 
@@ -502,7 +518,7 @@ def run_skill_eval(
     if not steps:
         raise ValueError(f"Skill '{name}' has no recoverable steps to grade against.")
 
-    keywords = _keywords(steps)
+    keywords = _keywords(_step_body(steps))
     tasks, custom = load_tasks(role, name)
     adapter_dir = constants.adapter_dir_for(role)
     adapter_present = adapter_is_usable(adapter_dir)

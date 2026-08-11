@@ -280,6 +280,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # so without this every skill dispatch holds two full copies of those
         # weights. Costs a reload per delegation; that is the price of a skill
         # worker at headmaster size on a machine that cannot hold both.
+        # The worker is unloaded again before the headmaster comes back, so
+        # this really does mean one model resident at a time — reloading the
+        # headmaster on top of a still-resident worker was the same double
+        # residency one turn later, and it OOM'd the machine.
         "headmaster_deep_sleep_while_workers": False,
         "hot_swap_adapters": True,
         # When a headmaster-sized worker cannot be hot-swapped, the fallback is

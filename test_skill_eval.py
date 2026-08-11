@@ -477,3 +477,51 @@ def test_order_anchors_match_whole_tokens_only():
         "1. Unplug the unit. 2. Check the configuration.", steps) is None
     # Spelled as its own token, it counts.
     assert skill_eval.order_score("Unplug the unit, then switch On.", steps) == 1.0
+
+
+# ---- step numbers are structure, not vocabulary ----
+#
+# Measured on the knife-sharpening skill: the base model answered with a
+# completely different procedure (whetstone, clean the blade, honing rod) and
+# still scored 68% against a 60% threshold, so it passed. Five of its 26
+# matches were the bare digits 1-5, which any numbered list gets for free.
+# The adapter arm is unaffected — it reproduces the steps either way — so this
+# was only ever flattering the baseline the whole comparison rests on.
+
+_KNIFE = ("1. Hold the knife with the blade facing up. "
+          "2. Insert the blade into the sharpening rod at a 20-degree angle. "
+          "3. Slowly slide the blade along the rod. "
+          "4. Repeat on the other side. "
+          "5. Test the edge by slicing paper.")
+
+
+def test_step_numbers_are_not_keywords():
+    kws = skill_eval._keywords(skill_eval._step_body(_KNIFE))
+    assert not [k for k in kws if k.isdigit()], kws
+
+
+def test_numbers_inside_a_step_survive():
+    """"20-degree" is the procedure; "3." is the enumeration."""
+    kws = skill_eval._keywords(skill_eval._step_body(_KNIFE))
+    assert "20-degree" in kws
+
+
+def test_a_different_procedure_no_longer_passes_on_its_numbering():
+    """The actual base-model reply that passed."""
+    reply = ("Here are the steps to sharpen a kitchen knife: "
+             "1. Prepare the knife: ensure the knife is clean and dry. "
+             "2. Choose a sharpening tool: a whetstone, a honing rod, or a "
+             "manual sharpener. 3. Hold the blade at an angle and slide it "
+             "along the stone. 4. Repeat on the other side. "
+             "5. Test the edge by slicing paper.")
+    before = skill_eval.coverage(reply, skill_eval._keywords(_KNIFE))
+    after = skill_eval.coverage(
+        reply, skill_eval._keywords(skill_eval._step_body(_KNIFE)))
+    assert before >= skill_eval.DEFAULT_PASS_THRESHOLD, (
+        "this is the score that used to pass")
+    assert after < before, "dropping the enumerators must lower it"
+
+
+def test_the_real_procedure_still_scores_full_marks():
+    kws = skill_eval._keywords(skill_eval._step_body(_KNIFE))
+    assert skill_eval.coverage(_KNIFE, kws) == 1.0

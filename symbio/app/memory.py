@@ -103,15 +103,19 @@ def save_skill(
 
 def list_skills() -> list[tuple[str, Path]]:
     """All saved skills as (title, path), detected by their '# Skill:' heading."""
-    skills = []
+    # Not `skills`: this module imports symbio.app.skills at the top, and a
+    # local of that name makes it unresolvable for the rest of the function.
+    # Harmless here only because nothing below touches the module — which is
+    # the same accident that made /skill-adapters unreachable in chat.py.
+    found = []
     for f in sorted(constants.NOTES_DIR.glob("*.md")):
         try:
             first_line = f.read_text(encoding="utf-8").splitlines()[0]
         except (OSError, IndexError):
             continue
         if first_line.lower().startswith("# skill:"):
-            skills.append((first_line[2:].strip(), f))
-    return skills
+            found.append((first_line[2:].strip(), f))
+    return found
 
 
 def _store_path(store: str) -> Path:
