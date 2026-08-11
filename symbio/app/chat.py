@@ -29,7 +29,7 @@ from symbio.config import _adapter_matches_model
 from symbio.computer import BrowserSession
 from symbio import safety
 from symbio.tools import tool_few_shots
-from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, prompts, prune, sandbox, sessions, setup, skills, tooling, training, web
+from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, pending, prompts, prune, sandbox, sessions, setup, skills, tooling, training, web
 from symbio.app.config import apply_gpu_limits, config_show, set_config_value
 from tag_rag import TagIndex
 
@@ -502,7 +502,15 @@ class _Spinner:
             self.label = label
 
     def start(self):
-        if not self.active or self._thread is not None:
+        if self._thread is not None:
+            return
+        if not self.active:
+            # No animation without a TTY, but silence is not the alternative:
+            # a turn that prints nothing between the prompt and the reply looks
+            # like a hang, and the wait here is tens of seconds on an 8B. One
+            # static line costs nothing and cannot be mistaken for frozen.
+            sys.stdout.write(f"  {self.label}\n")
+            sys.stdout.flush()
             return
         self._stop_event.clear()
         self._start_time = time.perf_counter()
@@ -621,7 +629,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"   Data   : {dataset_size:,} bytes")
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
-    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
+    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /resume  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
     output_fn("         /run <cmd>  /note [title]  /notes  /index-notes [--force]  /auto-index on|off  /new-skill <name>  /skills  /skill-adapters  /digest  /cron  /config  /archive  /restore")
     output_fn("         /build-mcp <name> | <description>  /mcp-tools  /hosts  /telemetry on|off  /feedback <text>")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
@@ -828,6 +836,10 @@ class ChatSession:
         # happen when the model is loaded lazily or never.
         if self.config.get("prune", {}).get("on_boot", True):
             self._self_prune()
+        # Pick up whatever the last process was in the middle of. Cheap, and
+        # runs before the model loads: this is reading a small JSON file and,
+        # at most, copying an adapter directory back over a truncated one.
+        self._recover_pending()
         self.user_turns = 0
         self.auto_searches = 0
         # Resolved subject for a subjectless "check online"-style command this
@@ -1091,6 +1103,70 @@ class ChatSession:
             self.retriever.invalidate_cache()
         return report
 
+    def _recover_pending(self):
+        """Report work the last process did not finish, and repair its damage.
+
+        The repair is automatic because there is only one right answer to it:
+        a run killed partway through leaves an adapter directory the trainer
+        was still writing, next to a complete copy of the last good one, and
+        loading the truncated version as if it were trained is worse than any
+        cost of putting the backup back.
+
+        Re-running the training is not automatic. It is minutes of GPU and a
+        second full copy of the weights, and starting one unprompted at boot
+        is close to a description of how the machine went down. The list is
+        printed; /resume runs it.
+        """
+        try:
+            repairs = pending.recover(restore_fn=training.restore_adapter)
+            outstanding = pending.describe_outstanding()
+        except Exception as e:
+            self.logger.warning(f"Pending-task recovery failed: {e}")
+            return
+        for line in repairs:
+            self.output_fn(f"  [Resume] {line}")
+        if outstanding:
+            self.output_fn(
+                f"  [Resume] {len(outstanding)} unfinished task(s) carried "
+                f"over. Run /resume to pick them up, /resume clear to drop them.")
+            for line in outstanding:
+                self.output_fn(f"    - {line}")
+
+    def _cmd_resume(self, arg: str = ""):
+        """List, run, or drop the work carried over from a previous session."""
+        arg = (arg or "").strip().lower()
+        outstanding = pending.outstanding()
+        if arg == "clear":
+            dropped = pending.clear()
+            self.output_fn(f"  [Resume] Dropped {dropped} carried-over task(s).")
+            return
+        if not outstanding:
+            self.output_fn("  [Resume] Nothing carried over — every task finished.")
+            return
+        if arg != "run":
+            self.output_fn(f"  [Resume] {len(outstanding)} task(s) waiting:")
+            for line in pending.describe_outstanding():
+                self.output_fn(f"    - {line}")
+            self.output_fn("  [Resume] /resume run to start them, "
+                           "/resume clear to drop them.")
+            return
+
+        # Strictly one at a time, and the headmaster's own run last: each is a
+        # trainer holding a full copy of the weights, and overlapping two of
+        # them is the failure that made any of this necessary.
+        for task in sorted(outstanding, key=lambda t: t.get("kind") == "train_headmaster"):
+            kind, role = task.get("kind"), task.get("role")
+            self.output_fn(f"  [Resume] {task.get('detail', kind)}...")
+            if kind == "train_worker" and role:
+                trained, msg = dispatch.guarded_train_worker(role, self.config)
+                self.output_fn(f"  [Resume] {msg}")
+            elif kind == "train_headmaster":
+                self._guarded_train()
+            else:
+                self.output_fn(
+                    f"  [Resume] Nothing knows how to re-run '{kind}'; "
+                    f"leaving it on the list.")
+
     def _run_post_load_self_check(self):
         """AI-driven feature verification after the model has finished loading.
 
@@ -1249,6 +1325,17 @@ class ChatSession:
             return False
         if any(meta.get(k) != v for k, v in want.items()):
             # The model, adapter or prompt changed since it was written.
+            path.unlink(missing_ok=True)
+            return False
+        # Loading a cache is not the same as being able to use one. A file
+        # written by an earlier process can carry arrays bound to an MLX stream
+        # that does not exist here, and nothing notices until generation, which
+        # then dies mid-turn. Touching the state now moves that failure to the
+        # one place equipped to handle it: prefill just runs normally instead.
+        try:
+            mx.eval([c.state for c in cache])
+        except Exception as e:
+            self._log_info(f"Prompt cache unusable in this process, discarding: {e}")
             path.unlink(missing_ok=True)
             return False
         self._prompt_cache = cache
@@ -1754,6 +1841,14 @@ class ChatSession:
             )
         self.output_fn("  [Train] Backing up current adapter before training...")
         backup_dir = training.backup_adapter() if golden_on else None
+        # Between here and discard_adapter_backup the previous adapter exists
+        # only inside backup_dir, and the adapter directory itself is whatever
+        # the trainer has written so far. A crash in that window used to leave
+        # both facts on the floor: an orphaned .bak nobody knew was live, and a
+        # half-written adapter that loaded as the real one.
+        task_id = pending.open_task(
+            "train_headmaster", "training for the headmaster adapter",
+            backup_dir=str(backup_dir) if backup_dir else None)
 
         try:
             trained = self._train_unloaded(iters=iters)
@@ -1874,6 +1969,7 @@ class ChatSession:
             self.output_fn(f"  [Train] {adapter_status_value(self.config, self.adapter_loaded)}")
             return True
         finally:
+            pending.finish(task_id)
             training.discard_adapter_backup(backup_dir)
 
     def _run_wildcard_check(self, learn_cfg: dict[str, Any]):
@@ -1983,6 +2079,13 @@ class ChatSession:
         elif cmd == "/retrain":
             self._cmd_retrain()
 
+        elif cmd.startswith("/resume"):
+            # `cmd` is the whole line, not the first word, so an equality test
+            # here silently drops every argument form — /resume listed fine
+            # and /resume run fell through to "Unknown command".
+            parts = user_input.split(None, 1)
+            self._cmd_resume(parts[1] if len(parts) == 2 else "")
+
         elif cmd.startswith("/train_worker"):
             parts = user_input.split(None, 1)
             role = parts[1].strip() if len(parts) == 2 else ""
@@ -2065,12 +2168,17 @@ class ChatSession:
             self._learn_from_correction(verbose=True)
 
         elif cmd == "/skills":
-            skills = memory.list_skills()
-            if not skills:
+            # Not `skills`: binding that name anywhere in this function makes
+            # it local for the whole of it, so the module import at the top
+            # stops resolving and /skill-adapters — hundreds of lines below,
+            # in the same function — dies with UnboundLocalError before it
+            # runs a line of its own.
+            saved_skills = memory.list_skills()
+            if not saved_skills:
                 self.output_fn("  No skills saved yet.")
             else:
-                self.output_fn(f"  {len(skills)} skill(s):")
-                for title, path in skills:
+                self.output_fn(f"  {len(saved_skills)} skill(s):")
+                for title, path in saved_skills:
                     self.output_fn(f"    - {title}  ({path.name})")
 
         elif cmd.startswith("/new-skill"):
@@ -2303,6 +2411,11 @@ class ChatSession:
                 idle_days = (datetime.now() - last_used).days
                 self.output_fn(f"  Adapter last used: {idle_days} day(s) ago")
             self.output_fn(f"  Learn: {learn_progress_line(self.config)}")
+            carried_over = pending.describe_outstanding()
+            if carried_over:
+                self.output_fn(f"  Unfinished tasks: {len(carried_over)} (/resume)")
+                for line in carried_over:
+                    self.output_fn(f"    - {line}")
             dispatch_on = self.config.get("dispatch", {}).get("enabled", False)
             loaded_workers = self.dispatch.loaded_roles()
             self.output_fn(
@@ -2948,6 +3061,10 @@ class ChatSession:
         # tool tag, we nudge it to retry — otherwise Caine just explains the
         # failure and gives up after one attempt.
         pending_browser_error: str | None = None
+        # Set the moment the user declines anything, and never cleared before
+        # the turn ends: a "no" applies to the rest of the turn, not just to
+        # the one tool that asked.
+        user_refused_this_turn = False
         browser_retry_nudged = False
         blank_retry_nudged = False
         echo_retry_nudged = False
@@ -3353,7 +3470,23 @@ class ChatSession:
             self.output_fn(f"  [Tool: {name}]")
             if name in _WEB_TOOLS:
                 web_used = True
-            observation = self._execute_tool(name, params)
+            if user_refused_this_turn:
+                # Observed live: browser_open was denied at the domain prompt,
+                # and the very next round the model ran `open -a 'Google
+                # Chrome'` through run_command and reported success. The
+                # sandbox is a denylist, so `open` was never going to stop it
+                # — but no denylist should have to. A refusal is about the
+                # action the user was asked about, not the tool that happened
+                # to ask, so once one is given nothing else runs this turn.
+                observation = (
+                    "Blocked: the user declined this action earlier in this "
+                    "turn. Do not attempt it by other means. Tell them it was "
+                    "not done.")
+                self.output_fn(f"  [Safety] {observation}")
+            else:
+                observation = self._execute_tool(name, params)
+                if learn.is_user_refusal(observation):
+                    user_refused_this_turn = True
             local_telemetry.log_event(
                 "tool", name=name, ok=not learn.sounds_like_tool_error(observation),
                 result=observation,
@@ -3403,13 +3536,23 @@ class ChatSession:
             # filter and the turn ends on a bare "Clicking the button." with
             # nothing clicked. Retries stay capped so a call that keeps
             # failing still can't spin.
-            if learn.sounds_like_tool_error(observation):
+            # A refusal is the exception: no retry turns a "no" into a "yes",
+            # and re-running the call just puts the same confirmation prompt
+            # in front of the user again. Observed live — one denied
+            # browser_open asked twice in a single turn.
+            if (learn.sounds_like_tool_error(observation)
+                    and not learn.is_user_refusal(observation)):
                 failed_calls[tool_key] = failed_calls.get(tool_key, 0) + 1
                 if failed_calls[tool_key] < _MAX_TOOL_RETRIES:
                     executed_calls.discard(tool_key)
             # Track browser-action failures so we can force a retry if the
             # model tries to end the turn without another tool tag.
-            if name in _BROWSER_ACTION_TOOLS and learn.sounds_like_tool_error(observation):
+            # A refusal is excluded here for the same reason: this nudge tells
+            # the model "do not end the turn until the request is completed",
+            # which against a denied request is an instruction to keep asking.
+            if (name in _BROWSER_ACTION_TOOLS
+                    and learn.sounds_like_tool_error(observation)
+                    and not learn.is_user_refusal(observation)):
                 pending_browser_error = observation
             else:
                 pending_browser_error = None
@@ -3426,6 +3569,16 @@ class ChatSession:
                     "\n\n[Answer ONLY from the results above. If they do not state "
                     "the answer, say plainly that you could not find it — do not "
                     "repeat your earlier claim or guess.]"
+                )
+            if learn.is_user_refusal(observation):
+                # Without this the turn ends on the sentence the model wrote
+                # *before* the tool ran — "Opening apple.com for you." — which
+                # reports an action the user had just blocked. Seen live: the
+                # denial changed nothing about the final answer.
+                observation += (
+                    "\n\n[The user declined this. It did NOT happen. Say plainly "
+                    "that you did not do it because they declined, and do not "
+                    "describe it as done or in progress. Do not try another way.]"
                 )
             # Present results in Hermes-style <tool_response> JSON so the model
             # learns the structured format, while keeping a plain-text fallback

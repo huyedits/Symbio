@@ -355,6 +355,37 @@ def test_the_preflight_can_be_switched_off(monkeypatch):
     assert training._memory_shortfall(_config(memory_preflight=False)) is None
 
 
+def test_a_plain_load_is_judged_by_what_a_load_costs(monkeypatch):
+    """The golden-check copies loaded around a training run carry no optimiser
+    state and no retained activations, so charging them the trainer's 3.6x
+    would refuse loads that fit several times over."""
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: 4_000_000_000)
+    monkeypatch.setattr(training, "free_ram_bytes", lambda: 6_000_000_000)
+
+    assert training._memory_shortfall(_config()) is not None
+    assert training.load_memory_shortfall(_config()) is None
+
+
+def test_a_load_with_no_room_is_refused(monkeypatch):
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: 4_000_000_000)
+    monkeypatch.setattr(training, "free_ram_bytes", lambda: 3_000_000_000)
+
+    message = training.load_memory_shortfall(_config(), purpose="check a worker")
+
+    assert message is not None
+    assert "check a worker" in message
+    assert "5.0 GB" in message and "3.0 GB" in message
+
+
+def test_the_load_preflight_honours_the_same_switches(monkeypatch):
+    monkeypatch.setattr(training, "free_ram_bytes", lambda: 1)
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: 4_000_000_000)
+    assert training.load_memory_shortfall(_config(memory_preflight=False)) is None
+
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: None)
+    assert training.load_memory_shortfall(_config()) is None
+
+
 def test_free_ram_counts_reclaimable_pages(monkeypatch):
     """Inactive pages are populated but available, so ignoring them would
     refuse to train on a machine that is actually idle."""
@@ -688,3 +719,88 @@ def test_checkpoint_interval_divides_the_evaluation_interval():
     lora = app_config.DEFAULT_CONFIG["lora"]
 
     assert lora["steps_per_eval"] % lora["save_every"] == 0
+
+
+# ---- adapter backup/restore must not swallow the worker adapters ----
+#
+# The workers live inside the headmaster's own directory
+# (adapters/workers/<role>), which made them collateral in every headmaster
+# rollback: the snapshot copied them in, and the restore put that frozen copy
+# back over everything they had learned since. Startup crash-recovery calls
+# restore_adapter unattended, so this ran without anyone watching.
+
+@pytest.fixture
+def adapter_tree(monkeypatch, tmp_path):
+    """A headmaster adapter with worker adapters nested underneath it."""
+    root = tmp_path / "adapters"
+    workers = root / "workers"
+    (workers / "researcher").mkdir(parents=True)
+    (root / "adapters.safetensors").write_text("headmaster v1")
+    (root / "adapter_config.json").write_text("{}")
+    (workers / "researcher" / "adapters.safetensors").write_text("researcher v1")
+    monkeypatch.setattr(constants, "ADAPTER_DIR", root)
+    monkeypatch.setattr(constants, "WORKER_ADAPTERS_DIR", workers)
+    monkeypatch.setattr(training, "adapter_label", lambda role=None: "HEADMASTER")
+    monkeypatch.setattr(training, "adapter_total_iters", lambda role=None: 125)
+    return root, workers
+
+
+def test_the_headmaster_backup_leaves_the_workers_out(adapter_tree):
+    root, _ = adapter_tree
+
+    backup = training.backup_adapter()
+
+    assert (backup / "adapters.safetensors").read_text() == "headmaster v1"
+    assert not (backup / "workers").exists(), (
+        "a headmaster snapshot must not carry copies of the worker adapters")
+
+
+def test_restoring_the_headmaster_does_not_touch_the_workers(adapter_tree):
+    root, workers = adapter_tree
+    backup = training.backup_adapter()
+    # Time passes: the headmaster retrains, and so does a worker.
+    (root / "adapters.safetensors").write_text("headmaster v2")
+    (workers / "researcher" / "adapters.safetensors").write_text("researcher v2")
+    (workers / "browser").mkdir()
+    (workers / "browser" / "adapters.safetensors").write_text("browser v1")
+
+    training.restore_adapter(backup)
+
+    assert (root / "adapters.safetensors").read_text() == "headmaster v1"
+    assert (workers / "researcher" / "adapters.safetensors").read_text() == (
+        "researcher v2"), "the worker's later training must survive"
+    assert (workers / "browser").exists(), (
+        "a worker trained after the snapshot must not be deleted by a "
+        "headmaster rollback")
+
+
+def test_an_older_backup_carrying_workers_does_not_restore_them(adapter_tree):
+    """Backups taken before this was fixed still have the stale tree inside —
+    including the one sitting in the project root right now."""
+    root, workers = adapter_tree
+    backup = root.parent / "adapters.OLD.bak"
+    (backup / "workers" / "researcher").mkdir(parents=True)
+    (backup / "adapters.safetensors").write_text("headmaster v0")
+    (backup / "workers" / "researcher" / "adapters.safetensors").write_text("stale")
+
+    training.restore_adapter(backup)
+
+    assert (root / "adapters.safetensors").read_text() == "headmaster v0"
+    assert (workers / "researcher" / "adapters.safetensors").read_text() == (
+        "researcher v1"), "the stale copy inside the backup must be ignored"
+
+
+def test_a_worker_restore_is_unaffected(adapter_tree):
+    """A worker's own directory has no nested tree to protect; its restore
+    must still replace everything it holds."""
+    root, workers = adapter_tree
+    monkeypatch_role = workers / "researcher"
+    backup = root.parent / "researcher.bak"
+    backup.mkdir()
+    (backup / "adapters.safetensors").write_text("researcher v0")
+    (monkeypatch_role / "stray.json").write_text("left over")
+
+    training.restore_adapter(backup, role="researcher")
+
+    assert (monkeypatch_role / "adapters.safetensors").read_text() == "researcher v0"
+    assert not (monkeypatch_role / "stray.json").exists()

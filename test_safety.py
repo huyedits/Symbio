@@ -143,3 +143,41 @@ def test_is_sensitive_config_key():
     assert safety.is_sensitive_config_key("remote.hosts")
     assert safety.is_sensitive_config_key("safety.enabled")
     assert not safety.is_sensitive_config_key("agent.temperature")
+
+
+# ---- a refusal is a decision, not a retryable failure ----
+#
+# Found by using the CLI: one denied browser_open put the identical
+# confirmation prompt in front of the user twice in the same turn, because a
+# denial matches sounds_like_tool_error and the retry path exists for
+# preconditions the model can fix. No retry turns a "no" into a "yes".
+
+from symbio.app import learn as _learn
+
+
+def test_a_denial_is_recognised_as_a_refusal():
+    assert _learn.is_user_refusal("User denied access to 'www.apple.com'.")
+    assert _learn.is_user_refusal("Browser open blocked: User denied access to 'x'.")
+    assert _learn.is_user_refusal("Command cancelled: user declined.")
+
+
+def test_a_refusal_still_reads_as_a_failed_call():
+    """The model must be told the call did not succeed — it just must not be
+    handed another attempt at it."""
+    assert _learn.sounds_like_tool_error(
+        "Browser open blocked: User denied access to 'www.apple.com'.")
+
+
+def test_an_ordinary_failure_is_not_a_refusal():
+    """The precondition failures the retry path was built for must keep it."""
+    assert not _learn.is_user_refusal(
+        "Browser click error: no element matching 'Sign in'.")
+    assert not _learn.is_user_refusal("Failed: page not open yet.")
+
+
+def test_content_mentioning_a_denial_is_not_a_refusal():
+    """Only the status line counts, so a search result about someone being
+    denied something does not disable retries for a successful call."""
+    assert not _learn.is_user_refusal(
+        "Search results:\nThe user denied the allegations in court.")
+

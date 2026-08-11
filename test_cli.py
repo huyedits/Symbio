@@ -114,3 +114,46 @@ def test_cli_archive_list_empty(isolated_cli, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "Archived notes: 0" in out
     assert "Archived adapters: 0" in out
+
+
+# ---- `symb train <skill>` must use the same guarded path as everything else ----
+#
+# It called run_training directly, so a worker trained from the CLI got no
+# golden baseline, no rollback on regression, and no journal update. Observed:
+# a skill trained this way finished on disk while still listed as owed.
+
+def test_symb_train_skill_goes_through_the_guarded_path(monkeypatch, tmp_path):
+    from symbio import constants
+    from symbio.app import cli as _cli
+    from symbio.app import dispatch as _dispatch
+    from symbio.app import config as _config
+
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    catalog = tmp_path / "worker_models.json"
+    catalog.write_text('{"s": {"model_name": "m/s", "role": "fix_wifi", "is_skill": true}}')
+    monkeypatch.setattr(constants, "WORKER_MODELS_FILE", catalog)
+
+    guarded, raw = [], []
+    monkeypatch.setattr(_dispatch, "guarded_train_worker",
+                        lambda role, cfg, **kw: (guarded.append((role, kw)), (True, "ok"))[1])
+    monkeypatch.setattr(_cli, "run_training", lambda *a, **k: raw.append(k) or True)
+
+    rc = _cli._cmd_train(_config.load_config(), skill="fix wifi", iters=7)
+
+    assert rc == 0
+    assert guarded == [("fix_wifi", {"iters": 7, "resume": False})]
+    assert raw == [], "the unguarded trainer must not be called for a worker"
+
+
+def test_symb_train_without_a_skill_still_trains_the_headmaster(monkeypatch, tmp_path):
+    from symbio.app import cli as _cli
+    from symbio.app import dispatch as _dispatch
+    from symbio.app import config as _config
+
+    guarded, raw = [], []
+    monkeypatch.setattr(_dispatch, "guarded_train_worker",
+                        lambda *a, **k: guarded.append(a) or (True, "ok"))
+    monkeypatch.setattr(_cli, "run_training", lambda *a, **k: raw.append(k) or True)
+
+    assert _cli._cmd_train(_config.load_config()) == 0
+    assert raw and guarded == [], "the headmaster has its own path"

@@ -4,11 +4,12 @@ task execution, the <delegate> tag, and guarded_train_worker's golden-check
 + rollback story for a worker's own adapter."""
 
 import json
+from pathlib import Path
 
 import pytest
 
 from symbio import constants
-from symbio.app import chat, dispatch, golden, tooling, training
+from symbio.app import chat, dispatch, golden, pending, tooling, training
 from symbio.app import config as app_config
 
 
@@ -206,6 +207,151 @@ def _make_session(config, monkeypatch):
     )
 
 
+def test_a_new_session_reports_and_repairs_what_the_last_one_left(
+        monkeypatch, tmp_path):
+    """The whole point, end to end: a session that was killed mid-training
+    leaves a record and a backup, and the next session — before it has even
+    loaded a model — puts the adapter back and says what is still owed."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+
+    task_id = pending.open_task(
+        "train_headmaster", "training for the headmaster adapter")
+    backup = tmp_path / "adapters.OLD.bak"
+    backup.mkdir()
+    (backup / "adapter_config.json").write_text("the last good adapter")
+    pending.update(task_id, backup_dir=str(backup), pid=0x7FFFFFFF)
+
+    printed = []
+    monkeypatch.setattr(chat, "load", lambda *a, **k: (object(), FakeTokenizer()))
+    chat.ChatSession(
+        app_config.load_config(), model=object(), tokenizer=FakeTokenizer(),
+        adapter_loaded=False, output_fn=printed.append,
+        generate_fn=lambda *a, **k: "unused",
+    )
+
+    assert (constants.ADAPTER_DIR / "adapter_config.json").read_text() == (
+        "the last good adapter"), "the half-written adapter must be replaced"
+    assert any("interrupted mid-run" in line for line in printed)
+    assert any("/resume" in line for line in printed)
+    assert len(pending.outstanding()) == 1, "the training itself is still owed"
+
+
+def test_resume_run_retrains_the_worker_that_was_owed(monkeypatch, tmp_path):
+    """Listing is the default because a fine-tune is minutes of GPU and a
+    second copy of the weights — the load that took the machine down. Running
+    it stays an explicit act."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+    })
+    pending.defer("train_worker", "first adapter for skill 'Summarize'",
+                  role="summarize", reason="not enough free memory")
+
+    retrained = []
+    monkeypatch.setattr(dispatch, "guarded_train_worker",
+                        lambda role, cfg, **k: (retrained.append(role), (True, "done"))[1])
+    printed = []
+    monkeypatch.setattr(chat, "load", lambda *a, **k: (object(), FakeTokenizer()))
+    session = chat.ChatSession(
+        app_config.load_config(), model=object(), tokenizer=FakeTokenizer(),
+        adapter_loaded=False, output_fn=printed.append,
+        generate_fn=lambda *a, **k: "unused",
+    )
+
+    # Through _handle_command, not _cmd_resume: `cmd` there is the whole
+    # input line rather than the first word, so a command registered with an
+    # equality test answers its bare form and drops every argument. Calling
+    # the method directly cannot see that — /resume run reached the user as
+    # "Unknown command" with these assertions passing.
+    session._handle_command("/resume")
+    assert retrained == [], "listing must not start a fine-tune"
+
+    session._handle_command("/resume run")
+    assert retrained == ["summarize"]
+
+
+def test_resume_clear_drops_the_carried_over_work(monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    pending.defer("train_worker", "adapter for 'x'", role="x")
+
+    monkeypatch.setattr(chat, "load", lambda *a, **k: (object(), FakeTokenizer()))
+    session = chat.ChatSession(
+        app_config.load_config(), model=object(), tokenizer=FakeTokenizer(),
+        adapter_loaded=False, output_fn=lambda *a: None,
+        generate_fn=lambda *a, **k: "unused",
+    )
+
+    session._handle_command("/resume clear")
+    assert pending.outstanding() == []
+
+
+def test_listing_skills_does_not_break_listing_skill_adapters(
+        monkeypatch, tmp_path):
+    """Found by using the CLI rather than by testing it. /skills bound a local
+    named `skills`, which makes that name local to the whole of
+    _handle_command — so /skill-adapters, hundreds of lines below in the same
+    function, raised UnboundLocalError before running a line of its own, and
+    the exception took the entire chat session down with it. Neither command
+    had any coverage."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(chat, "load", lambda *a, **k: (object(), FakeTokenizer()))
+    printed = []
+    session = chat.ChatSession(
+        app_config.load_config(), model=object(), tokenizer=FakeTokenizer(),
+        adapter_loaded=False, output_fn=printed.append,
+        generate_fn=lambda *a, **k: "unused",
+    )
+
+    session._handle_command("/skills")
+    session._handle_command("/skill-adapters")
+
+    assert any("skill adapter" in line.lower() for line in printed)
+
+
+def test_a_refusal_blocks_a_different_tool_reaching_the_same_end(
+        monkeypatch, tmp_path):
+    """Observed live, not in a test: browser_open was denied at the domain
+    prompt, and the next round the model ran `open -a 'Google Chrome'` through
+    run_command and reported success — Chrome really did launch. The sandbox
+    is a denylist and `open` was never on it, but the gate the user answered
+    was about the action, not about which tool asked."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(chat, "load", lambda *a, **k: (object(), FakeTokenizer()))
+    session = chat.ChatSession(
+        app_config.load_config(), model=object(), tokenizer=FakeTokenizer(),
+        adapter_loaded=False, output_fn=lambda *a: None,
+        generate_fn=lambda *a, **k: "",
+    )
+
+    replies = iter([
+        "Opening apple.com. <browse>www.apple.com</browse>",
+        "Opening Chrome. <cmd>open -a 'Google Chrome'</cmd>",
+        "You declined, so I did not open it.",
+    ])
+    monkeypatch.setattr(session, "_generate_reply",
+                        lambda *a, **k: (next(replies, "Done."), False))
+
+    executed = []
+
+    def fake_execute(name, params):
+        executed.append(name)
+        if name == "browser_open":
+            return "Browser open blocked: User denied access to 'www.apple.com'."
+        return "Command 'open -a 'Google Chrome'' exited ok."
+
+    monkeypatch.setattr(session, "_execute_tool", fake_execute)
+    session._agent_turn("open apple.com for me")
+
+    assert executed == ["browser_open"], (
+        f"a declined action must not be reachable through another tool, "
+        f"but these ran: {executed}")
+
+
 def test_execute_tool_delegate_disabled_by_default(monkeypatch, tmp_path):
     _isolate_dirs(monkeypatch, tmp_path)
     config = app_config.load_config()
@@ -252,7 +398,7 @@ def test_guarded_train_worker_no_prior_adapter_trains_without_golden_check(monke
     })
     monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
     monkeypatch.setattr(training, "run_training",
-                        lambda cfg, iters=None, role=None, model_name=None:
+                        lambda cfg, iters=None, role=None, model_name=None, resume=False:
                             _write_worker_adapter(role, "trained") or True)
 
     config = app_config.load_config()
@@ -260,6 +406,219 @@ def test_guarded_train_worker_no_prior_adapter_trains_without_golden_check(monke
     assert trained is True
     assert "trained" in msg.lower()
     assert (constants.adapter_dir_for("summarize") / "adapter_config.json").exists()
+
+
+def test_guarded_train_worker_refuses_the_baseline_load_without_room(
+        monkeypatch, tmp_path):
+    """run_training's preflight only guards the trainer child. The baseline
+    golden run loads a second full copy of the weights in *this* process,
+    before that preflight ever runs — and auto-train does it on a background
+    thread while the headmaster is still resident. That load was unchecked."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+    })
+    _write_worker_adapter("summarize", "original")
+
+    load_calls = []
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory(load_calls))
+    monkeypatch.setattr(training, "load_memory_shortfall",
+                        lambda cfg, model_name=None, purpose="": "No room.")
+    monkeypatch.setattr(training, "run_training",
+                        lambda *a, **k: pytest.fail("must not spawn a trainer"))
+
+    trained, msg = dispatch.guarded_train_worker("summarize", app_config.load_config())
+
+    assert trained is False
+    assert "No room." in msg
+    assert load_calls == [], "the refused copy must never have been loaded"
+    assert (constants.adapter_dir_for("summarize")
+            / "adapter_config.json").read_text() == "original"
+
+
+def test_a_refused_training_run_stays_on_the_books(monkeypatch, tmp_path):
+    """Refusing must not mean forgetting. The preflight declines a run it
+    cannot do safely, and without a record that is indistinguishable from the
+    training never having been wanted — which is how a skill ends up seeded
+    and permanently untrained."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+    })
+    _write_worker_adapter("summarize", "original")
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
+    monkeypatch.setattr(training, "load_memory_shortfall",
+                        lambda cfg, model_name=None, purpose="": "No room.")
+
+    trained, _ = dispatch.guarded_train_worker("summarize", app_config.load_config())
+
+    assert trained is False
+    owed = pending.outstanding()
+    assert len(owed) == 1
+    assert owed[0]["role"] == "summarize"
+    assert "memory" in owed[0]["reason"]
+
+
+def test_work_for_a_deleted_role_stops_being_owed(monkeypatch, tmp_path):
+    """Deleting a skill used to leave an immortal entry: the unknown-role
+    return happens before the task is opened, so nothing ever finished it.
+    It reappeared at every start and /resume run could not clear it — only
+    /resume clear, which drops everything else with it."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    _write_catalog(monkeypatch, tmp_path, {})
+    pending.defer("train_worker", "first adapter for skill 'Gone'", role="gone")
+
+    trained, msg = dispatch.guarded_train_worker("gone", app_config.load_config())
+
+    assert trained is False
+    assert "No worker configured" in msg
+    assert pending.outstanding() == [], "an impossible task must not survive"
+
+
+def test_other_roles_survive_dropping_a_deleted_one(monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    _write_catalog(monkeypatch, tmp_path, {})
+    pending.defer("train_worker", "adapter for 'gone'", role="gone")
+    pending.defer("train_worker", "adapter for 'kept'", role="kept")
+
+    dispatch.guarded_train_worker("gone", app_config.load_config())
+
+    assert [t["role"] for t in pending.outstanding()] == ["kept"]
+
+
+def test_a_run_that_produced_no_adapter_stays_owed(monkeypatch, tmp_path):
+    """Found by trialling five skills: four were seeded and none trained,
+    because the headmaster was resident and run_training's own preflight
+    refused. Every one returned False, and the blanket finish() in the
+    `finally` deleted the record — so four skills sat seeded and permanently
+    untrained with nothing owed and no warning at the next start. That is the
+    exact state this journal exists to make impossible."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+    })
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
+    # What a refused preflight looks like from here: no adapter written.
+    monkeypatch.setattr(training, "run_training", lambda *a, **k: False)
+
+    trained, msg = dispatch.guarded_train_worker("summarize", app_config.load_config())
+
+    assert trained is False
+    owed = pending.outstanding()
+    assert len(owed) == 1, "a skill that never trained is still owed"
+    assert owed[0]["role"] == "summarize"
+    assert "memory" in owed[0]["reason"]
+
+
+def test_a_regressed_but_completed_run_is_not_owed(monkeypatch, tmp_path):
+    """A rollback is a verdict on the result, not an unfinished run."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+    })
+    _write_worker_adapter("summarize", "original")
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
+    monkeypatch.setattr(training, "run_training",
+                        lambda cfg, iters=None, role=None, model_name=None, resume=False:
+                            _write_worker_adapter(role, "regressed") or True)
+    scores = iter([golden.GoldenResult({"c": True}, {}),
+                   golden.GoldenResult({"c": False}, {}),
+                   golden.GoldenResult({"c": False}, {})])
+    monkeypatch.setattr(golden, "run_golden_set",
+                        lambda *a, **k: next(scores, golden.GoldenResult({"c": False}, {})))
+    monkeypatch.setattr(golden, "run_golden_set_retry",
+                        lambda *a, **k: (golden.GoldenResult({"c": False}, {}), {"c"}))
+    monkeypatch.setattr(golden, "append_golden_remedy_samples",
+                        lambda *a, **k: 0)
+
+    trained, msg = dispatch.guarded_train_worker("summarize", app_config.load_config())
+
+    assert trained is True
+    assert pending.outstanding() == []
+
+
+def test_a_completed_training_run_leaves_nothing_owed(monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+    })
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
+    monkeypatch.setattr(training, "run_training",
+                        lambda cfg, iters=None, role=None, model_name=None, resume=False:
+                            _write_worker_adapter(role, "trained") or True)
+
+    trained, _ = dispatch.guarded_train_worker("summarize", app_config.load_config())
+
+    assert trained is True
+    assert pending.outstanding() == []
+    assert pending.all_tasks() == []
+
+
+def test_a_training_run_records_the_backup_it_is_relying_on(monkeypatch, tmp_path):
+    """While the run is in flight the previous adapter exists only inside the
+    backup directory. If nothing writes that path down, a process killed in
+    that window leaves an orphan nobody can identify."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+    })
+    _write_worker_adapter("summarize", "original")
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
+    monkeypatch.setattr(golden, "run_golden_set",
+                        lambda *a, **k: golden.GoldenResult({"c": True}, {}))
+
+    seen = {}
+
+    def capture_then_die(cfg, iters=None, role=None, model_name=None, resume=False):
+        seen.update({t["id"]: t for t in pending.all_tasks()})
+        raise RuntimeError("killed mid-run")
+
+    monkeypatch.setattr(training, "run_training", capture_then_die)
+
+    with pytest.raises(RuntimeError):
+        dispatch.guarded_train_worker("summarize", app_config.load_config())
+
+    in_flight = list(seen.values())
+    assert len(in_flight) == 1
+    assert in_flight[0]["backup_dir"], "the live backup must be recorded"
+    assert Path(in_flight[0]["backup_dir"]).name.endswith(".bak")
+
+
+def test_guarded_train_worker_rolls_back_when_it_cannot_verify(
+        monkeypatch, tmp_path):
+    """Memory can run out between the trainer exiting and the check reloading.
+    An adapter that could not be golden-checked is not one to ship."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+    })
+    _write_worker_adapter("summarize", "original")
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
+    monkeypatch.setattr(golden, "run_golden_set",
+                        lambda *a, **k: golden.GoldenResult({"c": True}, {}))
+    monkeypatch.setattr(training, "run_training",
+                        lambda cfg, iters=None, role=None, model_name=None, resume=False:
+                            _write_worker_adapter(role, "unverifiable") or True)
+
+    checks = []
+    monkeypatch.setattr(
+        training, "load_memory_shortfall",
+        lambda cfg, model_name=None, purpose="": (
+            checks.append(purpose) or ("No room." if len(checks) > 1 else None)))
+
+    trained, msg = dispatch.guarded_train_worker("summarize", app_config.load_config())
+
+    assert trained is False
+    assert "rolled back" in msg.lower()
+    assert (constants.adapter_dir_for("summarize")
+            / "adapter_config.json").read_text() == "original"
 
 
 def test_guarded_train_worker_regression_rolls_back(monkeypatch, tmp_path):
@@ -271,7 +630,7 @@ def test_guarded_train_worker_regression_rolls_back(monkeypatch, tmp_path):
 
     monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
     monkeypatch.setattr(training, "run_training",
-                        lambda cfg, iters=None, role=None, model_name=None:
+                        lambda cfg, iters=None, role=None, model_name=None, resume=False:
                             _write_worker_adapter(role, "regressed") or True)
 
     calls = []
@@ -303,7 +662,7 @@ def test_guarded_train_worker_regression_remedies_then_succeeds(monkeypatch, tmp
 
     train_calls = []
 
-    def fake_run_training(cfg, iters=None, role=None, model_name=None):
+    def fake_run_training(cfg, iters=None, role=None, model_name=None, resume=False):
         train_calls.append(iters)
         _write_worker_adapter(role, "remedied" if iters else "regressed")
         return True
@@ -480,7 +839,7 @@ def test_train_worker_command_trains_named_role(monkeypatch, tmp_path):
     })
     monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
     monkeypatch.setattr(training, "run_training",
-                        lambda cfg, iters=None, role=None, model_name=None:
+                        lambda cfg, iters=None, role=None, model_name=None, resume=False:
                             _write_worker_adapter(role, "trained") or True)
 
     config = app_config.load_config()
@@ -718,6 +1077,53 @@ def test_deep_sleep_allows_a_headmaster_sized_worker(monkeypatch, tmp_path):
 
     assert pool.get("alpha") is not None
     assert len(load_calls) == 1
+
+
+def test_deep_sleep_drops_the_worker_before_waking_the_headmaster(
+        monkeypatch, tmp_path):
+    """The OOM this was written for: deep sleep unloaded the headmaster before
+    the worker loaded, then reloaded it in the `finally` while the worker was
+    still resident — so both models were in RAM anyway, one turn later than
+    before. Deep sleep also switches off the second-copy refusal, so nothing
+    else was left to catch it."""
+    pool, _ = _refusal_pool(
+        monkeypatch, tmp_path, {"headmaster_deep_sleep_while_workers": True})
+    monkeypatch.setattr(dispatch, "generate", lambda *a, **k: "done")
+    monkeypatch.setattr(dispatch.training, "append_chat_pair",
+                        lambda *a, **k: None)
+
+    resident_when_headmaster_woke = []
+    pool.before_worker_fn = lambda: None
+    pool.after_worker_fn = lambda: resident_when_headmaster_woke.extend(
+        pool.loaded_roles())
+
+    pool.run_delegated_task("alpha", "do the thing")
+
+    assert resident_when_headmaster_woke == [], (
+        "the worker must be unloaded before the headmaster reloads")
+    assert pool.loaded_roles() == []
+
+
+def test_evicting_a_worker_hands_the_memory_back(monkeypatch, tmp_path):
+    """Dropping the dict entry is not freeing the weights: MLX keeps them
+    charged to the process until the allocator reclaims, so an eviction that
+    skips release_model() leaves the old worker resident right through the
+    load of its replacement."""
+    _isolate_dirs(monkeypatch, tmp_path)
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+        "b": {"model_name": "m/b", "role": "browser"},
+    })
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
+    released = []
+    monkeypatch.setattr(dispatch.training, "release_model",
+                        lambda: released.append(True))
+
+    pool = dispatch.WorkerPool({"dispatch": {"max_resident_workers": 1}})
+    pool.get("summarize")
+    assert released == [], "nothing evicted yet"
+    pool.get("browser")  # evicts summarize
+    assert released, "the evicted worker's memory must be released before the load"
 
 
 def test_the_second_copy_can_be_allowed_explicitly(monkeypatch, tmp_path):
