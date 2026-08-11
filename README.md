@@ -61,6 +61,23 @@ Grading is deliberately dumb — the fraction of the skill's own step vocabulary
 
 Read the numbers honestly: `base 0/5` does **not** mean the base model is useless at the task. In the run above it answered with real `networksetup` commands, which is arguably better — it just isn't *your* saved procedure. And on a two-step skill this is memorisation, which is the claim being tested but the weakest form of it. Skills with a substantial procedure give a far more meaningful delta.
 
+#### A six-skill run
+
+To get past that objection, six skills with real procedures, where the **model wrote every step itself** and the training data was generated from those steps by `_seed_skill_training_data` — six samples each, none hand-written:
+
+| skill | base | prompted | adapter |
+|---|---|---|---|
+| Quick Task Helper | 0/5 (5%) | 1/5 (22%) | **5/5** (93%) |
+| Coffee Making | 1/5 (27%) | 5/5 (100%) | **5/5** (100%) |
+| Bicycle Tuning | 1/5 (17%) | 5/5 (96%) | **5/5** (100%) |
+| Repotting a Houseplant | 2/5 (44%) | 5/5 (90%) | **5/5** (100%) |
+| Shipping a Parcel Overseas | 0/5 (24%) | 5/5 (80%) | **5/5** (99%) |
+| Sharpening a Kitchen Knife | 1/5 (32%) | 4/5 (90%) | **5/5** (100%) |
+
+**30/30 adapter, 5/30 base**, step order 100% on every one. Asked only `Sharpen a kitchen knife`, with nothing about the procedure in context, the adapter returns the saved steps verbatim while the base model gives a perfectly reasonable but completely different answer about whetstones.
+
+One correction worth recording, because it moved the numbers. The first run of this table scored the baseline higher, and it was the metric's fault: `_keywords` counted the bare step numbers `1`–`5` as vocabulary, so any numbered reply collected them for free. The base model's whetstone procedure scored **68%** against a 60% threshold and *passed* a task it had answered differently. Enumerators are now stripped before keywords are extracted (`20-degree` survives; `3.` doesn't), which took that task from 68% to 32%. The adapter arm never moved — it reproduces the steps either way — so the leak had only ever been flattering the baseline the whole comparison rests on.
+
 By default the harness generates five task phrasings, deliberately worded unlike the training seeds so a pass means recall rather than memorised strings. Drop your own in `training_data/workers/<role>/eval_tasks.json` to use a real battery:
 
 ```json
@@ -254,6 +271,8 @@ Dangerous actions from Telegram — blocked shell commands, new browser domains,
 | `/quit` | Exit the chat |
 | `/save` | Save the current conversation to training data |
 | `/train` | Run LoRA fine-tuning and reload the adapter |
+| `/train_worker <role>` | Train one worker's adapter, golden-checked and rolled back on regression |
+| `/resume` | List work a previous session didn't finish (`run` to do it, `clear` to drop it) |
 | `/learn` | Manually learn from your last correction (auto-learn is on by default) |
 | `/digest` | Convert notes into training samples |
 | `/note [title]` | Create a markdown note |
@@ -378,6 +397,10 @@ A self-training agent has a failure mode a normal chatbot doesn't: its own bad o
 
 **Retrieval hygiene.** Anything that looks like machinery is excluded from retrieval rather than fed back as prose: tool transcripts, any tool-call syntax (including the legacy short tags), and the `[System observation: ...]` scaffold the agent uses internally to hand tool results back to the model.
 
+**Retrieval can also return nothing.** Scoring is IDF-weighted, which ranks well but has no way to say *none of these*. Any note sharing a single common word scored above zero and made the cut, so a query whose topical words matched nothing came back with the three least-bad notes — as confidently as a real match. That is not merely a relevance problem here: a retrieved note is pasted into the model's context, skill notes are procedures, and the model performs them. Measured, before the fix: a request to save a bicycle-tuning skill retrieved the Browser Driver note and produced an eighteen-fold repetition of "Clicking the Steps. Scrolling down." and a real `browser_open` on google.com.
+
+A note now has to share a term that is both **rare** (present in at most a third of notes) and **not a stopword** — the frequency test alone isn't enough, because in a corpus of numbered procedures words like "how" and "do" are genuinely rare and were qualifying unrelated notes on their own. `skill` and `what are the steps` now retrieve nothing, since they distinguish nothing; every skill still retrieves its own note first.
+
 That last one matters more than it sounds. The scaffold appears in a sixth of the seed training corpus — always as a *user* turn, always followed by an assistant reply — so a model can learn to write the scaffold itself and then answer its own invented observation, on repeat:
 
 ```
@@ -414,6 +437,34 @@ Answering yes deletes it; declining or saying "keep" both just leave it alone an
 |---|---|---|
 | `learn.adapter_idle_reminder_enabled` | `true` | Ask about removing an adapter that's gone unused |
 | `learn.adapter_idle_days` | `30` | Days unused before the reminder fires |
+
+### Surviving a crash mid-fine-tune
+
+A fine-tune is minutes of GPU time that exists only in RAM until it writes an adapter, and on a unified-memory Mac the process can be killed outright — no unwind, no traceback, nothing written down. What that used to cost wasn't the compute, it was *the knowledge that the work was owed*: a skill saved with auto-train would be seeded, never trained, and nothing on the next start remembered it was supposed to be.
+
+Expensive work is now recorded in `logs/pending_tasks.json` **before** it begins, written atomically so a crash mid-write can't truncate it. Whether the owning process is still alive is decided by pid *and* boot id together — after a reboot the kernel reissues low pids, so a pid alone would call a dead trainer healthy forever.
+
+On the next start:
+
+```
+  [Resume] training for worker 'fix_wifi': interrupted mid-run; restored the
+           adapter from the backup it left behind. That backup is kept at
+           adapters/workers/fix_wifi.FIX_WIFI_ITER150.bak — delete it once
+           you are happy.
+  [Resume] 1 unfinished task(s) carried over. Run /resume to pick them up,
+           /resume clear to drop them.
+    - training for worker 'fix_wifi' — owning process died before it finished
+```
+
+Repair is automatic, because a truncated adapter sitting next to a complete backup has only one right answer. Re-running the training is **not** — that is minutes of GPU and a second full copy of the weights, and starting one unprompted at boot is a fair description of how the machine went down in the first place. `/resume` lists, `/resume run` runs them one at a time (headmaster last), `/resume clear` drops them. `/status` shows the same list.
+
+Work that was *refused* is recorded the same way. When the memory preflight declines a run there is no adapter and no error — just a line in a log nobody is reading, which is exactly how a skill ends up permanently untrained. It stays on the list instead, with the reason:
+
+```
+  Unfinished tasks: 1 (/resume)
+    - training for worker 'coffee_making' — training did not produce an
+      adapter (see the log; most often not enough free memory at the time)
+```
 
 ## Example screenshots
 <img width="1300" height="89" alt="Screenshot 2026-07-23 at 11 23 21 am" src="https://github.com/user-attachments/assets/c4e02593-f527-44dc-9bcb-181f329360ad" />
@@ -459,6 +510,26 @@ Every delegated task's (input, output) pair is recorded as a training sample und
 | `dispatch.max_worker_rounds` | `4` | Round cap for a multi-step worker task (e.g. browser) |
 | `dispatch.worker_golden_set_enabled` | `true` | Golden-check a worker's adapter around training |
 | `dispatch.worker_golden_rollback_on_regression` | `true` | Auto-rollback a worker's adapter on regression |
+| `dispatch.hot_swap_adapters` | `true` | Switch between workers sharing a base model by replacing only their LoRA tensors |
+| `dispatch.headmaster_deep_sleep_while_workers` | `false` | Unload the headmaster while a worker runs, for machines that cannot hold both |
+| `dispatch.allow_second_headmaster_copy` | `false` | Permit a worker on the headmaster's own model to load a second full copy |
+
+### One model at a time
+
+The failure mode on a unified-memory Mac is never one model being too big — it is two of them resident at once. Three rules keep that from happening:
+
+- A worker running the **headmaster's own model** is refused rather than loaded, because that is a second copy of the largest allocation on the machine. Hot-swapping its LoRA tensors onto an already-resident model costs ~19 MB instead of gigabytes, and is tried first. The refusal names the reason and tells you which setting overrides it.
+- With `headmaster_deep_sleep_while_workers` on, the headmaster unloads before a worker loads **and the worker unloads before the headmaster comes back**. Reloading it on top of a still-resident worker is the same double residency moved one turn later — which is exactly how this machine went down. The cost is a cold worker on the next delegation; that is the price of the setting.
+- Every eviction hands the memory back immediately. Dropping the reference is not the same as freeing the weights: MLX keeps them charged to the process until the allocator reclaims, so an eviction without that leaves the old worker fully resident right through the load of its replacement.
+
+Training gets its own preflight. A run is refused, with the arithmetic shown, when the machine cannot hold it — and refusing is not the same as forgetting, so the run goes on the `/resume` list instead of vanishing:
+
+```
+  [Train] Not enough free memory to train safely: the run needs about 4.1 GB
+          (2.3 GB of weights plus optimiser state and retained activations)
+          and only 3.1 GB is free. Skipping rather than risking an
+          out-of-memory kill.
+```
 
 Enabling dispatch also needs `"delegate"` in `tools.enabled_groups` — it's included by default going forward, but an existing `config.json` written before this feature won't have picked it up automatically; add it with `/config set tools.enabled_groups '[...]'` if delegation seems to silently do nothing.
 
@@ -505,7 +576,8 @@ Symbio understands two ways to call tools:
 - `execute_code` requires the script to import from `symbio_tools` (or the backward-compatible `caine_tools` alias) and blocks known dangerous imports.
 - Do not paste untrusted code into the agent without reviewing it first.
 - And also do pay attention to the 'Do you wanna yes/no' questions those are there to keep you from having Symbio do random stuff without your consent because you might not want to do it.
-- 
+- **A "no" ends the action for the whole turn, not just for the tool that asked.** Answering `N` to a browser domain prompt used to leave the model free to reach the same end another way — it ran `open -a 'Google Chrome'` through the shell on the next round and reported success. The sandbox is a *denylist*, so `open` was never on it, but the gate you answered was about the action, not about which tool happened to ask. A refusal is also not a retryable error: no second attempt turns a "no" into a "yes", and retrying one only puts the identical prompt in front of you again. The reply now says plainly that it did not happen, instead of describing the blocked action as done.
+
 ## Architecture
 
 The project is organized as a `symbio/` Python package with a thin `main.py` wrapper:
@@ -525,6 +597,7 @@ The project is organized as a `symbio/` Python package with a thin `main.py` wra
 │   │   ├── eval.py        # Held-out eval set: headmaster adapter vs base model
 │   │   ├── skill_eval.py  # Three-way skill scoring: base vs prompted vs adapter
 │   │   ├── prune.py       # Self-pruning of junk notes and duplicate session turns
+│   │   ├── pending.py     # Durable journal of in-flight work; survives a kill (/resume)
 │   │   ├── dispatch.py    # MoA: WorkerPool, delegated tasks, worker fine-tuning
 │   │   ├── worker_models.json  # Catalog of available worker models/roles
 │   │   ├── memory.py      # Notes, memory, profile management
@@ -547,7 +620,7 @@ The project is organized as a `symbio/` Python package with a thin `main.py` wra
 ├── adapters/            # LoRA adapter weights (workers/<role>/ for MoA workers)
 ├── cache/               # Persisted system-prompt KV cache
 
-├── logs/                # Session logs
+├── logs/                # Session logs, plus pending_tasks.json (unfinished work)
 ├── sessions/            # Session stores
 ├── screenshots/         # Browser screenshots
 └── sandbox/             # Scratch space for code execution
