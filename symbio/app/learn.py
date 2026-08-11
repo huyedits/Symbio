@@ -64,6 +64,23 @@ _TOOL_ERROR_RE = re.compile(
 )
 
 
+_USER_REFUSAL_RE = re.compile(
+    r"\buser (?:denied|declined|refused|cancelled|canceled)\b", re.IGNORECASE)
+
+
+def is_user_refusal(observation: str) -> bool:
+    """Did this tool fail because the user said no?
+
+    A refusal reads as a tool error and is nothing like one. The retry path
+    exists for preconditions the model can fix by trying again — clicking
+    before the page was open — and there is no second attempt that makes a
+    "no" into a "yes". Retrying one only re-opens the same confirmation
+    prompt, so the user is made to decline the identical request twice in a
+    single turn, which reads as the agent not taking no for an answer.
+    """
+    return bool(_USER_REFUSAL_RE.search(observation.split("\n", 1)[0]))
+
+
 def sounds_like_tool_error(observation: str) -> bool:
     """Did a tool observation's status indicate failure? Checked against
     just the status line (before the first newline/section) so a genuine
