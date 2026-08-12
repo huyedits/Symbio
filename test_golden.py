@@ -507,3 +507,71 @@ def test_guarded_train_accepts_config_arg_from_learn_callback(tmp_path, monkeypa
 
     assert trained is True
     assert (constants.ADAPTER_DIR / "adapter_config.json").read_text() == "trained"
+
+
+# ---- the post-remedy result gets the same flaky filter as the first round ----
+#
+# Measured live on a 2.5-hour headmaster run: baseline 10/15 -> final 12/15,
+# fixing four checks including refuse_note_injection, and it was rolled back on
+# two regressions that were never rechecked. The recheck a few lines earlier in
+# the same run had just shown two of these fifteen cases flip between identical
+# runs, so the threshold of 0 sits below the set's own noise floor.
+
+def test_flaky_post_remedy_regressions_do_not_force_a_rollback(monkeypatch, tmp_path):
+    from symbio import constants
+    from symbio.app import chat as _chat
+    from symbio.app import config as _config
+    from symbio.app import golden as _golden
+    from symbio.app import training as _training
+
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(constants, "ADAPTER_DIR", tmp_path / "adapters")
+    (tmp_path / "adapters").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "adapters" / "adapter_config.json").write_text("{}")
+    monkeypatch.setattr(_chat, "load", lambda *a, **k: (object(), _FakeTok()))
+
+    G = _golden.GoldenResult
+    runs = iter([
+        G({"a": True, "b": True, "c": False}, {}),    # baseline   -> {a,b}
+        G({"a": False, "b": True, "c": False}, {}),   # post-train -> regression {a}
+        G({"a": False, "b": False, "c": True}, {}),   # post-remedy-> regressions {a,b}
+    ])
+    monkeypatch.setattr(_golden, "run_golden_set", lambda *a, **k: next(runs))
+    # First recheck: 'a' really is failing, so remedy training runs.
+    # Second recheck: the post-remedy regressions all pass again — noise.
+    rechecks = iter([
+        (G({"a": False, "b": True, "c": False}, {}), {"a"}),
+        (G({"a": True, "b": True, "c": True}, {}), set()),
+    ])
+    monkeypatch.setattr(_golden, "run_golden_set_retry", lambda *a, **k: next(rechecks))
+    monkeypatch.setattr(_golden, "append_golden_remedy_samples", lambda *a, **k: 3)
+
+    rolled_back = []
+    monkeypatch.setattr(_training, "restore_adapter",
+                        lambda *a, **k: rolled_back.append(True))
+    monkeypatch.setattr(_training, "backup_adapter", lambda *a, **k: tmp_path / "bak")
+    monkeypatch.setattr(_training, "discard_adapter_backup", lambda *a, **k: None)
+
+    session = _chat.ChatSession(
+        _config.load_config(), model=object(), tokenizer=_FakeTok(),
+        adapter_loaded=True, output_fn=lambda *a: None,
+        generate_fn=lambda *a, **k: "unused",
+    )
+    monkeypatch.setattr(session, "_train_unloaded", lambda iters=None: True)
+    monkeypatch.setattr(session, "_reload_model", lambda: None)
+    monkeypatch.setattr(session, "_run_wildcard_check", lambda cfg: None)
+
+    session._guarded_train()
+
+    assert not rolled_back, (
+        "an adapter must not be discarded on post-remedy regressions that "
+        "pass on recheck")
+
+
+class _FakeTok:
+    def apply_chat_template(self, messages, tokenize=False,
+                            add_generation_prompt=False, enable_thinking=False):
+        return "\n".join(f"{m['role']}: {m['content']}" for m in messages)
+
+    def encode(self, text, add_special_tokens=True):
+        return [1, 2, 3]

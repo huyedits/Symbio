@@ -1930,6 +1930,31 @@ class ChatSession:
                                     f"  [Golden] Post-remedy checks: "
                                     f"{after.pass_count}/{after.total} passing.")
                                 regressions = sorted(baseline.passing - after.passing)
+                                # The same flaky filter the first round got.
+                                # Without it this single measurement decides
+                                # the rollback, and the recheck a few lines
+                                # above has just finished proving that two of
+                                # these fifteen cases flip between identical
+                                # runs. Observed: a run that went 10/15 ->
+                                # 12/15, fixing four checks including a
+                                # prompt-injection refusal, was discarded on
+                                # two unrechecked regressions — noise deciding
+                                # the fate of two and a half hours of GPU.
+                                if (len(regressions) > threshold
+                                        and learn_cfg.get("golden_retry_enabled", True)):
+                                    recheck2, consistent2 = golden.run_golden_set_retry(
+                                        self.model, self.tokenizer, self.generate_fn,
+                                        self.sampler, self.system_prompt, self.config,
+                                        self.enabled_groups)
+                                    flaky2 = sorted(set(regressions) - consistent2)
+                                    if flaky2:
+                                        self.output_fn(
+                                            f"  [Golden] {len(flaky2)} post-remedy "
+                                            f"regression(s) passed on recheck: "
+                                            f"{', '.join(flaky2)}")
+                                        after = recheck2
+                                        regressions = sorted(
+                                            baseline.passing - after.passing)
                     else:
                         self.output_fn("  [Train] No remedy samples could be generated.")
 
