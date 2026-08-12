@@ -56,5 +56,85 @@
     "is_skill": true,
     "skill_name": "Device Awareness",
     "routing_rationale": "Requests that belong to 'device_awareness' are those that involve noting a fact about the user or their belongings, performing small arithmetic, or using <py> for large arithmetic. The clearest signal distinguishing 'device_awareness' from other workers is the use of <note> for user-provided facts or <py> for arithmetic calculations."
+  },
+  "skill_quick_task_helper": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "quick_task_helper",
+    "description": "Skill: Quick Task Helper",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Quick Task Helper'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. Answer small arithmetic questions. 2. Note user facts. 3. Open websites with <browse> for interaction. 4. Use <py> for big calculations. 5. Read pages with <read> when needed. 6. Click/scroll with browser tools. 7. Use <search> for current facts. 8. Schedule tasks with <cron> when asked.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Quick Task Helper"
+  },
+  "skill_coffee_making": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "coffee_making",
+    "description": "Skill: Coffee Making",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Coffee Making'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. Start with fresh coffee beans. 2. Grind the beans to a medium consistency. 3. Put a filter in the coffee maker. 4. Pour the ground beans into the filter. 5. Put water into the reservoir. 6. Start the coffee maker and wait for it to finish. 7. Enjoy your coffee.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Coffee Making"
+  },
+  "skill_bicycle_tuning": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "bicycle_tuning",
+    "description": "Skill: Bicycle Tuning",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Bicycle Tuning'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. Check and adjust the tire pressure. 2. Lubricate the chain. 3. Inspect the brakes and ensure they function properly. 4. Check the shift gears and adjust if necessary. 5. Inspect the freewheel and clean it. 6. Check the bearing and ensure it's smooth. 7. Check the frame for any damage or wear.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Bicycle Tuning"
+  },
+  "skill_repotting_a_houseplant": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "repotting_a_houseplant",
+    "description": "Skill: Repotting a Houseplant",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Repotting a Houseplant'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. Check the roots by gently removing the plant from its current pot. 2. Rinse the roots in water to remove soil, and inspect for any damaged or diseased roots. 3. Choose a new pot that's one size larger than the current pot and has drainage holes. 4. Add a layer of fresh potting soil at the bottom of the new pot, then place the plant in the pot. 5. Add more potting soil around the roots, pressing gently to hold the plant in place. 6. Water the plant until the water drains out of the drainage holes. 7. Place the plant in a suitable location based on its light and water requirements.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Repotting a Houseplant"
+  },
+  "skill_shipping_a_parcel_overseas": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "shipping_a_parcel_overseas",
+    "description": "Skill: Shipping a Parcel Overseas",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Shipping a Parcel Overseas'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. Measure and weigh the parcel to determine the shipping cost. 2. Package the parcel securely, using appropriate materials to protect it during transit. 3. Choose a shipping method that suits your needs, such as express, standard, or economy. 4. Select a shipping company, such as DHL, FedEx, or USPS, and check their rates and delivery times. 5. Fill out the shipping form, ensuring that you provide the correct addresses, a description of the contents, and any necessary documents. 6. Pay for the shipping, either online or in person, and receive a tracking number. 7. Wait for the parcel to arrive at its destination, and check the tracking number for updates. 8. After the parcel arrives, confirm that it is delivered in good condition and has no damage or missing items.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Shipping a Parcel Overseas"
+  },
+  "skill_sharpen_a_kitchen_knife": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "sharpen_a_kitchen_knife",
+    "description": "Skill: Sharpen a kitchen knife",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Sharpen a kitchen knife'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. Hold the knife with the blade facing up and the tip pointing left. 2. Insert the blade into the sharpening rod at a 20-degree angle. 3. Slowly slide the blade along the rod, keeping the angle consistent. 4. Repeat on the other side to maintain symmetry. 5. Test the edge by gently slicing paper, and check the blade's sharpness by running your thumb along the edge.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Sharpen a kitchen knife"
+  },
+  "skill_change_a_car_tyre": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "change_a_car_tyre",
+    "description": "Skill: Change a car tyre",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Change a car tyre'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. Loosen the wheel nuts with a tire iron. 2. Lift the car with a jack. 3. Remove the wheel. 4. Replace the wheel with a spare. 5. Tighten the nuts. 6. Lower the car and check the nuts again. 7. Replace the jack and wheel iron. 8. Install the flat tire as a spare for future use.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Change a car tyre"
+  },
+  "skill_brew_loose_leaf_tea": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "brew_loose_leaf_tea",
+    "description": "Skill: Brew loose leaf tea",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Brew loose leaf tea'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. Boil water. 2. Add a tea spoon of loose leaf tea. 3. Let the water cool for a few seconds. 4. Pour the hot water into the tea. 5. Let the tea steep for a few minutes. 6. Strain the tea. 7. Add a bit of honey or lemon for taste.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Brew loose leaf tea"
   }
 }
