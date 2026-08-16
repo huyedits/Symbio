@@ -85,3 +85,15 @@ skill_eval_*.json
 # can be repaired by the next one.
 .pytest-training-backup/
 eval_*.json
+
+# Tests and scratch scaffolding: kept locally, not published.
+# Every pattern is root-anchored on purpose — an unanchored `_*.py` would
+# also match symbio/__init__.py and quietly untrack the package.
+/test_*.py
+/conftest.py
+/tests/
+/tests_mcp/
+/_*.py
+/eval_routing.py
+/eval_toolcall.py
+/diag_*.txt

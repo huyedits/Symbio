@@ -695,9 +695,12 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
     def _run_golden(model, tokenizer):
         if not (golden_on and cases):
             return None
+        # Graded the way a worker is actually served — see the same flag in
+        # run_delegated_task. Grading with thinking on measures a mode the
+        # worker never runs in, and worker training is gated on this result.
         return golden.run_golden_set(
             model, tokenizer, generate, sampler, system_prompt, config,
-            enabled_groups=None, cases=cases,
+            enabled_groups=None, cases=cases, enable_thinking=False,
         )
 
     baseline = None
@@ -806,7 +809,7 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
             )
             recheck, consistent = golden.run_golden_set_retry(
                 new_model, new_tok, generate, sampler, system_prompt, config,
-                enabled_groups=None, cases=cases,
+                enabled_groups=None, cases=cases, enable_thinking=False,
             )
             flaky = sorted(set(regressions) - consistent)
             if flaky:

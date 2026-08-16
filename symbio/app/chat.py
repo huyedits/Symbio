@@ -2319,13 +2319,21 @@ class ChatSession:
                         display += f" (port {port})"
                     self.output_fn(f"    - {alias}: {display}")
 
-        elif cmd == "/archive":
+        elif cmd.startswith("/archive"):
+            # startswith, not equality: `cmd` is the whole input line, so an
+            # equality test drops every argument. The README documents
+            # `/archive --dry-run` and it answered "Unknown command" — and
+            # even when matched, dry_run was never passed through, so the
+            # documented preview did not exist in chat at all.
+            arg = user_input[len("/archive"):].strip().lower()
+            dry_run = arg in ("--dry-run", "-n", "dry", "dry-run", "preview")
             try:
-                archived = skills.archive_idle_items(self.config)
+                archived = skills.archive_idle_items(self.config, dry_run=dry_run)
                 notes = archived.get("notes", [])
                 adapters = archived.get("adapters", [])
                 if notes or adapters:
-                    self.output_fn(f"  Archived {len(notes)} idle note(s) and {len(adapters)} idle adapter(s).")
+                    verb = "Would archive" if dry_run else "Archived"
+                    self.output_fn(f"  {verb} {len(notes)} idle note(s) and {len(adapters)} idle adapter(s).")
                     for n in notes:
                         self.output_fn(f"    note: {Path(n).name}")
                     for a in adapters:

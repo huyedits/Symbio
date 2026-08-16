@@ -374,9 +374,13 @@ def run_arm(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": task.prompt},
         ]
+        # Skill adapters are *served* by dispatch with thinking off, so
+        # grading them with it on measures a mode they never run in — and the
+        # reasoning preamble dilutes step coverage, which is the score. The
+        # headmaster's THINKING_ENABLED does not govern a worker.
         chat_prompt = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
-            enable_thinking=training.THINKING_ENABLED,
+            enable_thinking=False,
         )
         start = time.perf_counter()
         try:
