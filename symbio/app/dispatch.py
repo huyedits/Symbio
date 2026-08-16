@@ -15,6 +15,7 @@ shared one.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -472,14 +473,31 @@ class WorkerPool:
                 {"role": "user", "content": task},
             ]
             prompt = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+                messages, tokenize=False, add_generation_prompt=True,
+                # Workers do not reason out loud. Their reply is an
+                # observation for the headmaster and a training sample
+                # for their own adapter, and reasoning is noise in both.
+                # The headmaster is where THINKING_ENABLED belongs.
+                # Measured on Qwen3.5-4B: a one-line summary came back
+                # as 156 words of "Thinking Process:" with this True,
+                # and 13 correct words with it False. Not strippable
+                # either — that model reasons in prose, not <think>.
+                enable_thinking=False,
             )
             try:
-                reply = generate(
+                # A worker's reply is used twice: as the observation handed
+                # back to the headmaster, and as a training sample for this
+                # worker's own adapter. A reasoning block has no business in
+                # either — it is working-out, not an answer, and training on
+                # it teaches the worker to reply with its own deliberation.
+                # Observed after retargeting 'summarize' at a reasoning model:
+                # a one-line summary came back as 160 words opening with
+                # "Thinking Process: 1. Analyze the Request".
+                reply = tooling.strip_reasoning_block(generate(
                     model, tokenizer, prompt=prompt,
                     sampler=make_sampler(temp=0.2, top_p=0.9),
                     max_tokens=max_tokens, verbose=False,
-                ).strip()
+                )).strip()
             except Exception as e:
                 self._status(f"  [Dispatch] Worker '{role}' failed: {e}")
                 return f"Worker '{role}' failed: {e}"
@@ -530,7 +548,16 @@ class WorkerPool:
                 {"role": "user", "content": prompt_text},
             ]
             prompt = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+                messages, tokenize=False, add_generation_prompt=True,
+                # Workers do not reason out loud. Their reply is an
+                # observation for the headmaster and a training sample
+                # for their own adapter, and reasoning is noise in both.
+                # The headmaster is where THINKING_ENABLED belongs.
+                # Measured on Qwen3.5-4B: a one-line summary came back
+                # as 156 words of "Thinking Process:" with this True,
+                # and 13 correct words with it False. Not strippable
+                # either — that model reasons in prose, not <think>.
+                enable_thinking=False,
             )
             try:
                 action = generate(
@@ -567,12 +594,46 @@ class WorkerPool:
         )
 
 
+# One in-flight run per worker. Saving the same skill twice — which a retry
+# does, and which a user re-running /new-skill does — starts a second daemon
+# thread for the same role, and both then back up, overwrite and restore the
+# same adapter directory. Observed at 20 skills: two concurrent runs for
+# 'set_up_tent_in_wind', each with its own backup, interleaving on one
+# directory. TRAINER_LOCK serialises the trainer *subprocess* and does nothing
+# about that, because the damage is in the surrounding file operations.
+_ROLE_LOCKS: dict[str, threading.Lock] = {}
+_ROLE_LOCKS_GUARD = threading.Lock()
+
+
+def _role_lock(role: str) -> threading.Lock:
+    with _ROLE_LOCKS_GUARD:
+        return _ROLE_LOCKS.setdefault(role, threading.Lock())
+
+
 def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = None,
                          resume: bool = False) -> tuple[bool, str]:
     """Train a worker's own adapter and golden-check it the same way
     ChatSession._guarded_train protects the headmaster's: baseline golden
     run, backup, train, reload, recheck, auto-rollback on regression.
-    Returns (trained, status_message)."""
+    Returns (trained, status_message).
+
+    Refuses rather than queues when this role is already training: the caller
+    is a background thread whose work is already being done, and waiting would
+    just hold a second copy of everything until the first finished.
+    """
+    lock = _role_lock(role)
+    if not lock.acquire(blocking=False):
+        return False, (
+            f"Worker '{role}' is already being trained by another run; "
+            f"skipping this one rather than training the same adapter twice.")
+    try:
+        return _guarded_train_worker(role, config, iters=iters, resume=resume)
+    finally:
+        lock.release()
+
+
+def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = None,
+                          resume: bool = False) -> tuple[bool, str]:
     entry = catalog_entry_for_role(role)
     if entry is None:
         # Nothing can ever run this, so a record asking for it is not owed

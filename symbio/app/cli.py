@@ -19,7 +19,8 @@ from symbio import constants
 from symbio.app.chat import chat_loop
 from symbio.app.config import config_show, get_telegram_token, load_config, set_config_value
 from symbio.app.setup import is_first_run, run_setup_wizard
-from symbio.app.training import run_training
+from symbio.app import tooling
+from symbio.app.training import THINKING_ENABLED, run_training
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -801,7 +802,8 @@ def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
             {"role": "user", "content": prompt},
         ]
         prompt_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=THINKING_ENABLED,
         )
         sampler = make_sampler(temp=0.1, top_p=0.9)
         try:
@@ -809,6 +811,8 @@ def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
                 model, tokenizer, prompt=prompt_text, sampler=sampler,
                 max_tokens=2048, verbose=False,
             )
+            # Strip the Qwen3 thinking block plus plain-text reasoning variants.
+            text = tooling.strip_reasoning_block(text)
             for pattern in (
                 r"\bthinking\b.*?/\bthinking\b",
                 r"\breasoning\b.*?/\breasoning\b",

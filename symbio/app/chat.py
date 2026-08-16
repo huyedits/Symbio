@@ -1510,8 +1510,14 @@ class ChatSession:
             tokenizing_spinner.stop()
 
         use_stream = self.stream_chunk_fn is not None and agent_cfg.get("stream_output", True)
-        stripper = tooling.StreamingStripper() if use_stream else None
+        stripper = tooling.StreamingStripper(
+            show_reasoning=agent_cfg.get("show_reasoning", True)
+        ) if use_stream else None
         shown = False
+        # The reply prefix ("Caine: ") attaches to the ANSWER, not to a
+        # "[Reasoning] …" block the stripper emits first — so it is deferred
+        # until the first non-reasoning chunk.
+        answer_prefix_emitted = False
         first_token_time: float | None = None
         gen_start = time.perf_counter()
         prompt_tokens = len(ids)
@@ -1526,13 +1532,15 @@ class ChatSession:
         def _emit(text: str):
             if self.stream_chunk_fn is None or not text:
                 return
-            nonlocal shown
+            nonlocal shown, answer_prefix_emitted
             if not shown:
                 shown = True
                 # Stop the spinner and clear its line before the first visible
                 # chunk, otherwise the spinner thread keeps overwriting the
                 # streaming reply.
                 spinner.stop()
+            if not answer_prefix_emitted and not text.startswith(tooling.REASONING_MARKER):
+                answer_prefix_emitted = True
                 if chunk_prefix:
                     self.stream_chunk_fn(chunk_prefix)
             self.stream_chunk_fn(text)
@@ -1627,7 +1635,8 @@ class ChatSession:
             {"role": "user", "content": prompt},
         ]
         prompt_text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=training.THINKING_ENABLED,
         )
         # Make a fresh sampler for deterministic JSON.
         sampler = make_sampler(temp=0.1, top_p=0.9)
@@ -1636,7 +1645,9 @@ class ChatSession:
                 self.model, self.tokenizer, prompt=prompt_text, sampler=sampler,
                 max_tokens=2048, verbose=False,
             )
-            # Strip reasoning artifacts that smaller local models sometimes emit.
+            # Strip reasoning artifacts that smaller local models sometimes emit
+            # (the Qwen3 thinking block, plus the plain-text variants).
+            text = tooling.strip_reasoning_block(text)
             for pattern in (
                 r"\bthinking\b.*?/\bthinking\b",
                 r"\breasoning\b.*?/\breasoning\b",
@@ -2726,12 +2737,15 @@ class ChatSession:
         try:
             flush_prompt = self.tokenizer.apply_chat_template(
                 flush_messages, tokenize=False,
-                add_generation_prompt=True, enable_thinking=False,
+                add_generation_prompt=True, enable_thinking=training.THINKING_ENABLED,
             )
             flush_reply = self.generate_fn(
                 self.model, self.tokenizer, prompt=flush_prompt, sampler=self.sampler,
                 max_tokens=int(self.config["agent"]["max_reply_tokens"]), verbose=False,
             )
+            # The model may reason before emitting the tags; parse only the
+            # answer so reasoning text can't be mistaken for a tool call.
+            flush_reply = tooling.strip_reasoning_block(flush_reply)
             for name, params in tooling.parse_tools(flush_reply, self.enabled_groups):
                 if name == "save_memory":
                     msg = memory.save_memory(params["store"], params["content"], self.config,
@@ -2792,7 +2806,19 @@ class ChatSession:
             f"Correction: {sample[2]}\n"
             f"Correct answer: {sample[3]}"
         )
+        # Only skills the correction is actually about. _skill_notes_used is
+        # everything *retrieved* this session, cumulatively — and retrieval is
+        # fuzzy on purpose, so that set is far wider than "was involved in the
+        # wrong answer". Measured: a correction about which text editor the
+        # user prefers was filed against Device Awareness, folding a fitted
+        # sheet, and descaling a kettle, because those notes had been
+        # retrieved at some point. Those sidecars feed skill retraining, so a
+        # Helix correction would have been trained into the fitted-sheet
+        # adapter — cross-contamination straight through the per-skill
+        # isolation that exists to prevent exactly that.
         for note_path in self._skill_notes_used:
+            if not learn.correction_concerns_skill(correction_text, note_path):
+                continue
             try:
                 skills.record_skill_correction(note_path, correction_text)
             except Exception:
@@ -2872,12 +2898,17 @@ class ChatSession:
             ]
             try:
                 check_prompt = self.tokenizer.apply_chat_template(
-                    check_messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+                    check_messages, tokenize=False, add_generation_prompt=True,
+                    enable_thinking=training.THINKING_ENABLED,
                 )
                 check_reply = self.generate_fn(
                     self.model, self.tokenizer, prompt=check_prompt, sampler=self.sampler,
-                    max_tokens=int(self.config["agent"]["max_reply_tokens"]), verbose=False,
+                    # Room for a thinking block plus the one-word answer.
+                    max_tokens=256, verbose=False,
                 ).strip()
+                # The model may reason before echoing the phrase; the check
+                # grades the answer, not the reasoning.
+                check_reply = tooling.strip_reasoning_block(check_reply)
             except Exception as e:
                 self.output_fn(f"[Canary check failed: {e}]")
                 canary_failed = True
@@ -3075,6 +3106,8 @@ class ChatSession:
         mood = "neutral"
         mood_decided = False
         consecutive_tool_rounds = 0
+        scrolls_this_turn = 0
+        _MAX_SCROLLS_PER_TURN = 5
         # The exact "[System observation: ...]" text of the most recent
         # tool failure this turn, if any — used to capture (saw this error
         # -> did this instead, which worked) as a mistake-note training
@@ -3169,6 +3202,11 @@ class ChatSession:
                 try:
                     raw_reply, streamed_live = self._generate_reply(
                         messages, chunk_prefix=chunk_prefix, timings=timings)
+                    # The thinking block is surfaced to the user (streamed by
+                    # StreamingStripper, or printed below when not streaming);
+                    # the reply itself stays reasoning-free so tools and
+                    # history never see it.
+                    reasoning = tooling.extract_reasoning(raw_reply)
                     reply = tooling.clean_response(
                         tooling.strip_reasoning_block(raw_reply)).strip()
                     self.logger.info(f"RAW_REPLY: {raw_reply!r}")
@@ -3235,6 +3273,33 @@ class ChatSession:
             tools = tooling.parse_tools(reply, self.enabled_groups)
             display = tooling.strip_tool_tags(reply)
 
+            # A model that emits the same tool tag over and over in one
+            # response (e.g. "<scroll/> Scrolling down. <scroll/> Scrolling
+            # down. …") is looping. Catch it here so the display text from
+            # the stripped tags doesn't flood the user's screen, and nudge
+            # the model to break out on the next round.
+            if len(tools) >= 4 and not echo_retry_nudged:
+                from collections import Counter
+                tool_counts = Counter(n for n, _ in tools)
+                most_common, count = tool_counts.most_common(1)[0]
+                # Fire when one tool is >=80% of all calls and there are
+                # at least 4 of it — catches both "49 scrolls" and
+                # "1 browser_open + 49 scrolls".
+                if count >= 4 and count / len(tools) >= 0.8:
+                    echo_retry_nudged = True
+                    self.output_fn(
+                        f"  [Loop] {count}× <{most_common}/> in one reply "
+                        f"({len(tools)} total tags) — regenerating...")
+                    self.history.append({"role": "user", "content": (
+                        f"[System observation: your last reply contained "
+                        f"{count} copies of the <{most_common}/> tag. Do not "
+                        f"repeat the same tool call. If scrolling isn't "
+                        f"revealing new information, stop and work with "
+                        f"what you can see, or try a different approach.]"
+                    )})
+                    self._trim_history()
+                    continue
+
             # The model wrote the harness's own scaffold, or looped one line.
             # Either way this is not a reply. Checked here, ahead of the
             # display/log block below, because a copy written to the session
@@ -3263,6 +3328,11 @@ class ChatSession:
             if display.strip():
                 final_display = display
                 if not streamed_live:
+                    # Streaming showed nothing (streaming off, or the whole
+                    # reply was a tool tag) — surface the reasoning here so it
+                    # is not lost, then the answer.
+                    if reasoning and self.config["agent"].get("show_reasoning", True):
+                        self.output_fn(f"{tooling.REASONING_MARKER}{reasoning}")
                     self.output_fn(f"{self.config['assistant_name']:8}: {display}")
                 self.logger.info(f"{self.config['assistant_name']}: {display}")
                 self.session_store.log("assistant", display)
@@ -3509,7 +3579,23 @@ class ChatSession:
                     "not done.")
                 self.output_fn(f"  [Safety] {observation}")
             else:
-                observation = self._execute_tool(name, params)
+                # A model that scrolls without finding what it wants will
+                # scroll forever — the page never changes enough to satisfy
+                # it, and each <scroll/> is a distinct tag the dedup logic
+                # can't catch. Cap it per turn so the agent falls back to
+                # reading whatever is visible instead of scrolling into a
+                # loop that only stops when max_tool_rounds runs out.
+                if name == "browser_scroll" and scrolls_this_turn >= _MAX_SCROLLS_PER_TURN:
+                    observation = (
+                        f"Scrolled {scrolls_this_turn} times already this turn. "
+                        f"Stop scrolling and work with the page text you can see. "
+                        f"If the information is not on this page, try a different "
+                        f"URL or a web search instead."
+                    )
+                else:
+                    observation = self._execute_tool(name, params)
+                    if name == "browser_scroll":
+                        scrolls_this_turn += 1
                 if learn.is_user_refusal(observation):
                     user_refused_this_turn = True
             local_telemetry.log_event(

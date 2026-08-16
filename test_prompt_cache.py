@@ -239,3 +239,27 @@ def test_save_failure_is_not_fatal(env, monkeypatch):
     save(s)  # must not raise
     assert not constants.PROMPT_CACHE_FILE.exists()
     assert any("Could not save prompt cache" in m for m in s.logged), s.logged
+
+
+# ---- the browse example must not name a real site ----
+#
+# Measured: the worked example in the system prompt was
+# `<browse>https://www.apple.com</browse>`, and the system prompt is embedded
+# in every rendered training sample — 470 occurrences of www.apple.com across
+# 227 samples, present in 100% of them. It became the model's default action:
+# across three separate sessions it opened apple.com unprompted, once in the
+# middle of a request about descaling a kettle.
+
+def test_the_browse_example_uses_a_reserved_domain():
+    from symbio.app import prompts
+
+    text = prompts.__dict__.get("SYSTEM_PROMPT") or open(
+        prompts.__file__, encoding="utf-8").read()
+    browse_lines = [l for l in text.splitlines()
+                    if "<browse>" in l and "Example" in l]
+    assert browse_lines, "the browse example should still exist"
+    for line in browse_lines:
+        assert "apple.com" not in line, (
+            "a real site as the worked example becomes the model's default "
+            "browse target")
+        assert "example.com" in line, line

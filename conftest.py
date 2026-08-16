@@ -27,6 +27,7 @@ That also stops the developer's personal notes from steering retrieval
 assertions. rag.py keeps its own module-level NOTES_DIR, so both must move.
 test_prune.py covers the pruner directly against its own isolated store.
 """
+import json
 import shutil
 
 import pytest
@@ -161,3 +162,14 @@ def isolate_runtime_state():
         if constants.MISTAKES_DIR.exists():
             for f in set(constants.MISTAKES_DIR.glob("*.md")) - mistakes_before:
                 f.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def fixture_worker_catalog():
+    """The 8 test-fixture skills (fold_a_fitted_sheet, jump_start_a_car_battery,
+    ...) that were moved out of the shipped catalog. They exist to exercise the
+    skill-adapter machinery at scale, not to ship as product skills. Tests that
+    need them merge this dict into their isolated worker_models.json (see
+    test_skill_adapters.py's isolated_skill_env for the pattern)."""
+    path = constants.PROJECT_DIR / "tests" / "fixtures" / "worker_models.json"
+    return json.loads(path.read_text(encoding="utf-8"))

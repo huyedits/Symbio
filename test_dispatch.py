@@ -1442,3 +1442,133 @@ def test_a_worker_reply_without_tools_is_passed_through_unchanged():
 
 def test_an_empty_worker_reply_says_so():
     assert "returned nothing" in dispatch.label_worker_reply("researcher", "")
+
+
+# ---- one in-flight training run per worker ----
+#
+# Found at 20 skills: saving the same skill twice — which a retry does —
+# starts a second daemon thread for the same role, and both back up, overwrite
+# and restore the same adapter directory. TRAINER_LOCK serialises the trainer
+# subprocess and does nothing about that, because the damage is in the file
+# operations around it. The journal showed two live entries for
+# 'set_up_tent_in_wind', each with its own backup.
+
+def test_a_second_run_for_the_same_role_is_refused(monkeypatch, tmp_path):
+    import threading as _threading
+
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+    })
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
+
+    inside = _threading.Event()
+    release = _threading.Event()
+    second: list = []
+
+    def slow_training(*a, **k):
+        inside.set()
+        release.wait(5)
+        _write_worker_adapter(k.get("role") or a[0], "trained")
+        return True
+
+    monkeypatch.setattr(training, "run_training", slow_training)
+    cfg = app_config.load_config()
+
+    first = _threading.Thread(
+        target=lambda: dispatch.guarded_train_worker("summarize", cfg))
+    first.start()
+    assert inside.wait(5), "first run should have started"
+
+    second.append(dispatch.guarded_train_worker("summarize", cfg))
+    release.set()
+    first.join(10)
+
+    trained, msg = second[0]
+    assert trained is False
+    assert "already being trained" in msg
+
+
+def test_a_different_role_is_not_blocked(monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+        "b": {"model_name": "m/b", "role": "browser"},
+    })
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
+    monkeypatch.setattr(training, "run_training",
+                        lambda cfg, iters=None, role=None, model_name=None, resume=False:
+                            _write_worker_adapter(role, "trained") or True)
+    cfg = app_config.load_config()
+    dispatch._role_lock("summarize").acquire()
+    try:
+        trained, _ = dispatch.guarded_train_worker("browser", cfg)
+        assert trained is True, "a lock on one role must not block another"
+    finally:
+        dispatch._role_lock("summarize").release()
+
+
+# ---- the self-closing note tag ----
+#
+# Observed live while teaching a correction: the model replied with
+# `<write_note title="..." body="..." replace="false"/>`. Nothing parsed it,
+# nothing stripped it, and detect_malformed_tag returned None — so the note
+# was never written and the raw tag was printed to the user as the answer.
+# The turn taught nothing, which is the failure mode that matters for a
+# system whose whole point is learning from corrections.
+
+def test_a_self_closing_note_tag_is_executed():
+    r = '<write_note title="User Cat" body="My cat is called Mochi." replace="false"/>'
+    assert tooling.parse_tools(r) == [
+        ("write_note", {"title": "User Cat", "body": "My cat is called Mochi."})]
+
+
+def test_a_self_closing_note_tag_is_not_shown_to_the_user():
+    r = 'Noted. <write_note title="Cat" body="Mochi."/>'
+    assert tooling.strip_tool_tags(r).strip() == "Noted."
+
+
+def test_the_wrapper_note_form_still_works():
+    r = 'Saved. <note title="Cat">My cat is Mochi.</note>'
+    assert tooling.parse_tools(r) == [
+        ("write_note", {"title": "Cat", "body": "My cat is Mochi."})]
+    assert tooling.strip_tool_tags(r).strip() == "Saved."
+
+
+def test_a_bodyless_self_closing_tag_is_not_a_call():
+    """No body means nothing to save; better ignored than saved empty."""
+    assert tooling.parse_tools('<write_note title="Cat"/>') == []
+
+
+# ---- a worker's reasoning is not its answer ----
+#
+# A worker reply is used twice: as the observation returned to the headmaster,
+# and as a training sample for that worker's own adapter. Observed after
+# retargeting 'summarize' at a reasoning model — a one-line summary came back
+# as 160 words opening "Thinking Process: 1. Analyze the Request", and that
+# text was about to be trained into the worker.
+
+def test_a_workers_reasoning_block_is_stripped(monkeypatch, tmp_path):
+    _isolate_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    _write_catalog(monkeypatch, tmp_path, {
+        "s": {"model_name": "m/s", "role": "summarize"},
+    })
+    monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
+    monkeypatch.setattr(
+        dispatch, "generate",
+        lambda *a, **k: "<think>\nLet me analyse the request.\n</think>\n\nA short summary.")
+
+    recorded = []
+    monkeypatch.setattr(dispatch.training, "append_chat_pair",
+                        lambda task, reply, *a, **k: recorded.append(reply))
+
+    pool = dispatch.WorkerPool({"dispatch": {}})
+    result = pool.run_delegated_task("summarize", "Summarise this.")
+
+    assert "think" not in result.lower(), result
+    assert result.endswith("A short summary.")
+    assert recorded == ["A short summary."], (
+        "the reasoning must not be trained into the worker either")

@@ -1,17 +1,16 @@
 """Training and serving must agree on enable_thinking.
 
-Every sample in the corpus is rendered by
-training.build_chat_training_sample with enable_thinking=False, so it
-contains only empty <think></think> blocks — the adapter is fine-tuned to
-skip reasoning and answer directly. The live agent loop previously prompted
-with enable_thinking=True, asking for the one behaviour the fine-tune trained
-out. The observed failure was reasoning surfacing in place of the answer:
+Every sample in the corpus is rendered by training.build_chat_training_sample
+with the same enable_thinking value the live agent loop prompts with
+(training.THINKING_ENABLED). A mismatch between the two was the original
+failure mode: the corpus was trained with thinking off while the loop asked
+for it, and reasoning surfaced in place of the answer:
 
     Huy   : hi
     Caine : The assistant already greeted the user.
 
-The golden set and eval both grade with enable_thinking=False, so nothing in
-the regression net could see the mismatch. These tests pin the alignment.
+The golden set and eval both grade with the same value, so nothing in the
+regression net could see the mismatch. These tests pin the alignment.
 """
 
 import builtins
@@ -40,12 +39,12 @@ class RecordingTokenizer(tml.FakeTokenizer):
         )
 
 
-def test_training_renders_without_a_reasoning_block():
+def test_training_renders_with_the_configured_thinking_mode():
     tok = RecordingTokenizer()
     training.build_chat_training_sample(
         [{"role": "user", "content": "hi"},
          {"role": "assistant", "content": "Hey."}], tok)
-    assert tok.calls[0]["enable_thinking"] is False
+    assert tok.calls[0]["enable_thinking"] is training.THINKING_ENABLED
 
 
 def test_agent_loop_generation_matches_training(monkeypatch):
@@ -96,8 +95,11 @@ def test_agent_loop_generation_matches_training(monkeypatch):
             f"but the corpus is trained with {training.THINKING_ENABLED}")
 
 
-def test_corpus_contains_no_reasoning_blocks():
-    """A sample with real reasoning would mean the corpus itself drifted."""
+def test_corpus_thinking_matches_training_mode():
+    """The corpus's thinking blocks must match the training mode: when
+    THINKING_ENABLED is True the samples carry real reasoning, and when it is
+    False they carry none. A mismatch means the corpus drifted from the
+    training/serving value."""
     import json
     import re
 
@@ -110,7 +112,8 @@ def test_corpus_contains_no_reasoning_blocks():
         if not raw.strip():
             continue
         text = json.loads(raw).get("text", "")
-        for match in re.finditer(r"<think>(.*?)</think>", text, re.DOTALL):
-            assert not match.group(1).strip(), (
-                "corpus has a non-empty think block; training and serving "
-                "assumptions have drifted")
+        for match in re.finditer(r" thinking(.*?) response", text, re.DOTALL):
+            has_reasoning = bool(match.group(1).strip())
+            assert has_reasoning is training.THINKING_ENABLED, (
+                "corpus thinking blocks disagree with THINKING_ENABLED="
+                f"{training.THINKING_ENABLED}")

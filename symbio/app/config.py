@@ -84,6 +84,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "top_p": 0.9,
         "cron_poll_seconds": 20,
         "stream_output": True,
+        # Surface the model's Qwen3 thinking block to the user as a
+        # "[Reasoning] …" block before the answer. Set false to hide it.
+        "show_reasoning": True,
         "prompt_cache_enabled": True,
         # Keep the warmed system-prefix KV cache on disk between runs, so a
         # restart reloads it instead of re-prefilling ~4.3k tokens through the

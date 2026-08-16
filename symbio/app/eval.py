@@ -23,7 +23,7 @@ from mlx_lm import generate, load
 from mlx_lm.sample_utils import make_sampler
 
 from symbio import constants
-from symbio.app import prompts, tooling
+from symbio.app import prompts, tooling, training
 
 
 @dataclass
@@ -237,7 +237,8 @@ def run_eval_set(
             {"role": "user", "content": case.prompt_fn(config)},
         ]
         chat_prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=training.THINKING_ENABLED,
         )
         start = time.perf_counter()
         try:

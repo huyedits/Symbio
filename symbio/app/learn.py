@@ -262,21 +262,37 @@ def _collapse_ws(line: str) -> str:
 
 
 def looks_degenerate(text: str, min_repeats: int = 3) -> bool:
-    """True when a reply is the same non-trivial line repeated.
+    """True when a reply is the same non-trivial line or phrase repeated.
 
     A looping generation is not a reply, and logging one poisons retrieval:
     it is stored as a normal assistant turn and comes back as context later.
     """
+    # Check repeated lines first (existing behavior).
     lines = [_collapse_ws(ln) for ln in text.splitlines() if ln.strip()]
-    if len(lines) < min_repeats:
-        return False
-    counts: dict[str, int] = {}
-    for line in lines:
-        if len(line) < 12:
-            continue
-        counts[line] = counts.get(line, 0) + 1
-        if counts[line] >= min_repeats:
-            return True
+    if len(lines) >= min_repeats:
+        counts: dict[str, int] = {}
+        for line in lines:
+            if len(line) < 12:
+                continue
+            counts[line] = counts.get(line, 0) + 1
+            if counts[line] >= min_repeats:
+                return True
+
+    # Also catch repeated phrases within a single long line — a model
+    # that emits "<scroll/> Scrolling down. <scroll/> Scrolling down. …"
+    # puts it all on one line, which the line-based check above misses.
+    collapsed = _collapse_ws(text)
+    # Split on sentence boundaries: ". " or ".\n"
+    sentences = [s.strip() for s in collapsed.replace(".\n", ". ").split(". ") if s.strip()]
+    if len(sentences) >= min_repeats:
+        scounts: dict[str, int] = {}
+        for s in sentences:
+            if len(s) < 8:
+                continue
+            scounts[s] = scounts.get(s, 0) + 1
+            if scounts[s] >= min_repeats:
+                return True
+
     return False
 
 
@@ -378,7 +394,121 @@ def find_correction_sample(history: list[dict[str, str]], config: dict[str, Any]
     correct_answer = strip_tool_tags(history[correct_idx].get("content", ""))
     if not wrong_answer.strip() or not correct_answer.strip():
         return None
+    correct_answer = ground_corrected_answer(
+        correct_answer, correction_text, original_query)
+    if not correct_answer.strip():
+        return None
     return original_query, wrong_answer, correction_text, correct_answer
+
+
+# Words that carry no claim, so their absence from the correction proves
+# nothing. Deliberately generous: the cost of keeping a hedge word is nil,
+# the cost of dropping a true sentence is a lost training sample.
+_GROUNDING_STOPWORDS = frozenset("""
+    a an the and or but if then than that this these those there here it its
+    is are was were be been being am do does did doing done have has had
+    to of in on at by for with from into onto over under about as so such
+    i me my we our you your yours he she they them their
+    not no nor only just also very much more most less least can could
+    should would may might must will shall get got make made use used using
+    let know need want help me you can if want know let s t re ll ve
+    which what when where who how why yes ok okay sure right correct
+    """.split())
+
+# Sentence ends, plus the clause markers a model uses to bolt an unsupported
+# gloss onto a true statement. The observed failure was exactly that shape:
+# "You use Helix, which is a terminal multiplexer..." — the fact and the
+# invention in one sentence, separated by an appositive. Splitting only on
+# sentence enders would throw the fact away with the gloss.
+_SENTENCE_SPLIT_RE = re.compile(
+    r"(?<=[.!?])\s+|,\s+|\s+[—–-]\s+|;\s+")
+
+
+def _content_words(text: str) -> set[str]:
+    words = re.sub(r"[^\w\s]", " ", text.lower()).split()
+    return {w for w in words if len(w) > 1 and w not in _GROUNDING_STOPWORDS}
+
+
+def ground_corrected_answer(answer: str, correction: str, question: str) -> str:
+    """Cut the corrected answer where it starts asserting things the user
+    never said.
+
+    The corrected answer is taken from the model's own reply after being
+    corrected, and it goes straight into the corpus as ground truth. That is
+    the one place a self-training system must not trust itself. Measured: told
+    plainly "I use Helix", the model wrote back "You use Helix, which is a
+    terminal multiplexer and text editor combination" — Helix is not a
+    terminal multiplexer — and that sentence was stored as the correct answer,
+    ready to be trained in as fact.
+
+    Segments are kept while every content word in them appears in the user's
+    correction or their original question. The first segment that invents
+    something ends the answer, along with everything after it, since later
+    text elaborates on the invention. The original string is truncated rather
+    than split and rejoined, so a kept list keeps its commas. Returns "" when
+    even the opening segment is ungrounded, which drops the sample instead of
+    teaching it.
+    """
+    allowed = _content_words(correction) | _content_words(question)
+    cut = None
+    pos = 0
+    for sep in list(_SENTENCE_SPLIT_RE.finditer(answer)) + [None]:
+        end = sep.start() if sep is not None else len(answer)
+        if _content_words(answer[pos:end]) - allowed:
+            cut = pos
+            break
+        if sep is None:
+            break
+        pos = sep.end()
+    text = (answer if cut is None else answer[:cut]).strip()
+    text = text.rstrip(" ,;:-—–")
+    if text and text[-1] not in ".!?":
+        text += "."
+    # A grounded answer still has to assert the corrected fact. Trimming can
+    # leave an acknowledgement — "Okay." — which is safe and worthless, and
+    # training on it teaches the model to answer a question with a nod.
+    # Observed when the reply was the model's own reasoning rather than an
+    # answer, which the thinking adapter does on some prompts.
+    if not (_content_words(text) & _content_words(correction)):
+        return ""
+    return text
+
+
+_CORRECTION_LABEL_RE = re.compile(
+    r"\b(?:original question|wrong answer|correct answer|correction)\s*:",
+    re.IGNORECASE)
+
+
+def correction_concerns_skill(correction_text: str, note_path) -> bool:
+    """Is this correction actually about that skill?
+
+    A correction is filed against skills so a procedure can be amended by
+    being told it is wrong. The candidate set is every skill note retrieved
+    during the session, which is much broader than the skills involved — and
+    a sidecar entry feeds that skill's retraining, so a mis-filed correction
+    teaches an unrelated adapter. Requiring a shared content word is crude,
+    but it is the difference between amending the skill you were discussing
+    and amending whatever happened to match the retriever earlier.
+    """
+    try:
+        note = Path(note_path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    # The scaffold labels are not content. Leaving "Wrong answer:"/"Correct
+    # answer:" in matched every skill note that contains the word "answer",
+    # which is most of them, and put the check back where it started.
+    body = _CORRECTION_LABEL_RE.sub(" ", correction_text)
+    # Matched against the skill's title, not its whole body. Any two
+    # procedures share incidental words — "water" put a kettle correction
+    # onto Coffee Making and Repotting a Houseplant — whereas the title is
+    # what the skill is *about*, and a correction that concerns it says so.
+    title = note.splitlines()[0] if note.strip() else ""
+    title = re.sub(r"^#\s*Skill\s*:", " ", title, flags=re.IGNORECASE)
+    # Titles arrive both ways — "Fix wifi" when a human named it, and
+    # "descaling_a_kettle" when the model emitted the slug — and the slug
+    # tokenises as one word that matches nothing.
+    title = title.replace("_", " ")
+    return bool(_content_words(body) & _content_words(title))
 
 
 # How hard did the user push back? Severity scales both the per-note training

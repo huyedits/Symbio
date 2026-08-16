@@ -28,6 +28,13 @@ class ChatMLTokenizer:
     turn, so it appears in rendered text but not in the content that produced
     it. Getting that wrong is what made the first version of the corpus
     migration silently upgrade nothing.
+
+    Rendering is idempotent, because the real Qwen3 template is: it parses a
+    thinking block back out of assistant content and re-renders it canonically
+    rather than stacking a second one on top. Verified directly against
+    Qwen/Qwen3-8B-MLX-4bit. A stub that stacked instead made the upgrade path
+    look broken here while working fine in production — the failure was in
+    this double, not in the code under test.
     """
 
     def apply_chat_template(self, messages, tokenize=False,
@@ -36,7 +43,7 @@ class ChatMLTokenizer:
         out = []
         for m in messages:
             body = m["content"]
-            if m["role"] == "assistant":
+            if m["role"] == "assistant" and not body.lstrip().startswith("<think>"):
                 body = "<think>\n\n</think>\n\n" + body
             out.append(f"<|im_start|>{m['role']}\n{body}<|im_end|>\n")
         if add_generation_prompt:
@@ -111,10 +118,17 @@ def test_legacy_text_only_samples_are_upgraded(corpus):
 
     assert counts == {"upgraded": 1, "left": 0}
     assert training._supports_prompt_masking() is True
-    messages = _records(constants.TRAIN_FILE)[0]["messages"]
-    # The template's own reasoning block must not be carried into the content,
-    # or re-rendering stacks a second one on top of it.
-    assert messages[-1]["content"] == "A."
+    record = _records(constants.TRAIN_FILE)[0]
+    messages = record["messages"]
+    # The invariant is that re-rendering reproduces the sample byte for byte,
+    # not where the reasoning block is kept. It used to be stripped out of the
+    # content because the template stacked a second one on top; the current
+    # Qwen3 template re-renders it canonically instead, so it may now live in
+    # the content. What must never change is the round-trip, because the mask
+    # offset is computed from these messages and a drift puts it on the wrong
+    # tokens.
+    assert training.render_messages(messages, tok) == record["text"]
+    assert messages[-1]["content"].endswith("A.")
 
 
 def test_masking_stays_off_when_a_sample_cannot_be_parsed(corpus):
