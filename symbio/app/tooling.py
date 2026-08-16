@@ -542,6 +542,11 @@ def clean_response(text: str) -> str:
 _QWEN_THINK_OPEN = "".join(chr(c) for c in [0x3c, 0x74, 0x68, 0x69, 0x6e, 0x6b, 0x3e])
 _QWEN_THINK_CLOSE = "".join(chr(c) for c in [0x3c, 0x2f, 0x74, 0x68, 0x69, 0x6e, 0x6b, 0x3e])
 
+# Prefix used to surface a Qwen3 thinking block to the user (StreamingStripper
+# during streaming, chat.py's final print when not streaming). Plain ASCII so
+# it survives any terminal/tooling HTML transformation.
+REASONING_MARKER = "  [Reasoning] "
+
 # Explicit end-of-turn marker the model is taught to emit at the end of every
 # reply (see tool_few_shots + the system prompt). It is used as an early stop
 # sequence in _generate_reply: the moment it streams out, generation stops, so
@@ -582,6 +587,24 @@ def strip_reasoning_block(text: str) -> str:
         # Drop this complete think block and look at what remains.
         text = s[cidx + len(_QWEN_THINK_CLOSE):]
     return text.lstrip("\n")
+
+
+def extract_reasoning(text: str) -> str:
+    """Return the Qwen3 thinking block content from a generated reply, or "".
+
+    Mirrors strip_reasoning_block's detection: only a block anchored at the
+    start of the reply counts. The content is the text between the open and
+    close delimiters, stripped. Used to surface the reasoning to the user
+    (the reply itself still goes through strip_reasoning_block so tools and
+    history never see it).
+    """
+    s = text.lstrip("\n")
+    if not s.startswith(_QWEN_THINK_OPEN):
+        return ""
+    cidx = s.find(_QWEN_THINK_CLOSE, len(_QWEN_THINK_OPEN))
+    if cidx == -1:
+        return ""
+    return s[len(_QWEN_THINK_OPEN):cidx].strip()
 
 
 def tool_group(name: str) -> str | None:
@@ -784,6 +807,23 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
             "body": m.group(3).strip(),
         }))
 
+    # Self-closing attribute form: <write_note title="..." body="..." />.
+    # The model writes this when it treats the tag as XML rather than as a
+    # wrapper around the body. Nothing recognised it, so the note was never
+    # written AND the raw tag was printed to the user as the reply — observed
+    # verbatim in a session where a correction was being taught, which also
+    # meant nothing was learned from that turn.
+    for m in re.finditer(r'<(?:note|write_note)\b([^>]*?)/>', reply, re.DOTALL):
+        attrs = {k.lower(): v for k, _q, v in
+                 re.findall(r'(\w+)\s*=\s*(["\'])(.*?)\2', m.group(1), re.DOTALL)}
+        body = next((attrs[k] for k in
+                     ("body", "content", "text", "note", "value") if attrs.get(k)), "")
+        if body.strip():
+            tools.append(("write_note", {
+                "title": attrs.get("title", "").strip(),
+                "body": body.strip(),
+            }))
+
     for m in re.finditer(r'<cmd>(.*?)</cmd>', reply, re.DOTALL):
         tools.append(("run_command", {"cmd": m.group(1).strip()}))
 
@@ -966,6 +1006,9 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
 # so both agree on what "safe to remove" means.
 _COMPLETE_TAG_PATTERNS: list[str] = [
     r'<note\s+title=(["\'])(.*?)\1>(.*?)</note>',
+    # Executed above, so it must be stripped here too or the raw tag is what
+    # the user sees as the reply.
+    r'<(?:note|write_note)\b[^>]*?/>',
     r'<cmd>(.*?)</cmd>',
     r'<py>(.*?)</py>',
     r'<search>(.*?)</search>',
@@ -1127,7 +1170,7 @@ class StreamingStripper:
     once generation finishes, so a quirk here can never change what the
     agent actually does, only how the in-progress text looks."""
 
-    def __init__(self):
+    def __init__(self, show_reasoning: bool = True):
         self._buffer = ""
         # Qwen3 think block. With enable_thinking=True the generation prompt
         # ends at "<|im_start|>assistant\n" — the open delimiter is NOT part
@@ -1144,6 +1187,10 @@ class StreamingStripper:
         # already de-thought — streams normally instead of being swallowed
         # whole while waiting for a close delimiter that never comes.
         self._think_state = "undecided"  # -> "inside" -> "done"
+        # When True, a completed thinking block is surfaced to the user as a
+        # "[Reasoning] …" block (the answer still streams separately after
+        # it). When False, the block is hidden exactly as before.
+        self._show_reasoning = show_reasoning
         # Leading whitespace (newlines left after the think block, or after a
         # re-opened delim the adapter drops) is discarded until the first real
         # answer character is shown, so the reply starts flush on its line.
@@ -1172,8 +1219,13 @@ class StreamingStripper:
                 # Still inside the reasoning block — show nothing yet.
                 # finish() drops the leftover once generation ends.
                 return ""
-            # Drop the reasoning block and everything up through the close
-            # delimiter; what remains is the answer.
+            # The reasoning block is complete. If showing reasoning, emit it as
+            # a distinct "[Reasoning] …" block and hold the answer buffer for
+            # the next feed call (or finish()) so the answer streams
+            # separately after it — the caller can then attach its reply
+            # prefix to the answer, not the reasoning. Otherwise drop the
+            # block as before.
+            reasoning = self._buffer[:cidx].strip()
             self._buffer = self._buffer[cidx + len(_QWEN_THINK_CLOSE):]
             self._think_state = "done"
             # The answer may still carry think-delimiter artifacts (the
@@ -1183,6 +1235,8 @@ class StreamingStripper:
             # remaining one, then strip the leading newlines once at the
             # answer start.
             self._buffer = self._buffer.replace(_QWEN_THINK_OPEN, "").replace(_QWEN_THINK_CLOSE, "").lstrip("\n")
+            if self._show_reasoning and reasoning:
+                return f"{REASONING_MARKER}{reasoning}\n"
             if self._buffer == "":
                 return ""
         else:

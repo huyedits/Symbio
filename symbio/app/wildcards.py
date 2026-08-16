@@ -159,6 +159,143 @@ WILDCARD_CASES: list[EvalCase] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Deep set: 20 held-out cases per category.
+#
+# The nine cases above are a fast in-training probe, and at nine trials one
+# case is 11% of the score — finer than that the number cannot measure, so
+# "did this retrain help" and "did the sampler roll differently" look the
+# same. These 60 exist to answer that: 20 attempts per category, each a
+# distinct unseen subject, so a category's failure rate is a rate rather than
+# an anecdote. Same rule as above — every subject here must stay absent from
+# build_seed_pairs(), and subjects() below is what test_wildcards.py checks.
+
+DEEP_PRODUCTS = (
+    "Anker Prime 250W", "a Keychron Q1 HE", "a Fujifilm X-M5", "Pixelmator Pro 4",
+    "a Supernote A5X", "an Elgato Stream Deck Neo", "a Garmin Instinct 3",
+    "a Ploopy Adept trackball", "a Roborock Saros 10", "an Aqara U200",
+)
+DEEP_FACTS = (
+    "the mayor of Tallinn", "the prime minister of Slovenia",
+    "the president of Uruguay", "the mayor of Bergen",
+    "the chancellor of Austria", "the mayor of Porto",
+    "the president of Malta", "the mayor of Ghent",
+    "the prime minister of Latvia", "the mayor of Aarhus",
+)
+DEEP_DRIVE_SITES = (
+    "duckdb.org", "htmx.org", "caddyserver.com", "typst.app", "nushell.sh",
+    "tigerbeetle.com", "fly.io", "tailscale.com", "restic.net", "syncthing.net",
+)
+DEEP_HAND_SITES = (
+    "borgbackup.org", "rclone.org", "miniflux.app", "gotify.net", "sr.ht",
+    "fossil-scm.org", "redict.io", "zola.org", "ziglang.org", "gleam.run",
+)
+DEEP_FACTS_TO_SAVE = (
+    "my kayak is a Pyranha Ripper", "my router is a Flint 3",
+    "my espresso grinder is a DF64", "my tent is a Durston X-Mid 2",
+    "my keyboard is a Voyager", "my drone is an Avata 2",
+    "my watch is a Casio W-800",
+)
+# Expressions, not literals: Python does the arithmetic so a typo cannot make
+# a case unpassable and look like a model failure.
+DEEP_COMPUTE = (
+    ("how many seconds are in 41 years? exact number", 41 * 365 * 24 * 3600),
+    ("what is 3 to the power of 27, exactly", 3 ** 27),
+    ("multiply 987654 by 4321 for me, exact", 987654 * 4321),
+    ("how many days in 73 years, no rounding", 73 * 365),
+    ("what's 17 to the 8th power", 17 ** 8),
+    ("123456789 times 987, exact figure please", 123456789 * 987),
+    ("how many minutes in 29 years exactly", 29 * 365 * 24 * 60),
+)
+DEEP_TRIVIAL = (
+    ("quick one, 6 times 7", 6 * 7), ("what's 9 times 9", 9 * 9),
+    ("12 plus 30?", 12 + 30), ("what is 100 minus 37", 100 - 37),
+    ("5 squared, quickly", 5 ** 2), ("half of 84?", 84 // 2),
+)
+
+
+def _opens(token: str):
+    """Drove the controllable browser, to the address the request named."""
+    def check(display: str, tools: list, config: dict) -> bool:
+        if not sane_reply(display) or not _has_tool(tools, "browser_open"):
+            return False
+        return token in _tag_text(tools, "browser_open")
+    return check
+
+
+def _computes(expected: int):
+    """Too large for the head: run code, don't search, and don't guess."""
+    def check(display: str, tools: list, config: dict) -> bool:
+        if not sane_reply(display):
+            return False
+        if _has_tool(tools, "web_search", "browser_open"):
+            return False
+        if _has_tool(tools, "execute_code"):
+            return True
+        return str(expected) in display.replace(",", "").replace(" ", "")
+    return check
+
+
+def _answers_directly(expected: int):
+    """Small enough that reaching for a tool is itself the failure."""
+    def check(display: str, tools: list, config: dict) -> bool:
+        if not sane_reply(display):
+            return False
+        if _has_tool(tools, "web_search", "browser_open"):
+            return False
+        return str(expected) in display or _has_tool(tools, "execute_code")
+    return check
+
+
+def _deep_cases() -> list[EvalCase]:
+    cases: list[EvalCase] = []
+    for i, product in enumerate(DEEP_PRODUCTS):
+        cases.append(EvalCase(
+            f"deep_research_price_{i}", f"Prices {product} (expects search)",
+            lambda cfg, p=product: f"roughly what does {p} cost right now?",
+            _check_price_searches))
+    for i, fact in enumerate(DEEP_FACTS):
+        cases.append(EvalCase(
+            f"deep_research_fact_{i}", f"Looks up {fact} (expects search)",
+            lambda cfg, f=fact: f"any idea who {f} is at the moment?",
+            _check_fact_searches))
+    for i, site in enumerate(DEEP_DRIVE_SITES):
+        cases.append(EvalCase(
+            f"deep_browser_drive_{i}", f"Opens {site} to act on it",
+            lambda cfg, s=site: f"pull up {s} and click through to their docs for me",
+            _opens(site.split(".")[0])))
+    for i, site in enumerate(DEEP_HAND_SITES):
+        cases.append(EvalCase(
+            f"deep_browser_hand_{i}", f"Hands {site} to the user",
+            lambda cfg, s=site: f"just open {s} in my browser, I'll read it myself",
+            _check_hands_page_to_user))
+    for i, fact in enumerate(DEEP_FACTS_TO_SAVE):
+        cases.append(EvalCase(
+            f"deep_device_save_{i}", f"Saves: {fact}",
+            lambda cfg, f=fact: f"make a note of this — {f}.",
+            _check_saves))
+    for i, (prompt, expected) in enumerate(DEEP_COMPUTE):
+        cases.append(EvalCase(
+            f"deep_device_compute_{i}", f"Computes {expected}",
+            lambda cfg, p=prompt: p, _computes(expected)))
+    for i, (prompt, expected) in enumerate(DEEP_TRIVIAL):
+        cases.append(EvalCase(
+            f"deep_device_trivial_{i}", f"Answers {expected} without a tool",
+            lambda cfg, p=prompt: p, _answers_directly(expected)))
+    return cases
+
+
+DEEP_CASES: list[EvalCase] = _deep_cases()
+
+
+def category_of(case_id: str) -> str:
+    """Which of the three behaviours a case belongs to, for per-category rates."""
+    for name in ("research", "browser", "device"):
+        if case_id.startswith(f"deep_{name}_"):
+            return name
+    return "core"
+
+
 def history_path():
     """Where the trend is recorded.
 
@@ -249,4 +386,6 @@ def run_check(model, tokenizer, generate_fn, sampler, system_prompt,
 def subjects() -> list[str]:
     """Every distinctive subject these cases depend on staying novel."""
     return [*NOVEL_PRODUCTS, *NOVEL_SITES, *NOVEL_FACTS,
-            "Marin Nail Trail", "seconds in 37 years"]
+            "Marin Nail Trail", "seconds in 37 years",
+            *DEEP_PRODUCTS, *DEEP_FACTS, *DEEP_DRIVE_SITES, *DEEP_HAND_SITES,
+            *DEEP_FACTS_TO_SAVE]

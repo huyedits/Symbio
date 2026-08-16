@@ -19,6 +19,7 @@ from symbio.config import can_run_lora, detect_model_type
 from symbio.constants import ADAPTER_DIR, DEFAULT_CONFIG, LOG_DIR, PROJECT_DIR
 from symbio.learn import _is_system_observation
 from symbio.llm import run_training, save_history_pairs
+from symbio.app.training import THINKING_ENABLED
 from symbio.store import SessionStore
 from symbio.tools import (
     build_tool_registry,
@@ -298,7 +299,7 @@ class AIAgent:
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                enable_thinking=THINKING_ENABLED,
                 **({"tools": self._openai_tool_schemas()} if native_tools else {}),
             )
 

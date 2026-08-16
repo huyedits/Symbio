@@ -8,6 +8,7 @@ No external embedding model or vector DB is required. Retrieval uses:
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from collections import Counter
@@ -199,12 +200,100 @@ class Retriever:
         """Stable key for repeated/rephrased queries."""
         return " ".join(sorted(_normalize(query)))
 
-    def _score(self, query_terms: list[str], text: str) -> float:
+    # A term carried by more than this share of the corpus cannot be what
+    # makes one note the right answer. Measured on this project's notes:
+    # topical words sit at or below 11% ("wifi" 5%, "coffee" 11%, "bicycle"
+    # 5%) while the words that were actually deciding the ranking sit far
+    # above it ("skill" 53%, "the" 68%, "for" 47%). A third is the gap.
+    _MAX_DISCRIMINATIVE_SHARE = 1 / 3
+    # Corpus statistics alone cannot catch these. On a small, technical set of
+    # notes "how" and "do" are genuinely rare — most notes are written as
+    # numbered steps and simply never use them — so the share test called them
+    # discriminative and admitted the Device Awareness note for "how do I make
+    # coffee". A stopword is never the reason a note is the right answer, at
+    # any frequency, so it is excluded on principle rather than by counting.
+    _NEVER_DISCRIMINATIVE = frozenset("""
+        how do does did can could should would will shall may might must
+        what when where which who whom whose why is are was were be been being
+        have has had am the and or but if then than that this these those
+        for to of in on at by with from as into about over under
+        my me you your yours it its they them their we us our
+        one two some any all no not so just now new get got make made made
+        need want like use used using please tell show give take put
+        thing things stuff way ways time times step steps skill skills
+        """.split())
+
+    @classmethod
+    def _is_discriminative(cls, term: str, appears: int, total: int) -> bool:
+        if term in cls._NEVER_DISCRIMINATIVE:
+            return False
+        return 0 < appears <= total * cls._MAX_DISCRIMINATIVE_SHARE
+    # Below this many notes the share of a term is too noisy to act on — with
+    # four notes, one is 25% and two is 50%, so the cutoff would be deciding
+    # on nothing. Small corpora keep the old behaviour.
+    _MIN_NOTES_FOR_FLOOR = 5
+
+    @classmethod
+    def _discriminative_terms(cls, query_terms: list[str],
+                              normalized_docs) -> set[str] | None:
+        """Query terms rare enough to justify returning a note at all.
+
+        IDF ranks well and cannot say "none of these". When a query's topical
+        words appear in no note — asking about bread with no bread note — the
+        whole ranking falls to whatever common words are left, and the top
+        three come back as confidently as a real match. Measured: "save a
+        skill for making bread" returned Device Awareness, Coffee Making and
+        Quick Task Helper, decided by "skill", "for" and "save".
+
+        That is not a relevance problem. A retrieved note is pasted into the
+        model's context, skill notes are procedures, and the model performs
+        them: a bicycle question pulled the Browser Driver note and produced
+        real clicks on google.com. An empty result is strictly better than a
+        confident wrong one.
+
+        Returns None when the corpus is too small to judge.
+        """
+        docs = [set(d) for d in normalized_docs]
+        total = len(docs)
+        if total < cls._MIN_NOTES_FOR_FLOOR:
+            return None
+        return {t for t in set(query_terms)
+                if cls._is_discriminative(
+                    t, sum(1 for d in docs if t in d), total)}
+
+    @staticmethod
+    def _idf(query_terms: list[str], documents) -> dict[str, float]:
+        """How much each query term distinguishes one document from another.
+
+        Without this every term counts the same, so "the" is worth as much as
+        "power". Measured: routing "what is 3 to the power of 27, exactly"
+        scored the Researcher note 27 — of which "the" contributed 12 and no
+        content word contributed anything — over the Device note's 19, which
+        was the only one to match "power" and "exactly" at all. The router was
+        deciding on stopwords.
+
+        A term in every document scores 0; a term in one of many scores high.
+        """
+        docs = [_normalize(d) for d in documents]
+        total = len(docs) or 1
+        idf = {}
+        for term in set(query_terms):
+            appears = sum(1 for d in docs if term in d)
+            # +1 inside the log keeps a term present everywhere at exactly 0
+            # rather than negative, so it is ignored rather than penalised.
+            idf[term] = math.log(1 + (total - appears + 0.5) / (appears + 0.5))
+        return idf
+
+    def _score(self, query_terms: list[str], text: str,
+               idf: dict[str, float] | None = None) -> float:
         terms = _normalize(text)
         if not terms:
             return 0.0
         counts = Counter(terms)
-        score = sum(counts[t] for t in query_terms)
+        if idf is None:
+            score = sum(counts[t] for t in query_terms)
+        else:
+            score = sum(counts[t] * idf.get(t, 0.0) for t in query_terms)
         # Normalize by document length so long docs do not always win.
         return score / (len(terms) ** 0.5 + 1)
 
@@ -240,9 +329,19 @@ class Retriever:
                 pass
 
         notes = self._load_notes()
+        normalized = {name: _normalize(text) for name, text in notes.items()}
+        idf = self._idf(query_terms, notes.values())
+        # Nothing rare enough to justify an answer means the honest answer is
+        # no notes, not the three least-bad ones.
+        discriminative = self._discriminative_terms(query_terms, normalized.values())
+        if discriminative is not None and not discriminative:
+            return []
         scored = []
         for name, text in notes.items():
-            s = self._score(query_terms, text)
+            if discriminative is not None and not (
+                    discriminative & set(normalized[name])):
+                continue
+            s = self._score(query_terms, text, idf)
             if s > 0:
                 scored.append({
                     "source": "note",

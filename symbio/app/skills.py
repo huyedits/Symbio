@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from symbio import constants
-from symbio.app import dispatch, memory, training
+from symbio.app import dispatch, memory, pending, training
 
 
 NOTES_USAGE_FILE = constants.NOTES_DIR / ".last_used.json"
@@ -448,6 +448,15 @@ def save_skill_adapter(
         "trained": False,
         "message": f"Skill '{name}' saved as worker role '{role}' with {seeded} seed samples.",
     }
+
+    # The seeds are on disk and the adapter is not: from this line until a
+    # training run finishes, the skill is real but cannot answer from its own
+    # weights. Written down before the thread starts and before the crash
+    # window opens — guarded_train_worker supersedes this entry when it picks
+    # the work up, and clears it when it finishes, so a skill can never end up
+    # permanently seeded-but-untrained without something saying so.
+    pending.defer("train_worker", f"first adapter for skill '{name}'",
+                  role=role, reason="skill saved; adapter not trained yet")
 
     if auto_train:
         # Training the headmaster-sized model blocks for minutes; run in the

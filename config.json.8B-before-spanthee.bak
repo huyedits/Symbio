@@ -1,0 +1,236 @@
+{
+  "model_name": "mlx-community/DeepSeek-V4-Pro-Qwen3.5-9B-4bit",
+  "assistant_name": "Caine",
+  "user_name": "Huy",
+  "lora": {
+    "rank": 8,
+    "dropout": 0.1,
+    "scale": 20.0,
+    "num_layers": 8,
+    "batch_size": 1,
+    "learning_rate": 0.0001,
+    "iters": 150,
+    "max_iters": 600,
+    "max_seq_length": 3072,
+    "steps_per_eval": 30,
+    "save_every": 15,
+    "early_stop_enabled": true,
+    "early_stop_patience": 2,
+    "early_stop_min_delta": 0.02,
+    "grad_checkpoint": true,
+    "keys": [
+      "self_attn.q_proj",
+      "self_attn.v_proj"
+    ]
+  },
+  "agent": {
+    "max_tool_rounds": 3,
+    "history_limit": 20,
+    "sandbox_timeout": 30,
+    "code_timeout": 60,
+    "max_output_len": 4000,
+    "max_reply_tokens": 512,
+    "temperature": 0.6,
+    "top_p": 0.9,
+    "cron_poll_seconds": 20,
+    "stream_output": true,
+    "prompt_cache_enabled": true,
+    "first_chunk_timeout_ms": 600,
+    "max_history_chars": 4000,
+    "tool_use_temperature": 0.6,
+    "speed_mode": "balanced",
+    "backup_before_edit": true,
+    "native_tools": true
+  },
+  "browser": {
+    "enabled": true
+  },
+  "web": {
+    "search_results": 5,
+    "http_timeout": 15,
+    "auto_search_when_unsure": false,
+    "auto_search_session_cap": 20
+  },
+  "sandbox": {
+    "blocked_commands": [
+      "rm",
+      "sudo",
+      "su",
+      "dd",
+      "mkfs",
+      "fdisk",
+      "mount",
+      "umount",
+      "chmod",
+      "chown",
+      "curl",
+      "wget",
+      "ssh",
+      "scp",
+      "python",
+      "python3",
+      "perl",
+      "ruby",
+      "php",
+      "node",
+      "npm",
+      "bash",
+      "sh",
+      "zsh",
+      "fish"
+    ],
+    "blocked_shells": [
+      "bash",
+      "sh",
+      "zsh",
+      "fish"
+    ],
+    "shell_allow_localhost": true,
+    "shell_allow_remote_hosts": true,
+    "blocked_imports": [
+      "os",
+      "sys",
+      "subprocess",
+      "pathlib",
+      "shutil",
+      "socket",
+      "http",
+      "urllib",
+      "ftplib",
+      "smtplib",
+      "imaplib",
+      "pickle",
+      "ctypes",
+      "multiprocessing",
+      "threading",
+      "tempfile",
+      "asyncio",
+      "importlib",
+      "pkgutil",
+      "site",
+      "builtins"
+    ]
+  },
+  "telegram": {
+    "enabled": false,
+    "bot_token": "",
+    "allowed_chat_ids": [],
+    "confirm_dangerous": true
+  },
+  "rag": {
+    "enabled": true,
+    "top_k": 3,
+    "max_context_tokens": 800,
+    "sources": [
+      "notes",
+      "sessions"
+    ],
+    "tag_index_enabled": false,
+    "auto_index_enabled": false
+  },
+  "memory": {
+    "enabled": true,
+    "memory_char_limit": 2200,
+    "profile_char_limit": 1375,
+    "nudge_interval": 10,
+    "flush_min_turns": 6
+  },
+  "learn": {
+    "enabled": true,
+    "auto": true,
+    "auto_train": true,
+    "remember_research": true,
+    "note_decay_days": 90,
+    "mistake_threshold": 5,
+    "batch_train_iters": 25,
+    "iters_per_severity": 5,
+    "max_batch_train_iters": 100,
+    "boost_factor": 3,
+    "severe_correction_phrases": [
+      "wrong",
+      "incorrect",
+      "you misunderstood",
+      "fix it",
+      "not what"
+    ],
+    "golden_set_enabled": true,
+    "golden_max_tokens": 150,
+    "golden_regression_threshold": 0,
+    "golden_rollback_on_regression": true,
+    "golden_retry_enabled": true,
+    "golden_retry_max_extra_iters": 50,
+    "golden_retry_samples_per_case": 3,
+    "adapter_idle_reminder_enabled": true,
+    "adapter_idle_days": 30,
+    "correction_phrases": [
+      "no,",
+      "not quite",
+      "that's wrong",
+      "incorrect",
+      "wrong",
+      "you misunderstood",
+      "try again",
+      "actually",
+      "i meant",
+      "i said",
+      "i asked",
+      "not what",
+      "that's not",
+      "you're wrong",
+      "fix it",
+      "correction",
+      "rephrase"
+    ]
+  },
+  "eval": {
+    "max_eval_tokens": 512
+  },
+  "tools": {
+    "enabled_groups": [
+      "memory",
+      "notes",
+      "terminal",
+      "code",
+      "web_search",
+      "digest",
+      "train",
+      "cron",
+      "config",
+      "delegate",
+      "system",
+      "browser"
+    ]
+  },
+  "remote": {
+    "hosts": {}
+  },
+  "safety": {
+    "enabled": true,
+    "require_confirm_score": 3,
+    "log_score": 2
+  },
+  "dispatch": {
+    "enabled": true,
+    "headmaster_deep_sleep_while_workers": true,
+    "hot_swap_adapters": true,
+    "max_resident_workers": 1,
+    "worker_idle_unload_minutes": 10,
+    "max_worker_rounds": 4,
+    "worker_golden_set_enabled": true,
+    "worker_golden_regression_threshold": 0,
+    "worker_golden_rollback_on_regression": true,
+    "worker_golden_retry_enabled": true,
+    "worker_golden_retry_max_extra_iters": 50,
+    "worker_golden_retry_samples_per_case": 3
+  },
+  "telemetry": {
+    "enabled": false,
+    "consented": false,
+    "endpoint": "",
+    "shared_secret": "",
+    "feedback_enabled": false,
+    "ping_daily": true,
+    "local_log": true
+  },
+  "first_run": false
+}

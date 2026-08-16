@@ -19,7 +19,9 @@ from typing import Any
 
 from symbio import constants
 from symbio.app.config import load_config
+from symbio.app import tooling
 from symbio.app.training import (
+    THINKING_ENABLED,
     backup_adapter,
     build_chat_training_sample,
     restore_adapter,
@@ -69,7 +71,8 @@ async def _validate_adapter(
             {"role": "user", "content": ex.prompt},
         ]
         input_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=THINKING_ENABLED,
         )
         try:
             output = generate(
@@ -80,6 +83,7 @@ async def _validate_adapter(
                 max_tokens=256,
                 verbose=False,
             ).strip()
+            output = tooling.strip_reasoning_block(output)
         except Exception as exc:
             print(f"  [MCP Learn] Validation generation failed: {exc}")
             continue
