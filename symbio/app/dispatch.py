@@ -15,6 +15,7 @@ shared one.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from mlx_lm import generate, load
 from mlx_lm.sample_utils import make_sampler
 
 from symbio import constants
-from symbio.app import golden, training
+from symbio.app import golden, pending, tooling, training
 
 
 def load_catalog() -> dict[str, dict[str, Any]]:
@@ -183,6 +184,32 @@ def describe_recipe_drift(worker_dir: Path, headmaster_dir: Path) -> str | None:
     return "; ".join(drift) or None
 
 
+def label_worker_reply(role: str, reply: str) -> str:
+    """Frame a worker's reply so a tool call in it reads as proposed, not done.
+
+    Nothing executes a worker's tool tags. Its reply comes back as the
+    headmaster's observation, and an observation is where *results* live — so
+    a worker that correctly answered "<search>Tallinn mayor current</search>"
+    was read as a search that had already run. The headmaster then answered
+    the question from memory and presented it as looked-up. A specialist whose
+    whole job is choosing the right tool turns into a machine for dressing up
+    recall as research, which is worse than not delegating at all.
+
+    Saying plainly that the call has not run puts it back in the headmaster's
+    hands, which is the same "suggest, don't route" stance the rest of
+    dispatch takes.
+    """
+    if not reply:
+        return f"Worker '{role}' returned nothing."
+    if not tooling.parse_tools(reply):
+        return reply
+    return (
+        f"Worker '{role}' recommends this tool call but it has NOT been run "
+        f"and no result exists yet:\n{reply}\n"
+        f"Issue the call yourself if you agree with it. Do not answer as "
+        f"though it already returned.")
+
+
 class SecondHeadmasterCopyRefused(RuntimeError):
     """Raised rather than putting a second copy of the headmaster's weights in RAM.
 
@@ -225,19 +252,43 @@ class WorkerPool:
     def _dispatch_cfg(self) -> dict[str, Any]:
         return self.config.get("dispatch", {})
 
+    def _evict(self, roles: list[str]):
+        """Drop `roles` and hand their memory back to the system now.
+
+        Dropping the dict entry is not the same as freeing the weights. MLX
+        holds them in unified memory charged to the process until the
+        allocator reclaims it, so an eviction that is only a `del` leaves the
+        old worker fully resident right up to the moment the *next* one is
+        loaded — which is exactly when the machine can least afford it. This
+        is the same reason _reload_model frees before it loads.
+        """
+        if not roles:
+            return
+        for role in roles:
+            self._resident.pop(role, None)
+        training.release_model()
+
     def _evict_idle(self):
         idle_minutes = float(self._dispatch_cfg().get("worker_idle_unload_minutes", 10))
         if idle_minutes <= 0:
             return
         cutoff = time.time() - idle_minutes * 60
-        for role in [r for r, (_, _, ts) in self._resident.items() if ts < cutoff]:
-            del self._resident[role]
+        self._evict([r for r, (_, _, ts) in self._resident.items() if ts < cutoff])
 
     def _evict_lru_if_needed(self):
         max_resident = max(1, int(self._dispatch_cfg().get("max_resident_workers", 1)))
         while len(self._resident) >= max_resident:
             oldest_role = min(self._resident, key=lambda r: self._resident[r][2])
-            del self._resident[oldest_role]
+            self._evict([oldest_role])
+
+    def unload_all(self, reason: str = "") -> list[str]:
+        """Evict every resident worker. Returns the roles that were dropped."""
+        roles = list(self._resident)
+        self._evict(roles)
+        if roles and reason:
+            self._status(f"  [Dispatch] Unloading worker(s) "
+                         f"{', '.join(roles)}: {reason}")
+        return roles
 
     def loaded_roles(self) -> list[str]:
         return list(self._resident)
@@ -422,14 +473,31 @@ class WorkerPool:
                 {"role": "user", "content": task},
             ]
             prompt = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+                messages, tokenize=False, add_generation_prompt=True,
+                # Workers do not reason out loud. Their reply is an
+                # observation for the headmaster and a training sample
+                # for their own adapter, and reasoning is noise in both.
+                # The headmaster is where THINKING_ENABLED belongs.
+                # Measured on Qwen3.5-4B: a one-line summary came back
+                # as 156 words of "Thinking Process:" with this True,
+                # and 13 correct words with it False. Not strippable
+                # either — that model reasons in prose, not <think>.
+                enable_thinking=False,
             )
             try:
-                reply = generate(
+                # A worker's reply is used twice: as the observation handed
+                # back to the headmaster, and as a training sample for this
+                # worker's own adapter. A reasoning block has no business in
+                # either — it is working-out, not an answer, and training on
+                # it teaches the worker to reply with its own deliberation.
+                # Observed after retargeting 'summarize' at a reasoning model:
+                # a one-line summary came back as 160 words opening with
+                # "Thinking Process: 1. Analyze the Request".
+                reply = tooling.strip_reasoning_block(generate(
                     model, tokenizer, prompt=prompt,
                     sampler=make_sampler(temp=0.2, top_p=0.9),
                     max_tokens=max_tokens, verbose=False,
-                ).strip()
+                )).strip()
             except Exception as e:
                 self._status(f"  [Dispatch] Worker '{role}' failed: {e}")
                 return f"Worker '{role}' failed: {e}"
@@ -437,9 +505,18 @@ class WorkerPool:
             self._status(f"  [Dispatch] Worker '{role}' returned {len(reply.split())} word(s).")
             if reply:
                 training.append_chat_pair(task, reply, tokenizer, system_prompt, role=role)
-            return reply or f"Worker '{role}' returned nothing."
+            return label_worker_reply(role, reply)
         finally:
             if deep_sleep and self.after_worker_fn is not None:
+                # The worker is still resident at this point, so waking the
+                # headmaster on top of it puts both models in RAM at once —
+                # the exact state deep sleep exists to prevent, just moved
+                # from before the worker ran to after it finished. Deep sleep
+                # is the operator saying this machine holds one model at a
+                # time, so the worker goes before the headmaster comes back.
+                # It costs the worker's warm weights on the next delegation;
+                # the alternative cost is the machine.
+                self.unload_all("headmaster is waking up")
                 self._status("  [Dispatch] Waking headmaster back up...")
                 self.after_worker_fn()
 
@@ -471,7 +548,16 @@ class WorkerPool:
                 {"role": "user", "content": prompt_text},
             ]
             prompt = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+                messages, tokenize=False, add_generation_prompt=True,
+                # Workers do not reason out loud. Their reply is an
+                # observation for the headmaster and a training sample
+                # for their own adapter, and reasoning is noise in both.
+                # The headmaster is where THINKING_ENABLED belongs.
+                # Measured on Qwen3.5-4B: a one-line summary came back
+                # as 156 words of "Thinking Process:" with this True,
+                # and 13 correct words with it False. Not strippable
+                # either — that model reasons in prose, not <think>.
+                enable_thinking=False,
             )
             try:
                 action = generate(
@@ -508,14 +594,56 @@ class WorkerPool:
         )
 
 
-def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = None) -> tuple[bool, str]:
+# One in-flight run per worker. Saving the same skill twice — which a retry
+# does, and which a user re-running /new-skill does — starts a second daemon
+# thread for the same role, and both then back up, overwrite and restore the
+# same adapter directory. Observed at 20 skills: two concurrent runs for
+# 'set_up_tent_in_wind', each with its own backup, interleaving on one
+# directory. TRAINER_LOCK serialises the trainer *subprocess* and does nothing
+# about that, because the damage is in the surrounding file operations.
+_ROLE_LOCKS: dict[str, threading.Lock] = {}
+_ROLE_LOCKS_GUARD = threading.Lock()
+
+
+def _role_lock(role: str) -> threading.Lock:
+    with _ROLE_LOCKS_GUARD:
+        return _ROLE_LOCKS.setdefault(role, threading.Lock())
+
+
+def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = None,
+                         resume: bool = False) -> tuple[bool, str]:
     """Train a worker's own adapter and golden-check it the same way
     ChatSession._guarded_train protects the headmaster's: baseline golden
     run, backup, train, reload, recheck, auto-rollback on regression.
-    Returns (trained, status_message)."""
+    Returns (trained, status_message).
+
+    Refuses rather than queues when this role is already training: the caller
+    is a background thread whose work is already being done, and waiting would
+    just hold a second copy of everything until the first finished.
+    """
+    lock = _role_lock(role)
+    if not lock.acquire(blocking=False):
+        return False, (
+            f"Worker '{role}' is already being trained by another run; "
+            f"skipping this one rather than training the same adapter twice.")
+    try:
+        return _guarded_train_worker(role, config, iters=iters, resume=resume)
+    finally:
+        lock.release()
+
+
+def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = None,
+                          resume: bool = False) -> tuple[bool, str]:
     entry = catalog_entry_for_role(role)
     if entry is None:
-        return False, f"No worker configured for role '{role}'."
+        # Nothing can ever run this, so a record asking for it is not owed
+        # work — it is a line that reappears at every start and that /resume
+        # run can never clear, because this return happens before the task is
+        # even opened. Deleting a skill leaves exactly that behind.
+        dropped = pending.clear(kind="train_worker", role=role)
+        return False, (
+            f"No worker configured for role '{role}'."
+            + (f" Dropped {dropped} carried-over task(s) for it." if dropped else ""))
 
     # Refuse a run whose data was rendered by a different model's chat
     # template. Without this the run completes normally and produces an
@@ -567,14 +695,24 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
     def _run_golden(model, tokenizer):
         if not (golden_on and cases):
             return None
+        # Graded the way a worker is actually served — see the same flag in
+        # run_delegated_task. Grading with thinking on measures a mode the
+        # worker never runs in, and worker training is gated on this result.
         return golden.run_golden_set(
             model, tokenizer, generate, sampler, system_prompt, config,
-            enabled_groups=None, cases=cases,
+            enabled_groups=None, cases=cases, enable_thinking=False,
         )
 
     baseline = None
     backup_dir = None
     adapter_dir = constants.adapter_dir_for(role)
+    # Recorded before anything expensive starts. Auto-train runs this whole
+    # function on a daemon thread, so an out-of-memory kill takes it with no
+    # unwind: without a note on disk the next start has no way to know the
+    # skill was seeded and never trained, or that the backup below is the only
+    # intact copy of the adapter.
+    task_id = pending.open_task(
+        "train_worker", f"training for worker '{role}'", role=role)
     # A baseline is only meaningful against weights this model can actually
     # load. An adapter from a different base is discarded silently, so the
     # "before" score would be the base model wearing the adapter's name — and
@@ -582,9 +720,30 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
     if (adapter_dir.exists()
             and (adapter_dir / "adapter_config.json").exists()
             and adapter_matches_model(adapter_dir, entry["model_name"])):
+        # This load is in-process and was unguarded: run_training's preflight
+        # covers the trainer child, but the baseline copy loaded here lands
+        # first and on top of whatever the session already holds. Auto-train
+        # runs on a background thread while the headmaster is still resident,
+        # so this is the load that goes over the edge.
+        shortfall = training.load_memory_shortfall(
+            config, entry["model_name"],
+            purpose=f"golden-check worker '{role}' before training")
+        if shortfall:
+            # Refused, not forgotten: the run is owed and stays on the books
+            # until it is resumed or dropped on purpose.
+            pending.update(task_id, state=pending.DEFERRED, pid=None,
+                           reason="not enough free memory to run safely")
+            return False, (
+                f"{shortfall} Free memory first (unload the headmaster, or "
+                f"wait for the workers to idle out) and retrain '{role}' — "
+                f"it is on the deferred list until then.")
         base_model, base_tok = load(entry["model_name"], adapter_path=str(adapter_dir))
         baseline = _run_golden(base_model, base_tok)
         backup_dir = training.backup_adapter(role=role)
+        # From here until discard_adapter_backup, the previous adapter exists
+        # only in that directory. If this process dies in between, recovery
+        # needs to be told where to find it.
+        pending.update(task_id, backup_dir=str(backup_dir) if backup_dir else None)
         # The baseline scores are all we need from these weights, and the
         # trainer below loads its own full copy. Holding this one until the
         # function returns would mean two copies resident across the whole
@@ -593,15 +752,44 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
         base_model, base_tok = None, None
         training.release_model()
 
+    # Whether the run got far enough that nothing is still owed. Only a run
+    # that produced an adapter counts: a refusal reported into a log nobody is
+    # reading — which is every auto-train, since it runs on a background
+    # thread — leaves a skill seeded and permanently untrained, and clearing
+    # its record is what makes that state invisible.
+    settled = False
     try:
         trained = training.run_training(
-            config, iters=iters, role=role, model_name=entry["model_name"])
+            config, iters=iters, role=role, model_name=entry["model_name"],
+            resume=resume)
         if not trained:
             return False, (
                 f"Training for '{role}' produced no usable adapter. Check the "
                 f"log above: either there was no new data, or the run ended "
                 f"before any checkpoint was written."
             )
+        settled = True
+
+        # The trainer child has exited by now, but its memory only comes back
+        # once the allocator reclaims it, and this is the load that would
+        # otherwise race it.
+        training.release_model()
+        shortfall = training.load_memory_shortfall(
+            config, entry["model_name"],
+            purpose=f"reload worker '{role}' to check the new adapter")
+        if shortfall:
+            # The adapter is already on disk and cannot be verified. Reverting
+            # to a backup loses one training run; shipping an unchecked
+            # adapter is what the golden set exists to prevent.
+            if backup_dir:
+                training.restore_adapter(backup_dir, role=role)
+                return False, (
+                    f"{shortfall} Worker '{role}' trained but could not be "
+                    f"golden-checked, so it was rolled back to the previous "
+                    f"adapter. Retrain when there is more memory free.")
+            return True, (
+                f"{shortfall} Worker '{role}' trained and kept unverified "
+                f"(no previous adapter to roll back to).")
 
         new_model, new_tok = load(entry["model_name"], adapter_path=str(adapter_dir))
         training.mark_adapter_used(role=role)
@@ -621,7 +809,7 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
             )
             recheck, consistent = golden.run_golden_set_retry(
                 new_model, new_tok, generate, sampler, system_prompt, config,
-                enabled_groups=None, cases=cases,
+                enabled_groups=None, cases=cases, enable_thinking=False,
             )
             flaky = sorted(set(regressions) - consistent)
             if flaky:
@@ -669,7 +857,16 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
                     training.release_model()
                     trained2 = training.run_training(
                         config, iters=extra_iters, role=role, model_name=entry["model_name"])
-                    if trained2:
+                    training.release_model()
+                    remedy_shortfall = training.load_memory_shortfall(
+                        config, entry["model_name"],
+                        purpose=f"reload worker '{role}' after remedy training")
+                    if trained2 and remedy_shortfall:
+                        # Leave `after` and `regressions` as the pre-remedy
+                        # result: unchecked is treated as failed, so the
+                        # rollback below still fires.
+                        print(f"  [Train] {remedy_shortfall}")
+                    elif trained2:
                         new_model, new_tok = load(
                             entry["model_name"], adapter_path=str(adapter_dir))
                         print(
@@ -692,4 +889,22 @@ def guarded_train_worker(role: str, config: dict[str, Any], iters: int | None = 
                 f"check(s) ({', '.join(regressions)}); kept anyway.")
         return True, f"Worker '{role}' trained ({after.pass_count}/{after.total} checks passing)."
     finally:
+        # An adapter was produced, so the work is done however the checks then
+        # graded it — a rollback is a decision about the result, not an
+        # unfinished run. Anything else stays owed and visible at the next
+        # start, which is the only place a background failure gets seen.
+        if settled:
+            pending.finish(task_id)
+        else:
+            pending.update(
+                task_id, state=pending.DEFERRED, pid=None,
+                reason="training did not produce an adapter (see the log; "
+                       "most often not enough free memory at the time)")
         training.discard_adapter_backup(backup_dir)
+        # Whatever this run loaded goes back to the system now rather than
+        # whenever the collector next runs. Callers include a background
+        # thread finishing beside a live chat session, where the difference is
+        # a few gigabytes held for no reason.
+        base_model, base_tok = None, None
+        new_model, new_tok = None, None
+        training.release_model()

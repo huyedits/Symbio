@@ -29,7 +29,7 @@ from symbio.config import _adapter_matches_model
 from symbio.computer import BrowserSession
 from symbio import safety
 from symbio.tools import tool_few_shots
-from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, prompts, prune, sandbox, sessions, setup, skills, tooling, training, web
+from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, pending, prompts, prune, sandbox, sessions, setup, skills, tooling, training, web
 from symbio.app.config import apply_gpu_limits, config_show, set_config_value
 from tag_rag import TagIndex
 
@@ -502,7 +502,15 @@ class _Spinner:
             self.label = label
 
     def start(self):
-        if not self.active or self._thread is not None:
+        if self._thread is not None:
+            return
+        if not self.active:
+            # No animation without a TTY, but silence is not the alternative:
+            # a turn that prints nothing between the prompt and the reply looks
+            # like a hang, and the wait here is tens of seconds on an 8B. One
+            # static line costs nothing and cannot be mistaken for frozen.
+            sys.stdout.write(f"  {self.label}\n")
+            sys.stdout.flush()
             return
         self._stop_event.clear()
         self._start_time = time.perf_counter()
@@ -621,7 +629,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"   Data   : {dataset_size:,} bytes")
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
-    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
+    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /resume  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
     output_fn("         /run <cmd>  /note [title]  /notes  /index-notes [--force]  /auto-index on|off  /new-skill <name>  /skills  /skill-adapters  /digest  /cron  /config  /archive  /restore")
     output_fn("         /build-mcp <name> | <description>  /mcp-tools  /hosts  /telemetry on|off  /feedback <text>")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
@@ -828,6 +836,10 @@ class ChatSession:
         # happen when the model is loaded lazily or never.
         if self.config.get("prune", {}).get("on_boot", True):
             self._self_prune()
+        # Pick up whatever the last process was in the middle of. Cheap, and
+        # runs before the model loads: this is reading a small JSON file and,
+        # at most, copying an adapter directory back over a truncated one.
+        self._recover_pending()
         self.user_turns = 0
         self.auto_searches = 0
         # Resolved subject for a subjectless "check online"-style command this
@@ -1091,6 +1103,70 @@ class ChatSession:
             self.retriever.invalidate_cache()
         return report
 
+    def _recover_pending(self):
+        """Report work the last process did not finish, and repair its damage.
+
+        The repair is automatic because there is only one right answer to it:
+        a run killed partway through leaves an adapter directory the trainer
+        was still writing, next to a complete copy of the last good one, and
+        loading the truncated version as if it were trained is worse than any
+        cost of putting the backup back.
+
+        Re-running the training is not automatic. It is minutes of GPU and a
+        second full copy of the weights, and starting one unprompted at boot
+        is close to a description of how the machine went down. The list is
+        printed; /resume runs it.
+        """
+        try:
+            repairs = pending.recover(restore_fn=training.restore_adapter)
+            outstanding = pending.describe_outstanding()
+        except Exception as e:
+            self.logger.warning(f"Pending-task recovery failed: {e}")
+            return
+        for line in repairs:
+            self.output_fn(f"  [Resume] {line}")
+        if outstanding:
+            self.output_fn(
+                f"  [Resume] {len(outstanding)} unfinished task(s) carried "
+                f"over. Run /resume to pick them up, /resume clear to drop them.")
+            for line in outstanding:
+                self.output_fn(f"    - {line}")
+
+    def _cmd_resume(self, arg: str = ""):
+        """List, run, or drop the work carried over from a previous session."""
+        arg = (arg or "").strip().lower()
+        outstanding = pending.outstanding()
+        if arg == "clear":
+            dropped = pending.clear()
+            self.output_fn(f"  [Resume] Dropped {dropped} carried-over task(s).")
+            return
+        if not outstanding:
+            self.output_fn("  [Resume] Nothing carried over — every task finished.")
+            return
+        if arg != "run":
+            self.output_fn(f"  [Resume] {len(outstanding)} task(s) waiting:")
+            for line in pending.describe_outstanding():
+                self.output_fn(f"    - {line}")
+            self.output_fn("  [Resume] /resume run to start them, "
+                           "/resume clear to drop them.")
+            return
+
+        # Strictly one at a time, and the headmaster's own run last: each is a
+        # trainer holding a full copy of the weights, and overlapping two of
+        # them is the failure that made any of this necessary.
+        for task in sorted(outstanding, key=lambda t: t.get("kind") == "train_headmaster"):
+            kind, role = task.get("kind"), task.get("role")
+            self.output_fn(f"  [Resume] {task.get('detail', kind)}...")
+            if kind == "train_worker" and role:
+                trained, msg = dispatch.guarded_train_worker(role, self.config)
+                self.output_fn(f"  [Resume] {msg}")
+            elif kind == "train_headmaster":
+                self._guarded_train()
+            else:
+                self.output_fn(
+                    f"  [Resume] Nothing knows how to re-run '{kind}'; "
+                    f"leaving it on the list.")
+
     def _run_post_load_self_check(self):
         """AI-driven feature verification after the model has finished loading.
 
@@ -1249,6 +1325,17 @@ class ChatSession:
             return False
         if any(meta.get(k) != v for k, v in want.items()):
             # The model, adapter or prompt changed since it was written.
+            path.unlink(missing_ok=True)
+            return False
+        # Loading a cache is not the same as being able to use one. A file
+        # written by an earlier process can carry arrays bound to an MLX stream
+        # that does not exist here, and nothing notices until generation, which
+        # then dies mid-turn. Touching the state now moves that failure to the
+        # one place equipped to handle it: prefill just runs normally instead.
+        try:
+            mx.eval([c.state for c in cache])
+        except Exception as e:
+            self._log_info(f"Prompt cache unusable in this process, discarding: {e}")
             path.unlink(missing_ok=True)
             return False
         self._prompt_cache = cache
@@ -1423,8 +1510,14 @@ class ChatSession:
             tokenizing_spinner.stop()
 
         use_stream = self.stream_chunk_fn is not None and agent_cfg.get("stream_output", True)
-        stripper = tooling.StreamingStripper() if use_stream else None
+        stripper = tooling.StreamingStripper(
+            show_reasoning=agent_cfg.get("show_reasoning", True)
+        ) if use_stream else None
         shown = False
+        # The reply prefix ("Caine: ") attaches to the ANSWER, not to a
+        # "[Reasoning] …" block the stripper emits first — so it is deferred
+        # until the first non-reasoning chunk.
+        answer_prefix_emitted = False
         first_token_time: float | None = None
         gen_start = time.perf_counter()
         prompt_tokens = len(ids)
@@ -1439,13 +1532,15 @@ class ChatSession:
         def _emit(text: str):
             if self.stream_chunk_fn is None or not text:
                 return
-            nonlocal shown
+            nonlocal shown, answer_prefix_emitted
             if not shown:
                 shown = True
                 # Stop the spinner and clear its line before the first visible
                 # chunk, otherwise the spinner thread keeps overwriting the
                 # streaming reply.
                 spinner.stop()
+            if not answer_prefix_emitted and not text.startswith(tooling.REASONING_MARKER):
+                answer_prefix_emitted = True
                 if chunk_prefix:
                     self.stream_chunk_fn(chunk_prefix)
             self.stream_chunk_fn(text)
@@ -1540,7 +1635,8 @@ class ChatSession:
             {"role": "user", "content": prompt},
         ]
         prompt_text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=training.THINKING_ENABLED,
         )
         # Make a fresh sampler for deterministic JSON.
         sampler = make_sampler(temp=0.1, top_p=0.9)
@@ -1549,7 +1645,9 @@ class ChatSession:
                 self.model, self.tokenizer, prompt=prompt_text, sampler=sampler,
                 max_tokens=2048, verbose=False,
             )
-            # Strip reasoning artifacts that smaller local models sometimes emit.
+            # Strip reasoning artifacts that smaller local models sometimes emit
+            # (the Qwen3 thinking block, plus the plain-text variants).
+            text = tooling.strip_reasoning_block(text)
             for pattern in (
                 r"\bthinking\b.*?/\bthinking\b",
                 r"\breasoning\b.*?/\breasoning\b",
@@ -1754,6 +1852,14 @@ class ChatSession:
             )
         self.output_fn("  [Train] Backing up current adapter before training...")
         backup_dir = training.backup_adapter() if golden_on else None
+        # Between here and discard_adapter_backup the previous adapter exists
+        # only inside backup_dir, and the adapter directory itself is whatever
+        # the trainer has written so far. A crash in that window used to leave
+        # both facts on the floor: an orphaned .bak nobody knew was live, and a
+        # half-written adapter that loaded as the real one.
+        task_id = pending.open_task(
+            "train_headmaster", "training for the headmaster adapter",
+            backup_dir=str(backup_dir) if backup_dir else None)
 
         try:
             trained = self._train_unloaded(iters=iters)
@@ -1835,6 +1941,31 @@ class ChatSession:
                                     f"  [Golden] Post-remedy checks: "
                                     f"{after.pass_count}/{after.total} passing.")
                                 regressions = sorted(baseline.passing - after.passing)
+                                # The same flaky filter the first round got.
+                                # Without it this single measurement decides
+                                # the rollback, and the recheck a few lines
+                                # above has just finished proving that two of
+                                # these fifteen cases flip between identical
+                                # runs. Observed: a run that went 10/15 ->
+                                # 12/15, fixing four checks including a
+                                # prompt-injection refusal, was discarded on
+                                # two unrechecked regressions — noise deciding
+                                # the fate of two and a half hours of GPU.
+                                if (len(regressions) > threshold
+                                        and learn_cfg.get("golden_retry_enabled", True)):
+                                    recheck2, consistent2 = golden.run_golden_set_retry(
+                                        self.model, self.tokenizer, self.generate_fn,
+                                        self.sampler, self.system_prompt, self.config,
+                                        self.enabled_groups)
+                                    flaky2 = sorted(set(regressions) - consistent2)
+                                    if flaky2:
+                                        self.output_fn(
+                                            f"  [Golden] {len(flaky2)} post-remedy "
+                                            f"regression(s) passed on recheck: "
+                                            f"{', '.join(flaky2)}")
+                                        after = recheck2
+                                        regressions = sorted(
+                                            baseline.passing - after.passing)
                     else:
                         self.output_fn("  [Train] No remedy samples could be generated.")
 
@@ -1874,6 +2005,7 @@ class ChatSession:
             self.output_fn(f"  [Train] {adapter_status_value(self.config, self.adapter_loaded)}")
             return True
         finally:
+            pending.finish(task_id)
             training.discard_adapter_backup(backup_dir)
 
     def _run_wildcard_check(self, learn_cfg: dict[str, Any]):
@@ -1983,6 +2115,13 @@ class ChatSession:
         elif cmd == "/retrain":
             self._cmd_retrain()
 
+        elif cmd.startswith("/resume"):
+            # `cmd` is the whole line, not the first word, so an equality test
+            # here silently drops every argument form — /resume listed fine
+            # and /resume run fell through to "Unknown command".
+            parts = user_input.split(None, 1)
+            self._cmd_resume(parts[1] if len(parts) == 2 else "")
+
         elif cmd.startswith("/train_worker"):
             parts = user_input.split(None, 1)
             role = parts[1].strip() if len(parts) == 2 else ""
@@ -2065,12 +2204,17 @@ class ChatSession:
             self._learn_from_correction(verbose=True)
 
         elif cmd == "/skills":
-            skills = memory.list_skills()
-            if not skills:
+            # Not `skills`: binding that name anywhere in this function makes
+            # it local for the whole of it, so the module import at the top
+            # stops resolving and /skill-adapters — hundreds of lines below,
+            # in the same function — dies with UnboundLocalError before it
+            # runs a line of its own.
+            saved_skills = memory.list_skills()
+            if not saved_skills:
                 self.output_fn("  No skills saved yet.")
             else:
-                self.output_fn(f"  {len(skills)} skill(s):")
-                for title, path in skills:
+                self.output_fn(f"  {len(saved_skills)} skill(s):")
+                for title, path in saved_skills:
                     self.output_fn(f"    - {title}  ({path.name})")
 
         elif cmd.startswith("/new-skill"):
@@ -2175,13 +2319,21 @@ class ChatSession:
                         display += f" (port {port})"
                     self.output_fn(f"    - {alias}: {display}")
 
-        elif cmd == "/archive":
+        elif cmd.startswith("/archive"):
+            # startswith, not equality: `cmd` is the whole input line, so an
+            # equality test drops every argument. The README documents
+            # `/archive --dry-run` and it answered "Unknown command" — and
+            # even when matched, dry_run was never passed through, so the
+            # documented preview did not exist in chat at all.
+            arg = user_input[len("/archive"):].strip().lower()
+            dry_run = arg in ("--dry-run", "-n", "dry", "dry-run", "preview")
             try:
-                archived = skills.archive_idle_items(self.config)
+                archived = skills.archive_idle_items(self.config, dry_run=dry_run)
                 notes = archived.get("notes", [])
                 adapters = archived.get("adapters", [])
                 if notes or adapters:
-                    self.output_fn(f"  Archived {len(notes)} idle note(s) and {len(adapters)} idle adapter(s).")
+                    verb = "Would archive" if dry_run else "Archived"
+                    self.output_fn(f"  {verb} {len(notes)} idle note(s) and {len(adapters)} idle adapter(s).")
                     for n in notes:
                         self.output_fn(f"    note: {Path(n).name}")
                     for a in adapters:
@@ -2303,6 +2455,11 @@ class ChatSession:
                 idle_days = (datetime.now() - last_used).days
                 self.output_fn(f"  Adapter last used: {idle_days} day(s) ago")
             self.output_fn(f"  Learn: {learn_progress_line(self.config)}")
+            carried_over = pending.describe_outstanding()
+            if carried_over:
+                self.output_fn(f"  Unfinished tasks: {len(carried_over)} (/resume)")
+                for line in carried_over:
+                    self.output_fn(f"    - {line}")
             dispatch_on = self.config.get("dispatch", {}).get("enabled", False)
             loaded_workers = self.dispatch.loaded_roles()
             self.output_fn(
@@ -2588,12 +2745,15 @@ class ChatSession:
         try:
             flush_prompt = self.tokenizer.apply_chat_template(
                 flush_messages, tokenize=False,
-                add_generation_prompt=True, enable_thinking=False,
+                add_generation_prompt=True, enable_thinking=training.THINKING_ENABLED,
             )
             flush_reply = self.generate_fn(
                 self.model, self.tokenizer, prompt=flush_prompt, sampler=self.sampler,
                 max_tokens=int(self.config["agent"]["max_reply_tokens"]), verbose=False,
             )
+            # The model may reason before emitting the tags; parse only the
+            # answer so reasoning text can't be mistaken for a tool call.
+            flush_reply = tooling.strip_reasoning_block(flush_reply)
             for name, params in tooling.parse_tools(flush_reply, self.enabled_groups):
                 if name == "save_memory":
                     msg = memory.save_memory(params["store"], params["content"], self.config,
@@ -2654,7 +2814,19 @@ class ChatSession:
             f"Correction: {sample[2]}\n"
             f"Correct answer: {sample[3]}"
         )
+        # Only skills the correction is actually about. _skill_notes_used is
+        # everything *retrieved* this session, cumulatively — and retrieval is
+        # fuzzy on purpose, so that set is far wider than "was involved in the
+        # wrong answer". Measured: a correction about which text editor the
+        # user prefers was filed against Device Awareness, folding a fitted
+        # sheet, and descaling a kettle, because those notes had been
+        # retrieved at some point. Those sidecars feed skill retraining, so a
+        # Helix correction would have been trained into the fitted-sheet
+        # adapter — cross-contamination straight through the per-skill
+        # isolation that exists to prevent exactly that.
         for note_path in self._skill_notes_used:
+            if not learn.correction_concerns_skill(correction_text, note_path):
+                continue
             try:
                 skills.record_skill_correction(note_path, correction_text)
             except Exception:
@@ -2734,12 +2906,17 @@ class ChatSession:
             ]
             try:
                 check_prompt = self.tokenizer.apply_chat_template(
-                    check_messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+                    check_messages, tokenize=False, add_generation_prompt=True,
+                    enable_thinking=training.THINKING_ENABLED,
                 )
                 check_reply = self.generate_fn(
                     self.model, self.tokenizer, prompt=check_prompt, sampler=self.sampler,
-                    max_tokens=int(self.config["agent"]["max_reply_tokens"]), verbose=False,
+                    # Room for a thinking block plus the one-word answer.
+                    max_tokens=256, verbose=False,
                 ).strip()
+                # The model may reason before echoing the phrase; the check
+                # grades the answer, not the reasoning.
+                check_reply = tooling.strip_reasoning_block(check_reply)
             except Exception as e:
                 self.output_fn(f"[Canary check failed: {e}]")
                 canary_failed = True
@@ -2873,11 +3050,28 @@ class ChatSession:
                 "suggest_skill_workers", True):
             offers = ", ".join(f"<delegate role='{r}'>the task</delegate>"
                                for r in suggested_roles)
+            # Retrieval usually surfaces about two candidates, so the offer has
+            # to carry enough to tell them apart. Each worker's own recorded
+            # reason for existing does that; without it the model is choosing
+            # between bare role names it has no basis to rank.
+            reasons = ""
+            if len(suggested_roles) > 1:
+                from symbio.app import dispatch as _dispatch
+
+                lines = []
+                for role in suggested_roles:
+                    entry = _dispatch.catalog_entry_for_role(role) or {}
+                    why = (entry.get("routing_rationale") or "").strip()
+                    if why:
+                        lines.append(f"  - {role}: {why.splitlines()[0]}")
+                if lines:
+                    reasons = "\n Which one:\n" + "\n".join(lines)
             rag_block += (
                 f"\n\n[System note: this request matches a skill that has its own "
                 f"trained worker. The procedure is in that worker's weights, so "
                 f"prefer handing it over with {offers} rather than answering from "
-                f"memory. Ignore this if the request is not actually about that skill.]"
+                f"memory. Ignore this if the request is not actually about that "
+                f"skill.{reasons}]"
             )
         rag_ms = (time.perf_counter() - turn_start) * 1000
         timings["rag_ms"] = rag_ms
@@ -2920,6 +3114,8 @@ class ChatSession:
         mood = "neutral"
         mood_decided = False
         consecutive_tool_rounds = 0
+        scrolls_this_turn = 0
+        _MAX_SCROLLS_PER_TURN = 5
         # The exact "[System observation: ...]" text of the most recent
         # tool failure this turn, if any — used to capture (saw this error
         # -> did this instead, which worked) as a mistake-note training
@@ -2931,6 +3127,10 @@ class ChatSession:
         # tool tag, we nudge it to retry — otherwise Caine just explains the
         # failure and gives up after one attempt.
         pending_browser_error: str | None = None
+        # Set the moment the user declines anything, and never cleared before
+        # the turn ends: a "no" applies to the rest of the turn, not just to
+        # the one tool that asked.
+        user_refused_this_turn = False
         browser_retry_nudged = False
         blank_retry_nudged = False
         echo_retry_nudged = False
@@ -3003,9 +3203,18 @@ class ChatSession:
             # observation round-trip that pollutes history.
             gen_aborted = False
             for _sample_attempt in range(2):
+                # _generate_reply clears the cache in its own error path before
+                # re-raising, so whether one was in play has to be recorded here
+                # or the handler below can never tell.
+                _had_prompt_cache = self._prompt_cache is not None
                 try:
                     raw_reply, streamed_live = self._generate_reply(
                         messages, chunk_prefix=chunk_prefix, timings=timings)
+                    # The thinking block is surfaced to the user (streamed by
+                    # StreamingStripper, or printed below when not streaming);
+                    # the reply itself stays reasoning-free so tools and
+                    # history never see it.
+                    reasoning = tooling.extract_reasoning(raw_reply)
                     reply = tooling.clean_response(
                         tooling.strip_reasoning_block(raw_reply)).strip()
                     self.logger.info(f"RAW_REPLY: {raw_reply!r}")
@@ -3014,6 +3223,24 @@ class ChatSession:
                     gen_aborted = True
                     break
                 except Exception as e:
+                    # The warmed prompt cache is an optimization, and the turn
+                    # must not die with it. A cache persisted by an earlier run
+                    # can reference an MLX stream that does not exist in this
+                    # process ("There is no Stream(cpu, N) in current thread");
+                    # loading it succeeds and generation is where it explodes,
+                    # so the prefill guard never sees it. Drop it, delete the
+                    # stale file so the next run does not inherit the same
+                    # crash, and take the second attempt without it.
+                    if _had_prompt_cache and _sample_attempt == 0:
+                        self.output_fn("  [Cache] Warmed prompt cache unusable "
+                                       "here; discarding it and retrying.")
+                        self._prompt_cache = None
+                        self._cached_prompt_ids = None
+                        try:
+                            constants.PROMPT_CACHE_FILE.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+                        continue
                     self.output_fn(f"[MLX Error: {e}]")
                     gen_aborted = True
                     break
@@ -3054,6 +3281,33 @@ class ChatSession:
             tools = tooling.parse_tools(reply, self.enabled_groups)
             display = tooling.strip_tool_tags(reply)
 
+            # A model that emits the same tool tag over and over in one
+            # response (e.g. "<scroll/> Scrolling down. <scroll/> Scrolling
+            # down. …") is looping. Catch it here so the display text from
+            # the stripped tags doesn't flood the user's screen, and nudge
+            # the model to break out on the next round.
+            if len(tools) >= 4 and not echo_retry_nudged:
+                from collections import Counter
+                tool_counts = Counter(n for n, _ in tools)
+                most_common, count = tool_counts.most_common(1)[0]
+                # Fire when one tool is >=80% of all calls and there are
+                # at least 4 of it — catches both "49 scrolls" and
+                # "1 browser_open + 49 scrolls".
+                if count >= 4 and count / len(tools) >= 0.8:
+                    echo_retry_nudged = True
+                    self.output_fn(
+                        f"  [Loop] {count}× <{most_common}/> in one reply "
+                        f"({len(tools)} total tags) — regenerating...")
+                    self.history.append({"role": "user", "content": (
+                        f"[System observation: your last reply contained "
+                        f"{count} copies of the <{most_common}/> tag. Do not "
+                        f"repeat the same tool call. If scrolling isn't "
+                        f"revealing new information, stop and work with "
+                        f"what you can see, or try a different approach.]"
+                    )})
+                    self._trim_history()
+                    continue
+
             # The model wrote the harness's own scaffold, or looped one line.
             # Either way this is not a reply. Checked here, ahead of the
             # display/log block below, because a copy written to the session
@@ -3082,6 +3336,11 @@ class ChatSession:
             if display.strip():
                 final_display = display
                 if not streamed_live:
+                    # Streaming showed nothing (streaming off, or the whole
+                    # reply was a tool tag) — surface the reasoning here so it
+                    # is not lost, then the answer.
+                    if reasoning and self.config["agent"].get("show_reasoning", True):
+                        self.output_fn(f"{tooling.REASONING_MARKER}{reasoning}")
                     self.output_fn(f"{self.config['assistant_name']:8}: {display}")
                 self.logger.info(f"{self.config['assistant_name']}: {display}")
                 self.session_store.log("assistant", display)
@@ -3314,7 +3573,39 @@ class ChatSession:
             self.output_fn(f"  [Tool: {name}]")
             if name in _WEB_TOOLS:
                 web_used = True
-            observation = self._execute_tool(name, params)
+            if user_refused_this_turn:
+                # Observed live: browser_open was denied at the domain prompt,
+                # and the very next round the model ran `open -a 'Google
+                # Chrome'` through run_command and reported success. The
+                # sandbox is a denylist, so `open` was never going to stop it
+                # — but no denylist should have to. A refusal is about the
+                # action the user was asked about, not the tool that happened
+                # to ask, so once one is given nothing else runs this turn.
+                observation = (
+                    "Blocked: the user declined this action earlier in this "
+                    "turn. Do not attempt it by other means. Tell them it was "
+                    "not done.")
+                self.output_fn(f"  [Safety] {observation}")
+            else:
+                # A model that scrolls without finding what it wants will
+                # scroll forever — the page never changes enough to satisfy
+                # it, and each <scroll/> is a distinct tag the dedup logic
+                # can't catch. Cap it per turn so the agent falls back to
+                # reading whatever is visible instead of scrolling into a
+                # loop that only stops when max_tool_rounds runs out.
+                if name == "browser_scroll" and scrolls_this_turn >= _MAX_SCROLLS_PER_TURN:
+                    observation = (
+                        f"Scrolled {scrolls_this_turn} times already this turn. "
+                        f"Stop scrolling and work with the page text you can see. "
+                        f"If the information is not on this page, try a different "
+                        f"URL or a web search instead."
+                    )
+                else:
+                    observation = self._execute_tool(name, params)
+                    if name == "browser_scroll":
+                        scrolls_this_turn += 1
+                if learn.is_user_refusal(observation):
+                    user_refused_this_turn = True
             local_telemetry.log_event(
                 "tool", name=name, ok=not learn.sounds_like_tool_error(observation),
                 result=observation,
@@ -3364,13 +3655,23 @@ class ChatSession:
             # filter and the turn ends on a bare "Clicking the button." with
             # nothing clicked. Retries stay capped so a call that keeps
             # failing still can't spin.
-            if learn.sounds_like_tool_error(observation):
+            # A refusal is the exception: no retry turns a "no" into a "yes",
+            # and re-running the call just puts the same confirmation prompt
+            # in front of the user again. Observed live — one denied
+            # browser_open asked twice in a single turn.
+            if (learn.sounds_like_tool_error(observation)
+                    and not learn.is_user_refusal(observation)):
                 failed_calls[tool_key] = failed_calls.get(tool_key, 0) + 1
                 if failed_calls[tool_key] < _MAX_TOOL_RETRIES:
                     executed_calls.discard(tool_key)
             # Track browser-action failures so we can force a retry if the
             # model tries to end the turn without another tool tag.
-            if name in _BROWSER_ACTION_TOOLS and learn.sounds_like_tool_error(observation):
+            # A refusal is excluded here for the same reason: this nudge tells
+            # the model "do not end the turn until the request is completed",
+            # which against a denied request is an instruction to keep asking.
+            if (name in _BROWSER_ACTION_TOOLS
+                    and learn.sounds_like_tool_error(observation)
+                    and not learn.is_user_refusal(observation)):
                 pending_browser_error = observation
             else:
                 pending_browser_error = None
@@ -3387,6 +3688,16 @@ class ChatSession:
                     "\n\n[Answer ONLY from the results above. If they do not state "
                     "the answer, say plainly that you could not find it — do not "
                     "repeat your earlier claim or guess.]"
+                )
+            if learn.is_user_refusal(observation):
+                # Without this the turn ends on the sentence the model wrote
+                # *before* the tool ran — "Opening apple.com for you." — which
+                # reports an action the user had just blocked. Seen live: the
+                # denial changed nothing about the final answer.
+                observation += (
+                    "\n\n[The user declined this. It did NOT happen. Say plainly "
+                    "that you did not do it because they declined, and do not "
+                    "describe it as done or in progress. Do not try another way.]"
                 )
             # Present results in Hermes-style <tool_response> JSON so the model
             # learns the structured format, while keeping a plain-text fallback

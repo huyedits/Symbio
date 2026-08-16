@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from symbio import constants
-from symbio.app import prompts
+from symbio.app import prompts, training
 
 # Arm names, in report order.
 ARM_BASE = "base"
@@ -95,6 +95,22 @@ class ArmResult:
     @property
     def accuracy(self) -> float:
         return round(self.pass_count / self.total, 4) if self.total else 0.0
+
+
+def _step_body(text: str) -> str:
+    """The steps with their "1. " "2. " enumerators removed.
+
+    The numbers are structure, not content, and counting them as keywords
+    hands free credit to any numbered list. Measured on the knife-sharpening
+    skill: the base model answered with a completely different procedure —
+    whetstone, clean the blade, honing rod — and scored 68% against a
+    threshold of 60%, so it passed. Five of its 26 matches were the bare
+    digits 1-5. The adapter's own score is unaffected (it reproduces the
+    steps), so this only stops the baseline being flattered, which is the
+    number the whole comparison rests on.
+    """
+    parts = split_steps(text)
+    return " ".join(parts) if parts else text
 
 
 def _keywords(text: str) -> list[str]:
@@ -263,7 +279,7 @@ def skill_golden_cases(name: str, steps: str) -> list[Any]:
 
     if not steps.strip():
         return []
-    keywords = _keywords(steps)
+    keywords = _keywords(_step_body(steps))
     if not keywords:
         return []
 
@@ -358,8 +374,13 @@ def run_arm(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": task.prompt},
         ]
+        # Skill adapters are *served* by dispatch with thinking off, so
+        # grading them with it on measures a mode they never run in — and the
+        # reasoning preamble dilutes step coverage, which is the score. The
+        # headmaster's THINKING_ENABLED does not govern a worker.
         chat_prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
         )
         start = time.perf_counter()
         try:
@@ -378,7 +399,7 @@ def run_arm(
 
         latency = time.perf_counter() - start
         total_latency += latency
-        display = tooling.strip_tool_tags(raw)
+        display = tooling.strip_tool_tags(tooling.strip_reasoning_block(raw))
         score = coverage(display, keywords)
         order = order_score(display, steps) if steps else None
         missing = [kw for kw in task.must_include if kw.lower() not in display.lower()]
@@ -502,7 +523,7 @@ def run_skill_eval(
     if not steps:
         raise ValueError(f"Skill '{name}' has no recoverable steps to grade against.")
 
-    keywords = _keywords(steps)
+    keywords = _keywords(_step_body(steps))
     tasks, custom = load_tasks(role, name)
     adapter_dir = constants.adapter_dir_for(role)
     adapter_present = adapter_is_usable(adapter_dir)

@@ -56,10 +56,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # per check and can dominate a run. This is a plateau detector, not a
         # benchmark.
         "val_batches": 8,
-        # Checkpoint interval. A crash between checkpoints destroys everything
-        # since the last one, and an 8B LoRA step runs ~20s here, so 100 iters
-        # is a ~33 minute hole. Writing a ~19 MB adapter every 25 steps costs
-        # almost nothing next to what it saves.
+        # Checkpoint interval, and it must divide steps_per_eval. A crash
+        # between checkpoints destroys everything since the last one, and an 8B
+        # LoRA step runs ~20s here, so 100 iters is a ~33 minute hole. The
+        # divisibility matters as much as the size: early stopping restores the
+        # best-scoring *evaluated* step, so an interval that never lands on an
+        # eval point leaves every best step without a file and hands the run's
+        # output to _restore_best's fallback.
+        # 25 divides the 100 above; config.json's 30/15 pairing does too.
         "save_every": 25,
         # Early stopping: kill training if validation loss stops improving.
         "early_stop_enabled": True,
@@ -80,6 +84,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "top_p": 0.9,
         "cron_poll_seconds": 20,
         "stream_output": True,
+        # Surface the model's Qwen3 thinking block to the user as a
+        # "[Reasoning] …" block before the answer. Set false to hide it.
+        "show_reasoning": True,
         "prompt_cache_enabled": True,
         # Keep the warmed system-prefix KV cache on disk between runs, so a
         # restart reloads it instead of re-prefilling ~4.3k tokens through the
@@ -276,6 +283,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # so without this every skill dispatch holds two full copies of those
         # weights. Costs a reload per delegation; that is the price of a skill
         # worker at headmaster size on a machine that cannot hold both.
+        # The worker is unloaded again before the headmaster comes back, so
+        # this really does mean one model resident at a time — reloading the
+        # headmaster on top of a still-resident worker was the same double
+        # residency one turn later, and it OOM'd the machine.
         "headmaster_deep_sleep_while_workers": False,
         "hot_swap_adapters": True,
         # When a headmaster-sized worker cannot be hot-swapped, the fallback is

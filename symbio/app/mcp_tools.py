@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from symbio import constants
+from symbio.app import tooling, training
 from symbio.app.sandbox import _is_code_safe
 
 MCP_MODULE_DIR = constants.PROJECT_DIR / "mcp_modules"
@@ -213,13 +214,18 @@ def _generate_schema_and_body(name: str, description: str,
     prompt = f"Name: {name}\nDescription: {description}\n\nGenerate schema and body."
     messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
     if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
-        text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=training.THINKING_ENABLED,
+        )
     else:
         text = f"{system}\n\nUser: {prompt}\nAssistant:"
 
     output = generate_fn(model, tokenizer, prompt=text, max_tokens=1024, verbose=False)
     try:
-        parsed = json.loads(output.strip())
+        # The model may reason before emitting the JSON; drop the thinking
+        # block so json.loads sees only the object.
+        parsed = json.loads(tooling.strip_reasoning_block(output).strip())
         schema = parsed.get("schema", {})
         body = parsed.get("body", _default_body(schema))
         # Validate schema basics.

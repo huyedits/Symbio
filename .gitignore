@@ -20,6 +20,11 @@ logs/
 *.log
 adapters.bak.*/
 adapters.testbak.*/
+# Labelled snapshots: adapters.RESEARCHER_ITER20.bak and friends. The rule
+# above only matches the timestamped form, and an adapter backup that slips
+# past .gitignore is ~19 MB of per-user weights in the history.
+adapters.*.bak/
+adapters.*.bak.*/
 benchmark_lora_*.json
 training_data/*.bak.*
 training_data/tmp*.yaml
@@ -79,3 +84,19 @@ skill_eval_*.json
 # Crash mirror written by preserve_training_state so an interrupted run
 # can be repaired by the next one.
 .pytest-training-backup/
+eval_*.json
+
+# Tests and scratch scaffolding: kept locally, not published.
+# Every pattern is root-anchored on purpose — an unanchored `_*.py` would
+# also match symbio/__init__.py and quietly untrack the package.
+/test_*.py
+/conftest.py
+/tests/
+/tests_mcp/
+/_*.py
+/eval_routing.py
+/eval_toolcall.py
+/diag_*.txt
+
+# Locally quantised model weights — gigabytes, and GitHub caps files at 100 MB.
+models/

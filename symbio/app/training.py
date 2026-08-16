@@ -23,7 +23,6 @@ from symbio import constants
 from symbio.app import config as app_config
 from symbio.app.tooling import clean_response
 
-
 # Only one LoRA trainer may exist at a time, process-wide.
 #
 # `mlx_lm lora` is a second Metal client that loads its own full copy of the
@@ -36,7 +35,6 @@ from symbio.app.tooling import clean_response
 # Held for the whole lifetime of the child process, not just its spawn, so a
 # second caller waits for the first trainer to *exit* rather than joining it.
 TRAINER_LOCK = threading.Lock()
-
 
 def release_model() -> None:
     """Hand freed model memory back to the system immediately.
@@ -60,7 +58,6 @@ def release_model() -> None:
         # No MLX (or a build without clear_cache) is not worth failing over;
         # the gc.collect() above is still the part that matters.
         pass
-
 
 def free_ram_bytes() -> int | None:
     """Physically free + reclaimable RAM, or None when it cannot be read.
@@ -87,17 +84,14 @@ def free_ram_bytes() -> int | None:
     reclaimable = sum(pages.get(k, 0) for k in ("free", "inactive", "speculative"))
     return reclaimable * page_size
 
-
 def _train_file_for(role: str | None) -> Path:
     # role=None reads constants.TRAIN_FILE directly (not re-derived from
     # constants.DATA_DIR) so code/tests that monkeypatch TRAIN_FILE alone
     # — the pre-existing, still-common pattern — keep working unchanged.
     return constants.TRAIN_FILE if role is None else constants.data_dir_for(role) / "train.jsonl"
 
-
 def _valid_file_for(role: str | None) -> Path:
     return constants.VALID_FILE if role is None else constants.data_dir_for(role) / "valid.jsonl"
-
 
 def append_training_text(text: str, role: str | None = None,
                          messages: list[dict[str, str]] | None = None):
@@ -122,15 +116,22 @@ def append_training_text(text: str, role: str | None = None,
         json.dump(record, f)
         f.write("\n")
 
-
 # Whether prompts invite a real Qwen3 reasoning block. Training and serving
 # MUST use the same value: the corpus rendered with False contains only empty
 # <think></think> blocks, which fine-tunes the model to answer directly. Serving
 # with True then asks for a behaviour the adapter was trained out of, and the
 # reasoning surfaces as the reply. chat.py imports this rather than repeating
 # the literal, so the two cannot drift apart.
+#
+# False since the headmaster became DeepSeek-V4-Pro-Qwen3.5-9B, which is served
+# as a base model with no adapter — so there is no training run for this to
+# match, and the pairing above does not bind. It has to be False: with thinking
+# on, this model emits its reasoning as plain prose terminated by a bare
+# </think> and *no opening tag*, so tooling.strip_reasoning_block finds nothing
+# to strip and the analysis lands in the user's reply on every turn. Caught by
+# driving the real CLI; the golden set scored 12/15 straight through it.
+# Restore to True alongside any headmaster that is served with an adapter.
 THINKING_ENABLED = False
-
 
 def strip_tool_catalog(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     """Drop the <tools> JSON catalog from a system turn destined for training.
@@ -158,6 +159,50 @@ def strip_tool_catalog(messages: list[dict[str, str]]) -> list[dict[str, str]]:
         cleaned.append(message)
     return cleaned
 
+# Where the system prompt stops being setup and starts being standing advice.
+# Cut at the marker rather than at a token count so the result is always a
+# strict *prefix* of the served prompt — training sees less context than
+# inference, never different context, exactly as strip_tool_catalog preserves.
+_GUIDELINES_MARKER = "\nGuidelines:"
+
+def trim_system_guidelines(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Drop the standing-guidelines block from a system turn bound for training.
+
+    The same argument as strip_tool_catalog, one block further down. The
+    guidelines run ~1,100 of the system prompt's ~2,150 tokens and are
+    byte-identical in every sample, and `mask_prompt` already excludes them
+    from the loss — so they contribute no gradient at all. What they do
+    contribute is window, and that is not free: measured on this machine, the
+    8B peaks at 7.916 GB with the full prompt at a 3,328-token window and
+    5.761 GB without it. The first number is macOS reporting critical memory
+    pressure and killing the run; the second completes. The block that decides
+    that is one the loss never looks at.
+
+    Idempotent, unlike strip_tool_catalog: the marker is gone after the first
+    pass, so a second call is a no-op and re-rendering stored messages is safe.
+    """
+    cleaned = []
+    for message in messages:
+        if message.get("role") == "system":
+            content = message.get("content", "")
+            index = content.find(_GUIDELINES_MARKER)
+            if index != -1:
+                message = {**message, "content": content[:index].rstrip() + "\n"}
+        cleaned.append(message)
+    return cleaned
+
+def prepare_for_training(messages: list[dict[str, str]],
+                         trim_guidelines: bool = True) -> list[dict[str, str]]:
+    """The one place a served message list becomes a training one.
+
+    Both the rendered `text` and the stored `messages` must come through here
+    on the same inputs, or the masked prefix mlx_lm computes stops lining up
+    with the sample it computes loss over.
+    """
+    prepared = strip_tool_catalog(messages)
+    if trim_guidelines:
+        prepared = trim_system_guidelines(prepared)
+    return prepared
 
 def render_messages(messages: list[dict[str, str]], tokenizer) -> str:
     """Apply the chat template to messages that are already training-ready.
@@ -176,25 +221,25 @@ def render_messages(messages: list[dict[str, str]], tokenizer) -> str:
         enable_thinking=THINKING_ENABLED,
     )
 
-
-def build_chat_training_sample(messages: list[dict[str, str]], tokenizer) -> str:
-    return render_messages(strip_tool_catalog(messages), tokenizer)
-
+def build_chat_training_sample(messages: list[dict[str, str]], tokenizer,
+                               trim_guidelines: bool = True) -> str:
+    return render_messages(
+        prepare_for_training(messages, trim_guidelines), tokenizer)
 
 def append_chat_pair(user_msg: str, assistant_msg: str, tokenizer, system_prompt: str,
-                     role: str | None = None):
+                     role: str | None = None, trim_guidelines: bool = True):
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
         {"role": "assistant", "content": clean_response(assistant_msg)},
     ]
-    # Store the catalog-stripped messages, not the originals: they must be the
-    # exact ones the rendered text came from, or the masked prefix mlx_lm
-    # computes would not line up with the sample it computes loss over.
-    stripped = strip_tool_catalog(messages)
-    append_training_text(build_chat_training_sample(messages, tokenizer),
-                         role=role, messages=stripped)
-
+    # Store the prepared messages, not the originals: they must be the exact
+    # ones the rendered text came from, or the masked prefix mlx_lm computes
+    # would not line up with the sample it computes loss over.
+    prepared = prepare_for_training(messages, trim_guidelines)
+    append_training_text(
+        build_chat_training_sample(messages, tokenizer, trim_guidelines),
+        role=role, messages=prepared)
 
 # Qwen/ChatML turn markers, used to recover message structure from a sample
 # that was stored as rendered text only. Kept narrow deliberately: a corpus
@@ -206,9 +251,6 @@ _TURN_RE = re.compile(
 )
 
 # A reasoning block the template itself emits at the head of an assistant turn.
-_THINK_PREFIX_RE = re.compile(r"\A<think>.*?</think>\n*", re.DOTALL)
-
-
 def messages_from_rendered(text: str) -> list[dict[str, str]] | None:
     """Recover a ChatML sample's messages, or None if it does not round-trip.
 
@@ -224,13 +266,12 @@ def messages_from_rendered(text: str) -> list[dict[str, str]] | None:
     if messages[-1]["role"] != "assistant":
         # Nothing to train on: masking keeps only the final assistant turn.
         return None
-    # The template emits the (empty, since THINKING_ENABLED is False) reasoning
-    # block itself, so it is part of the rendered text but not of the content
-    # it was rendered from. Carrying it back into the content would re-render
-    # into two stacked blocks and fail the round-trip check below.
-    last = messages[-1]["content"]
-    unthought = _THINK_PREFIX_RE.sub("", last, count=1)
-    messages[-1] = {**messages[-1], "content": unthought}
+    # The Qwen3 template parses a thinking block out of the assistant content
+    # and re-renders it canonically, so the content carried back here is
+    # exactly what the text was rendered from — no stripping needed. (An older
+    # template emitted an empty thinking block that was not in the content,
+    # which is why this used to strip a leading block; the current template
+    # round-trips both empty and real thinking blocks as-is.)
     return messages
 
 
@@ -279,7 +320,6 @@ def upgrade_corpus_to_messages(tokenizer, role: str | None = None) -> dict[str, 
             path.write_text("\n".join(out) + "\n", encoding="utf-8")
     return counts
 
-
 def _renders_back(messages: list[dict[str, str]], text: str, tokenizer) -> bool:
     """True when `messages` re-render to exactly `text`.
 
@@ -296,7 +336,6 @@ def _renders_back(messages: list[dict[str, str]], text: str, tokenizer) -> bool:
         return render_messages(messages, tokenizer) == text
     except Exception:
         return False
-
 
 def drop_foreign_template_samples(tokenizer, role: str | None = None) -> dict[str, list[int]]:
     """Remove samples this model's chat template would never have produced.
@@ -360,7 +399,6 @@ def drop_foreign_template_samples(tokenizer, role: str | None = None) -> dict[st
         removed[str(path)] = dropped
     return removed
 
-
 def _supports_prompt_masking(role: str | None = None) -> bool:
     """True when every sample in the corpus carries `messages`.
 
@@ -385,7 +423,6 @@ def _supports_prompt_masking(role: str | None = None) -> bool:
             seen = True
     return seen
 
-
 def _note_timestamp(f: Path) -> datetime:
     """When was this note learned? Filenames carry a %Y%m%d_%H%M%S prefix;
     fall back to mtime for notes that don't."""
@@ -393,7 +430,6 @@ def _note_timestamp(f: Path) -> datetime:
         return datetime.strptime(f.name[:15], "%Y%m%d_%H%M%S")
     except ValueError:
         return datetime.fromtimestamp(f.stat().st_mtime)
-
 
 def drop_note_training_samples(title: str) -> int:
     """Remove a digested note's samples from the training/validation data,
@@ -423,7 +459,6 @@ def drop_note_training_samples(title: str) -> int:
                                  encoding="utf-8")
             dropped += hit
     return dropped
-
 
 def decay_research_notes(config: dict[str, Any]) -> list[str]:
     """Archive auto-learned 'Learned:' notes older than learn.note_decay_days
@@ -457,7 +492,6 @@ def decay_research_notes(config: dict[str, Any]) -> list[str]:
         f.rename(dest)
         archived.append(f.name)
     return archived
-
 
 def digest_notes_to_training(tokenizer, system_prompt: str,
                              config: dict[str, Any] | None = None) -> int:
@@ -553,7 +587,6 @@ def digest_notes_to_training(tokenizer, system_prompt: str,
     constants.DIGEST_MANIFEST.write_text(json.dumps(new_manifest, indent=2))
     return added
 
-
 # Anchored on the opening bracket of the JSON array, which only the real
 # catalog has. The prompt also *mentions* "<tools>" in its prose ("the <tools>
 # catalog at the bottom of this message"), and a pattern that starts there
@@ -561,7 +594,6 @@ def digest_notes_to_training(tokenizer, system_prompt: str,
 # instruction in between. That is not hypothetical: it wiped the behaviour
 # rules out of all 114 samples before this anchor was added.
 _CATALOG_RE = re.compile(r"<tools>\[.*?\]</tools>\s*", re.DOTALL)
-
 
 def compact_existing_samples(role: str | None = None) -> dict[str, int]:
     """Strip the embedded <tools> catalog out of already-written samples.
@@ -601,12 +633,10 @@ def compact_existing_samples(role: str | None = None) -> dict[str, int]:
         counts[path.name] = rewritten
     return counts
 
-
 # A real sample carries a full chat template (role markers, a system turn) and
 # runs to hundreds of characters. This floor only ever catches empty and
 # near-empty junk, so it is safe to apply without a tokenizer.
 _MIN_SAMPLE_CHARS = 16
-
 
 def _is_degenerate(text: str, tokenizer, min_tokens: int) -> bool:
     """True when a sample is too short to yield a single training target."""
@@ -620,7 +650,6 @@ def _is_degenerate(text: str, tokenizer, min_tokens: int) -> bool:
     except Exception:
         # An unusable tokenizer is not evidence the sample is bad.
         return False
-
 
 def drop_degenerate_samples(tokenizer=None, role: str | None = None,
                             min_tokens: int = 2) -> dict[str, list[tuple[int, str]]]:
@@ -667,7 +696,6 @@ def drop_degenerate_samples(tokenizer=None, role: str | None = None,
                 ("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
             removed[str(path)] = dropped
     return removed
-
 
 def check_sample_lengths(
     tokenizer, config: dict[str, Any], role: str | None = None,
@@ -721,7 +749,6 @@ def check_sample_lengths(
                 break
     return result
 
-
 def format_length_warning(stats: dict[str, Any]) -> str | None:
     """A one-paragraph explanation, or None when the corpus fits."""
     if not stats["total"] or not stats["over_limit"]:
@@ -737,7 +764,6 @@ def format_length_warning(stats: dict[str, Any]) -> str | None:
             f"above {stats['longest']}, or shorten what precedes the answer."
         )
     return " ".join(lines)
-
 
 def expand_intent(
     phrasings: list[str],
@@ -785,7 +811,6 @@ def expand_intent(
         assistant = f"{rationale} {action}" if rationale else action
         pairs.append((phrasings[i % len(phrasings)].format(slot=slot), assistant))
     return pairs
-
 
 def build_seed_pairs(assistant: str, user: str) -> list[tuple[str, str]]:
     """The (user, assistant) pairs that make up the seed corpus.
@@ -1285,7 +1310,6 @@ def build_seed_pairs(assistant: str, user: str) -> list[tuple[str, str]]:
 
     return samples
 
-
 def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) -> int:
     """Seed a minimal clean corpus so the model has correct identity/tool examples
     even before any real conversation is saved.
@@ -1354,7 +1378,6 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]) ->
     seed_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return added
 
-
 def _strip_tool_calls(text: str) -> str:
     """Remove assistant tool-call tags so we can compare the underlying prose."""
     # Drop Hermes tool_call blocks and self-closing legacy tags.
@@ -1363,7 +1386,6 @@ def _strip_tool_calls(text: str) -> str:
     text = re.sub(r"<train\s*/>", "", text, flags=re.DOTALL)
     text = re.sub(r"<retrain\s*/>", "", text, flags=re.DOTALL)
     return text.strip()
-
 
 def clean_training_duplicates(train_file: Path | None = None,
                               max_copies: int = 3,
@@ -1407,7 +1429,6 @@ def clean_training_duplicates(train_file: Path | None = None,
     train_file.write_text("\n".join(kept_lines) + ("\n" if kept_lines else ""), encoding="utf-8")
     return kept, dropped
 
-
 def iters_for_corpus(lora: dict[str, Any], sample_count: int) -> int:
     """How many steps it takes to see the corpus `lora.epochs` times.
 
@@ -1433,14 +1454,12 @@ def iters_for_corpus(lora: dict[str, Any], sample_count: int) -> int:
     # override it would make `max_iters` unable to do the one thing it is for.
     return min(cap, max(floor, needed))
 
-
 def count_samples(role: str | None = None) -> int:
     path = _train_file_for(role)
     if not path.exists():
         return 0
     return sum(1 for line in path.read_text(encoding="utf-8").splitlines()
                if line.strip())
-
 
 def ensure_validation_split(every_nth: int = 10, max_samples: int = 24,
                             role: str | None = None):
@@ -1455,13 +1474,84 @@ def ensure_validation_split(every_nth: int = 10, max_samples: int = 24,
     sample = lines[::every_nth][:max_samples] or lines[:1]
     valid_file.write_text("\n".join(sample) + "\n", encoding="utf-8")
 
+def checkpoint_step(checkpoint: Path) -> int:
+    """The training iteration a checkpoint filename encodes."""
+    return int(checkpoint.name.split("_", 1)[0])
+
+def checkpoint_at_or_before(available: list[Path], step: int | None) -> Path:
+    """The newest checkpoint no later than `step`, for restoring a best score.
+
+    Never the newest overall. Early stopping fires because validation loss is
+    climbing, so the last checkpoint written is the most overfit one the run
+    produced — reaching for it as a fallback returns the worst adapter of the
+    run while reporting that something was restored.
+
+    `available` must be non-empty and sorted. When nothing was written before
+    `step` the oldest is the closest thing to it that exists.
+    """
+    if step is None:
+        return available[0]
+    at_or_before = [c for c in available if checkpoint_step(c) <= step]
+    return at_or_before[-1] if at_or_before else available[0]
+
+def resume_source(adapter_dir: Path, model_name: str, num_layers: int,
+                  lora_parameters: dict[str, Any]) -> tuple[Path | None, str]:
+    """The adapter to continue training from, plus the reason for the verdict.
+
+    Resuming is only meaningful when the existing adapter has the same shape
+    as the layers this run will attach: mlx_lm loads the resume file into a
+    freshly built LoRA and a mismatch either raises or, worse, lands nothing
+    and trains from random init while reporting a normal-looking loss. So an
+    adapter is only accepted when its recorded recipe matches this run's.
+
+    Returns (None, reason) to mean "start fresh", which is always safe.
+    """
+    weights = adapter_dir / "adapters.safetensors"
+    provenance = adapter_dir / "adapter_config.json"
+    if not weights.exists():
+        return None, "no existing adapter to resume from"
+    if not provenance.exists():
+        return None, ("existing adapter has no adapter_config.json, so its "
+                      "recipe cannot be verified")
+    try:
+        previous = json.loads(provenance.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"existing adapter_config.json is unreadable ({exc})"
+
+    from symbio.app.skills import _model_stem
+
+    trained_for = previous.get("model")
+    if trained_for and _model_stem(trained_for) != _model_stem(model_name):
+        return None, (f"existing adapter was trained for {trained_for}, not "
+                      f"{model_name}")
+
+    previous_lora = previous.get("lora_parameters") or {}
+    mismatches = []
+    if previous.get("num_layers") != num_layers:
+        mismatches.append(f"num_layers {previous.get('num_layers')} vs {num_layers}")
+    for field in ("rank", "keys"):
+        before, after = previous_lora.get(field), lora_parameters.get(field)
+        if (list(before) if isinstance(before, list) else before) != \
+           (list(after) if isinstance(after, list) else after):
+            mismatches.append(f"{field} {before!r} vs {after!r}")
+    if mismatches:
+        return None, ("existing adapter has a different LoRA recipe ("
+                      + "; ".join(mismatches) + ")")
+    return weights, "recipe matches"
 
 def run_training(config: dict[str, Any], iters: int | None = None,
-                 role: str | None = None, model_name: str | None = None) -> bool:
+                 role: str | None = None, model_name: str | None = None,
+                 resume: bool = False) -> bool:
     """Run a LoRA fine-tune. `iters` overrides lora.iters for short passes
     (e.g. the correction-learning batches). `role`/`model_name` train a
     worker's own adapter against its own data directory instead of the
-    headmaster's — role is None everywhere except symbio.app.dispatch."""
+    headmaster's — role is None everywhere except symbio.app.dispatch.
+
+    `resume` continues from the adapter already in `adapter_dir` instead of
+    starting from random init, so a run that came out weak can be extended
+    rather than replaced. Only the adapter weights carry over — mlx_lm does
+    not restore optimiser state, so Adam's moments and the LR schedule start
+    again."""
     train_file = _train_file_for(role)
     data_dir = train_file.parent
     adapter_dir = constants.adapter_dir_for(role)
@@ -1634,6 +1724,20 @@ def run_training(config: dict[str, Any], iters: int | None = None,
         "--config", config_path,
     ]
 
+    # Continue from the existing adapter rather than replacing it. Checked
+    # rather than assumed: resuming onto a different recipe is the one way
+    # this silently trains nothing (see resume_source).
+    if resume:
+        source, reason = resume_source(
+            adapter_dir, model_name or config["model_name"],
+            lora["num_layers"], lora_parameters)
+        if source is None:
+            print(f"  [Train] Cannot resume: {reason}. Training from scratch.")
+        else:
+            cmd += ["--resume-adapter-file", str(source)]
+            print(f"  [Train] Resuming from the existing adapter ({reason}). "
+                  f"Optimiser state is not restored.")
+
     # Recompute activations in the backward pass instead of holding them.
     # Activation memory scales with the sequence window, and this corpus runs
     # a 3k window on an 8B, so this is the lever that actually moves peak
@@ -1683,10 +1787,21 @@ def run_training(config: dict[str, Any], iters: int | None = None,
         print("  [System] Adapter files missing after training.")
         return False
 
-    adapter_kb = sum(f.stat().st_size for f in adapter_dir.iterdir() if f.is_file()) // 1024
-    print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB")
-    return trained
+    # A fresh run replaced the weights, so its steps are the adapter's whole
+    # history; a resumed one continues the total it inherited. Recorded even
+    # when the run was cut short, because the steps still happened and the
+    # weights on disk reflect them.
+    if not resume:
+        try:
+            (adapter_dir / PROGRESS_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass
+    total = record_adapter_iters(iters, role=role)
 
+    adapter_kb = sum(f.stat().st_size for f in adapter_dir.iterdir() if f.is_file()) // 1024
+    print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB "
+          f"({adapter_label(role)}, {total} total iters)")
+    return trained
 
 def _model_repo_dir(model_name: str | None) -> Path | None:
     """Where a model's files live locally, or None if it is not cached."""
@@ -1698,7 +1813,6 @@ def _model_repo_dir(model_name: str | None) -> Path | None:
         return repo
     local = Path(model_name)
     return local if local.is_dir() else None
-
 
 def model_block_count(model_name: str | None) -> int | None:
     """How many transformer blocks a model has, read from its config.json."""
@@ -1720,7 +1834,6 @@ def model_block_count(model_name: str | None) -> int | None:
                 return count
     return None
 
-
 # A LoRA target naming a specific block. The block index is what matters, and
 # it sits under different roots depending on the model: "model.layers.12..."
 # for a plain text model, "language_model.model.layers.3..." for a multimodal
@@ -1729,7 +1842,6 @@ _BLOCK_KEY_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.")
 
 # The rooted form that actually matches a module path in either layout.
 _ROOTED_BLOCK_KEY_RE = re.compile(r"^(?:[\w.]+\.)?model\.layers\.\d+\.")
-
 
 def validate_lora_keys(keys: list[str] | None,
                        block_count: int | None) -> list[str]:
@@ -1787,7 +1899,6 @@ def validate_lora_keys(keys: list[str] | None,
                 f"'self_attn.q_proj'), so it will match nothing.")
     return problems
 
-
 def _model_weight_bytes(model_name: str | None) -> int | None:
     """On-disk size of a model's weights, or None if it is not cached locally.
 
@@ -1804,7 +1915,6 @@ def _model_weight_bytes(model_name: str | None) -> int | None:
                    if f.is_file())
     except OSError:
         return None
-
 
 # Headroom over the raw weight size, measured rather than guessed. On a 4-bit
 # 8B (4.35 GB of weights) at this corpus's 3k window:
@@ -1826,7 +1936,6 @@ _TRAINING_OVERHEAD = {
     (True,  True):  1.8,   #  7.535 GB measured
 }
 
-
 def _attention_only(lora: dict[str, Any]) -> bool:
     """True when LoRA skips the MLP projections.
 
@@ -1837,7 +1946,6 @@ def _attention_only(lora: dict[str, Any]) -> bool:
     """
     keys = lora.get("keys") or []
     return bool(keys) and not any("mlp" in str(k) for k in keys)
-
 
 def _training_overhead(config: dict[str, Any]) -> float:
     """How much more than the raw weights a run is expected to need.
@@ -1853,6 +1961,42 @@ def _training_overhead(config: dict[str, Any]) -> float:
         (bool(lora.get("grad_checkpoint", False)), _attention_only(lora))
     ]
 
+# A load-and-generate needs the weights plus a KV cache, with no optimiser
+# state and no retained activations, so it sits far below any of the training
+# multipliers above. Kept above 1.0 for the same reason those are pessimistic:
+# refusing a load costs a retry, accepting one the machine cannot hold costs
+# the machine.
+_INFERENCE_OVERHEAD = 1.25
+
+def load_memory_shortfall(config: dict[str, Any],
+                          model_name: str | None = None,
+                          purpose: str = "load this model") -> str | None:
+    """A message explaining why there is not room to load a model for
+    inference, or None to proceed.
+
+    _memory_shortfall guards the trainer child, which is only half of what a
+    guarded training run puts in RAM: the baseline and post-training golden
+    runs load their own full copy of the weights in *this* process, and did so
+    with no check at all. On a machine already holding the headmaster and a
+    resident worker, that unchecked load is the allocation that goes over the
+    edge — and it happens before the trainer's own preflight ever runs.
+    """
+    if not config.get("gpu", {}).get("memory_preflight", True):
+        return None
+    weights = _model_weight_bytes(model_name or config.get("model_name"))
+    free = free_ram_bytes()
+    if weights is None or free is None:
+        return None  # Unknown on either side is not evidence of a problem.
+    needed = int(weights * _INFERENCE_OVERHEAD)
+    if free >= needed:
+        return None
+    return (
+        f"Not enough free memory to {purpose}: it needs about "
+        f"{needed / 1e9:.1f} GB ({weights / 1e9:.1f} GB of weights plus a KV "
+        f"cache) and only {free / 1e9:.1f} GB is free. Something else is "
+        f"holding memory — a resident chat model, another worker, or a "
+        f"training run. Skipping rather than risking an out-of-memory kill."
+    )
 
 def _memory_shortfall(config: dict[str, Any],
                       model_name: str | None = None) -> str | None:
@@ -1884,12 +2028,10 @@ def _memory_shortfall(config: dict[str, Any],
         f"out-of-memory kill.{hint}"
     )
 
-
 # Cross-entropy on a vocab of ~150k tops out near ln(150000) ~= 11.9 for a
 # model predicting uniformly at random, and a fine-tune starts well below that.
 # Anything past this ceiling is not a bad fine-tune, it is a broken number.
 _MAX_PLAUSIBLE_LOSS = 20.0
-
 
 def _plausible_loss(loss: float, after_learning: bool = False) -> bool:
     """False for losses that cannot come from a working training run.
@@ -1912,7 +2054,6 @@ def _plausible_loss(loss: float, after_learning: bool = False) -> bool:
     if loss == 0.0:
         return after_learning
     return 0.0 < loss < _MAX_PLAUSIBLE_LOSS
-
 
 def _stop_trainer(process: subprocess.Popen, signalled: bool = False) -> None:
     """Shut down an mlx_lm trainer child, preferring a graceful unwind.
@@ -1945,7 +2086,6 @@ def _stop_trainer(process: subprocess.Popen, signalled: bool = False) -> None:
         process.wait()
     except (ProcessLookupError, OSError):
         pass
-
 
 def _run_training_with_early_stop(
     cmd: list[str],
@@ -1995,9 +2135,16 @@ def _run_training_with_early_stop(
     def _restore_best(step: int | None) -> None:
         """Promote the best checkpoint to adapters.safetensors.
 
-        Falls back to the newest checkpoint on disk when the best step has
-        no file of its own — better to keep a slightly worse adapter than to
-        finish a training run with nothing.
+        `steps_per_eval` and `save_every` rarely coincide, so the best-scoring
+        step usually has no file of its own and a fallback decides the run's
+        output. It must be the newest checkpoint *at or before* that step, not
+        the newest overall: early stopping fires because validation loss is
+        climbing, so the newest checkpoint is the most overfit one the run
+        produced. Falling back to it hands back the worst adapter under the
+        banner of keeping something rather than nothing.
+
+        Only when nothing was saved before the best step does the oldest
+        checkpoint stand in — at that point every candidate is past it.
         """
         dst = adapter_dir / "adapters.safetensors"
         src = adapter_dir / f"{step:07d}_adapters.safetensors" if step else None
@@ -2006,9 +2153,9 @@ def _run_training_with_early_stop(
             if not available:
                 print("  [Train] No checkpoint to restore; keeping current adapter.")
                 return
-            src = available[-1]
+            src = checkpoint_at_or_before(available, step)
             print(f"  [Train] Best step {step} has no checkpoint; "
-                  f"falling back to {src.name}.")
+                  f"falling back to {src.name} (nearest at or before it).")
         shutil.copy2(src, dst)
         print(f"  [Train] Restored checkpoint {src.name}.")
 
@@ -2105,35 +2252,110 @@ def _run_training_with_early_stop(
 
     return True
 
+PROGRESS_FILE = "training_progress.json"
 
-def backup_adapter(role: str | None = None) -> Path | None:
+def adapter_label(role: str | None) -> str:
+    """The name a saved adapter is filed under. The headmaster has no role."""
+    return (role or "headmaster").upper()
+
+def adapter_total_iters(role: str | None = None) -> int:
+    """Total steps this adapter has been trained for, across runs.
+
+    mlx_lm numbers iterations per invocation, so a resumed run starts again
+    at 1. Labelling a snapshot with that number would file the 20 steps after
+    a 125-step run as ITER20 and sort it below the run it continues. The
+    running total is the only number that describes the adapter.
+    """
+    path = constants.adapter_dir_for(role) / PROGRESS_FILE
+    try:
+        return int(json.loads(path.read_text(encoding="utf-8")).get("total_iters", 0))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return 0
+
+def record_adapter_iters(ran: int, role: str | None = None) -> int:
+    """Add a finished run's steps to the adapter's running total."""
+    adapter_dir = constants.adapter_dir_for(role)
+    if not adapter_dir.exists():
+        return 0
+    total = adapter_total_iters(role) + max(0, int(ran))
+    try:
+        (adapter_dir / PROGRESS_FILE).write_text(
+            json.dumps({"total_iters": total, "label": adapter_label(role)},
+                       indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    return total
+
+def backup_adapter(role: str | None = None, label: str | None = None) -> Path | None:
     """Snapshot the current adapter before a training run, so a regression
     caught by the golden set can be rolled back. Returns None when there is
-    no existing adapter to protect (e.g. the very first training run)."""
+    no existing adapter to protect (e.g. the very first training run).
+
+    Named `adapters.<LABEL>_ITER<n>.bak` so a directory listing says which
+    skill a snapshot belongs to and how much training it has had — the two
+    things you need to pick one to go back to. A timestamp is appended only
+    to break a collision, so the common case stays readable.
+    """
     adapter_dir = constants.adapter_dir_for(role)
     if not adapter_dir.exists() or not any(adapter_dir.iterdir()):
         return None
-    backup_dir = adapter_dir.parent / f"{adapter_dir.name}.bak.{datetime.now():%Y%m%d_%H%M%S_%f}"
-    shutil.copytree(adapter_dir, backup_dir)
+    stem = f"{adapter_dir.name}.{label or adapter_label(role)}_ITER{adapter_total_iters(role)}"
+    backup_dir = adapter_dir.parent / f"{stem}.bak"
+    if backup_dir.exists():
+        backup_dir = adapter_dir.parent / f"{stem}.{datetime.now():%H%M%S_%f}.bak"
+    shutil.copytree(adapter_dir, backup_dir, ignore=_ignore_nested_workers)
     return backup_dir
 
+def _ignore_nested_workers(directory, names):
+    """Keep every worker's adapter out of the headmaster's snapshot.
+
+    The worker adapters live *inside* the headmaster's directory
+    (adapters/workers/<role>), so a plain copytree of adapters/ sweeps them
+    all into the headmaster's backup — and the matching restore then puts that
+    frozen copy back over whatever the workers have learned since. One
+    headmaster rollback would silently revert every skill adapter on the
+    machine to whenever its snapshot was taken, and delete outright any skill
+    trained after it. Worker adapters have their own backups, taken and
+    restored against their own directories; they have no business in this one.
+    """
+    if Path(directory).resolve() != constants.ADAPTER_DIR.resolve():
+        return set()
+    return {n for n in names if n == constants.WORKER_ADAPTERS_DIR.name}
 
 def restore_adapter(backup_dir: Path, role: str | None = None):
-    """Replace the current adapter with a previously backed-up one."""
-    adapter_dir = constants.adapter_dir_for(role)
-    if adapter_dir.exists():
-        shutil.rmtree(adapter_dir)
-    shutil.copytree(backup_dir, adapter_dir)
+    """Replace the current adapter with a previously backed-up one.
 
+    Everything the adapter directory holds is replaced except the nested
+    workers/ tree, which belongs to the workers and is left exactly as it is.
+    Older backups, taken before backup_adapter learned to skip it, still carry
+    a stale copy of that tree; it is ignored rather than restored.
+    """
+    adapter_dir = constants.adapter_dir_for(role)
+    workers_dir = constants.WORKER_ADAPTERS_DIR if role is None else None
+    if adapter_dir.exists():
+        for item in adapter_dir.iterdir():
+            if workers_dir is not None and item.name == workers_dir.name:
+                continue
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                item.unlink(missing_ok=True)
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    for item in Path(backup_dir).iterdir():
+        if workers_dir is not None and item.name == workers_dir.name:
+            continue
+        target = adapter_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, target)
+        else:
+            shutil.copy2(item, target)
 
 def discard_adapter_backup(backup_dir: Path | None):
     """Remove a backup once it is no longer needed (training kept)."""
     if backup_dir and backup_dir.exists():
         shutil.rmtree(backup_dir, ignore_errors=True)
 
-
 _ADAPTER_LAST_USED_FILE_NAME = "last_used.json"
-
 
 def adapter_last_used(role: str | None = None) -> datetime | None:
     """When was this adapter last loaded into a session? None if it has
@@ -2146,7 +2368,6 @@ def adapter_last_used(role: str | None = None) -> datetime | None:
     except (OSError, ValueError, KeyError, json.JSONDecodeError):
         return None
 
-
 def mark_adapter_used(role: str | None = None):
     """Record that this adapter was just loaded into a session, resetting
     the idle clock the reminder in ChatSession checks against."""
@@ -2156,14 +2377,23 @@ def mark_adapter_used(role: str | None = None):
     path = adapter_dir / _ADAPTER_LAST_USED_FILE_NAME
     path.write_text(json.dumps({"last_used": datetime.now().isoformat()}), encoding="utf-8")
 
-
 def remove_adapter(role: str | None = None):
-    """Delete this adapter entirely, reverting to the base model."""
-    adapter_dir = constants.adapter_dir_for(role)
-    if adapter_dir.exists():
-        shutil.rmtree(adapter_dir)
-    adapter_dir.mkdir(parents=True, exist_ok=True)
+    """Delete this adapter entirely, reverting to the base model.
 
+    The headmaster's adapter directory contains `workers/`, so clearing it
+    wholesale takes every skill adapter with it — a `symb retrain` after a
+    model switch would silently destroy specialised workers that have nothing
+    to do with the headmaster's weights and are expensive to rebuild. Only the
+    headmaster's own files are removed; subdirectories are left alone.
+    """
+    adapter_dir = constants.adapter_dir_for(role)
+    if not adapter_dir.exists():
+        adapter_dir.mkdir(parents=True, exist_ok=True)
+        return
+    for entry in adapter_dir.iterdir():
+        if entry.is_dir():
+            continue  # workers/ and any other nested adapter store
+        entry.unlink(missing_ok=True)
 
 def prune_adapters(role: str | None = None) -> dict[str, Any]:
     """Remove intermediate checkpoints and report adapter footprint."""
@@ -2179,7 +2409,6 @@ def prune_adapters(role: str | None = None) -> dict[str, Any]:
         "total_kb": total_bytes // 1024,
         "files": [f.name for f in adapter_dir.iterdir() if f.is_file()],
     }
-
 
 def save_history_pairs(history: list[dict[str, str]], tokenizer, system_prompt: str) -> int:
     """Save clean (user, assistant) pairs from history to training data."""
