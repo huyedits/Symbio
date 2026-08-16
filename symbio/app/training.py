@@ -122,7 +122,16 @@ def append_training_text(text: str, role: str | None = None,
 # with True then asks for a behaviour the adapter was trained out of, and the
 # reasoning surfaces as the reply. chat.py imports this rather than repeating
 # the literal, so the two cannot drift apart.
-THINKING_ENABLED = True
+#
+# False since the headmaster became DeepSeek-V4-Pro-Qwen3.5-9B, which is served
+# as a base model with no adapter — so there is no training run for this to
+# match, and the pairing above does not bind. It has to be False: with thinking
+# on, this model emits its reasoning as plain prose terminated by a bare
+# </think> and *no opening tag*, so tooling.strip_reasoning_block finds nothing
+# to strip and the analysis lands in the user's reply on every turn. Caught by
+# driving the real CLI; the golden set scored 12/15 straight through it.
+# Restore to True alongside any headmaster that is served with an adapter.
+THINKING_ENABLED = False
 
 def strip_tool_catalog(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     """Drop the <tools> JSON catalog from a system turn destined for training.
@@ -150,6 +159,51 @@ def strip_tool_catalog(messages: list[dict[str, str]]) -> list[dict[str, str]]:
         cleaned.append(message)
     return cleaned
 
+# Where the system prompt stops being setup and starts being standing advice.
+# Cut at the marker rather than at a token count so the result is always a
+# strict *prefix* of the served prompt — training sees less context than
+# inference, never different context, exactly as strip_tool_catalog preserves.
+_GUIDELINES_MARKER = "\nGuidelines:"
+
+def trim_system_guidelines(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Drop the standing-guidelines block from a system turn bound for training.
+
+    The same argument as strip_tool_catalog, one block further down. The
+    guidelines run ~1,100 of the system prompt's ~2,150 tokens and are
+    byte-identical in every sample, and `mask_prompt` already excludes them
+    from the loss — so they contribute no gradient at all. What they do
+    contribute is window, and that is not free: measured on this machine, the
+    8B peaks at 7.916 GB with the full prompt at a 3,328-token window and
+    5.761 GB without it. The first number is macOS reporting critical memory
+    pressure and killing the run; the second completes. The block that decides
+    that is one the loss never looks at.
+
+    Idempotent, unlike strip_tool_catalog: the marker is gone after the first
+    pass, so a second call is a no-op and re-rendering stored messages is safe.
+    """
+    cleaned = []
+    for message in messages:
+        if message.get("role") == "system":
+            content = message.get("content", "")
+            index = content.find(_GUIDELINES_MARKER)
+            if index != -1:
+                message = {**message, "content": content[:index].rstrip() + "\n"}
+        cleaned.append(message)
+    return cleaned
+
+def prepare_for_training(messages: list[dict[str, str]],
+                         trim_guidelines: bool = True) -> list[dict[str, str]]:
+    """The one place a served message list becomes a training one.
+
+    Both the rendered `text` and the stored `messages` must come through here
+    on the same inputs, or the masked prefix mlx_lm computes stops lining up
+    with the sample it computes loss over.
+    """
+    prepared = strip_tool_catalog(messages)
+    if trim_guidelines:
+        prepared = trim_system_guidelines(prepared)
+    return prepared
+
 def render_messages(messages: list[dict[str, str]], tokenizer) -> str:
     """Apply the chat template to messages that are already training-ready.
 
@@ -167,22 +221,25 @@ def render_messages(messages: list[dict[str, str]], tokenizer) -> str:
         enable_thinking=THINKING_ENABLED,
     )
 
-def build_chat_training_sample(messages: list[dict[str, str]], tokenizer) -> str:
-    return render_messages(strip_tool_catalog(messages), tokenizer)
+def build_chat_training_sample(messages: list[dict[str, str]], tokenizer,
+                               trim_guidelines: bool = True) -> str:
+    return render_messages(
+        prepare_for_training(messages, trim_guidelines), tokenizer)
 
 def append_chat_pair(user_msg: str, assistant_msg: str, tokenizer, system_prompt: str,
-                     role: str | None = None):
+                     role: str | None = None, trim_guidelines: bool = True):
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_msg},
         {"role": "assistant", "content": clean_response(assistant_msg)},
     ]
-    # Store the catalog-stripped messages, not the originals: they must be the
-    # exact ones the rendered text came from, or the masked prefix mlx_lm
-    # computes would not line up with the sample it computes loss over.
-    stripped = strip_tool_catalog(messages)
-    append_training_text(build_chat_training_sample(messages, tokenizer),
-                         role=role, messages=stripped)
+    # Store the prepared messages, not the originals: they must be the exact
+    # ones the rendered text came from, or the masked prefix mlx_lm computes
+    # would not line up with the sample it computes loss over.
+    prepared = prepare_for_training(messages, trim_guidelines)
+    append_training_text(
+        build_chat_training_sample(messages, tokenizer, trim_guidelines),
+        role=role, messages=prepared)
 
 # Qwen/ChatML turn markers, used to recover message structure from a sample
 # that was stored as rendered text only. Kept narrow deliberately: a corpus
