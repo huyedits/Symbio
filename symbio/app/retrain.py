@@ -12,7 +12,6 @@ from symbio.app.training import (
     run_training,
     seed_training_data,
 )
-from symbio.llm import load_model_with_adapter
 
 
 def retrain_model(config: dict[str, Any], *, digest: bool = True, seed: bool = True) -> bool:
@@ -38,12 +37,27 @@ def retrain_model(config: dict[str, Any], *, digest: bool = True, seed: bool = T
         except OSError as exc:
             print(f"  [System warning] Could not clear digest manifest: {exc}")
 
-    # 3. Load base model + tokenizer for the new model.
-    print("  [System] Loading model and tokenizer...")
+    # 3. Load the tokenizer for the new model — and only the tokenizer.
+    #
+    # This used to call load_model_with_adapter, which pulls the full base
+    # model into *this* process and, because the result is bound for the whole
+    # function, keeps it resident. Nothing here ever uses it: seeding,
+    # digestion and sample rendering need a tokenizer and nothing else. But
+    # run_training then spawns the trainer as a child needing its own copy of
+    # the weights, so the parent's idle 4.4 GB came straight off the budget the
+    # memory guard checks. Measured on a 16 GB machine: 9.4 GB free on entry,
+    # 4.9 GB by the time the guard looked, and every retrain refused with
+    # "needs about 7.8 GB and only 4.9 GB is free".
+    #
+    # TokenizerWrapper is what load_model_with_adapter returned, so callers see
+    # exactly the same object; it just arrives without the weights beside it.
+    print("  [System] Loading tokenizer...")
     try:
-        _, tokenizer, _ = load_model_with_adapter(config, adapter_path=False)
+        from mlx_lm.tokenizer_utils import TokenizerWrapper
+        from transformers import AutoTokenizer
+        tokenizer = TokenizerWrapper(AutoTokenizer.from_pretrained(model_name))
     except Exception as exc:
-        print(f"  [System] Failed to load model: {exc}")
+        print(f"  [System] Failed to load tokenizer: {exc}")
         return False
 
     system_prompt = config.get("system_prompt", "") or build_default_system_prompt(config)
