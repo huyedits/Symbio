@@ -97,3 +97,6 @@ eval_*.json
 /eval_routing.py
 /eval_toolcall.py
 /diag_*.txt
+
+# Locally quantised model weights — gigabytes, and GitHub caps files at 100 MB.
+models/
