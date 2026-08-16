@@ -485,7 +485,8 @@ def run_golden_set(
             {"role": "user", "content": case.prompt_fn(config)},
         ]
         chat_prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=training.THINKING_ENABLED,
         )
         try:
             raw_reply = generate_fn(

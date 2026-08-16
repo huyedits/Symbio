@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from symbio import constants
-from symbio.app import prompts
+from symbio.app import prompts, training
 
 # Arm names, in report order.
 ARM_BASE = "base"
@@ -375,7 +375,8 @@ def run_arm(
             {"role": "user", "content": task.prompt},
         ]
         chat_prompt = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=training.THINKING_ENABLED,
         )
         start = time.perf_counter()
         try:
@@ -394,7 +395,7 @@ def run_arm(
 
         latency = time.perf_counter() - start
         total_latency += latency
-        display = tooling.strip_tool_tags(raw)
+        display = tooling.strip_tool_tags(tooling.strip_reasoning_block(raw))
         score = coverage(display, keywords)
         order = order_score(display, steps) if steps else None
         missing = [kw for kw in task.must_include if kw.lower() not in display.lower()]
