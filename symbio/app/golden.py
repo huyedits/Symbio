@@ -464,6 +464,7 @@ def run_golden_set(
     model, tokenizer, generate_fn, sampler, system_prompt: str,
     config: dict[str, Any], enabled_groups: set[str] | None = None,
     max_tokens: int | None = None, cases: list[GoldenCase] | None = None,
+    enable_thinking: bool | None = None,
 ) -> GoldenResult:
     """Run every golden case as a single-turn, tool-free generation and
     grade it. Never executes a tool — only parses the reply — so it is safe
@@ -484,9 +485,16 @@ def run_golden_set(
             {"role": "system", "content": context},
             {"role": "user", "content": case.prompt_fn(config)},
         ]
+        # Grade a model the way it is actually served. THINKING_ENABLED is
+        # the headmaster's setting; workers are served with thinking off, and
+        # grading them with it on measures a mode they never run in. Measured:
+        # the browser worker replies "click: Sign in" — its own ideal_reply —
+        # and failed its golden case purely because this asked for reasoning.
+        # Worker training is golden-gated, so that rolls back good adapters.
         chat_prompt = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
-            enable_thinking=training.THINKING_ENABLED,
+            enable_thinking=(training.THINKING_ENABLED
+                             if enable_thinking is None else enable_thinking),
         )
         try:
             raw_reply = generate_fn(
@@ -519,6 +527,7 @@ def run_golden_set_retry(
     model, tokenizer, generate_fn, sampler, system_prompt: str,
     config: dict[str, Any], enabled_groups: set[str] | None = None,
     max_tokens: int | None = None, cases: list[GoldenCase] | None = None,
+    enable_thinking: bool | None = None,
 ) -> tuple[GoldenResult, set[str]]:
     """Run the golden set and, if any cases fail, run it a second time.
     Returns the second (or only) result plus the set of case ids that failed
@@ -526,7 +535,7 @@ def run_golden_set_retry(
     generation noise."""
     first = run_golden_set(
         model, tokenizer, generate_fn, sampler, system_prompt,
-        config, enabled_groups, max_tokens, cases,
+        config, enabled_groups, max_tokens, cases, enable_thinking,
     )
     failing_first = {case_id for case_id, ok in first.results.items() if not ok}
     if not failing_first:
@@ -535,7 +544,7 @@ def run_golden_set_retry(
     print(f"  [Golden] Re-checking {len(failing_first)} failing case(s)...")
     second = run_golden_set(
         model, tokenizer, generate_fn, sampler, system_prompt,
-        config, enabled_groups, max_tokens, cases,
+        config, enabled_groups, max_tokens, cases, enable_thinking,
     )
     consistent = {case_id for case_id in failing_first if not second.results.get(case_id, True)}
     return second, consistent
