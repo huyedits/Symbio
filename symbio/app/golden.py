@@ -25,6 +25,8 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, NamedTuple
 
+from mlx_lm.sample_utils import make_sampler
+
 from symbio import constants
 from symbio.app import prompts, tooling, training
 
@@ -475,6 +477,17 @@ def run_golden_set(
     cases = cases if cases is not None else all_golden_cases()
     max_tokens = max_tokens or int(config.get("learn", {}).get("golden_max_tokens", 150))
     context = system_prompt + prompts.env_note() + prompts.time_note()
+
+    # Grade greedily, whatever sampler the caller serves conversations with.
+    # This is a regression gate, and callers hand it agent.temperature (0.6),
+    # which makes the same adapter score differently run to run: measured 9/15
+    # live against 12/15 greedy on an identical model, prompt and adapter.
+    # golden_rollback_on_regression then keeps or reverts a fine-tune on that
+    # noise, so a good retrain can be thrown away and a bad one kept. The
+    # `sampler` argument is left in the signature because every caller passes
+    # its serving sampler positionally; it is deliberately not used here.
+    del sampler
+    sampler = make_sampler(temp=0.0)
 
     results: dict[str, bool] = {}
     replies: dict[str, str] = {}
