@@ -1,6 +1,7 @@
 """Benchmark MLX models from Hugging Face for use as Symbio's local brain."""
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -132,6 +133,35 @@ DEFAULT_TASKS: list[BenchmarkTask] = [
 ]
 
 
+# Terminators a detokenizer can hand back as literal text. mlx_lm stops
+# generating at EOS but the token itself still lands in the returned string for
+# some tokenizers, and every validator here compares against exact output — so
+# leaving it on scores a correct "56" as a wrong answer. That is not a model
+# result, it is a harness artifact, and it is how a Qwen2.5-Coder run once came
+# out at 14/100 with visibly correct answers in the report.
+_TERMINATORS = ("<|im_end|>", "<|endoftext|>", "<|eot_id|>", "<|end|>",
+                "<|im_start|>", "</s>")
+_FENCE_RE = re.compile(r"^```[A-Za-z0-9_+-]*\s*(.*?)\s*```$", re.DOTALL)
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _clean_output(text: str, tokenizer: Any = None) -> str:
+    """Strip what the transport added, not what the model decided.
+
+    Removes chat-template terminators, an unasked-for reasoning block, and a
+    markdown fence around an otherwise valid JSON answer. Anything past that —
+    prose in front of the JSON, a wrong number, a refusal — is the model's own
+    answer and is left for the validator to judge.
+    """
+    text = _THINK_RE.sub("", text).strip()
+    eos = getattr(tokenizer, "eos_token", None)
+    for marker in (*_TERMINATORS, *( (eos,) if isinstance(eos, str) else () )):
+        text = text.replace(marker, "")
+    text = text.strip()
+    fenced = _FENCE_RE.match(text)
+    return fenced.group(1).strip() if fenced else text
+
+
 def _validate(text: str, task: BenchmarkTask) -> tuple[bool, str | None]:
     if task.validator is not None:
         try:
@@ -184,7 +214,7 @@ def _generate(model, tokenizer, prompt: str, system_prompt: str | None = None, m
         verbose=False,
     )
     latency = time.perf_counter() - start
-    return output.strip(), latency
+    return _clean_output(output, tokenizer), latency
 
 
 def evaluate_model(model_name: str, tasks: list[BenchmarkTask], system_prompt: str | None = None) -> ModelResult:
