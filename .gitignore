@@ -33,9 +33,17 @@ adapters.premask.*
 # training corpus, and LoRA adapter on first run — never ship them.
 # prompt.md is seeded from DEFAULT_SYSTEM_PROMPT in main.py on first run.
 config.json
+config.json.*.bak
+config.json.bak.*
 prompt.md
 prompt.md.default
 prompt.md.backup.*
+prompt.md.bak.*
+# The security policy and its shipped snapshot are both written on first run
+# by symbio.app.security (see ensure_security_file); security.md is then the
+# user's own file to edit, so publishing either one would overwrite it.
+security.md
+security.md.default
 cron_jobs.json
 gateway.pid
 agent_memory.md
