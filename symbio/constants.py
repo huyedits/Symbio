@@ -40,12 +40,20 @@ SESSIONS_DIR = PROJECT_DIR / "sessions"
 # Snapshot of the last shipped default prompt; used to auto-update prompt.md
 # when the user has not customized it.
 PROMPT_DEFAULT_FILE = PROJECT_DIR / "prompt.md.default"
+# The security policy: the instruction-hierarchy rules, kept in their own file
+# so nothing the assistant can reach at runtime is able to rewrite them. Read
+# first and placed at the top of every system prompt. See symbio.app.security.
+SECURITY_FILE = PROJECT_DIR / "security.md"
+SECURITY_DEFAULT_FILE = PROJECT_DIR / "security.md.default"
 GOLDEN_CASES_FILE = PROJECT_DIR / "golden_cases.json"
 # Warmed KV cache for the system+tools prefix, reused across restarts. Its own
 # directory rather than adapters/: it is large (hundreds of MB) and would
 # otherwise be counted in the adapter footprint that /prune reports.
 CACHE_DIR = PROJECT_DIR / "cache"
 PROMPT_CACHE_FILE = CACHE_DIR / "system_prompt.safetensors"
+# Hash of security.md as of the last run, so a change to the policy is
+# announced on the next start instead of taking effect quietly.
+SECURITY_STAMP_FILE = CACHE_DIR / "security.sha256"
 
 for d in (
     CACHE_DIR,

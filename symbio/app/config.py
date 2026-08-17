@@ -222,6 +222,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "golden_retry_enabled": True,
         "golden_retry_max_extra_iters": 50,
         "golden_retry_samples_per_case": 3,
+        # Also teach golden cases that were already failing when a training
+        # round started, not just ones that round broke. Without it a case
+        # only ever gets remedy samples the round it regresses, so anything
+        # that slipped through stays failing forever.
+        "golden_teach_baseline_failures": True,
         "adapter_idle_reminder_enabled": True,
         "adapter_idle_days": 30,
         "correction_phrases": [
