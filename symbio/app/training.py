@@ -1454,17 +1454,31 @@ def iters_for_corpus(lora: dict[str, Any], sample_count: int) -> int:
     `lora.iters` is kept as a floor rather than dropped, so a small corpus
     still gets enough steps to converge, and `lora.max_iters` caps the top end
     so a large one cannot run away.
+
+    The floor is itself bounded by `lora.max_epochs`, because on a small corpus
+    it stops being a floor and becomes the whole schedule. A 6-sample skill
+    corpus needs 12 steps at 2 epochs; the 150 floor turned that into 25 epochs,
+    which is not "enough steps to converge" but memorisation of six strings —
+    and it is why every skill worker recited its seed samples instead of
+    generalising. Measured: at 3 epochs over 20 samples the same recipe held
+    learned constraints across held-out scenarios; at 25 epochs it did not.
     """
     epochs = float(lora.get("epochs", 2))
+    max_epochs = float(lora.get("max_epochs", 4))
     batch_size = max(1, int(lora.get("batch_size", 1)))
     floor = int(lora.get("iters", 150))
     cap = int(lora.get("max_iters", 2000))
     if sample_count <= 0 or epochs <= 0:
         return min(cap, floor)
     needed = math.ceil(epochs * sample_count / batch_size)
+    # How many steps `max_epochs` passes would take. The floor may not exceed
+    # this, so "give a small corpus a few more steps" cannot silently become
+    # "run it twenty-five times".
+    epoch_ceiling = math.ceil(max_epochs * sample_count / batch_size)
+    effective_floor = min(floor, epoch_ceiling)
     # The cap is applied last so it is a real ceiling: a floor that could
     # override it would make `max_iters` unable to do the one thing it is for.
-    return min(cap, max(floor, needed))
+    return min(cap, max(effective_floor, needed))
 
 def count_samples(role: str | None = None) -> int:
     path = _train_file_for(role)

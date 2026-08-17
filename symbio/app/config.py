@@ -39,6 +39,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "iters": 300,
         "epochs": 2,
         "max_iters": 2000,
+        # Ceiling on how many passes the `iters` floor may buy a small corpus.
+        # Without it the floor stops being a floor: at 6 samples the old 150
+        # meant 25 epochs, which memorises the samples instead of learning
+        # from them.
+        "max_epochs": 4,
         # Compute the loss only over the assistant's answer. Without this the
         # system prompt — ~99% of every sample's tokens, and identical across
         # all of them — dominates the gradient, and the run measures how well
@@ -305,7 +310,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_worker_rounds": 4,
         "worker_golden_set_enabled": True,
         "worker_golden_regression_threshold": 0,
+        # Applies to hand-written eval_tasks.json only. Derived checks grade a
+        # reply by how much of the steps text it reproduces, so a worker that
+        # learns to perform its skill fails them by definition; those report
+        # without reverting (see skill_eval.has_custom_tasks).
         "worker_golden_rollback_on_regression": True,
+        # Append each worker reply to that worker's training corpus. Off by
+        # default: nothing validates the reply first, so this trains a worker
+        # on its own unchecked output.
+        "capture_worker_samples": False,
         # When a worker adapter regresses on a golden case, synthesize extra
         # training samples from the case's ideal reply and do a targeted
         # retrain before deciding whether to roll back.

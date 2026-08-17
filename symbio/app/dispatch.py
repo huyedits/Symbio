@@ -503,7 +503,16 @@ class WorkerPool:
                 return f"Worker '{role}' failed: {e}"
 
             self._status(f"  [Dispatch] Worker '{role}' returned {len(reply.split())} word(s).")
-            if reply:
+            # Opt-in, and off by default: this writes the worker's own output
+            # back into the corpus it will next be trained on, with nothing
+            # having checked the output first. Observed: a worker whose corpus
+            # demonstrated vegetarian-only suggestions answered a held-out
+            # prompt with lobster, and that answer was appended as a training
+            # sample — so the next retrain would have learned the violation as
+            # correct. A model graded only by itself drifts toward whatever it
+            # already does, which is the one failure a corpus cannot recover
+            # from on its own.
+            if reply and self._dispatch_cfg().get("capture_worker_samples", False):
                 training.append_chat_pair(task, reply, tokenizer, system_prompt, role=role)
             return label_worker_reply(role, reply)
         finally:
@@ -879,11 +888,30 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
                     print("  [Train] No remedy samples could be generated.")
 
         if len(regressions) > threshold:
-            if backup_dir and dispatch_cfg.get("worker_golden_rollback_on_regression", True):
+            # Derived cases grade a reply on how much of the steps text it
+            # reproduces. That is the right target while the corpus is still
+            # the seeded steps-text samples -- a worker answering "I don't
+            # know." there is genuinely broken and must not ship. Once real
+            # demonstrations replace the seeds the worker is meant to stop
+            # reciting, and the same cases would revert the specialisation.
+            derived_only = (
+                skill_cases
+                and not _skill_eval.has_custom_tasks(role)
+                and not _skill_eval.corpus_teaches_recitation(
+                    role, _skill_eval.skill_steps(entry) if entry else ""))
+            rollback_on = dispatch_cfg.get(
+                "worker_golden_rollback_on_regression", True)
+            if backup_dir and rollback_on and not derived_only:
                 training.restore_adapter(backup_dir, role=role)
                 return True, (
                     f"Worker '{role}' trained but regressed on {len(regressions)} "
                     f"check(s) ({', '.join(regressions)}); rolled back.")
+            if derived_only and rollback_on:
+                return True, (
+                    f"Worker '{role}' trained; {len(regressions)} derived "
+                    f"check(s) ({', '.join(regressions)}) no longer recite the "
+                    f"steps text. Kept — derived checks report only. Add "
+                    f"{_skill_eval.tasks_path_for(role).name} to make them block.")
             return True, (
                 f"Worker '{role}' trained but regressed on {len(regressions)} "
                 f"check(s) ({', '.join(regressions)}); kept anyway.")
