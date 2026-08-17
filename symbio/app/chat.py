@@ -29,7 +29,7 @@ from symbio.config import _adapter_matches_model
 from symbio.computer import BrowserSession
 from symbio import safety
 from symbio.tools import tool_few_shots
-from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, pending, prompts, prune, sandbox, sessions, setup, skills, tooling, training, web
+from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, pending, prompts, prune, sandbox, security, sessions, setup, skills, tooling, training, web
 from symbio.app.config import apply_gpu_limits, config_show, set_config_value
 try:
     # tag_rag lives at the repo root rather than inside the package, so it is
@@ -639,7 +639,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"   Data   : {dataset_size:,} bytes")
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
-    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /resume  /golden  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
+    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /resume  /golden [audit|prune]  /security  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
     output_fn("         /run <cmd>  /note [title]  /notes  /index-notes [--force]  /auto-index on|off  /new-skill <name>  /skills  /skill-adapters  /digest  /cron  /config  /archive  /restore")
     output_fn("         /build-mcp <name> | <description>  /mcp-tools  /hosts  /telemetry on|off  /feedback <text>")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
@@ -1865,6 +1865,23 @@ class ChatSession:
                 f"  [Train] Baseline golden checks: "
                 f"{baseline.pass_count}/{baseline.total} passing."
             )
+            # Cases that were already failing when this round started never
+            # enter the regression set below (baseline.passing - after.passing
+            # can only contain cases that passed first), so nothing downstream
+            # ever teaches them: a contract an earlier fine-tune broke stays
+            # broken through every later /train, and the golden report just
+            # keeps reprinting it. Give a standing failure the same remedy
+            # samples a fresh regression would get, so ordinary training walks
+            # it back instead of preserving it.
+            standing = sorted(set(baseline.results) - baseline.passing)
+            if standing and learn_cfg.get("golden_teach_baseline_failures", True):
+                added = golden.append_golden_remedy_samples(
+                    standing, self.tokenizer, self.system_prompt, self.config,
+                    copies=int(learn_cfg.get("golden_retry_samples_per_case", 3)))
+                if added:
+                    self.output_fn(
+                        f"  [Train] Injected {added} remedy sample(s) for "
+                        f"{len(standing)} standing failure(s): {', '.join(standing)}")
         self.output_fn("  [Train] Backing up current adapter before training...")
         backup_dir = training.backup_adapter() if golden_on else None
         # Between here and discard_adapter_backup the previous adapter exists
@@ -2079,6 +2096,50 @@ class ChatSession:
 
     # ---- Slash commands ----
 
+    def _golden_corpus_command(self, action: str) -> None:
+        """`/golden audit` and `/golden prune`: check the training corpus for
+        samples that answer a golden case's own prompt in a way that case
+        grades as a failure, and optionally drop them.
+
+        A failing golden case says the model got a prompt wrong; it cannot say
+        why. When the reason is that the corpus teaches both answers, more
+        training is not a fix — the counter-examples have to go first."""
+        hits = golden.find_corpus_contradictions(
+            self.config, enabled_groups=self.enabled_groups)
+        if not hits:
+            self.output_fn("  [Golden] No training samples contradict a golden case.")
+            return
+
+        counts: dict[str, int] = {}
+        for hit in hits:
+            counts[hit.case_id] = counts.get(hit.case_id, 0) + 1
+        self.output_fn(
+            f"  [Golden] {len(hits)} sample(s) teach against a golden case:")
+        for case_id, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+            self.output_fn(f"    {case_id}: {n} sample(s)")
+        for hit in hits:
+            # The answer is what contradicts the case; the reasoning block in
+            # front of it is just noise in a listing this long.
+            reply = " ".join(tooling.strip_reasoning_block(hit.reply).split())
+            self.output_fn(
+                f"    {hit.path.name}:{hit.line_no} [{hit.case_id}] {reply[:120]}"
+                f"{'...' if len(reply) > 120 else ''}")
+
+        if action != "prune":
+            self.output_fn(
+                "  [Golden] Run /golden prune to drop them, then /train.")
+            return
+        if not self._yes_no(
+                f"  Delete {len(hits)} contradicting training sample(s)? [y/N] "):
+            self.output_fn("  [Golden] Left the corpus alone.")
+            return
+        dropped = golden.drop_corpus_contradictions(
+            self.config, enabled_groups=self.enabled_groups)
+        total = sum(dropped.values())
+        self.output_fn(
+            f"  [Golden] Dropped {total} sample(s); a timestamped copy of each "
+            "file was kept. Run /train to relearn the contracts.")
+
     def _yes_no(self, prompt: str) -> bool:
         """Local Y/N prompt: uses confirm_fn if a front-end supplied one, else
         reads a line from input_fn. Used by /telemetry's consent re-prompt."""
@@ -2146,14 +2207,51 @@ class ChatSession:
                 trained, msg = dispatch.guarded_train_worker(role, self.config)
                 self.output_fn(f"  [Worker] {msg}")
 
+        elif cmd == "/security":
+            path = constants.SECURITY_FILE
+            self.output_fn(f"  [Security] Policy: {path}")
+            self.output_fn(f"  [Security] Digest: {security.policy_digest()[:16] or '(missing)'}")
+            self.output_fn(
+                "  [Security] Not writable from inside the assistant: no tool "
+                "call, shell command, or script can change it.")
+            self.output_fn(
+                f"  [Security] To change it, edit {path.name} yourself; it "
+                "takes effect on the next turn.")
+            if path.exists():
+                self.output_fn("")
+                for line in path.read_text(encoding="utf-8").rstrip().splitlines():
+                    self.output_fn(f"    {line}")
+
+        elif cmd.startswith("/golden ") and cmd.split(None, 1)[1].strip() in ("audit", "prune"):
+            self._golden_corpus_command(cmd.split(None, 1)[1].strip())
+
         elif cmd == "/golden":
             result = golden.run_golden_set(
                 self.model, self.tokenizer, self.generate_fn, self.sampler,
                 self.system_prompt, self.config, self.enabled_groups)
             self.output_fn(f"  [Golden] {result.pass_count}/{result.total} checks passing:")
-            for case in golden.GOLDEN_CASES:
+            # all_golden_cases(), not GOLDEN_CASES: user-defined cases from
+            # golden_cases.json are run and counted, so they have to be listed
+            # too or the report silently omits the ones it just graded.
+            for case in golden.all_golden_cases():
                 mark = "PASS" if result.results.get(case.id) else "FAIL"
                 self.output_fn(f"    [{mark}] {case.id} — {case.description}")
+                if result.results.get(case.id):
+                    continue
+                # Show what the model actually said. Without this a failure is
+                # just a name, and diagnosing it means re-running the case by
+                # hand outside the CLI — which is how "<cmd>" coming out as
+                # "/cmd>" stayed invisible: right command, one wrong token,
+                # nothing to parse, and no way to see it from this report.
+                reply = " ".join(result.replies.get(case.id, "").split())
+                if reply:
+                    self.output_fn(
+                        f"           reply: {reply[:200]}"
+                        f"{'...' if len(reply) > 200 else ''}")
+            if result.pass_count < result.total:
+                self.output_fn(
+                    "  [Golden] /golden audit checks whether the corpus itself "
+                    "teaches against a failing case.")
 
         elif cmd == "/wildcards":
             from symbio.app import wildcards as _wild
@@ -3854,6 +3952,19 @@ class ChatSession:
             return f"{msg}Edited {path.relative_to(constants.PROJECT_DIR)}."
 
     def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
+        # The security policy is not writable from inside the assistant, by any
+        # route, before any other gate gets a say. A refusal, not a
+        # confirmation prompt: every other high-risk call ends in "ask the
+        # user", which is the right answer when the user is the one who wants
+        # it and the wrong one here, because the attack this guards against is
+        # precisely an instruction that arrived pretending to be them. A file
+        # that can be unlocked by a convincing enough message is not locked.
+        if security.blocks_tool_call(name, params):
+            safety.log_security_event("policy_write_blocked", {
+                "tool": name, "params": params,
+            })
+            return security.refusal_message(f"tool '{name}'")
+
         # Respect tool-group enable/disable settings.
         group = tooling.tool_group(name)
         enabled_groups = getattr(self, "enabled_groups", None)
@@ -4374,6 +4485,16 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
         and stream_fn is None
     )
     if is_real_cli_run:
+        # Say so when the policy is not the one the last session ran under.
+        # Nothing inside the assistant can write security.md, so a change means
+        # a human edited it — worth one line, because it is the file that
+        # decides every refusal.
+        try:
+            changed = security.check_stamp()
+            if changed:
+                output_fn(f"  [Security] {changed}")
+        except OSError:
+            pass
         session._ensure_model_loaded()
         # Persist the identity defaults filled above (only on a real CLI run,
         # so tests with injected models don't rewrite the user's config.json).

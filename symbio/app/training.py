@@ -93,6 +93,12 @@ def _train_file_for(role: str | None) -> Path:
 def _valid_file_for(role: str | None) -> Path:
     return constants.VALID_FILE if role is None else constants.data_dir_for(role) / "valid.jsonl"
 
+def corpus_files(role: str | None = None) -> tuple[Path, Path]:
+    """The train and validation files a role's samples live in, in that order.
+    Read through this rather than reaching for the constants directly, so a
+    caller sweeping the corpus covers both halves of it."""
+    return (_train_file_for(role), _valid_file_for(role))
+
 def append_training_text(text: str, role: str | None = None,
                          messages: list[dict[str, str]] | None = None):
     """Append one sample, carrying its message structure when we have it.

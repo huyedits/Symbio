@@ -1069,6 +1069,14 @@ def execute_tools(agent: AIAgent, tools: list[tuple[str, dict[str, Any]]]) -> li
 
 
 def run_single_tool(agent: AIAgent, name: str, params: dict[str, Any]) -> str:
+    # Same refusal the tag agent enforces in ChatSession._execute_tool. Every
+    # tool table that can write needs it, or the protection is only as good as
+    # which front-end happens to be running.
+    from symbio.app import security as _security
+
+    if _security.blocks_tool_call(name, params):
+        return _security.refusal_message(f"tool '{name}'")
+
     meta = tool_metadata(name, agent.tools, agent)
     runner: Callable[[dict[str, Any]], str] = meta.get("run", lambda _: f"Unknown tool: {name}")
     print(f"  [Tool: {name}]")

@@ -21,8 +21,11 @@ from __future__ import annotations
 import json
 import platform as platform_module
 import re
+import shutil
 from collections import Counter
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
 from mlx_lm.sample_utils import make_sampler
@@ -349,6 +352,129 @@ def append_golden_remedy_samples(
             training.append_chat_pair(user_msg, target, tokenizer, system_prompt, role=role)
             added += 1
     return added
+
+
+class Contradiction(NamedTuple):
+    """A training sample that answers a golden case's own prompt in a way the
+    case grades as a failure."""
+    case_id: str
+    path: Path
+    line_no: int  # 1-based, as the file reads
+    reply: str
+
+
+def _normalized(prompt: str) -> str:
+    return " ".join((prompt or "").split()).casefold()
+
+
+def _sample_messages(record: dict[str, Any]) -> list[dict[str, str]] | None:
+    messages = record.get("messages")
+    if isinstance(messages, list) and messages:
+        return messages
+    return training.messages_from_rendered(record.get("text", ""))
+
+
+def _user_assistant_pairs(messages: list[dict[str, str]]):
+    """Yield every (user content, next assistant content) in a sample."""
+    pending: str | None = None
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role, content = message.get("role"), message.get("content", "")
+        if role == "user":
+            pending = content
+        elif role == "assistant" and pending is not None:
+            yield pending, content
+            pending = None
+
+
+def find_corpus_contradictions(
+    config: dict[str, Any], cases: list[GoldenCase] | None = None,
+    enabled_groups: set[str] | None = None, role: str | None = None,
+) -> list[Contradiction]:
+    """Find corpus samples that teach the opposite of a golden contract.
+
+    A golden case only says the model got a prompt wrong; it cannot say why.
+    This says why, for the one cause no amount of retraining fixes: the corpus
+    answering that same prompt both ways. Measured here — nine samples for
+    "Please remember that I prefer concise replies.", six of them a bare
+    acknowledgement with no <note> at all, and six for "Open Chrome." split
+    three saving it with <cmd>open -a against three opening google.com in the
+    automation browser. Both cases fail live, and remedy samples just add
+    copies to the side that is already losing.
+
+    Grading uses the same parse/strip pipeline `run_golden_set` grades live
+    replies with, so a sample counts as a contradiction on exactly the terms
+    the case would judge it by.
+    """
+    cases = cases if cases is not None else all_golden_cases()
+    by_prompt: dict[str, GoldenCase] = {}
+    for case in cases:
+        try:
+            by_prompt.setdefault(_normalized(case.prompt_fn(config)), case)
+        except Exception:
+            continue
+    if not by_prompt:
+        return []
+
+    found: list[Contradiction] = []
+    for path in training.corpus_files(role):
+        if not path.exists():
+            continue
+        for line_no, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            messages = _sample_messages(record)
+            if not messages:
+                continue
+            for user_msg, assistant_msg in _user_assistant_pairs(messages):
+                case = by_prompt.get(_normalized(user_msg))
+                if case is None:
+                    continue
+                tools = tooling.parse_tools(assistant_msg, enabled_groups)
+                display = tooling.strip_tool_tags(assistant_msg)
+                try:
+                    ok = bool(case.check(display, tools, config))
+                except Exception:
+                    ok = False
+                if not ok:
+                    found.append(Contradiction(case.id, path, line_no, assistant_msg))
+    return found
+
+
+def drop_corpus_contradictions(
+    config: dict[str, Any], cases: list[GoldenCase] | None = None,
+    enabled_groups: set[str] | None = None, role: str | None = None,
+) -> dict[str, int]:
+    """Delete the samples `find_corpus_contradictions` reports, keeping a
+    timestamped copy of each file it touches. Returns {case_id: dropped}.
+
+    Only samples answering a golden case's exact prompt are eligible, and only
+    ones that case grades as failures — everything else in the corpus is left
+    exactly where it is."""
+    contradictions = find_corpus_contradictions(config, cases, enabled_groups, role)
+    if not contradictions:
+        return {}
+    dropped = Counter()
+    by_path: dict[Path, set[int]] = {}
+    for hit in contradictions:
+        by_path.setdefault(hit.path, set()).add(hit.line_no)
+        dropped[hit.case_id] += 1
+    for path, line_nos in by_path.items():
+        lines = path.read_text(encoding="utf-8").splitlines()
+        kept = [line for i, line in enumerate(lines, start=1) if i not in line_nos]
+        backup = path.with_suffix(
+            path.suffix + f".precontradiction.{datetime.now():%Y%m%d_%H%M%S}")
+        shutil.copy2(path, backup)
+        path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    return dict(dropped)
 
 
 @dataclass
