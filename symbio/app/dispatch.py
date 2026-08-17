@@ -305,6 +305,12 @@ class WorkerPool:
         if role in self._resident:
             model, tokenizer, _ = self._resident[role]
             self._resident[role] = (model, tokenizer, time.time())
+            # Every path out of get() marks the adapter used, including this
+            # one. It is the path a busy worker takes — the second and every
+            # later delegation in a row — and leaving it out meant the more a
+            # worker was used, the staler its last-used stamp looked, which is
+            # what archive_idle_items reads to decide it can be archived.
+            training.mark_adapter_used(role=role)
             return model, tokenizer, (catalog_entry_for_role(role) or {})
 
         entry = catalog_entry_for_role(role)
@@ -446,16 +452,42 @@ class WorkerPool:
         every other role is a single-shot generation. Both record their
         (input, output) pairs as training samples for that worker, so real
         usage accumulates the corpus guarded_train_worker draws on."""
-        if role == "browser" and browser is not None:
-            max_rounds = int(self._dispatch_cfg().get("max_worker_rounds", 4))
-            return self._run_browser_delegation(task, browser, max_rounds)
+        # Resolve the role before anything is unloaded for it. The headmaster
+        # used to be put to sleep first and the catalog consulted second, so a
+        # task delegated to a role that does not exist — a typo, or a skill
+        # deleted since the model last saw the list — unloaded the 8B, found
+        # nothing to run, and reloaded it. A full model reload as the price of
+        # a misspelling, for a turn that returns an error string either way.
+        if catalog_entry_for_role(role) is None:
+            known = sorted({e.get("role") for e in load_catalog().values() if e.get("role")})
+            return f"No worker configured for role '{role}'. Known roles: {', '.join(known) or 'none'}."
 
         deep_sleep = bool(self._dispatch_cfg().get("headmaster_deep_sleep_while_workers", False))
+        # A worker that is already resident needs no room made for it, and the
+        # headmaster is the most expensive thing on this machine to reload.
+        # Deep sleep exists so two models are never held at once; when the
+        # second one is already held, sleeping buys nothing and costs a reload.
+        # This is the common case in a multi-round tool loop, where the same
+        # worker is asked several things in a row.
+        if deep_sleep and role in self._resident:
+            deep_sleep = False
         if deep_sleep and self.before_worker_fn is not None:
             self._status("  [Dispatch] Putting headmaster to sleep before loading worker...")
             self.before_worker_fn()
 
         try:
+            # Inside the bracket, not before it. The browser loop used to
+            # return above all of this, so with deep sleep on it loaded its
+            # worker while the headmaster was still resident — the two-models-
+            # at-once state the whole setting exists to prevent, reached by the
+            # one role that holds its worker for several rounds. Nothing
+            # refused it either: _second_headmaster_copy_refusal stands down
+            # when deep sleep is configured, on the assumption that the sleep
+            # actually happened.
+            if role == "browser" and browser is not None:
+                max_rounds = int(self._dispatch_cfg().get("max_worker_rounds", 4))
+                return self._run_browser_delegation(task, browser, max_rounds)
+
             try:
                 loaded = self.get(role)
             except SecondHeadmasterCopyRefused as exc:
@@ -465,7 +497,8 @@ class WorkerPool:
                 known = sorted({e.get("role") for e in load_catalog().values() if e.get("role")})
                 return f"No worker configured for role '{role}'. Known roles: {', '.join(known) or 'none'}."
             model, tokenizer, entry = loaded
-            training.mark_adapter_used(role=role)
+            # get() already marked it; a second call here does the same write
+            # twice per delegation for no reader.
             self._status(f"  [Dispatch] Delegating to '{role}': {task[:80]}{'...' if len(task) > 80 else ''}")
             system_prompt = self._worker_system_prompt(role, entry)
             messages = [
@@ -539,7 +572,6 @@ class WorkerPool:
         if loaded is None:
             return "No worker configured for role 'browser'."
         model, tokenizer, entry = loaded
-        training.mark_adapter_used(role="browser")
         system_prompt = ROLE_SYSTEM_PROMPTS["browser"]
 
         try:
@@ -781,8 +813,14 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
 
         # The trainer child has exited by now, but its memory only comes back
         # once the allocator reclaims it, and this is the load that would
-        # otherwise race it.
+        # otherwise race it. release_model() forces our own collection; the
+        # settle waits out the kernel's, which is the half that panics — a
+        # child exit unmaps every Metal buffer in one bulk teardown, and the
+        # load below is a multi-gigabyte allocation landing straight into it.
+        # Reading free memory *after* the wait also makes the shortfall check
+        # below judge the machine as it will be, not as it is mid-reclaim.
         training.release_model()
+        training.settle_after_trainer_exit(config)
         shortfall = training.load_memory_shortfall(
             config, entry["model_name"],
             purpose=f"reload worker '{role}' to check the new adapter")
@@ -866,7 +904,13 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
                     training.release_model()
                     trained2 = training.run_training(
                         config, iters=extra_iters, role=role, model_name=entry["model_name"])
+                    # Second trainer child, second bulk teardown, and the same
+                    # reload waiting on the other side of it. This is the pair
+                    # that makes one guarded_train_worker call five model loads
+                    # in a row — the densest load churn anywhere in the app,
+                    # and it runs unattended on a background thread.
                     training.release_model()
+                    training.settle_after_trainer_exit(config)
                     remedy_shortfall = training.load_memory_shortfall(
                         config, entry["model_name"],
                         purpose=f"reload worker '{role}' after remedy training")

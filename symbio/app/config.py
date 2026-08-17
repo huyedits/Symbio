@@ -39,6 +39,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "iters": 300,
         "epochs": 2,
         "max_iters": 2000,
+        # How long to wait after a trainer child exits before loading a model
+        # again. The child hands every Metal buffer back in one bulk teardown,
+        # and a multi-gigabyte allocation landing in the middle of that is what
+        # panics IOGPUFamily on Apple silicon — three kernel panics in twenty
+        # minutes on 2026-08-17. vm_stat reports the pages free immediately,
+        # so this floor covers the driver-side reclaim that cannot be observed
+        # from userspace; settle_free_gb then polls for the part that can.
+        # Set to 0 to disable (there is no userspace fix, only less exposure).
+        "settle_after_training_seconds": 15,
+        "settle_free_gb": 6.0,
+        "settle_timeout_seconds": 180,
         # Ceiling on how many passes the `iters` floor may buy a small corpus.
         # Without it the floor stops being a floor: at 6 samples the old 150
         # meant 25 epochs, which memorises the samples instead of learning
