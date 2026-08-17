@@ -123,15 +123,21 @@ def append_training_text(text: str, role: str | None = None,
 # reasoning surfaces as the reply. chat.py imports this rather than repeating
 # the literal, so the two cannot drift apart.
 #
-# False since the headmaster became DeepSeek-V4-Pro-Qwen3.5-9B, which is served
-# as a base model with no adapter — so there is no training run for this to
-# match, and the pairing above does not bind. It has to be False: with thinking
-# on, this model emits its reasoning as plain prose terminated by a bare
-# </think> and *no opening tag*, so tooling.strip_reasoning_block finds nothing
-# to strip and the analysis lands in the user's reply on every turn. Caught by
-# driving the real CLI; the golden set scored 12/15 straight through it.
-# Restore to True alongside any headmaster that is served with an adapter.
-THINKING_ENABLED = False
+# True because the headmaster is served WITH an adapter, so the pairing above
+# binds and the corpus was rendered this way.
+#
+# Set it False only for a headmaster served as a bare base model, where there is
+# no training run to match. DeepSeek-V4-Pro-Qwen3.5-9B specifically REQUIRES
+# False: with thinking on it emits reasoning as plain prose terminated by a bare
+# </think> with *no opening tag*, so tooling.strip_reasoning_block matches
+# nothing and the analysis lands in the user's reply every turn. The golden set
+# scored 12/15 straight through that — only driving the real CLI caught it.
+#
+# Known gap: the corpus is currently split 315/320 between empty
+# <think></think> blocks and real reasoning, a half-finished migration by
+# _regenerate_corpus.py. Serving with True against a corpus that half-teaches
+# "skip thinking" is why simple prompts still come back with an empty block.
+THINKING_ENABLED = True
 
 def strip_tool_catalog(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     """Drop the <tools> JSON catalog from a system turn destined for training.
