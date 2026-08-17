@@ -98,6 +98,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # model. Costs a few hundred MB in cache/ (KV for the whole prefix);
         # set false to trade the faster start back for the disk.
         "persist_prompt_cache": True,
+        # Start reading that persisted cache off disk *while* the weights are
+        # still loading, rather than after. The two are the slowest parts of
+        # boot and contend for almost nothing, so overlapping them hides the
+        # read almost entirely. Only the read is overlapped — the cache is not
+        # materialized onto the GPU until the weight load has finished, so
+        # there is never a second Metal client during the load window.
+        # Set false on a memory-tight machine: the read raises peak page-cache
+        # residency at the moment the load is already at its high-water mark.
+        "prefetch_prompt_cache_during_load": True,
         # How long a chat front-end should wait before showing a "thinking…"
         # placeholder if the model has not emitted a visible token yet.
         "first_chunk_timeout_ms": 600,

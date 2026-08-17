@@ -762,6 +762,21 @@ class ChatSession:
         # joins it before any generation (so the model is never used by two
         # threads at once).
         self._prefill_thread: threading.Thread | None = None
+        # A persisted prompt cache is a few hundred MB of safetensors, and
+        # reading it used to start only once load() had finished — so the two
+        # slowest parts of boot ran back to back when they have nothing to say
+        # to each other. The read is pure file I/O and the weight load is
+        # mostly decompress-and-place, so the read is started *before* load()
+        # and overlaps it; by the time the model is resident the bytes are
+        # already in the page cache. See _start_prompt_cache_prefetch.
+        self._prefetch_thread: threading.Thread | None = None
+        # (cache, metadata) once the prefetch has read the file, or None. The
+        # cache is deliberately left unevaluated here: materializing it would
+        # allocate GPU buffers on a second thread while load() is allocating
+        # its own, and this codebase has a standing kernel-panic problem with
+        # concurrent Metal clients. mx.eval stays on the prefill thread, which
+        # only runs after load() has returned.
+        self._prefetched_cache: tuple[list, dict] | None = None
         self.enabled_groups: set[str] = set(
             config.get("tools", {}).get("enabled_groups", [])
         )
@@ -924,6 +939,10 @@ class ChatSession:
         # Whatever the KV cache holds refers to weights we are about to drop.
         self._prompt_cache = None
         self._cached_prompt_ids = None
+        # A prefetch that nobody consumed is a few hundred megabytes with no
+        # reader, which is the opposite of what it was added for. Dropping the
+        # weights is the point at which it can no longer be claimed.
+        self._take_prefetched_cache()
         if getattr(self, "model", None) is not None:
             del self.model
         self.model = None
@@ -1013,6 +1032,16 @@ class ChatSession:
             # Cap MLX's buffer cache before the first allocation, so a long
             # chat session doesn't sit on GPU memory a training run needs.
             apply_gpu_limits(self.config)
+
+            # Start reading the persisted KV cache off disk now, so those
+            # hundreds of megabytes stream in while load() is busy with the
+            # weights instead of after it. Pure I/O on a daemon thread; it
+            # touches neither the model nor the GPU. Started before the
+            # "Waking model..." line so a slow first read still overlaps the
+            # whole load, and deliberately inside the try below's scope so a
+            # load failure still leaves it harmless (it is only ever consumed
+            # by the prefill, which does not run if the load failed).
+            self._start_prompt_cache_prefetch()
 
             # Don't spin during load(): HuggingFace's download progress bar
             # animates the same terminal line via \r, and the two carriages
@@ -1315,24 +1344,91 @@ class ChatSession:
             "n_tokens": str(len(system_ids)),
         }
 
+    def _start_prompt_cache_prefetch(self):
+        """Begin reading the persisted KV cache while the weights are loading.
+
+        The two slowest things at boot are the weight load and the prompt-cache
+        read, and they were strictly sequential: the read only began once
+        _finish_model_setup started the prefill, which is after load() returns.
+        They contend for almost nothing — one is file I/O, the other is mostly
+        CPU placing tensors — so running the read underneath the load hides it
+        almost entirely, and the first turn is warm the moment the model is.
+
+        What this thread must NOT do is touch the GPU. Materializing the cache
+        here would put a second Metal client in the same window as the weight
+        load, which is the shape that panics IOGPUFamily on this hardware. So
+        it stops at the read: load_prompt_cache leaves the arrays lazy, and the
+        mx.eval that actually allocates stays on the prefill thread, after the
+        load has finished. The signature check needs a tokenizer that does not
+        exist yet, so it also waits — a mismatched file costs one wasted read,
+        which is exactly what it cost before.
+        """
+        if not self.config.get("agent", {}).get("prompt_cache_enabled", True):
+            return
+        if not self.config.get("agent", {}).get("persist_prompt_cache", True):
+            return
+        if not self.config.get("agent", {}).get(
+                "prefetch_prompt_cache_during_load", True):
+            return
+        path = constants.PROMPT_CACHE_FILE
+        if not path.exists():
+            return
+
+        def _prefetch():
+            try:
+                cache, meta = load_prompt_cache(str(path), return_metadata=True)
+                self._prefetched_cache = (cache, meta)
+            except Exception:
+                # Nothing is owed here. A failure leaves _prefetched_cache None
+                # and _load_persisted_prompt_cache reads the file itself, which
+                # is what it did before this existed — including the unlink of
+                # a truncated file, so the error is still handled, just later.
+                self._prefetched_cache = None
+
+        self._prefetch_thread = threading.Thread(target=_prefetch, daemon=True)
+        self._prefetch_thread.start()
+
+    def _take_prefetched_cache(self) -> tuple[list, dict] | None:
+        """Hand over the prefetched (cache, metadata), waiting for it if needed.
+
+        Consumed exactly once: a KV cache is mutated in place by generation, so
+        handing the same object to a second caller would give two readers one
+        buffer. After this returns the prefetch is spent and a later miss falls
+        back to reading the file.
+        """
+        thread = self._prefetch_thread
+        if thread is not None:
+            thread.join()
+            self._prefetch_thread = None
+        taken = self._prefetched_cache
+        self._prefetched_cache = None
+        return taken
+
     def _load_persisted_prompt_cache(self, system_ids: list[int]) -> bool:
         """Restore the warmed system-prefix cache from disk.
 
         Returns True if the cache was loaded and is safe to use. Reading a few
         hundred MB off an SSD is roughly an order of magnitude cheaper than
-        re-running the prefill through the model, which is the whole point.
+        re-running the prefill through the model, which is the whole point —
+        and cheaper still when _start_prompt_cache_prefetch already read it
+        underneath the weight load, in which case there is nothing left to wait
+        for here.
         """
         path = constants.PROMPT_CACHE_FILE
         if not path.exists():
             return False
         want = self._prompt_cache_signature(system_ids)
-        try:
-            cache, meta = load_prompt_cache(str(path), return_metadata=True)
-        except Exception as e:
-            # A truncated or version-mismatched file is not worth keeping.
-            self._log_info(f"Prompt cache unreadable, discarding: {e}")
-            path.unlink(missing_ok=True)
-            return False
+        prefetched = self._take_prefetched_cache()
+        if prefetched is not None:
+            cache, meta = prefetched
+        else:
+            try:
+                cache, meta = load_prompt_cache(str(path), return_metadata=True)
+            except Exception as e:
+                # A truncated or version-mismatched file is not worth keeping.
+                self._log_info(f"Prompt cache unreadable, discarding: {e}")
+                path.unlink(missing_ok=True)
+                return False
         if any(meta.get(k) != v for k, v in want.items()):
             # The model, adapter or prompt changed since it was written.
             path.unlink(missing_ok=True)
