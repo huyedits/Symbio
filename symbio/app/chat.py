@@ -965,6 +965,14 @@ class ChatSession:
             )
             self.adapter_loaded = True
             training.mark_adapter_used()
+            # Same cold-cache problem as _wake_headmaster: _unload_model above
+            # dropped the KV cache, and without this the first turn after a
+            # retrain re-processes the whole prefix. No prefetch here, though —
+            # training rewrote the adapter, so the persisted cache's signature
+            # cannot match and reading it would be pure waste. This prefill is
+            # a real one, which is exactly why it belongs on a background
+            # thread rather than in front of the user's next message.
+            self._prefill_system_prompt_cache(show_spinner=False)
             return None
         except Exception as e:
             # We already dropped the previous model, so returning here would
@@ -990,10 +998,25 @@ class ChatSession:
         self._status("  [Dispatch] Headmaster asleep.")
 
     def _wake_headmaster(self):
-        """Reload the headmaster model after a worker finishes."""
+        """Reload the headmaster model after a worker finishes, warm.
+
+        Waking used to hand back a model with a cold KV cache. _unload_model
+        drops _prompt_cache along with the weights — it has to, the cached
+        values belong to weights that no longer exist — and nothing rebuilt it,
+        so the turn after every delegation silently re-processed the whole
+        ~4000-token system+tools prefix through the model. The delegation saved
+        RAM and spent that saving on latency the user paid at the worst moment:
+        immediately after waiting for a worker.
+
+        So the wake mirrors the boot path. The cache read starts before load()
+        and overlaps it, and the prefill runs afterwards — which, since the
+        model, adapter and prompt are all unchanged since boot, is a signature
+        hit on the persisted file rather than a real prefill.
+        """
         if getattr(self, "model", None) is not None:
             return
         self._status("  [Dispatch] Headmaster waking up (reloading 8B model)...")
+        self._start_prompt_cache_prefetch()
         try:
             if self.adapter_config.exists():
                 self.model, self.tokenizer = load(
@@ -1004,6 +1027,7 @@ class ChatSession:
                 self.model, self.tokenizer = load(self.config["model_name"])
                 self.adapter_loaded = False
             training.mark_adapter_used()
+            self._prefill_system_prompt_cache(show_spinner=False)
             self._status("  [Dispatch] Headmaster awake.")
         except Exception as e:
             self._status(f"  [Dispatch] Headmaster reload failed: {e}")
@@ -1922,8 +1946,16 @@ class ChatSession:
         the freshly trained adapter anyway. On a skipped run, a failure, or
         an exception, the previous model is restored before returning.
         """
+        # Both branches end the same way: a trainer child process has exited,
+        # and whoever called this reloads the adapter immediately afterwards.
+        # That reload is a multi-gigabyte allocation landing in the middle of
+        # the child's bulk Metal teardown, which is the sequence that panics
+        # the driver — so the wait goes here, once, rather than at each of the
+        # several places that reload.
         if not self.config.get("gpu", {}).get("unload_model_during_training", True):
-            return training.run_training(self.config, iters=iters)
+            trained = training.run_training(self.config, iters=iters)
+            training.settle_after_trainer_exit(self.config, status_fn=self.output_fn)
+            return trained
 
         self.output_fn("  [Train] Unloading model so the trainer has the GPU to itself...")
         self._unload_model()
@@ -1932,6 +1964,7 @@ class ChatSession:
             trained = training.run_training(self.config, iters=iters)
             return trained
         finally:
+            training.settle_after_trainer_exit(self.config, status_fn=self.output_fn)
             if not trained:
                 self._restore_model()
 
