@@ -31,7 +31,17 @@ from symbio import safety
 from symbio.tools import tool_few_shots
 from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, pending, prompts, prune, sandbox, sessions, setup, skills, tooling, training, web
 from symbio.app.config import apply_gpu_limits, config_show, set_config_value
-from tag_rag import TagIndex
+try:
+    # tag_rag lives at the repo root rather than inside the package, so it is
+    # only importable when the root is on sys.path — true for `./symb` (which
+    # runs `python -m symbio.app.cli` from the checkout) and false for the
+    # installed `symbio` console script, whose sys.path[0] is venv/bin. That
+    # made an optional feature fatal to startup: tag indexing is off by default
+    # and _ensure_tag_index() already refuses to build one without
+    # rag.broad_tags, so nothing here needs it to import.
+    from tag_rag import TagIndex
+except ModuleNotFoundError:  # pragma: no cover - depends on how it was launched
+    TagIndex = None
 
 
 def _looks_like_shell_command(cmd: str) -> bool:
@@ -1662,6 +1672,11 @@ class ChatSession:
         rag_cfg = self.config.get("rag", {})
         broad_tags = rag_cfg.get("broad_tags", [])
         if not broad_tags:
+            return False
+        if TagIndex is None:
+            self.output_fn(
+                "  Tag indexing needs tag_rag.py from the project root, which "
+                "this launch cannot import. Run ./symb instead of symbio.")
             return False
         if self.tag_index is None:
             db_path = rag_cfg.get("tag_index_db", "notes/tags.db")
