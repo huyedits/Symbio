@@ -108,3 +108,5 @@ eval_*.json
 
 # Locally quantised model weights — gigabytes, and GitHub caps files at 100 MB.
 models/
+# Local LoRA experiment snapshots: per-user weights, never publish.
+adapters.thinking-pretrain/
