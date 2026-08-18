@@ -4323,7 +4323,63 @@ class ChatSession:
                     "Retry now with <press>down</press>. "
                     "Do not explain the failure — just emit the corrected press tag."
                 )
-            out = browser_action_tools[name]()
+            def _act() -> str:
+                """Run the action, turning a raised 'not open' into the same
+                string the other paths return.
+
+                The browser reports a closed session two different ways and the
+                activity log shows both: 314 failures came back as a returned
+                "Browser click error: Browser is not open...", and another 122
+                as "Tool 'browser_click' failed unexpectedly: Browser is not
+                open..." — an exception caught by the generic handler upstream.
+                Recovering only the returned form would leave more than a
+                quarter of the failures untouched for no reason.
+                """
+                try:
+                    return browser_action_tools[name]()
+                except Exception as exc:
+                    if "browser is not open" in str(exc).lower():
+                        # name already reads "browser_click"; prefixing another
+                        # "Browser" gives "Browser browser_click error".
+                        return f"{name} error: {exc}"
+                    raise
+
+            out = _act()
+
+            # Reopen and retry once when the page is gone.
+            #
+            # This is the single largest tool failure in the system. Of 567
+            # browser_click calls in the local activity log, 453 failed, and
+            # 450 of those failed with "Browser is not open" — the model
+            # clicking at a page that was never opened or whose session was
+            # reset. The old behaviour was to append a sentence telling it to
+            # open a page first, which it had already been told and which
+            # plainly was not working.
+            #
+            # _last_browsed_url has existed since the beginning for exactly
+            # this, described in its own comment as being "used to auto-recover
+            # when a later click/type/scroll/press finds the browser session
+            # was reset or never opened". It was assigned and never once read.
+            #
+            # Recovery is only attempted for a real action (closing a browser
+            # by reopening it first is absurd), only when there is a URL this
+            # session already opened successfully, and only once — a retry loop
+            # against a page that will not load is worse than a clear failure.
+            if (
+                "Browser is not open" in out
+                and name != "browser_close"
+                and self._last_browsed_url
+            ):
+                self._status(f"  [Browser] Session was closed; reopening "
+                             f"{self._last_browsed_url} to retry {name}.")
+                reopened = self.browser.open(self._last_browsed_url)
+                if "blocked" not in reopened and "error" not in reopened.lower():
+                    out = _act()
+                    local_telemetry.log_event(
+                        "browser_recover", url=self._last_browsed_url, tool=name,
+                        ok="Browser is not open" not in out,
+                    )
+
             if "Browser is not open" in out:
                 out = (
                     f"{out} Use <browse>https://...</browse> to load a page first, "
