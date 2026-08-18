@@ -138,6 +138,27 @@ def _keywords(text: str) -> list[str]:
     return out
 
 
+_ENUM_RE = re.compile(r"(?:^|\s)\d+[.)]\s*")
+
+
+def _echoes(reply: str, body: str) -> bool:
+    """Is `reply` essentially the steps text repeated back?
+
+    Containment either way, on text normalised for case, whitespace and list
+    enumerators. Deliberately a blunt textual test rather than keyword
+    coverage: this is asked about *training samples*, where a seeded sample's
+    answer is literally the procedure, and the answer must not depend on the
+    keyword extraction that a `## Triggers` section already skews.
+    """
+    def norm(text: str) -> str:
+        return " ".join(_ENUM_RE.sub(" ", text.lower()).split())
+
+    a, b = norm(reply), norm(body)
+    if not a or not b:
+        return False
+    return a in b or b in a
+
+
 def coverage(reply: str, keywords: list[str]) -> float:
     """Fraction of the skill's step vocabulary present in the reply."""
     if not keywords:
@@ -320,6 +341,68 @@ def tasks_path_for(role: str) -> Path:
     return constants.data_dir_for(role) / "eval_tasks.json"
 
 
+def has_custom_tasks(role: str) -> bool:
+    """Does this skill have hand-written eval tasks, rather than derived ones?"""
+    try:
+        return tasks_path_for(role).exists()
+    except Exception:
+        return False
+
+
+def corpus_teaches_recitation(role: str, steps: str) -> bool:
+    """Do this worker's training samples answer by reproducing its steps text?
+
+    Decides whether derived golden cases may *revert* a retrain or only report
+    it, and the honest answer depends on what the corpus is teaching.
+
+    A freshly seeded skill has six samples that all answer with the steps text.
+    There, "recite the steps" IS the target, the derived cases measure the real
+    thing, and a worker that comes back with "I don't know." must be rolled
+    back. Once real demonstrations replace those seeds the target has changed:
+    the worker is meant to perform the skill, so it stops reproducing the steps
+    by design and the derived cases start scoring specialisation as damage.
+    Measured: a worker trained on 20 real demonstrations was rolled back on 4
+    derived checks, then held its learned behaviour across 8 held-out scenarios
+    once the rollback was suppressed.
+
+    Conservative on every failure path: an unreadable or empty corpus returns
+    True, keeping the guard rail on rather than silently removing it.
+
+    Compares text directly rather than reusing the derived cases' keyword
+    coverage. That path takes its keywords from the whole note, so for a skill
+    with a `## Triggers` section it scores replies against trigger vocabulary
+    ("broken", "cannot", "keywords") instead of the procedure: fix_wifi's own
+    correct answer scores 0.15 against itself. Whatever that is worth as a
+    golden check, it cannot be trusted to answer this question.
+    """
+    body = _step_body(steps).strip() if steps else ""
+    if not body:
+        return True
+    path = constants.data_dir_for(role) / "train.jsonl"
+    try:
+        lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except OSError:
+        return True
+    if not lines:
+        return True
+    reciting = total = 0
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        answers = [m.get("content", "") for m in (row.get("messages") or [])
+                   if m.get("role") == "assistant"]
+        if not answers:
+            continue
+        total += 1
+        if _echoes(answers[-1], body):
+            reciting += 1
+    if not total:
+        return True
+    return reciting * 2 >= total
+
+
 def load_tasks(role: str, name: str) -> tuple[list[SkillTask], bool]:
     """Hand-written tasks for a skill if present, else generated ones.
 
@@ -470,8 +553,21 @@ def resolve_skill(role_or_name: str) -> dict[str, Any] | None:
     return None
 
 
+_SECTION_RE = re.compile(r"^#{2,}\s", re.MULTILINE)
+
+
 def skill_steps(entry: dict[str, Any]) -> str:
-    """Recover a skill's steps from its note, falling back to its prompt."""
+    """Recover a skill's steps from its note, falling back to its prompt.
+
+    Only the procedure, not the whole note. A skill note carries a `## Triggers`
+    section listing routing keywords and example phrasings, and every caller of
+    this uses the result as the answer key for grading. Including that section
+    graded replies against trigger vocabulary instead of the procedure:
+    fix_wifi's own correct answer, "1. Toggle wifi off. 2. Toggle it on.",
+    scored 0.15 coverage against a 0.5 floor — the right answer failed its own
+    check, which quietly disabled the worker regression gate for every skill
+    with triggers.
+    """
     from symbio.app import skills
 
     name = entry.get("skill_name", "")
@@ -482,6 +578,11 @@ def skill_steps(entry: dict[str, Any]) -> str:
             except OSError:
                 break
             body = text.split("\n", 1)[1] if "\n" in text else ""
+            # Cut at the first sub-heading: everything above it is the
+            # procedure, everything below is metadata about when to route here.
+            section = _SECTION_RE.search(body)
+            if section:
+                body = body[:section.start()]
             if body.strip():
                 return body.strip()
     # Fall back to the Steps block embedded in the stored system prompt.

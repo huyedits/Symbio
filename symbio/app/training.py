@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -83,6 +84,77 @@ def free_ram_bytes() -> int | None:
         return None
     reclaimable = sum(pages.get(k, 0) for k in ("free", "inactive", "speculative"))
     return reclaimable * page_size
+
+# Set by run_training when the trainer child has exited, cleared by the settle
+# that waits it out. It is what makes settle_after_trainer_exit a no-op for a
+# caller whose run_training was stubbed — there was no child, so there is no
+# bulk teardown to wait for, and sleeping would be pure cost.
+_trainer_child_exited = False
+
+
+def settle_after_trainer_exit(config: dict[str, Any] | None = None,
+                              status_fn=None) -> None:
+    """Wait for a dead trainer's GPU memory to actually come back.
+
+    Process exit is the reliable way to reclaim MLX weights, but it hands every
+    Metal buffer back to the kernel in one bulk teardown. Loading the next
+    model into the middle of that teardown is what took this machine down three
+    times on 2026-08-17:
+
+        panic: "pending memory object unexpectedly found in non pending hash"
+        @IOGPUGroupMemory.cpp:528
+
+    IOGPUFamily tracks GPU memory objects in a pending/non-pending hash pair. A
+    bulk unmap, plus a concurrent wired-collector pass, plus a fresh multi-GB
+    allocation, is enough to have an object reclassified mid-flight, and the
+    driver panics rather than continue on inconsistent page-table state.
+
+    The fixed floor is not redundant with the poll. vm_stat reports pages as
+    free the moment the process dies, but the driver's own reclaim runs behind
+    that — memory can read as available while IOGPUFamily is still walking its
+    hashes. The floor covers the part that cannot be observed from userspace;
+    the poll covers the part that can.
+
+    This belongs only where a child process has exited. In-process frees go
+    through the live allocator with no mass unmap event, and paying a
+    multi-second floor for one would be latency spent on a race that shape
+    cannot produce — which is why the interactive delegation path does not
+    call this.
+
+    Never raises. A machine that will not drain is a reason to say so and carry
+    on, not to lose a training run that already succeeded.
+    """
+    global _trainer_child_exited
+    if not _trainer_child_exited:
+        return
+    _trainer_child_exited = False
+
+    lora_cfg = (config or {}).get("lora", {})
+    floor = float(lora_cfg.get("settle_after_training_seconds", 15))
+    need_gb = float(lora_cfg.get("settle_free_gb", 6.0))
+    timeout = float(lora_cfg.get("settle_timeout_seconds", 180))
+    if floor <= 0:
+        return
+    time.sleep(floor)
+    need = int(need_gb * 1024 ** 3)
+    deadline = time.monotonic() + timeout
+    while True:
+        free = free_ram_bytes()
+        if free is None:
+            return  # Cannot measure; the floor wait is all there is.
+        if free >= need:
+            return
+        # Clamped to the deadline so `timeout` means what it says rather than
+        # overshooting by up to a full poll interval.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(5.0, remaining))
+    free = free_ram_bytes()
+    have = f"{free / 1024 ** 3:.1f} GB" if free is not None else "unknown"
+    message = (f"  [Train] Memory did not drain to {need_gb:.0f} GB within "
+               f"{timeout:.0f}s (free: {have}); continuing anyway.")
+    (status_fn or print)(message)
 
 def _train_file_for(role: str | None) -> Path:
     # role=None reads constants.TRAIN_FILE directly (not re-derived from
@@ -1454,17 +1526,31 @@ def iters_for_corpus(lora: dict[str, Any], sample_count: int) -> int:
     `lora.iters` is kept as a floor rather than dropped, so a small corpus
     still gets enough steps to converge, and `lora.max_iters` caps the top end
     so a large one cannot run away.
+
+    The floor is itself bounded by `lora.max_epochs`, because on a small corpus
+    it stops being a floor and becomes the whole schedule. A 6-sample skill
+    corpus needs 12 steps at 2 epochs; the 150 floor turned that into 25 epochs,
+    which is not "enough steps to converge" but memorisation of six strings —
+    and it is why every skill worker recited its seed samples instead of
+    generalising. Measured: at 3 epochs over 20 samples the same recipe held
+    learned constraints across held-out scenarios; at 25 epochs it did not.
     """
     epochs = float(lora.get("epochs", 2))
+    max_epochs = float(lora.get("max_epochs", 4))
     batch_size = max(1, int(lora.get("batch_size", 1)))
     floor = int(lora.get("iters", 150))
     cap = int(lora.get("max_iters", 2000))
     if sample_count <= 0 or epochs <= 0:
         return min(cap, floor)
     needed = math.ceil(epochs * sample_count / batch_size)
+    # How many steps `max_epochs` passes would take. The floor may not exceed
+    # this, so "give a small corpus a few more steps" cannot silently become
+    # "run it twenty-five times".
+    epoch_ceiling = math.ceil(max_epochs * sample_count / batch_size)
+    effective_floor = min(floor, epoch_ceiling)
     # The cap is applied last so it is a real ceiling: a floor that could
     # override it would make `max_iters` unable to do the one thing it is for.
-    return min(cap, max(floor, needed))
+    return min(cap, max(effective_floor, needed))
 
 def count_samples(role: str | None = None) -> int:
     path = _train_file_for(role)
@@ -1792,6 +1878,14 @@ def run_training(config: dict[str, Any], iters: int | None = None,
                     os.unlink(config_path)
                 except OSError:
                     pass
+
+        # Both branches above ran the trainer as a child process, and it has
+        # exited by the time either returns — including the failure paths,
+        # which unmap just as much as a success does. This is what arms
+        # settle_after_trainer_exit; without it that wait cannot tell a real
+        # teardown from a caller who never spawned anything.
+        global _trainer_child_exited
+        _trainer_child_exited = True
 
     config_file = adapter_dir / "adapter_config.json"
     weight_files = list(adapter_dir.glob("adapters.*"))
