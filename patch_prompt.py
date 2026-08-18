@@ -31,6 +31,26 @@ AFTER APPLYING: the prompt no longer matches the corpus the adapter was
 trained on. That is a soft mismatch, not a crash, and the measurement above
 was taken with exactly that mismatch in place — so the gain is real without a
 retrain. Retraining will resync it; let the golden set gate that, as designed.
+
+DO NOT BLINDLY EXTEND THIS BLOCK.
+
+The obvious next move — an example for each of the ~25 tools that lack one —
+was tested across the whole surface, 23 cases, 138 runs. It is not safe:
+
+    completed  53/69 -> 58/69     (77% -> 84%, net +5)
+
+    improved:  config_show 0/3->3/3, cron_list 0/3->3/3, cron_schedule 2/3->3/3,
+               add_golden_case 2/3->3/3, read_page 2/3->3/3, digest_notes 1/3->2/3
+    REGRESSED: save_memory 3/3->0/3, execute_code 1/3->0/3, compact_memory 3/3->2/3
+
+An example helps a tool the model cannot reach, and can break a neighbouring
+tool it was already reaching, by adding a competing candidate next to it —
+save_memory worked perfectly until compact_memory was given an example beside
+it. The three lines below stay because cron-only was measured on its own and
+gained without costing anything: 4/9 -> 9/9, no regressions.
+
+So: add examples for tools the battery shows failing, one group at a time, and
+re-run tool_eval before and after. Never in bulk.
 """
 from __future__ import annotations
 
