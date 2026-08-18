@@ -844,8 +844,13 @@ def _in_code_fence(text: str, index: int) -> bool:
     return text[:index].count("```") % 2 == 1
 
 
-def _extract_function_attr_calls(reply: str) -> list[tuple[str, dict[str, Any]]]:
+def _find_function_attr_calls(
+        reply: str) -> list[tuple[int, int, str, dict[str, Any]]]:
     """Recognise the improvised function form for any declared tool.
+
+    Returns (start, end, name, params) so callers can both execute the call and
+    cut it out of the visible reply — a recovered call that still printed its
+    raw tag to the user would be a worse bug than not recovering it.
 
     Regions already wrapped in the XML tool-call tag are masked out so a
     well-formed call is not also counted here.
@@ -856,7 +861,7 @@ def _extract_function_attr_calls(reply: str) -> list[tuple[str, dict[str, Any]]]
             masked[i] = "\x00"
     scan = "".join(masked)
 
-    out: list[tuple[str, dict[str, Any]]] = []
+    out: list[tuple[int, int, str, dict[str, Any]]] = []
     seen: set[tuple[int, int]] = set()
 
     for m in _FUNC_ATTR_RE.finditer(scan):
@@ -869,7 +874,7 @@ def _extract_function_attr_calls(reply: str) -> list[tuple[str, dict[str, Any]]]
         if not params:
             continue
         seen.add((m.start(), m.end()))
-        out.append((name, _normalize_args(name, params)))
+        out.append((m.start(), m.end(), name, _normalize_args(name, params)))
 
     for m in _FUNC_NOARG_RE.finditer(scan):
         if _in_code_fence(reply, m.start()):
@@ -880,9 +885,13 @@ def _extract_function_attr_calls(reply: str) -> list[tuple[str, dict[str, Any]]]
         name = _HERMES_NAME_MAP.get(raw, raw)
         if name not in _TOOL_GROUPS:
             continue
-        out.append((name, {}))
+        out.append((m.start(), m.end(), name, {}))
 
     return out
+
+
+def _extract_function_attr_calls(reply: str) -> list[tuple[str, dict[str, Any]]]:
+    return [(n, p) for _s, _e, n, p in _find_function_attr_calls(reply)]
 
 
 def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
@@ -1222,6 +1231,15 @@ def strip_tool_tags(reply: str) -> str:
     # Drop bare JSON tool-call objects the model may emit unwrapped, so the
     # raw JSON never reaches the visible reply.
     for _start, _end, _c in sorted(_extract_bare_tool_calls(display), key=lambda s: s[0], reverse=True):
+        display = display[:_start] + display[_end:]
+    # And the improvised function forms parse_tools now executes. Recovering
+    # the call but still printing its raw tag is worse than not recovering it:
+    # observed live as
+    #     Caine: >tag
+    #     <schedule_job schedule="0 9 * * *" text="stretch"/>
+    # where the job WAS created and the user was shown the markup anyway.
+    for _start, _end, _n, _p in sorted(
+            _find_function_attr_calls(display), key=lambda s: s[0], reverse=True):
         display = display[:_start] + display[_end:]
     display = _UNTERMINATED_TAG_RE.sub('', display)
     return clean_response(display)

@@ -11,7 +11,7 @@ must NOT fire: on ordinary prose, and on an example inside a code fence.
 """
 import pytest
 
-from symbio.app.tooling import parse_tools
+from symbio.app.tooling import parse_tools, strip_tool_tags
 
 
 # ---- the improvised forms now resolve ----
@@ -83,3 +83,24 @@ def test_the_recovery_yields_to_any_other_syntax_in_the_same_reply():
 def test_a_disabled_group_still_filters_an_improvised_call():
     assert parse_tools('.schedule_job schedule="0 9 * * *" text="x"',
                        enabled_groups={"terminal"}) == []
+
+
+# ---- and the recovered markup must not reach the user ----
+
+def test_a_recovered_call_is_stripped_from_the_visible_reply():
+    """Observed live: the job WAS created and the user was still shown the raw
+    tag. Recovering a call but printing its markup is worse than not
+    recovering it at all."""
+    reply = 'Scheduled. <schedule_job schedule="0 9 * * *" text="stretch"/>'
+    assert parse_tools(reply) == [
+        ("schedule_job", {"schedule": "0 9 * * *", "text": "stretch"})]
+    assert strip_tool_tags(reply) == "Scheduled."
+
+
+def test_a_dotted_call_leaves_nothing_behind():
+    assert strip_tool_tags('.schedule_job schedule="0 9 * * *" text="x"') == ""
+
+
+def test_stripping_leaves_ordinary_prose_alone():
+    text = "I could delegate_task to a worker if you want."
+    assert strip_tool_tags(text) == text
