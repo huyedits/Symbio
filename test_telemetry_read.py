@@ -86,16 +86,18 @@ def test_days_filters_by_timestamp(tmp_path):
 def test_a_missing_log_is_not_an_error(tmp_path):
     r = lt.summarise(path=str(tmp_path / "nope.txt"))
     assert r["events"] == 0
-    assert "No activity recorded yet" in lt.format_summary(r)
+    assert "Nothing recorded yet" in lt.format_summary(r)
 
 
 def test_the_summary_names_the_file_it_actually_read(tmp_path):
     """Reporting the default path while summarising a different file names a
-    file the numbers did not come from."""
+    file the numbers did not come from. The path is verbose-only — where it
+    belongs, since it is not something you act on."""
     path = write_log(tmp_path)
     r = lt.summarise(path=path)
     assert r["path"] == path
-    assert path in lt.format_summary(r)
+    assert path not in lt.format_summary(r)
+    assert path in lt.format_summary(r, verbose=True)
 
 
 def test_no_tool_calls_says_so_plainly(tmp_path):
@@ -104,7 +106,45 @@ def test_no_tool_calls_says_so_plainly(tmp_path):
     assert "not reaching" in out
 
 
-def test_the_rendered_summary_shows_rates(tmp_path):
-    out = lt.format_summary(lt.summarise(path=write_log(tmp_path)))
-    assert "browser_click" in out
-    assert "50% ok" in out
+# ---- saying what is wrong, and nothing else ----
+
+def _log(tmp_path, name, calls, ok):
+    lines = []
+    for i in range(calls):
+        good = "True" if i < ok else "False"
+        lines.append(f"[2026-08-18 08:{i // 60:02d}:{i % 60:02d}] "
+                     f"tool name={name} ok={good} result=whatever\n")
+    return write_log(tmp_path, "".join(lines))
+
+
+def test_a_healthy_system_says_so_in_one_line(tmp_path):
+    """Nothing wrong means nothing to read."""
+    out = lt.format_summary(lt.summarise(path=_log(tmp_path, "web_search", 30, 30)))
+    assert out.strip().startswith("All good")
+    assert "web_search" not in out
+
+
+def test_the_worst_tool_is_the_headline(tmp_path):
+    text = (open(_log(tmp_path, "browser_click", 50, 10)).read()
+            + open(_log(tmp_path, "run_command", 50, 40)).read())
+    out = lt.format_summary(lt.summarise(path=write_log(tmp_path, text)))
+    assert out.splitlines()[0].strip().startswith("browser_click is your worst tool")
+
+
+def test_a_small_sample_is_not_a_problem(tmp_path):
+    """6 calls at 33% ranked above run_command's 1643 at 67% in an early
+    draft. A rate needs a sample before it means anything."""
+    out = lt.format_summary(lt.summarise(path=_log(tmp_path, "browser_press", 6, 2)))
+    assert "browser_press" not in out
+    assert out.strip().startswith("All good")
+
+
+def test_failures_are_described_in_words_not_just_percentages(tmp_path):
+    out = lt.format_summary(lt.summarise(path=_log(tmp_path, "browser_click", 50, 10)))
+    assert "fails 4 of every 5 calls" in out
+
+
+def test_verbose_brings_the_full_table_back(tmp_path):
+    report = lt.summarise(path=_log(tmp_path, "web_search", 30, 30))
+    assert "web_search" not in lt.format_summary(report)
+    assert "web_search" in lt.format_summary(report, verbose=True)

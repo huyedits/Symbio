@@ -2817,18 +2817,12 @@ class ChatSession:
             # day one and never once read — log_path() existed and nothing
             # called it — so a MEDIUM-risk security alert and a tool failing
             # four calls in five both sat in the file unnoticed.
-            if rest.startswith("activity") or rest == "":
-                arg = rest[len("activity"):].strip()
-                days = int(arg) if arg.isdigit() else None
+            if rest in ("", "all") or rest.split()[0] in ("activity", "all"):
+                parts = rest.split()
+                verbose = "all" in parts
+                days = next((int(p) for p in parts if p.isdigit()), None)
                 report = local_telemetry.summarise(days=days)
-                if days:
-                    self.output_fn(f"  Local activity, last {days} day(s):")
-                else:
-                    self.output_fn("  Local activity, all time:")
-                self.output_fn(local_telemetry.format_summary(report))
-                self.output_fn("")
-                self.output_fn(f"  Remote: {'on' if tcfg.get('enabled') else 'off'}"
-                               f" · /telemetry on|off to change")
+                self.output_fn(local_telemetry.format_summary(report, verbose=verbose))
                 return True
             if rest in ("on", "enable", "true", "yes", "1"):
                 # Re-ask consent with the full data set disclosed, honoring the
