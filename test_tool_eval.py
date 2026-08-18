@@ -215,3 +215,14 @@ def test_repeats_report_a_rate_not_a_verdict():
         output_fn=lambda *_a, **_k: None)
     assert report["per_case"]["cron"]["runs"] == 3
     assert report["per_case"]["cron"]["passed"] == 2
+
+
+def test_a_correct_answer_in_different_words_is_not_a_failure():
+    """The grader must not manufacture failures. Live: handed "All subsystems
+    healthy. 0 errors." the model answered "System check passed." — correct,
+    and scored as a miss because the check demanded the word "health"."""
+    case = CASE._replace(check_final=tool_eval._any_of("health", "passed"),
+                         check_args=None)
+    report = run('<schedule_job schedule="0 9 * * *"/>', "System check passed.",
+                 case=case)
+    assert report["passed"] == 1
