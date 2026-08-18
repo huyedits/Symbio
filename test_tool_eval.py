@@ -217,6 +217,43 @@ def test_repeats_report_a_rate_not_a_verdict():
     assert report["per_case"]["cron"]["passed"] == 2
 
 
+# ---- the extended battery ----
+
+def test_the_extended_battery_expects_only_resolvable_tools():
+    """A case expecting a name parse_tools cannot resolve can never pass, and
+    would read as a permanent model failure that no prompt change could fix."""
+    from symbio.app.tooling import _TOOL_GROUPS
+    bad = [c.id for c in tool_eval.EXTENDED_CASES
+           if c.expect_tool not in _TOOL_GROUPS]
+    assert bad == []
+
+
+def test_every_extended_case_has_a_distinct_id():
+    """Ids key the per-case rates; a duplicate silently merges two cases."""
+    ids = [c.id for c in tool_eval.EXTENDED_CASES]
+    assert len(ids) == len(set(ids))
+
+
+def test_the_worker_delegation_cases_name_real_registered_roles():
+    """A delegate_task case is worthless if it names a worker that does not
+    exist — the model would be right to refuse, and the case would read as a
+    dispatch failure forever."""
+    import json
+
+    from symbio import constants
+    catalog = json.loads(
+        constants.WORKER_MODELS_FILE.read_text(encoding="utf-8"))
+    roles = {e.get("role") for e in catalog.values()}
+    checked = 0
+    for case in tool_eval.EXTENDED_CASES:
+        if case.expect_tool != "delegate_task":
+            continue
+        checked += 1
+        assert [r for r in roles if r and r in case.prompt], \
+            f"{case.id} names no registered worker role"
+    assert checked, "no delegate_task cases to check"
+
+
 def test_a_correct_answer_in_different_words_is_not_a_failure():
     """The grader must not manufacture failures. Live: handed "All subsystems
     healthy. 0 errors." the model answered "System check passed." — correct,
