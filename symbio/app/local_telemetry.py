@@ -172,31 +172,81 @@ def _pct(n: int, total: int) -> str:
     return f"{100 * n / total:.0f}%" if total else "n/a"
 
 
-def format_summary(report: dict[str, Any]) -> str:
-    """Render summarise() for a terminal."""
+# A tool is "failing" below this rate, and only once it has been called enough
+# times for the rate to mean anything. Sample size is doing real work here:
+# at 5 calls, read_page ("1 call, 0% ok") read as the second-worst tool in the
+# system, and browser_press ("6 calls, 33%") sat above run_command's 1643.
+# Neither was a finding. 20 is where the number starts meaning something.
+_OK_THRESHOLD = 0.90
+_MIN_CALLS = 20
+
+
+def format_summary(report: dict[str, Any], verbose: bool = False) -> str:
+    """Say what is wrong. Say nothing otherwise.
+
+    The first version of this printed sixteen rows of per-tool statistics, of
+    which fifteen said 100%. That is a data dump wearing a report's clothes: it
+    makes the reader find the one line that matters, which is the job the tool
+    was supposed to do. Everything healthy is now silent, and `verbose` brings
+    the table back for when you actually want to read it.
+    """
     if not report["events"]:
-        return f"  No activity recorded yet ({report['path']})."
+        return "  Nothing recorded yet."
 
-    lines = [f"  {report['events']} events · {report['turns']} turns"]
+    tools = report["tools"]
+    if not tools:
+        return "  No tool has ever been called. The model is not reaching them."
 
-    if report["tools"]:
-        total = sum(t["calls"] for t in report["tools"].values())
-        ok = sum(t["ok"] for t in report["tools"].values())
-        lines.append(f"\n  Tool calls: {total} ({_pct(ok, total)} succeeded)")
-        for name, t in report["tools"].items():
-            lines.append(f"    {name:18s} {t['calls']:5d} calls  "
-                         f"{_pct(t['ok'], t['calls']):>4s} ok")
+    total = sum(t["calls"] for t in tools.values())
+    failing = [(n, t) for n, t in tools.items()
+               if t["calls"] >= _MIN_CALLS and t["ok"] / t["calls"] < _OK_THRESHOLD]
+    failing.sort(key=lambda nt: nt[1]["ok"] / nt[1]["calls"])
+
+    lines: list[str] = []
+
+    if failing:
+        # One headline, named and in plain words. A list of four "problems" is
+        # still a triage exercise handed back to the reader; the worst tool is
+        # the thing to go fix, and the rest is a footnote until it is fixed.
+        name, t = failing[0]
+        lines.append(f"  {name} is your worst tool — "
+                     f"it {_in_words(t['ok'], t['calls'])} ({t['calls']} calls).")
+        others = len(failing) - 1
+        fine = len(tools) - len(failing)
+        tail = []
+        if others:
+            tail.append(f"{others} other{'s are' if others != 1 else ' is'} struggling")
+        if fine:
+            tail.append(f"{fine} fine")
+        if tail:
+            lines.append("  " + ", ".join(tail).capitalize() + ".")
     else:
-        lines.append("\n  No tool calls recorded — the model is not reaching "
-                     "its tools at all.")
+        lines.append(f"  All good — {total} tool calls, "
+                     f"{_pct(sum(t['ok'] for t in tools.values()), total)} ok.")
 
     if report["alerts"]:
-        lines.append(f"\n  Security alerts: {len(report['alerts'])}")
-        for ev in report["alerts"][-3:]:
-            lines.append(f"    [{ev['ts']}] {ev.get('name', '?')}: "
-                         f"{ev.get('result', '')[:90]}")
-    if report["blocked"]:
-        lines.append(f"\n  Blocked or declined: {len(report['blocked'])}")
+        n = len(report["alerts"])
+        lines.append(f"  {n} security alert{'s' if n != 1 else ''}, "
+                     f"most recent {report['alerts'][-1]['ts']}.")
 
-    lines.append(f"\n  {report['path']}")
+    if verbose:
+        lines.append("")
+        for name, t in tools.items():
+            lines.append(f"    {name:18s} {t['calls']:5d} calls  "
+                         f"{_pct(t['ok'], t['calls']):>4s} ok")
+        lines.append(f"\n  {report['events']} events · {report['turns']} turns")
+        lines.append(f"  {report['path']}")
+
     return "\n".join(lines)
+
+
+def _in_words(ok: int, calls: int) -> str:
+    """"fails 4 of every 5 calls" beats "20% ok" for the line you read first."""
+    bad = calls - ok
+    if bad == calls:
+        return "fails every time"
+    ratio = calls / bad if bad else 0
+    if ratio >= 1.8:
+        return f"fails 1 call in {round(ratio)}"
+    per5 = round(5 * bad / calls)
+    return f"fails {per5} of every 5 calls"
