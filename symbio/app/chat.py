@@ -3435,9 +3435,21 @@ class ChatSession:
             browser_note = ""
             if self.browser.is_open:
                 browser_note = "\n\n[" + self.browser.status() + "]"
+            # Static parts first, volatile parts last.
+            #
+            # This block is prepended to the last user message, so everything
+            # from the first byte that differs from last turn has to be
+            # re-prefilled. env_note is fixed for the life of the machine;
+            # sitting it after rag_block meant a new retrieval hit pushed it
+            # into the re-prefilled region every time, for nothing.
+            #
+            # Measured on a 349-token block: when the clock ticks alone this
+            # changes nothing (344 tokens reused either way), but when the RAG
+            # hit also changes — the common case, since retrieval runs per
+            # query — reuse goes from 141 tokens to 243.
             context_block = (
-                memory.curated_memory_block(self.config) + rag_block
-                + prompts.env_note() + prompts.time_note() + nudge_block
+                memory.curated_memory_block(self.config) + prompts.env_note()
+                + rag_block + prompts.time_note() + nudge_block
                 + browser_note
             ).lstrip()
             # Greeting guard: the small model sometimes invents random tool
