@@ -792,6 +792,99 @@ def _extract_bare_tool_calls(text: str) -> list[tuple[int, int, dict[str, Any]]]
     return out
 
 
+# Canonical tool names only, longest first so `list_cron_jobs` wins over a
+# shorter name that prefixes it.
+#
+# Deliberately NOT including _HERMES_NAME_MAP's short aliases. Those contain
+# bare words like "type", "read" and "open", and the dedicated XML handlers
+# above already parse <type enter="true">...</type> — matching it here too
+# would emit the same call twice. write_note is excluded for the same reason:
+# the self-closing <note/>|<write_note/> handler already covers it.
+_CALLABLE_NAMES = sorted(
+    (n for n in _TOOL_GROUPS if n != "write_note"), key=len, reverse=True)
+_NAME_ALT = "|".join(re.escape(n) for n in _CALLABLE_NAMES)
+
+# Improvised function-call syntax, with arguments.
+#
+# 25 of the 27 tools declared in the <tools> block have no worked example
+# anywhere in the assembled system prompt — only compact_memory and config_set
+# do. A tool the model has seen declared but never seen *called* gets a call
+# shape invented for it, and the invented shape is consistently a dotted or
+# parenthesised function with keyword attributes:
+#
+#     .schedule_job schedule="0 9 * * *" text="stretch"
+#     schedule_job(schedule="0 9 * * *", text="stretch")
+#     <schedule_job schedule="0 9 * * *" text="stretch" />
+#
+# None of these matched any pattern, so the tool silently never ran and the
+# raw text was printed to the user as the reply — a success-looking line for
+# a job that was never created. That is the same failure the self-closing
+# <note/> handler above was written for; this generalises it to every tool
+# instead of fixing them one at a time as each is caught in the wild.
+#
+# Anchored on the exact declared names, so prose cannot trip it.
+_FUNC_ATTR_RE = re.compile(
+    r'[.<]?\b(' + _NAME_ALT + r')\b\s*\(?\s*'
+    r'((?:\w+\s*=\s*(?:"[^"]*"|\'[^\']*\')\s*,?\s*)+)\)?\s*/?>?'
+)
+
+# The same, with no arguments: `.list_cron_jobs` or `list_cron_jobs()`. The
+# dot or the parentheses are required — a bare tool name is far too common in
+# ordinary prose ("I'll delegate_task to the worker") to treat as a call.
+_FUNC_NOARG_RE = re.compile(
+    r'(?:\.(' + _NAME_ALT + r')\b(?!\s*\()|\b(' + _NAME_ALT + r')\s*\(\s*\))'
+)
+
+_ATTR_PAIR_RE = re.compile(r'(\w+)\s*=\s*(["\'])(.*?)\2', re.DOTALL)
+
+
+def _in_code_fence(text: str, index: int) -> bool:
+    """True when `index` falls inside a markdown code fence — the model is
+    showing an example there, not calling anything."""
+    return text[:index].count("```") % 2 == 1
+
+
+def _extract_function_attr_calls(reply: str) -> list[tuple[str, dict[str, Any]]]:
+    """Recognise the improvised function form for any declared tool.
+
+    Regions already wrapped in the XML tool-call tag are masked out so a
+    well-formed call is not also counted here.
+    """
+    masked = list(reply)
+    for m in _WRAPPED_TOOL_CALL_RE.finditer(reply):
+        for i in range(m.start(), m.end()):
+            masked[i] = "\x00"
+    scan = "".join(masked)
+
+    out: list[tuple[str, dict[str, Any]]] = []
+    seen: set[tuple[int, int]] = set()
+
+    for m in _FUNC_ATTR_RE.finditer(scan):
+        if _in_code_fence(reply, m.start()):
+            continue
+        name = _HERMES_NAME_MAP.get(m.group(1), m.group(1))
+        if name not in _TOOL_GROUPS:
+            continue
+        params = {k.lower(): v for k, _q, v in _ATTR_PAIR_RE.findall(m.group(2))}
+        if not params:
+            continue
+        seen.add((m.start(), m.end()))
+        out.append((name, _normalize_args(name, params)))
+
+    for m in _FUNC_NOARG_RE.finditer(scan):
+        if _in_code_fence(reply, m.start()):
+            continue
+        if any(s <= m.start() < e for s, e in seen):
+            continue
+        raw = m.group(1) or m.group(2)
+        name = _HERMES_NAME_MAP.get(raw, raw)
+        if name not in _TOOL_GROUPS:
+            continue
+        out.append((name, {}))
+
+    return out
+
+
 def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
     """Extract tool calls from the model reply.
 
@@ -991,6 +1084,12 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
         if isinstance(name, str):
             internal_name = _HERMES_NAME_MAP.get(name, name)
             tools.append((internal_name, _normalize_args(internal_name, params)))
+
+    # Improvised function form, for the tools the prompt declares but never
+    # demonstrates. Last, so a well-formed call in any supported syntax is
+    # already in `tools` and this only ever adds what nothing else caught.
+    if not tools:
+        tools.extend(_extract_function_attr_calls(reply))
 
     if enabled_groups is not None:
         tools = [
