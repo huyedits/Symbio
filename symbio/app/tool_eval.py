@@ -191,6 +191,123 @@ DEFAULT_CASES: tuple[ToolCase, ...] = (
 )
 
 
+
+
+# --------------------------------------------------------------------------
+# The full surface.
+#
+# DEFAULT_CASES covers the tools that were already known broken. This covers
+# everything else the parser can resolve, so "which tools can the model
+# actually reach" has an answer for all of them rather than for seven.
+#
+# Every observation is a plausible, boring result. A case should fail because
+# the model could not reach the tool or could not use what came back — never
+# because the fixture was strange.
+
+EXTENDED_CASES: tuple[ToolCase, ...] = DEFAULT_CASES + (
+    ToolCase(
+        id="cron_update", description="Changing a job reaches update_cron_job",
+        prompt="Change reminder 3 to run at 10am instead.",
+        expect_tool="update_cron_job", observation="Job 3 now runs at 0 10 * * *.",
+        check_final=_any_of("10", "updated", "changed"),
+    ),
+    ToolCase(
+        id="execute_code", description="A calculation reaches execute_code",
+        prompt="Use Python to work out 2 to the power of 20.",
+        expect_tool="execute_code", observation="1048576",
+        also_accept=("run_command",), check_final=_contains("1048576"),
+    ),
+    ToolCase(
+        id="read_page", description="Reading a URL reaches read_page",
+        prompt="Read https://example.com and tell me the heading.",
+        expect_tool="read_page", observation="Example Domain. This domain is for use in illustrative examples.",
+        also_accept=("browser_open",), check_final=_contains("example domain"),
+    ),
+    ToolCase(
+        id="browser_open", description="Opening a site reaches browser_open",
+        prompt="Open apple.com in the browser.",
+        expect_tool="browser_open", observation="Opened https://apple.com",
+        check_final=_any_of("open", "apple"),
+    ),
+    ToolCase(
+        id="write_note", description="Saving a note reaches write_note",
+        prompt="Save a note titled Groceries saying: milk and eggs.",
+        expect_tool="write_note", observation="Saved note 'Groceries'.",
+        check_final=_any_of("saved", "note", "groceries"),
+    ),
+    ToolCase(
+        id="save_memory", description="A durable fact reaches save_memory",
+        prompt="Remember permanently that my dentist is Dr Chen.",
+        expect_tool="save_memory", observation="Saved to memory.",
+        also_accept=("write_note",), check_final=_any_of("remember", "saved", "chen"),
+    ),
+    ToolCase(
+        id="write_file", description="Writing a file reaches write_file",
+        prompt="Write the text hello world to /tmp/greeting.txt.",
+        expect_tool="write_file", observation="Wrote 11 bytes to /tmp/greeting.txt.",
+        also_accept=("run_command", "edit_file"), check_final=_any_of("wrote", "written", "greeting"),
+    ),
+    ToolCase(
+        id="config_show", description="Asking about settings reaches config_show",
+        prompt="Show me my current configuration settings.",
+        expect_tool="config_show", observation="model_name=Qwen/Qwen3-8B-MLX-4bit, temperature=0.6",
+        check_final=_any_of("qwen", "temperature", "config"),
+    ),
+    ToolCase(
+        id="digest_notes", description="Asking to digest reaches digest_notes",
+        prompt="Digest my notes into the training data.",
+        expect_tool="digest_notes", observation="Digested 47 notes.",
+        check_final=_any_of("47", "digest"),
+    ),
+    ToolCase(
+        id="verify_features", description="Asking to verify reaches verify_features",
+        prompt="Verify that all my enabled features actually work.",
+        expect_tool="verify_features", observation="12 features checked, all healthy.",
+        also_accept=("system_check",), check_final=_any_of("12", "health", "feature"),
+    ),
+    ToolCase(
+        id="delegate_mock_aws",
+        description="An AWS question reaches the mock_aws_client worker",
+        prompt="Use the mock_aws_client worker to list my S3 buckets.",
+        expect_tool="delegate_task",
+        observation="Worker mock_aws_client replied: buckets are backups, logs, assets.",
+        check_final=_any_of("backups", "logs", "assets", "bucket"),
+    ),
+    ToolCase(
+        id="delegate_research",
+        description="A research request reaches the research_brief worker",
+        prompt="Delegate to the research_brief worker: summarise the state of solid-state batteries.",
+        expect_tool="delegate_task",
+        observation="Worker research_brief replied: solid-state cells promise higher density but scaling is unsolved.",
+        check_final=_any_of("solid-state", "density", "scaling"),
+    ),
+    ToolCase(
+        id="compact_memory", description="A full memory store reaches compact_memory",
+        prompt="My memory store is too big. Compact it.",
+        expect_tool="compact_memory", observation="Memory compacted from 40 KB to 12 KB.",
+        check_final=_any_of("compact", "12"),
+    ),
+    ToolCase(
+        id="run_remote", description="A remote command reaches run_remote",
+        prompt="Run uptime on the host called myserver over SSH.",
+        expect_tool="run_remote", observation="up 14 days, load average 0.2",
+        also_accept=("run_command",), check_final=_any_of("14 days", "uptime", "load"),
+    ),
+    ToolCase(
+        id="browser_close", description="Closing the browser reaches browser_close",
+        prompt="Close the browser please.",
+        expect_tool="browser_close", observation="Browser closed.",
+        check_final=_any_of("closed", "done"),
+    ),
+    ToolCase(
+        id="add_golden_case", description="Adding a regression case reaches add_golden_case",
+        prompt="Add a golden test case so you never again forget my name.",
+        expect_tool="add_golden_case", observation="Added golden case 'remembers_name'.",
+        check_final=_any_of("added", "golden", "case"),
+    ),
+)
+
+
 def run_tool_cases(
     model,
     tokenizer,
