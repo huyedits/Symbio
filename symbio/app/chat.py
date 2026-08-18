@@ -1319,16 +1319,46 @@ class ChatSession:
                 # which the next run's prefix diff could not reuse.
                 if self.config.get("agent", {}).get("persist_prompt_cache", True):
                     self._save_persisted_prompt_cache(system_ids)
-            except Exception:
+            except Exception as e:
                 # Prefill is an optimization, never a hard requirement. Clear any
                 # partial state so the next generation rebuilds cleanly.
+                #
+                # But say why. Swallowing this silently is how the prefill came
+                # to be dead in the running app while every switch that controls
+                # it read as enabled: no cache file was ever written, every turn
+                # reported "cached 0", and nothing anywhere said a word. The
+                # save path next to this one already logs its failures; this one
+                # not doing so hid a broken feature rather than a slow one.
+                self._log_info(f"Prompt cache prefill failed: {e!r}")
                 self._prompt_cache = None
                 self._cached_prompt_ids = None
             finally:
                 self._indexing_now = False
 
-        self._prefill_thread = threading.Thread(target=_prefill, daemon=True)
-        self._prefill_thread.start()
+        # Run it here, on the calling thread, NOT on a background one.
+        #
+        # This used to start a daemon thread so the user could type their first
+        # message while the ~5k-token prefix warmed. That never once worked.
+        # generate_step calls mx.eval on the cache state, MLX's stream registry
+        # is thread-local, and evaluating a cache built from main-thread model
+        # weights on another thread raises
+        #     RuntimeError: There is no Stream(cpu, N) in current thread.
+        # after zero yields, on every boot, with this MLX build. The bare
+        # except below swallowed it in silence, so the feature reported as
+        # enabled while never having run: no cache file was ever written and
+        # every turn logged "cached 0".
+        #
+        # Entering the main thread's stream inside the worker does not fix it —
+        # tried, still raises — because the failing stream is a cpu one owned by
+        # the arrays, not the device stream the worker enters.
+        #
+        # So this now blocks. It costs ~24s on a first boot, once: the whole
+        # point of persisting the cache is that every later boot loads the file
+        # instead of prefilling, and _start_prompt_cache_prefetch overlaps even
+        # that read with the model load. Paying 24s once to make the feature
+        # real beats an unblocking optimization that never produced a cache.
+        _prefill()
+        self._prefill_thread = None
 
     def _log_info(self, message: str):
         """Log only once the session logger exists.
