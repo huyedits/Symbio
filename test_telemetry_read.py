@@ -48,9 +48,48 @@ def test_a_result_field_keeps_its_spaces_and_punctuation(tmp_path):
 
 def test_per_tool_success_rates(tmp_path):
     r = lt.summarise(path=write_log(tmp_path))
-    assert r["tools"]["browser_click"] == {"calls": 2, "ok": 1}
-    assert r["tools"]["run_command"] == {"calls": 2, "ok": 1}
+    assert r["tools"]["browser_click"] == {"calls": 2, "ok": 1, "declined": 0}
+    # The run_command failure in the fixture is a user decline, not a failure.
+    assert r["tools"]["run_command"] == {"calls": 2, "ok": 1, "declined": 1}
     assert r["turns"] == 1
+
+
+# ---- a refusal is not a failure ----
+
+def test_a_user_decline_does_not_count_against_the_tool(tmp_path):
+    """browser_open read as 83% ok and landed in the "struggling" list. 74 of
+    its 75 failures were "User denied access to ..." — the safety gate doing
+    its job. An instrument that reports a working gate as a broken tool sends
+    you to fix something that is right."""
+    lines = []
+    for i in range(30):
+        lines.append(f"[2026-08-18 08:{i:02d}:00] tool name=browser_open ok=True "
+                     f"result=Opened https://example.com\n")
+    for i in range(30, 55):
+        lines.append(f"[2026-08-18 08:{i:02d}:00] tool name=browser_open ok=False "
+                     f"result=Browser open blocked: User denied access to 'x.com'.\n")
+    r = lt.summarise(path=write_log(tmp_path, "".join(lines)))
+
+    assert r["tools"]["browser_open"] == {"calls": 55, "ok": 30, "declined": 25}
+    out = lt.format_summary(r)
+    assert "browser_open" not in out, out
+    assert out.strip().startswith("All good"), out
+
+
+def test_declines_are_still_counted_and_shown_in_full(tmp_path):
+    lines = [f"[2026-08-18 08:{i:02d}:00] tool name=browser_open ok=False "
+             f"result=Blocked: user declined.\n" for i in range(5)]
+    r = lt.summarise(path=write_log(tmp_path, "".join(lines)))
+    assert len(r["blocked"]) == 5
+    assert "5 declined" in lt.format_summary(r, verbose=True)
+
+
+def test_a_tool_that_only_ever_gets_declined_is_not_called_broken(tmp_path):
+    """Zero calls actually ran, so there is nothing to rate."""
+    lines = [f"[2026-08-18 08:{i:02d}:00] tool name=browser_open ok=False "
+             f"result=Blocked: user declined.\n" for i in range(30)]
+    out = lt.format_summary(lt.summarise(path=write_log(tmp_path, "".join(lines))))
+    assert "browser_open is your worst tool" not in out
 
 
 def test_tools_are_ordered_by_how_much_they_are_used(tmp_path):

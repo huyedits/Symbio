@@ -143,14 +143,29 @@ def summarise(days: int | None = None,
         counts[ev["kind"]] = counts.get(ev["kind"], 0) + 1
         if ev["kind"] != "tool":
             continue
-        slot = tools.setdefault(ev.get("name", "?"), {"calls": 0, "ok": 0})
-        slot["calls"] += 1
-        if str(ev.get("ok", "")).lower() == "true":
-            slot["ok"] += 1
         result = ev.get("result", "")
+        declined = (result.startswith(("Blocked", "Refused"))
+                    or "denied" in result.lower())
+
+        slot = tools.setdefault(ev.get("name", "?"),
+                                {"calls": 0, "ok": 0, "declined": 0})
+        slot["calls"] += 1
+        if declined:
+            # The user saying no is not the tool failing.
+            #
+            # Counting refusals as failures made browser_open read as 83% ok
+            # and land in the "struggling" list. 74 of its 75 failures were
+            # "User denied access to ..." — the safety gate doing precisely its
+            # job. An instrument that reports a working gate as a broken tool
+            # sends you to fix something that is right, which is worse than
+            # reporting nothing.
+            slot["declined"] += 1
+        elif str(ev.get("ok", "")).lower() == "true":
+            slot["ok"] += 1
+
         if "Security alert" in result:
             alerts.append(ev)
-        if result.startswith(("Blocked", "Refused")) or "denied" in result.lower():
+        if declined:
             blocked.append(ev)
 
     return {
@@ -197,10 +212,15 @@ def format_summary(report: dict[str, Any], verbose: bool = False) -> str:
     if not tools:
         return "  No tool has ever been called. The model is not reaching them."
 
-    total = sum(t["calls"] for t in tools.values())
+    # Rates are over calls that actually ran. A call the user declined never
+    # reached the tool, so it can say nothing about whether the tool works.
+    def ran(t: dict[str, int]) -> int:
+        return t["calls"] - t.get("declined", 0)
+
+    total = sum(ran(t) for t in tools.values())
     failing = [(n, t) for n, t in tools.items()
-               if t["calls"] >= _MIN_CALLS and t["ok"] / t["calls"] < _OK_THRESHOLD]
-    failing.sort(key=lambda nt: nt[1]["ok"] / nt[1]["calls"])
+               if ran(t) >= _MIN_CALLS and t["ok"] / ran(t) < _OK_THRESHOLD]
+    failing.sort(key=lambda nt: nt[1]["ok"] / ran(nt[1]))
 
     lines: list[str] = []
 
@@ -210,7 +230,7 @@ def format_summary(report: dict[str, Any], verbose: bool = False) -> str:
         # the thing to go fix, and the rest is a footnote until it is fixed.
         name, t = failing[0]
         lines.append(f"  {name} is your worst tool — "
-                     f"it {_in_words(t['ok'], t['calls'])} ({t['calls']} calls).")
+                     f"it {_in_words(t['ok'], ran(t))} ({ran(t)} calls).")
         others = len(failing) - 1
         fine = len(tools) - len(failing)
         tail = []
@@ -232,8 +252,10 @@ def format_summary(report: dict[str, Any], verbose: bool = False) -> str:
     if verbose:
         lines.append("")
         for name, t in tools.items():
-            lines.append(f"    {name:18s} {t['calls']:5d} calls  "
-                         f"{_pct(t['ok'], t['calls']):>4s} ok")
+            lines.append(
+                f"    {name:18s} {ran(t):5d} calls  "
+                f"{_pct(t['ok'], ran(t)):>4s} ok"
+                + (f"  ({t['declined']} declined)" if t.get("declined") else ""))
         lines.append(f"\n  {report['events']} events · {report['turns']} turns")
         lines.append(f"  {report['path']}")
 
