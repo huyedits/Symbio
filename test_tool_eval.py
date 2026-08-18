@@ -149,3 +149,17 @@ def test_every_improvised_shape_counts_as_invoked(reply, expected_stage):
     under-report exactly the fix that made them work."""
     report = run(reply, "Okay.")
     assert report["results"][0]["reached"] == expected_stage
+
+
+def test_repeats_report_a_rate_not_a_verdict():
+    """A case that passes sometimes must read as flaky, because that is a
+    different problem from one that never passes."""
+    replies = ['<schedule_job schedule="0 9 * * *" text="stretch"/>', "stretch scheduled",
+               "schedule_jobs: I'll remind you to stretch.",
+               '<schedule_job schedule="0 9 * * *" text="stretch"/>', "stretch scheduled"]
+    report = run_tool_cases(
+        model=object(), tokenizer=FakeTokenizer(), system_prompt="SYS",
+        config={}, generate_fn=scripted(*replies), cases=(CASE,), repeats=3,
+        output_fn=lambda *_a, **_k: None)
+    assert report["per_case"]["cron"]["runs"] == 3
+    assert report["per_case"]["cron"]["passed"] == 2

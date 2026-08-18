@@ -160,12 +160,24 @@ def run_tool_cases(
     max_tokens: int = 200,
     enabled_groups: set[str] | None = None,
     enable_thinking: bool = False,
+    repeats: int = 1,
     output_fn=print,
 ) -> dict[str, Any]:
-    """Run every case as a simulated two-turn exchange. Executes nothing."""
+    """Run every case as a simulated two-turn exchange. Executes nothing.
+
+    `repeats` runs each case that many times and reports the rate, because a
+    single pass at serving temperature is dice. Measured on this model, one
+    greedy run and one served run gave the same completed count with DIFFERENT
+    cases failing: cron_list passed at 0.6 and failed at 0.0, system_check the
+    other way round. Only a case that fails repeatedly is telling you
+    something. golden.py carries the same warning from the same lesson.
+    """
     cases = cases if cases is not None else DEFAULT_CASES
     context = system_prompt + prompts.env_note() + prompts.time_note()
     results: list[CaseResult] = []
+
+    if repeats > 1:
+        cases = tuple(c for c in cases for _ in range(repeats))
 
     for i, case in enumerate(cases, 1):
         output_fn(f"  [ToolEval] {i}/{len(cases)} {case.id}...")
@@ -249,15 +261,30 @@ def _summarise(results: list[CaseResult], output_fn) -> dict[str, Any]:
         n = funnel[stage]
         output_fn(f"    {stage:11s} {n}/{len(results)}  ({100 * n / total:.0f}%)")
 
-    failures = [r for r in results if not r.passed]
-    if failures:
+    # Per case, so a flaky one reads as flaky instead of as two separate
+    # failures. A case that passes sometimes is a different problem from one
+    # that never passes, and only the second is worth changing the prompt for.
+    per_case: dict[str, dict[str, Any]] = {}
+    for r in results:
+        slot = per_case.setdefault(r.id, {"runs": 0, "passed": 0, "notes": []})
+        slot["runs"] += 1
+        slot["passed"] += int(r.passed)
+        if not r.passed:
+            slot["notes"].append(r.note or r.reached or "nothing")
+
+    imperfect = {k: v for k, v in per_case.items() if v["passed"] < v["runs"]}
+    if imperfect:
         output_fn("\n  [ToolEval] where it stopped:")
-        for r in failures:
-            output_fn(f"    {r.id:16s} {r.reached or 'nothing':11s} {r.note}")
+        for cid, v in imperfect.items():
+            verdict = "never" if v["passed"] == 0 else "flaky"
+            note = v["notes"][0] if v["notes"] else ""
+            output_fn(f"    {cid:16s} {v['passed']}/{v['runs']} "
+                      f"{verdict:6s} {note}")
 
     return {
         "total": len(results),
         "passed": sum(1 for r in results if r.passed),
         "funnel": funnel,
+        "per_case": per_case,
         "results": [r._asdict() for r in results],
     }
