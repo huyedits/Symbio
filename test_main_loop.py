@@ -1837,8 +1837,16 @@ def test_agent_loop_does_not_capture_when_error_never_gets_fixed():
     with scratch_mistakes_dir():
         session = ScriptedSession(
             user_inputs=["Open Chrome.", "/quit", "n"],
-            model_replies=["<cmd>chrome</cmd>", "<cmd>chromebrowser</cmd>",
-                           "<cmd>chrome-app</cmd>", "<cmd>launch-chrome</cmd>", "<cmd>chrome-x</cmd>"],
+            # Deliberately names that are NOT in chat._GUI_APP_ALIASES.
+            # chrome / chromebrowser / chrome-app used to be the natural
+            # "everything fails" fixture, but they now auto-recover to
+            # `open -a 'Google Chrome'` and succeed, which would give this turn
+            # a confirmed fix and make a note the correct outcome. The
+            # invariant under test is unchanged — no fix, no note — so the
+            # fixture needs commands that still genuinely fail.
+            model_replies=["<cmd>launch-chrome</cmd>", "<cmd>chrome-x</cmd>",
+                           "<cmd>start-chrome</cmd>", "<cmd>chromium-run</cmd>",
+                           "<cmd>webbrowser</cmd>"],
         )
         session.run()
         notes = [f for f in constants.MISTAKES_DIR.glob("*.md") if f.is_file()]

@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import shlex
 import sys
 import threading
 import time
@@ -42,6 +43,48 @@ try:
     from tag_rag import TagIndex
 except ModuleNotFoundError:  # pragma: no cover - depends on how it was launched
     TagIndex = None
+
+
+# Bare words the model reaches for when it means "launch this desktop app".
+# Only the ones actually seen failing, plus their obvious spellings — a wide
+# net here would turn a genuine "command not found" into a surprise app launch.
+_GUI_APP_ALIASES: dict[str, str] = {
+    "chrome": "Google Chrome",
+    "chromebrowser": "Google Chrome",
+    "chrome-app": "Google Chrome",
+    "chrome_app": "Google Chrome",
+    "googlechrome": "Google Chrome",
+    "google-chrome": "Google Chrome",
+    "safari": "Safari",
+    "spotify": "Spotify",
+    "finder": "Finder",
+    "terminal.app": "Terminal",
+    "notes": "Notes",
+    "calendar": "Calendar",
+    "messages": "Messages",
+    "mail": "Mail",
+    "preview": "Preview",
+    "vscode": "Visual Studio Code",
+    "code-app": "Visual Studio Code",
+}
+
+
+def _gui_app_for(cmd: str, output: str) -> str | None:
+    """The macOS app a failed bare command was probably trying to launch.
+
+    Returns None unless the command is a single bare word (no arguments, no
+    shell syntax) that names a known GUI app AND the failure was specifically
+    "command not found". A command that failed for any other reason is a real
+    failure and must be reported as one.
+    """
+    if sys.platform != "darwin":
+        return None
+    if "command not found" not in output.lower():
+        return None
+    word = cmd.strip().strip("'\"")
+    if not word or len(word.split()) != 1:
+        return None
+    return _GUI_APP_ALIASES.get(word.lower())
 
 
 def _looks_like_shell_command(cmd: str) -> bool:
@@ -4232,6 +4275,67 @@ class ChatSession:
                 ok, out = sandbox.run_shell(cmd, self.config, confirm_fn=self.confirm_fn)
                 return f"Shell command exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
             ok, out = sandbox.run_sandboxed(params["cmd"], self.config, confirm_fn=self.confirm_fn)
+
+            # Launch a GUI app the way macOS actually launches one.
+            #
+            # 481 of the 542 run_command failures in the activity log are this
+            # single mistake: the model trying to start a desktop app by a CLI
+            # name that has never existed.
+            #
+            #     241  chrome            120  chromebrowser
+            #     120  chrome-app
+            #
+            # env_note() already tells it, in the prompt, on every single turn,
+            # that "GUI apps have no CLI names like 'chrome'" and to use
+            # `open -a 'Google Chrome'`. It read that and did it anyway, 481
+            # times. Another sentence of prompt is not the fix; this is
+            # deterministic and belongs in code.
+            if not ok:
+                app = _gui_app_for(params["cmd"], out)
+                if app:
+                    self._status(f"  [Shell] '{params['cmd'].strip()}' is a GUI app; "
+                                 f"launching it with open -a '{app}'.")
+                    retry = f"open -a {shlex.quote(app)}"
+                    ok, out = sandbox.run_sandboxed(
+                        retry, self.config, confirm_fn=self.confirm_fn)
+                    local_telemetry.log_event(
+                        "gui_launch_recover", asked=params["cmd"].strip(),
+                        app=app, ok=ok)
+
+                    # Recover the action AND keep the lesson.
+                    #
+                    # This turn's failure-then-fix is normally what feeds the
+                    # mistake-note loop: a tool call that fails followed by one
+                    # that works gets captured, digested, and trained on. By
+                    # recovering internally the loop would never see a failure,
+                    # and the model would go on emitting `chrome` forever with
+                    # nothing to learn from.
+                    #
+                    # Writing the note here keeps that signal. Worth noting the
+                    # loop had this exact lesson available 481 times already and
+                    # the mistake kept happening — so this is not a substitute
+                    # for the deterministic fix above, it is the training data
+                    # the fix would otherwise have destroyed.
+                    if ok:
+                        try:
+                            learn.save_mistake_note(
+                                original_query=f"launch the {app} app",
+                                wrong_answer=f"<cmd>{params['cmd'].strip()}</cmd>",
+                                # Carry the real failure text, not a paraphrase.
+                                # The note is training data, and the model
+                                # needs to see the error it actually produced.
+                                correction=(
+                                    f"Command not found: {params['cmd'].strip()}. "
+                                    f"GUI apps have no CLI name; launch them "
+                                    f"with open -a."),
+                                correct_answer=f"<cmd>{retry}</cmd>",
+                            )
+                        except Exception:
+                            # Never let bookkeeping fail a turn that worked.
+                            pass
+
+                    return (f"Command '{retry}' exited {'ok' if ok else 'error'}.\n"
+                            f"Output:\n{out}")
             return f"Command '{params['cmd']}' exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
         if name == "run_remote":
