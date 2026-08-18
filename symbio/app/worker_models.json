@@ -136,5 +136,55 @@
     "system_prompt": "You are the specialist worker for the skill 'Brew loose leaf tea'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\n1. Boil water. 2. Add a tea spoon of loose leaf tea. 3. Let the water cool for a few seconds. 4. Pour the hot water into the tea. 5. Let the tea steep for a few minutes. 6. Strain the tea. 7. Add a bit of honey or lemon for taste.\n\nReply with the result of applying these steps to the user's request.",
     "is_skill": true,
     "skill_name": "Brew loose leaf tea"
+  },
+  "skill_meal_suggestions": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "meal_suggestions",
+    "description": "Skill: Meal Suggestions",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Meal Suggestions'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\nSuggest meal ideas that fit the situation the user describes.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Meal Suggestions"
+  },
+  "skill_mock_aws_client": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "mock_aws_client",
+    "description": "Skill: Mock AWS Client",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Mock AWS Client'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\nWrite Python that talks to AWS for the task the user describes.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Mock AWS Client"
+  },
+  "skill_research_brief": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "research_brief",
+    "description": "Skill: Research Brief",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Research Brief'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\nAnswer the research question the user asks.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Research Brief"
+  },
+  "skill_scrape_script": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "scrape_script",
+    "description": "Skill: Scrape Script",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Scrape Script'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\nWrite Python that collects the data the user describes from a website.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Scrape Script"
+  },
+  "skill_change_watcher": {
+    "model_name": "mlx-community/Qwen3-4B-4bit",
+    "role": "change_watcher",
+    "description": "Skill: Change Watcher",
+    "adapter_compatible": true,
+    "memory_note": "worker-size RAM at runtime, alongside the headmaster",
+    "system_prompt": "You are the specialist worker for the skill 'Change Watcher'. Follow the steps below exactly, produce only the requested output, and do not add extra commentary.\n\nSteps:\nWrite Python that watches a page for changes and reports them.\n\nReply with the result of applying these steps to the user's request.",
+    "is_skill": true,
+    "skill_name": "Change Watcher"
   }
 }
