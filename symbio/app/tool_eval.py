@@ -56,8 +56,17 @@ class ToolCase(NamedTuple):
     # a case should fail because the model could not use a normal result, not
     # because the fixture was exotic.
     observation: str
+    # Other tools that solve the case just as well. Without this the harness
+    # scores a reasonable choice as a failure and sends you to fix a model that
+    # was right: "look up X on the web" is served by web_search or by
+    # read_page, and only one of them can be expect_tool.
+    also_accept: tuple[str, ...] = ()
     check_args: Callable[[dict[str, Any]], bool] | None = None
     check_final: Callable[[str], bool] | None = None
+
+    @property
+    def accepted(self) -> tuple[str, ...]:
+        return (self.expect_tool,) + tuple(self.also_accept)
 
 
 class CaseResult(NamedTuple):
@@ -127,6 +136,9 @@ DEFAULT_CASES: tuple[ToolCase, ...] = (
         prompt="Search the web for the current Mars rover mission name.",
         expect_tool="web_search",
         observation="Top result: NASA's Perseverance rover is active on Mars.",
+        # Fetching a page is a legitimate way to answer a lookup; scoring it as
+        # a miss measures the case's phrasing, not the model.
+        also_accept=("read_page",),
         check_args=_args_have("query"),
         check_final=_contains("perseverance"),
     ),
@@ -198,11 +210,22 @@ def run_tool_cases(
                                       "no resolvable tool call"))
             continue
 
-        called, args = tools[0]
+        # Take the accepted tool if the reply contains one anywhere, not
+        # blindly tools[0]. A reply that calls the right tool second was being
+        # graded as a wrong-tool failure.
+        match = next((t for t in tools if t[0] in case.accepted), None)
+        called, args = match if match is not None else tools[0]
+
         reached = "invoked"
-        if called != case.expect_tool:
-            results.append(CaseResult(case.id, reached, called, args, turn1, "",
-                                      f"expected {case.expect_tool}"))
+        if match is None:
+            # Name what it DID call. Reporting only "expected list_cron_jobs"
+            # says a case failed without saying how to fix it — and for a
+            # wrong-tool failure the tool it chose instead is the entire
+            # diagnosis.
+            offered = ", ".join(sorted({t[0] for t in tools}))
+            results.append(CaseResult(
+                case.id, reached, called, args, turn1, "",
+                f"called {offered} instead of {case.expect_tool}"))
             continue
 
         reached = "right_tool"
@@ -266,11 +289,14 @@ def _summarise(results: list[CaseResult], output_fn) -> dict[str, Any]:
     # that never passes, and only the second is worth changing the prompt for.
     per_case: dict[str, dict[str, Any]] = {}
     for r in results:
-        slot = per_case.setdefault(r.id, {"runs": 0, "passed": 0, "notes": []})
+        slot = per_case.setdefault(
+            r.id, {"runs": 0, "passed": 0, "notes": [], "sample": ""})
         slot["runs"] += 1
         slot["passed"] += int(r.passed)
         if not r.passed:
             slot["notes"].append(r.note or r.reached or "nothing")
+            if not slot["sample"]:
+                slot["sample"] = " ".join((r.turn1 or "").split())[:160]
 
     imperfect = {k: v for k, v in per_case.items() if v["passed"] < v["runs"]}
     if imperfect:
@@ -280,6 +306,11 @@ def _summarise(results: list[CaseResult], output_fn) -> dict[str, Any]:
             note = v["notes"][0] if v["notes"] else ""
             output_fn(f"    {cid:16s} {v['passed']}/{v['runs']} "
                       f"{verdict:6s} {note}")
+            # The reply itself, right here. Needing a second script to see what
+            # the model actually said is how a wrong-tool failure stayed
+            # undiagnosed through a full 18-run pass.
+            if v["sample"]:
+                output_fn(f"                     said: {v['sample']}")
 
     return {
         "total": len(results),
