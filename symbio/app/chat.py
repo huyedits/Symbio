@@ -44,6 +44,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - depends on how it was launched
     TagIndex = None
 
+<<<<<<< HEAD
 
 # Bare words the model reaches for when it means "launch this desktop app".
 # Only the ones actually seen failing, plus their obvious spellings — a wide
@@ -87,6 +88,11 @@ def _gui_app_for(cmd: str, output: str) -> str | None:
     return _GUI_APP_ALIASES.get(word.lower())
 
 
+=======
+def bare_browser_launch_note(cmd: str, ok: bool) -> str:
+    """say what the command did :P"""
+    return ""
+>>>>>>> 149166f (fixed the <end. tag. HUMAN i love yall <3 make sure people can see this! ^.^ <3)
 def _looks_like_shell_command(cmd: str) -> bool:
     """Return True if a command uses shell syntax that shlex+no-shell can't handle.
 
@@ -1787,7 +1793,8 @@ class ChatSession:
                     think_close = tooling._QWEN_THINK_CLOSE
                     opens = raw_acc.count(think_open)
                     closes = raw_acc.count(think_close)
-                    if opens <= closes:
+                    m = tooling.END_TURN_RE.search(raw_acc)
+                    if opens <= closes and not raw_acc[m.end():].strip():
                         break
         except BaseException:
             # The real MLX cache may already be mutated beyond what our
@@ -4339,6 +4346,7 @@ class ChatSession:
             return f"Command '{params['cmd']}' exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
         if name == "run_remote":
+            return f"Command '{params['cmd']}' exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
             ok, out = sandbox.run_remote(
                 params["host"], params["command"], self.config, confirm_fn=self.confirm_fn
             )
