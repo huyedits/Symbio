@@ -3973,8 +3973,35 @@ class ChatSession:
                 self.output_fn(f"  [Learn] Tool mistake captured: {path.name}")
                 learn.maybe_train_on_mistakes(
                     self.config, self.tokenizer, self.system_prompt, train_fn=self._guarded_train)
+            # Tell it to retry, not to describe retrying.
+            #
+            # Measured over three multi-turn database tasks, each given a real
+            # sqlite error and up to four rounds: it diagnosed every error
+            # correctly and then called nothing, 3 out of 3.
+            #
+            #   r1  SELECT ... FROM purchases   -> no such table: purchases
+            #   r2  "The error indicates that the table `purchases` doesn't
+            #        exist in the shop.db SQLite database."      no tool call
+            #   r1  INSERT ... VALUES ('Dmitri' -> syntax error
+            #   r2  "I'll fix the SQL query and run it."         no tool call
+            #
+            # It says it will fix the query and then does not fix the query.
+            # Since the observation round-trip is the only self-correction this
+            # agent has, round one was effectively the only round that ever did
+            # anything.
+            #
+            # The wording is lifted from the browser param errors above, which
+            # have carried "Do not explain the failure — just emit the
+            # corrected click tag" since someone hit this same wall there.
+            # Applying it to every actionable tool error rather than only to
+            # browser arguments.
             pending_tool_error = (
-                f"[System observation: {observation}]" if learn.sounds_like_tool_error(observation)
+                f"[System observation: {observation}]\n"
+                "[The call failed. Fix it and emit the corrected tool call now. "
+                "Do not explain the failure and do not describe what you are "
+                "about to do — issue the call. If you need to know the shape of "
+                "something first, call a tool that inspects it.]"
+                if learn.sounds_like_tool_error(observation)
                 else None
             )
             # Anonymous tool-error counter for telemetry (no content, just +1).
