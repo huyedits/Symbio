@@ -94,12 +94,8 @@ def bare_browser_launch_note(cmd: str, ok: bool) -> str:
     return ""
 
 def _looks_like_shell_command(cmd: str) -> bool:
-    """Return True if a command uses shell syntax that shlex+no-shell can't handle.
+    """Returns true for those cmmds that uses shell syntax, saves ya time. it checks headers and common things ifykykyk."""
 
-    Pipes, redirects, command separators, subshells, globs, and env var
-    assignments all need a real shell interpreter. Simple space-separated
-    commands (including URLs) stay in the direct sandbox path.
-    """
     shell_tokens = {"|", "&&", "||", ";", "&", "<", ">", "$(", "`", "*", "$", "{", "}"}
     for token in shell_tokens:
         if token in cmd:
@@ -116,10 +112,7 @@ def _looks_like_shell_command(cmd: str) -> bool:
     return False
 
 
-# Short verification follow-ups ("are you sure?", "check again") carry almost
-# no signal, so a small low-temperature model derails — reciting its identity
-# or regurgitating an earlier topic instead of re-examining the answer it just
-# gave. Detected here so the turn loop can inject a contextual nudge.
+# just some detection words for a large langugage model, HOW FUNNY LMAO.
 _VERIFICATION_FOLLOWUPS = {
     # Direct re-check requests.
     "are you sure", "you sure", "sure", "sure?", "really", "really?",
@@ -138,12 +131,7 @@ _VERIFICATION_FOLLOWUPS = {
     "nope", "nah", "i doubt it", "doubt it", "skeptical",
 }
 
-# Cues that also work at the END of a longer pushback, e.g.
-# "that's qatar, not america. check again". Bare ambiguous single tokens
-# (again/sure/really/wait/hmm) are excluded here — they only qualify as short
-# standalone follow-ups, not as trailing cues, so a sentence that merely ends
-# with one of them isn't mistaken for doubt. "you think" is deliberately
-# excluded so "what do you think" (asking for an opinion) never trips.
+# Even more LMAOLMAO
 _VERIFICATION_TRAILING = {
     "check again", "are you sure", "is that right", "is that correct",
     "double check", "double-check", "doublecheck", "recheck", "rethink",
@@ -183,10 +171,7 @@ def _looks_like_verification_followup(text: str) -> bool:
     return False
 
 
-# Imperative "search for me" phrasings. When the user explicitly tells the model
-# to search and it waffles (describes searching instead of calling <search>),
-# the turn loop forces a web search so the user isn't left stranded. Word-
-# boundary anchored so "research" (which contains "search") never matches.
+# just more regex for search alike words
 _EXPLICIT_SEARCH_RE = re.compile(
     r"\b(?:search\s+it|search\s+online|search\s+the\s+web|search\s+now|"
     r"google\s+it|look\s+it\s+up|just\s+search|check\s+online|check\s+the\s+web|"
@@ -194,15 +179,7 @@ _EXPLICIT_SEARCH_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Function/filler words (len>=4) that never constitute a search subject on
-# their own. Words shorter than 4 chars (it, has, the, is, of, on, in, at,
-# do, to, be, a, an, as, by, he, we, me, my, no, so, or, up, us) are dropped
-# by the len>=4 signature filter in _subjectless_search_command, so they
-# don't need listing here. A "check online" command is subjectless when,
-# after dropping the matched command phrase, no substantive word survives —
-# e.g. "it has check online" -> "it has" -> no signature word -> inject the
-# previous question; "check online who won the world cup" -> "world" survives
-# -> the model can bind the topic itself.
+# damn it, i just had to yk? my bad but these are filter stopwards
 _SEARCH_FILLER_STOPWORDS = {
     "does", "much", "will", "would", "should", "could", "that", "this",
     "with", "from", "about", "they", "them", "have", "been", "were",
@@ -217,17 +194,8 @@ _SEARCH_FILLER_STOPWORDS = {
 
 
 def _subjectless_search_command(text: str) -> bool:
-    """A "go search" command whose own words carry no searchable subject —
-    "check online.", "it has check online", "search it", "just google it".
-    The small model has nothing to bind the search to and will hallucinate an
-    unrelated query, so the caller injects the previous unanswered question
-    as the subject instead.
+    """ Just does the search command where the user didnt even freaking bother to say so the ai figures it out. good on ya lmao."""
 
-    Detects this by dropping the matched command phrase (e.g. "check online")
-    and checking whether any substantive word (len>=4, not a function-word
-    stopword) survives in the remainder. "it has" -> none -> subjectless;
-    "who won the world cup" -> "world" -> has a subject.
-    """
     t = text.strip().lower().rstrip("?.!")
     if not t or len(t.split()) > 6:
         return False
@@ -262,10 +230,7 @@ def _queries_overlap(model_query: str, subject: str) -> bool:
     model_lower = (model_query or "").lower()
     return any(w in model_lower for w in subj_words)
 
-# Greeting-only messages ("hi", "hi caine", "hello there", "hey", "good
-# morning"). A blank reply to one must never trigger a web search (we'd
-# "search" the word "hi" and get nonsense) and must never be "learned" as
-# research. Matched by tokenizing so "hi" can't false-fire on "this" etc.
+# greetings
 _GREETING_WORDS = {
     "hi", "hello", "hey", "yo", "sup", "howdy", "hiya", "heya",
     "morning", "evening", "afternoon", "greetings", "whatsup", "whats",
@@ -287,13 +252,7 @@ def _is_greeting(text: str) -> bool:
     return all(w in _GREETING_WORDS or w in _GREETING_FILLERS for w in words)
 
 
-# A user turn that asks Caine to *do* something with a tool — open/navigate to a
-# page, click/press/type/scroll, or read a URL. When the model blanks on one of
-# these (no tool call, no prose), the turn must not die silent: the user is
-# waiting for an action, so we nudge the model to emit the right tool rather than
-# leaving them with nothing. Matches the same verbs browser_followup uses, plus
-# an explicit URL, so "now go to cloudflare pricing" / "read the webpage at …"
-# are caught.
+# do keywords
 def _is_action_request(text: str) -> bool:
     t = text.strip().lower()
     if not t:
@@ -306,14 +265,7 @@ def _is_action_request(text: str) -> bool:
     ))
 
 
-# A pure navigation request: "open/go to/visit <site>" with NO ask for info or
-# further on-page action. Once the page is open, the task is done — re-prompting
-# the model with the freshly-loaded page only invites it to auto-click elements
-# it happens to see (the "Stream now"/"Continue" problem). Used to stop the
-# tool loop right after a successful browser_open so the model's pre-tool prose
-# (e.g. "Opening Apple.com.") stands as the reply. Requests that also want info
-# ("go to cloudflare pricing", "open X and tell me…") are NOT navigation-only,
-# so the loop continues and the model can read/summarize the page.
+# navigation
 def _is_navigation_only(text: str) -> bool:
     t = text.strip().lower()
     if not t:
@@ -360,11 +312,7 @@ def _last_exchange(history: list[dict[str, str]]) -> tuple[str | None, str | Non
     return question, answer
 
 
-# Per-turn user affect: a lightweight read of how the user is feeling from one
-# message, so Caine can adapt tone/directness instead of waffling cheerfully
-# while the user is frustrated. Heuristic only — caps/punctuation + a small
-# lexicon — good enough to spot the states that should change how it replies
-# (frustration/impatience most of all), not a fine-grained emotion model.
+# per turn user mood detection, used to nudge the model to adapt its tone. The model itself
 
 _AFFECT_FRUSTRATION = {
     "frick", "insufferable", "annoying", "stupid", "wtf", "ugh", "bruh",
@@ -416,17 +364,12 @@ _AFFECT_EXASPERATION = (
     "are you done",
     "are you finished",
 )
-# Same phrases with repeated letters collapsed, so misspelled emphasis
-# ("doingg", "soooo") matches them and legit doubles ("kidding" -> "kiding")
-# line up on both sides of the comparison.
+# repeating
 _AFFECT_EXASPERATION_NORM = tuple(
     re.sub(r"(.)\1+", r"\1", p) for p in _AFFECT_EXASPERATION
 )
 
-# Command-start verbs, to tell an all-caps imperative ("TELL ME SEARCH IT
-# ONLINE") from an all-caps question ("WHO IS THE CEO") when there's no
-# question mark. Question auxiliaries (do/does/is/are) are deliberately
-# excluded so "DO YOU KNOW" doesn't read as a command.
+# even more terms
 _CMD_START_RE = re.compile(
     r"^\s*(?:tell|search|find|get|show|give|make|run|open|fix|check|look|go|"
     r"stop|help|explain|list|try|call|fetch|write|read|delete|create|start|"
@@ -434,9 +377,7 @@ _CMD_START_RE = re.compile(
     r"copy|clear|reset|quit|exit|please|just|now)\b", re.IGNORECASE,
 )
 
-# Tone adaptation for the detected mood now lives in the system prompt (the
-# model reads the mood itself and adjusts), so there is no per-turn nudge
-# dict here.
+
 
 
 def infer_user_affect(text: str) -> str:
@@ -488,14 +429,8 @@ def infer_user_affect(text: str) -> str:
     return "neutral"
 
 
-# --- Model-emitted mood tag -------------------------------------------------
-# The model itself reads the user's tone (it was trained on human language, so
-# it catches anger/frustration/sadness/joy that a regex misses — e.g. a single
-# raised-voice emphasis word like "DOINGG"). It emits <mood>tag</mood> at the
-# start of its reply; StreamingStripper + strip_tool_tags hide that tag from
-# the user, and the turn loop parses it to surface [Mood: tag]. The lexicon
-# heuristic (infer_user_affect) is only a fallback for turns where the model
-# omits the tag.
+# Model-emitted mood tag 
+# tag to emit for types of emotiuons. too basic but who tf cares
 _MOOD_TAG_RE = re.compile(r"<mood>\s*([a-zA-Z]+)\s*</mood>", re.IGNORECASE)
 _VALID_MOODS = {
     "angry", "frustrated", "impatient", "confused", "sad", "anxious",
@@ -541,7 +476,7 @@ class _Spinner:
     is not a TTY (tests, pipes, or non-terminal front-ends).
     """
 
-    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏67"
 
     def __init__(self, label: str = "thinking…"):
         self.label = label
