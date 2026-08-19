@@ -27,13 +27,34 @@ from symbio import constants
 from symbio.app import golden, pending, tooling, training
 
 
+# (path, mtime_ns, size) -> parsed catalog. The file is small, but it is read
+# on a path that runs several times per delegated turn — once per resident
+# donor inside _try_hot_swap, and again for every entry lookup — so re-parsing
+# it each time is work done repeatedly to reach the same answer. Keyed on the
+# stat rather than a TTL because the thing that invalidates it is a skill being
+# saved or deleted, which rewrites the file; a stale read there would route a
+# turn to a worker that no longer exists.
+_CATALOG_CACHE: tuple[Any, ...] | None = None
+
+
 def load_catalog() -> dict[str, dict[str, Any]]:
-    if not constants.WORKER_MODELS_FILE.exists():
-        return {}
+    global _CATALOG_CACHE
+    path = constants.WORKER_MODELS_FILE
     try:
-        return json.loads(constants.WORKER_MODELS_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        st = path.stat()
+    except OSError:
+        _CATALOG_CACHE = None
         return {}
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    if _CATALOG_CACHE is not None and _CATALOG_CACHE[0] == key:
+        return _CATALOG_CACHE[1]
+    try:
+        catalog = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _CATALOG_CACHE = None
+        return {}
+    _CATALOG_CACHE = (key, catalog)
+    return catalog
 
 
 def catalog_entry_for_role(role: str) -> dict[str, Any] | None:
@@ -305,6 +326,12 @@ class WorkerPool:
         if role in self._resident:
             model, tokenizer, _ = self._resident[role]
             self._resident[role] = (model, tokenizer, time.time())
+            # Every path out of get() marks the adapter used, including this
+            # one. It is the path a busy worker takes — the second and every
+            # later delegation in a row — and leaving it out meant the more a
+            # worker was used, the staler its last-used stamp looked, which is
+            # what archive_idle_items reads to decide it can be archived.
+            training.mark_adapter_used(role=role)
             return model, tokenizer, (catalog_entry_for_role(role) or {})
 
         entry = catalog_entry_for_role(role)
@@ -424,6 +451,37 @@ class WorkerPool:
             return model, tokenizer, entry
         return None
 
+    def _run_worker(self, model, tokenizer, system_prompt: str, user_text: str,
+                    max_tokens: int) -> str:
+        """Render one worker turn and return its reply, reasoning stripped.
+
+        Both delegation paths need exactly this, and having it written twice is
+        how they drifted: the browser loop was generating without stripping,
+        which matters more there than anywhere else, because its reply is
+        matched with startswith() against 'click:'/'type:'/'scroll'/'done'. A
+        model that opens with a think block does not fail a check — it fails
+        *every* check, and the loop reports an unrecognized action and stops.
+
+        enable_thinking is False for the same reason in both: a worker's reply
+        is an observation for the headmaster and a training sample for its own
+        adapter, and deliberation is noise in both. The headmaster is where
+        THINKING_ENABLED belongs. Measured on Qwen3.5-4B: a one-line summary
+        came back as 156 words of "Thinking Process:" with this True, and 13
+        correct words with it False — and not strippable either, because that
+        model reasons in prose rather than <think>. The strip below is for the
+        models that do use the tag.
+        """
+        prompt = tokenizer.apply_chat_template(
+            [{"role": "system", "content": system_prompt},
+             {"role": "user", "content": user_text}],
+            tokenize=False, add_generation_prompt=True, enable_thinking=False,
+        )
+        return tooling.strip_reasoning_block(generate(
+            model, tokenizer, prompt=prompt,
+            sampler=make_sampler(temp=0.2, top_p=0.9),
+            max_tokens=max_tokens, verbose=False,
+        )).strip()
+
     def _worker_system_prompt(self, role: str, entry: dict[str, Any]) -> str:
         """Return the system prompt for a worker role.
 
@@ -446,9 +504,15 @@ class WorkerPool:
         every other role is a single-shot generation. Both record their
         (input, output) pairs as training samples for that worker, so real
         usage accumulates the corpus guarded_train_worker draws on."""
-        if role == "browser" and browser is not None:
-            max_rounds = int(self._dispatch_cfg().get("max_worker_rounds", 4))
-            return self._run_browser_delegation(task, browser, max_rounds)
+        # Resolve the role before anything is unloaded for it. The headmaster
+        # used to be put to sleep first and the catalog consulted second, so a
+        # task delegated to a role that does not exist — a typo, or a skill
+        # deleted since the model last saw the list — unloaded the 8B, found
+        # nothing to run, and reloaded it. A full model reload as the price of
+        # a misspelling, for a turn that returns an error string either way.
+        if catalog_entry_for_role(role) is None:
+            known = sorted({e.get("role") for e in load_catalog().values() if e.get("role")})
+            return f"No worker configured for role '{role}'. Known roles: {', '.join(known) or 'none'}."
 
         deep_sleep = bool(self._dispatch_cfg().get("headmaster_deep_sleep_while_workers", False))
         if deep_sleep and self.before_worker_fn is not None:
@@ -456,6 +520,18 @@ class WorkerPool:
             self.before_worker_fn()
 
         try:
+            # Inside the bracket, not before it. The browser loop used to
+            # return above all of this, so with deep sleep on it loaded its
+            # worker while the headmaster was still resident — the two-models-
+            # at-once state the whole setting exists to prevent, reached by the
+            # one role that holds its worker for several rounds. Nothing
+            # refused it either: _second_headmaster_copy_refusal stands down
+            # when deep sleep is configured, on the assumption that the sleep
+            # actually happened.
+            if role == "browser" and browser is not None:
+                max_rounds = int(self._dispatch_cfg().get("max_worker_rounds", 4))
+                return self._run_browser_delegation(task, browser, max_rounds)
+
             try:
                 loaded = self.get(role)
             except SecondHeadmasterCopyRefused as exc:
@@ -465,45 +541,28 @@ class WorkerPool:
                 known = sorted({e.get("role") for e in load_catalog().values() if e.get("role")})
                 return f"No worker configured for role '{role}'. Known roles: {', '.join(known) or 'none'}."
             model, tokenizer, entry = loaded
-            training.mark_adapter_used(role=role)
+            # get() already marked it; a second call here does the same write
+            # twice per delegation for no reader.
             self._status(f"  [Dispatch] Delegating to '{role}': {task[:80]}{'...' if len(task) > 80 else ''}")
             system_prompt = self._worker_system_prompt(role, entry)
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": task},
-            ]
-            prompt = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True,
-                # Workers do not reason out loud. Their reply is an
-                # observation for the headmaster and a training sample
-                # for their own adapter, and reasoning is noise in both.
-                # The headmaster is where THINKING_ENABLED belongs.
-                # Measured on Qwen3.5-4B: a one-line summary came back
-                # as 156 words of "Thinking Process:" with this True,
-                # and 13 correct words with it False. Not strippable
-                # either — that model reasons in prose, not <think>.
-                enable_thinking=False,
-            )
             try:
-                # A worker's reply is used twice: as the observation handed
-                # back to the headmaster, and as a training sample for this
-                # worker's own adapter. A reasoning block has no business in
-                # either — it is working-out, not an answer, and training on
-                # it teaches the worker to reply with its own deliberation.
-                # Observed after retargeting 'summarize' at a reasoning model:
-                # a one-line summary came back as 160 words opening with
-                # "Thinking Process: 1. Analyze the Request".
-                reply = tooling.strip_reasoning_block(generate(
-                    model, tokenizer, prompt=prompt,
-                    sampler=make_sampler(temp=0.2, top_p=0.9),
-                    max_tokens=max_tokens, verbose=False,
-                )).strip()
+                reply = self._run_worker(
+                    model, tokenizer, system_prompt, task, max_tokens)
             except Exception as e:
                 self._status(f"  [Dispatch] Worker '{role}' failed: {e}")
                 return f"Worker '{role}' failed: {e}"
 
             self._status(f"  [Dispatch] Worker '{role}' returned {len(reply.split())} word(s).")
-            if reply:
+            # Opt-in, and off by default: this writes the worker's own output
+            # back into the corpus it will next be trained on, with nothing
+            # having checked the output first. Observed: a worker whose corpus
+            # demonstrated vegetarian-only suggestions answered a held-out
+            # prompt with lobster, and that answer was appended as a training
+            # sample — so the next retrain would have learned the violation as
+            # correct. A model graded only by itself drifts toward whatever it
+            # already does, which is the one failure a corpus cannot recover
+            # from on its own.
+            if reply and self._dispatch_cfg().get("capture_worker_samples", False):
                 training.append_chat_pair(task, reply, tokenizer, system_prompt, role=role)
             return label_worker_reply(role, reply)
         finally:
@@ -530,7 +589,6 @@ class WorkerPool:
         if loaded is None:
             return "No worker configured for role 'browser'."
         model, tokenizer, entry = loaded
-        training.mark_adapter_used(role="browser")
         system_prompt = ROLE_SYSTEM_PROMPTS["browser"]
 
         try:
@@ -543,28 +601,9 @@ class WorkerPool:
         for _ in range(max_rounds):
             status_note = f"Result of your last action: {last_status}\n\n" if last_status else ""
             prompt_text = f"Goal: {task}\n\n{status_note}Page text:\n{page_text[:1500]}"
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt_text},
-            ]
-            prompt = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True,
-                # Workers do not reason out loud. Their reply is an
-                # observation for the headmaster and a training sample
-                # for their own adapter, and reasoning is noise in both.
-                # The headmaster is where THINKING_ENABLED belongs.
-                # Measured on Qwen3.5-4B: a one-line summary came back
-                # as 156 words of "Thinking Process:" with this True,
-                # and 13 correct words with it False. Not strippable
-                # either — that model reasons in prose, not <think>.
-                enable_thinking=False,
-            )
             try:
-                action = generate(
-                    model, tokenizer, prompt=prompt,
-                    sampler=make_sampler(temp=0.2, top_p=0.9),
-                    max_tokens=60, verbose=False,
-                ).strip()
+                action = self._run_worker(
+                    model, tokenizer, system_prompt, prompt_text, max_tokens=60)
             except Exception as e:
                 return f"Worker 'browser' failed: {e}"
 
@@ -657,7 +696,6 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
     dispatch_cfg = config.get("dispatch", {})
     golden_on = dispatch_cfg.get("worker_golden_set_enabled", True)
     sampler = make_sampler(temp=0.2, top_p=0.9)
-    entry = catalog_entry_for_role(role)
 
     cases = WORKER_GOLDEN_CASES.get(role)
     skill_cases = False
@@ -772,8 +810,14 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
 
         # The trainer child has exited by now, but its memory only comes back
         # once the allocator reclaims it, and this is the load that would
-        # otherwise race it.
+        # otherwise race it. release_model() forces our own collection; the
+        # settle waits out the kernel's, which is the half that panics — a
+        # child exit unmaps every Metal buffer in one bulk teardown, and the
+        # load below is a multi-gigabyte allocation landing straight into it.
+        # Reading free memory *after* the wait also makes the shortfall check
+        # below judge the machine as it will be, not as it is mid-reclaim.
         training.release_model()
+        training.settle_after_trainer_exit(config)
         shortfall = training.load_memory_shortfall(
             config, entry["model_name"],
             purpose=f"reload worker '{role}' to check the new adapter")
@@ -857,7 +901,13 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
                     training.release_model()
                     trained2 = training.run_training(
                         config, iters=extra_iters, role=role, model_name=entry["model_name"])
+                    # Second trainer child, second bulk teardown, and the same
+                    # reload waiting on the other side of it. This is the pair
+                    # that makes one guarded_train_worker call five model loads
+                    # in a row — the densest load churn anywhere in the app,
+                    # and it runs unattended on a background thread.
                     training.release_model()
+                    training.settle_after_trainer_exit(config)
                     remedy_shortfall = training.load_memory_shortfall(
                         config, entry["model_name"],
                         purpose=f"reload worker '{role}' after remedy training")
@@ -879,11 +929,30 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
                     print("  [Train] No remedy samples could be generated.")
 
         if len(regressions) > threshold:
-            if backup_dir and dispatch_cfg.get("worker_golden_rollback_on_regression", True):
+            # Derived cases grade a reply on how much of the steps text it
+            # reproduces. That is the right target while the corpus is still
+            # the seeded steps-text samples -- a worker answering "I don't
+            # know." there is genuinely broken and must not ship. Once real
+            # demonstrations replace the seeds the worker is meant to stop
+            # reciting, and the same cases would revert the specialisation.
+            derived_only = (
+                skill_cases
+                and not _skill_eval.has_custom_tasks(role)
+                and not _skill_eval.corpus_teaches_recitation(
+                    role, _skill_eval.skill_steps(entry) if entry else ""))
+            rollback_on = dispatch_cfg.get(
+                "worker_golden_rollback_on_regression", True)
+            if backup_dir and rollback_on and not derived_only:
                 training.restore_adapter(backup_dir, role=role)
                 return True, (
                     f"Worker '{role}' trained but regressed on {len(regressions)} "
                     f"check(s) ({', '.join(regressions)}); rolled back.")
+            if derived_only and rollback_on:
+                return True, (
+                    f"Worker '{role}' trained; {len(regressions)} derived "
+                    f"check(s) ({', '.join(regressions)}) no longer recite the "
+                    f"steps text. Kept — derived checks report only. Add "
+                    f"{_skill_eval.tasks_path_for(role).name} to make them block.")
             return True, (
                 f"Worker '{role}' trained but regressed on {len(regressions)} "
                 f"check(s) ({', '.join(regressions)}); kept anyway.")

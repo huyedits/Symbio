@@ -13,8 +13,10 @@ toggles it live without a restart.
 from __future__ import annotations
 
 import json
+import re
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from symbio import constants
@@ -70,3 +72,203 @@ def log_event(kind: str, **fields: Any) -> None:
 def log_path() -> str:
     """Return the absolute path of the telemetry .txt (for /status etc.)."""
     return str(_LOG_FILE)
+
+
+# --------------------------------------------------------------------------
+# Reading it back.
+#
+# Everything above has been writing since day one and nothing ever read a line
+# of it — log_path() was defined and called from nowhere. activity.txt reached
+# 985 KB and ~13,000 events on this machine, including a MEDIUM-risk security
+# alert for a command that arrived through prompt injection: recorded at the
+# moment it happened, and never seen, because there was no way to ask.
+#
+# A write-only log is not telemetry, it is a disk cost.
+
+_LINE_RE = re.compile(r"^\[(?P<ts>[^\]]+)\] (?P<kind>\w+)(?P<rest> .*)?$")
+_FIELD_RE = re.compile(r"(\w+)=(.*?)(?=\s+\w+=|$)")
+
+
+def _parse_line(line: str) -> dict[str, Any] | None:
+    m = _LINE_RE.match(line.rstrip("\n"))
+    if not m:
+        return None
+    out: dict[str, Any] = {"ts": m.group("ts"), "kind": m.group("kind")}
+    for k, v in _FIELD_RE.findall((m.group("rest") or "").strip()):
+        out[k] = v.strip()
+    return out
+
+
+def read_events(since: datetime | None = None,
+                path: str | None = None) -> list[dict[str, Any]]:
+    """Parse activity.txt into event dicts, oldest first."""
+    target = Path(path) if path else _LOG_FILE
+    if not target.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    with open(target, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            ev = _parse_line(line)
+            if ev is None:
+                continue
+            if since is not None:
+                try:
+                    if datetime.strptime(ev["ts"], "%Y-%m-%d %H:%M:%S") < since:
+                        continue
+                except ValueError:
+                    continue
+            events.append(ev)
+    return events
+
+
+def summarise(days: int | None = None,
+              path: str | None = None) -> dict[str, Any]:
+    """Aggregate the activity log into the questions worth asking of it.
+
+    The per-tool success rate is the one that matters. It is the same thing
+    tool_eval.py measures in a lab, measured instead against what actually
+    happened. A tool with a low rate is failing in real use; a tool that never
+    appears at all is one the model is not reaching, which is the failure that
+    leaves no other trace.
+    """
+    since = datetime.now() - timedelta(days=days) if days is not None else None
+    events = read_events(since=since, path=path)
+
+    tools: dict[str, dict[str, int]] = {}
+    alerts: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    counts: dict[str, int] = {}
+
+    for ev in events:
+        counts[ev["kind"]] = counts.get(ev["kind"], 0) + 1
+        if ev["kind"] != "tool":
+            continue
+        result = ev.get("result", "")
+        declined = (result.startswith(("Blocked", "Refused"))
+                    or "denied" in result.lower())
+
+        slot = tools.setdefault(ev.get("name", "?"),
+                                {"calls": 0, "ok": 0, "declined": 0})
+        slot["calls"] += 1
+        if declined:
+            # The user saying no is not the tool failing.
+            #
+            # Counting refusals as failures made browser_open read as 83% ok
+            # and land in the "struggling" list. 74 of its 75 failures were
+            # "User denied access to ..." — the safety gate doing precisely its
+            # job. An instrument that reports a working gate as a broken tool
+            # sends you to fix something that is right, which is worse than
+            # reporting nothing.
+            slot["declined"] += 1
+        elif str(ev.get("ok", "")).lower() == "true":
+            slot["ok"] += 1
+
+        if "Security alert" in result:
+            alerts.append(ev)
+        if declined:
+            blocked.append(ev)
+
+    return {
+        "events": len(events),
+        "counts": counts,
+        "turns": counts.get("turn", 0),
+        "tools": dict(sorted(tools.items(),
+                             key=lambda kv: kv[1]["calls"], reverse=True)),
+        "alerts": alerts,
+        "blocked": blocked,
+        # The file actually read, not the default — reporting _LOG_FILE while
+        # summarising a different path names a file the numbers did not come
+        # from, which is worse than naming none.
+        "path": str(Path(path) if path else _LOG_FILE),
+    }
+
+
+def _pct(n: int, total: int) -> str:
+    return f"{100 * n / total:.0f}%" if total else "n/a"
+
+
+# A tool is "failing" below this rate, and only once it has been called enough
+# times for the rate to mean anything. Sample size is doing real work here:
+# at 5 calls, read_page ("1 call, 0% ok") read as the second-worst tool in the
+# system, and browser_press ("6 calls, 33%") sat above run_command's 1643.
+# Neither was a finding. 20 is where the number starts meaning something.
+_OK_THRESHOLD = 0.90
+_MIN_CALLS = 20
+
+
+def format_summary(report: dict[str, Any], verbose: bool = False) -> str:
+    """Say what is wrong. Say nothing otherwise.
+
+    The first version of this printed sixteen rows of per-tool statistics, of
+    which fifteen said 100%. That is a data dump wearing a report's clothes: it
+    makes the reader find the one line that matters, which is the job the tool
+    was supposed to do. Everything healthy is now silent, and `verbose` brings
+    the table back for when you actually want to read it.
+    """
+    if not report["events"]:
+        return "  Nothing recorded yet."
+
+    tools = report["tools"]
+    if not tools:
+        return "  No tool has ever been called. The model is not reaching them."
+
+    # Rates are over calls that actually ran. A call the user declined never
+    # reached the tool, so it can say nothing about whether the tool works.
+    def ran(t: dict[str, int]) -> int:
+        return t["calls"] - t.get("declined", 0)
+
+    total = sum(ran(t) for t in tools.values())
+    failing = [(n, t) for n, t in tools.items()
+               if ran(t) >= _MIN_CALLS and t["ok"] / ran(t) < _OK_THRESHOLD]
+    failing.sort(key=lambda nt: nt[1]["ok"] / ran(nt[1]))
+
+    lines: list[str] = []
+
+    if failing:
+        # One headline, named and in plain words. A list of four "problems" is
+        # still a triage exercise handed back to the reader; the worst tool is
+        # the thing to go fix, and the rest is a footnote until it is fixed.
+        name, t = failing[0]
+        lines.append(f"  {name} is your worst tool — "
+                     f"it {_in_words(t['ok'], ran(t))} ({ran(t)} calls).")
+        others = len(failing) - 1
+        fine = len(tools) - len(failing)
+        tail = []
+        if others:
+            tail.append(f"{others} other{'s are' if others != 1 else ' is'} struggling")
+        if fine:
+            tail.append(f"{fine} fine")
+        if tail:
+            lines.append("  " + ", ".join(tail).capitalize() + ".")
+    else:
+        lines.append(f"  All good — {total} tool calls, "
+                     f"{_pct(sum(t['ok'] for t in tools.values()), total)} ok.")
+
+    if report["alerts"]:
+        n = len(report["alerts"])
+        lines.append(f"  {n} security alert{'s' if n != 1 else ''}, "
+                     f"most recent {report['alerts'][-1]['ts']}.")
+
+    if verbose:
+        lines.append("")
+        for name, t in tools.items():
+            lines.append(
+                f"    {name:18s} {ran(t):5d} calls  "
+                f"{_pct(t['ok'], ran(t)):>4s} ok"
+                + (f"  ({t['declined']} declined)" if t.get("declined") else ""))
+        lines.append(f"\n  {report['events']} events · {report['turns']} turns")
+        lines.append(f"  {report['path']}")
+
+    return "\n".join(lines)
+
+
+def _in_words(ok: int, calls: int) -> str:
+    """"fails 4 of every 5 calls" beats "20% ok" for the line you read first."""
+    bad = calls - ok
+    if bad == calls:
+        return "fails every time"
+    ratio = calls / bad if bad else 0
+    if ratio >= 1.8:
+        return f"fails 1 call in {round(ratio)}"
+    per5 = round(5 * bad / calls)
+    return f"fails {per5} of every 5 calls"

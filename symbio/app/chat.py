@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import shlex
 import sys
 import threading
 import time
@@ -42,6 +43,48 @@ try:
     from tag_rag import TagIndex
 except ModuleNotFoundError:  # pragma: no cover - depends on how it was launched
     TagIndex = None
+
+
+# Bare words the model reaches for when it means "launch this desktop app".
+# Only the ones actually seen failing, plus their obvious spellings — a wide
+# net here would turn a genuine "command not found" into a surprise app launch.
+_GUI_APP_ALIASES: dict[str, str] = {
+    "chrome": "Google Chrome",
+    "chromebrowser": "Google Chrome",
+    "chrome-app": "Google Chrome",
+    "chrome_app": "Google Chrome",
+    "googlechrome": "Google Chrome",
+    "google-chrome": "Google Chrome",
+    "safari": "Safari",
+    "spotify": "Spotify",
+    "finder": "Finder",
+    "terminal.app": "Terminal",
+    "notes": "Notes",
+    "calendar": "Calendar",
+    "messages": "Messages",
+    "mail": "Mail",
+    "preview": "Preview",
+    "vscode": "Visual Studio Code",
+    "code-app": "Visual Studio Code",
+}
+
+
+def _gui_app_for(cmd: str, output: str) -> str | None:
+    """The macOS app a failed bare command was probably trying to launch.
+
+    Returns None unless the command is a single bare word (no arguments, no
+    shell syntax) that names a known GUI app AND the failure was specifically
+    "command not found". A command that failed for any other reason is a real
+    failure and must be reported as one.
+    """
+    if sys.platform != "darwin":
+        return None
+    if "command not found" not in output.lower():
+        return None
+    word = cmd.strip().strip("'\"")
+    if not word or len(word.split()) != 1:
+        return None
+    return _GUI_APP_ALIASES.get(word.lower())
 
 
 def _looks_like_shell_command(cmd: str) -> bool:
@@ -762,6 +805,21 @@ class ChatSession:
         # joins it before any generation (so the model is never used by two
         # threads at once).
         self._prefill_thread: threading.Thread | None = None
+        # A persisted prompt cache is a few hundred MB of safetensors, and
+        # reading it used to start only once load() had finished — so the two
+        # slowest parts of boot ran back to back when they have nothing to say
+        # to each other. The read is pure file I/O and the weight load is
+        # mostly decompress-and-place, so the read is started *before* load()
+        # and overlaps it; by the time the model is resident the bytes are
+        # already in the page cache. See _start_prompt_cache_prefetch.
+        self._prefetch_thread: threading.Thread | None = None
+        # (cache, metadata) once the prefetch has read the file, or None. The
+        # cache is deliberately left unevaluated here: materializing it would
+        # allocate GPU buffers on a second thread while load() is allocating
+        # its own, and this codebase has a standing kernel-panic problem with
+        # concurrent Metal clients. mx.eval stays on the prefill thread, which
+        # only runs after load() has returned.
+        self._prefetched_cache: tuple[list, dict] | None = None
         self.enabled_groups: set[str] = set(
             config.get("tools", {}).get("enabled_groups", [])
         )
@@ -924,6 +982,10 @@ class ChatSession:
         # Whatever the KV cache holds refers to weights we are about to drop.
         self._prompt_cache = None
         self._cached_prompt_ids = None
+        # A prefetch that nobody consumed is a few hundred megabytes with no
+        # reader, which is the opposite of what it was added for. Dropping the
+        # weights is the point at which it can no longer be claimed.
+        self._take_prefetched_cache()
         if getattr(self, "model", None) is not None:
             del self.model
         self.model = None
@@ -946,6 +1008,14 @@ class ChatSession:
             )
             self.adapter_loaded = True
             training.mark_adapter_used()
+            # Same cold-cache problem as _wake_headmaster: _unload_model above
+            # dropped the KV cache, and without this the first turn after a
+            # retrain re-processes the whole prefix. No prefetch here, though —
+            # training rewrote the adapter, so the persisted cache's signature
+            # cannot match and reading it would be pure waste. This prefill is
+            # a real one, which is exactly why it belongs on a background
+            # thread rather than in front of the user's next message.
+            self._prefill_system_prompt_cache(show_spinner=False)
             return None
         except Exception as e:
             # We already dropped the previous model, so returning here would
@@ -971,10 +1041,25 @@ class ChatSession:
         self._status("  [Dispatch] Headmaster asleep.")
 
     def _wake_headmaster(self):
-        """Reload the headmaster model after a worker finishes."""
+        """Reload the headmaster model after a worker finishes, warm.
+
+        Waking used to hand back a model with a cold KV cache. _unload_model
+        drops _prompt_cache along with the weights — it has to, the cached
+        values belong to weights that no longer exist — and nothing rebuilt it,
+        so the turn after every delegation silently re-processed the whole
+        ~4000-token system+tools prefix through the model. The delegation saved
+        RAM and spent that saving on latency the user paid at the worst moment:
+        immediately after waiting for a worker.
+
+        So the wake mirrors the boot path. The cache read starts before load()
+        and overlaps it, and the prefill runs afterwards — which, since the
+        model, adapter and prompt are all unchanged since boot, is a signature
+        hit on the persisted file rather than a real prefill.
+        """
         if getattr(self, "model", None) is not None:
             return
         self._status("  [Dispatch] Headmaster waking up (reloading 8B model)...")
+        self._start_prompt_cache_prefetch()
         try:
             if self.adapter_config.exists():
                 self.model, self.tokenizer = load(
@@ -985,6 +1070,7 @@ class ChatSession:
                 self.model, self.tokenizer = load(self.config["model_name"])
                 self.adapter_loaded = False
             training.mark_adapter_used()
+            self._prefill_system_prompt_cache(show_spinner=False)
             self._status("  [Dispatch] Headmaster awake.")
         except Exception as e:
             self._status(f"  [Dispatch] Headmaster reload failed: {e}")
@@ -1013,6 +1099,16 @@ class ChatSession:
             # Cap MLX's buffer cache before the first allocation, so a long
             # chat session doesn't sit on GPU memory a training run needs.
             apply_gpu_limits(self.config)
+
+            # Start reading the persisted KV cache off disk now, so those
+            # hundreds of megabytes stream in while load() is busy with the
+            # weights instead of after it. Pure I/O on a daemon thread; it
+            # touches neither the model nor the GPU. Started before the
+            # "Waking model..." line so a slow first read still overlaps the
+            # whole load, and deliberately inside the try below's scope so a
+            # load failure still leaves it harmless (it is only ever consumed
+            # by the prefill, which does not run if the load failed).
+            self._start_prompt_cache_prefetch()
 
             # Don't spin during load(): HuggingFace's download progress bar
             # animates the same terminal line via \r, and the two carriages
@@ -1266,16 +1362,46 @@ class ChatSession:
                 # which the next run's prefix diff could not reuse.
                 if self.config.get("agent", {}).get("persist_prompt_cache", True):
                     self._save_persisted_prompt_cache(system_ids)
-            except Exception:
+            except Exception as e:
                 # Prefill is an optimization, never a hard requirement. Clear any
                 # partial state so the next generation rebuilds cleanly.
+                #
+                # But say why. Swallowing this silently is how the prefill came
+                # to be dead in the running app while every switch that controls
+                # it read as enabled: no cache file was ever written, every turn
+                # reported "cached 0", and nothing anywhere said a word. The
+                # save path next to this one already logs its failures; this one
+                # not doing so hid a broken feature rather than a slow one.
+                self._log_info(f"Prompt cache prefill failed: {e!r}")
                 self._prompt_cache = None
                 self._cached_prompt_ids = None
             finally:
                 self._indexing_now = False
 
-        self._prefill_thread = threading.Thread(target=_prefill, daemon=True)
-        self._prefill_thread.start()
+        # Run it here, on the calling thread, NOT on a background one.
+        #
+        # This used to start a daemon thread so the user could type their first
+        # message while the ~5k-token prefix warmed. That never once worked.
+        # generate_step calls mx.eval on the cache state, MLX's stream registry
+        # is thread-local, and evaluating a cache built from main-thread model
+        # weights on another thread raises
+        #     RuntimeError: There is no Stream(cpu, N) in current thread.
+        # after zero yields, on every boot, with this MLX build. The bare
+        # except below swallowed it in silence, so the feature reported as
+        # enabled while never having run: no cache file was ever written and
+        # every turn logged "cached 0".
+        #
+        # Entering the main thread's stream inside the worker does not fix it —
+        # tried, still raises — because the failing stream is a cpu one owned by
+        # the arrays, not the device stream the worker enters.
+        #
+        # So this now blocks. It costs ~24s on a first boot, once: the whole
+        # point of persisting the cache is that every later boot loads the file
+        # instead of prefilling, and _start_prompt_cache_prefetch overlaps even
+        # that read with the model load. Paying 24s once to make the feature
+        # real beats an unblocking optimization that never produced a cache.
+        _prefill()
+        self._prefill_thread = None
 
     def _log_info(self, message: str):
         """Log only once the session logger exists.
@@ -1315,24 +1441,91 @@ class ChatSession:
             "n_tokens": str(len(system_ids)),
         }
 
+    def _start_prompt_cache_prefetch(self):
+        """Begin reading the persisted KV cache while the weights are loading.
+
+        The two slowest things at boot are the weight load and the prompt-cache
+        read, and they were strictly sequential: the read only began once
+        _finish_model_setup started the prefill, which is after load() returns.
+        They contend for almost nothing — one is file I/O, the other is mostly
+        CPU placing tensors — so running the read underneath the load hides it
+        almost entirely, and the first turn is warm the moment the model is.
+
+        What this thread must NOT do is touch the GPU. Materializing the cache
+        here would put a second Metal client in the same window as the weight
+        load, which is the shape that panics IOGPUFamily on this hardware. So
+        it stops at the read: load_prompt_cache leaves the arrays lazy, and the
+        mx.eval that actually allocates stays on the prefill thread, after the
+        load has finished. The signature check needs a tokenizer that does not
+        exist yet, so it also waits — a mismatched file costs one wasted read,
+        which is exactly what it cost before.
+        """
+        if not self.config.get("agent", {}).get("prompt_cache_enabled", True):
+            return
+        if not self.config.get("agent", {}).get("persist_prompt_cache", True):
+            return
+        if not self.config.get("agent", {}).get(
+                "prefetch_prompt_cache_during_load", True):
+            return
+        path = constants.PROMPT_CACHE_FILE
+        if not path.exists():
+            return
+
+        def _prefetch():
+            try:
+                cache, meta = load_prompt_cache(str(path), return_metadata=True)
+                self._prefetched_cache = (cache, meta)
+            except Exception:
+                # Nothing is owed here. A failure leaves _prefetched_cache None
+                # and _load_persisted_prompt_cache reads the file itself, which
+                # is what it did before this existed — including the unlink of
+                # a truncated file, so the error is still handled, just later.
+                self._prefetched_cache = None
+
+        self._prefetch_thread = threading.Thread(target=_prefetch, daemon=True)
+        self._prefetch_thread.start()
+
+    def _take_prefetched_cache(self) -> tuple[list, dict] | None:
+        """Hand over the prefetched (cache, metadata), waiting for it if needed.
+
+        Consumed exactly once: a KV cache is mutated in place by generation, so
+        handing the same object to a second caller would give two readers one
+        buffer. After this returns the prefetch is spent and a later miss falls
+        back to reading the file.
+        """
+        thread = self._prefetch_thread
+        if thread is not None:
+            thread.join()
+            self._prefetch_thread = None
+        taken = self._prefetched_cache
+        self._prefetched_cache = None
+        return taken
+
     def _load_persisted_prompt_cache(self, system_ids: list[int]) -> bool:
         """Restore the warmed system-prefix cache from disk.
 
         Returns True if the cache was loaded and is safe to use. Reading a few
         hundred MB off an SSD is roughly an order of magnitude cheaper than
-        re-running the prefill through the model, which is the whole point.
+        re-running the prefill through the model, which is the whole point —
+        and cheaper still when _start_prompt_cache_prefetch already read it
+        underneath the weight load, in which case there is nothing left to wait
+        for here.
         """
         path = constants.PROMPT_CACHE_FILE
         if not path.exists():
             return False
         want = self._prompt_cache_signature(system_ids)
-        try:
-            cache, meta = load_prompt_cache(str(path), return_metadata=True)
-        except Exception as e:
-            # A truncated or version-mismatched file is not worth keeping.
-            self._log_info(f"Prompt cache unreadable, discarding: {e}")
-            path.unlink(missing_ok=True)
-            return False
+        prefetched = self._take_prefetched_cache()
+        if prefetched is not None:
+            cache, meta = prefetched
+        else:
+            try:
+                cache, meta = load_prompt_cache(str(path), return_metadata=True)
+            except Exception as e:
+                # A truncated or version-mismatched file is not worth keeping.
+                self._log_info(f"Prompt cache unreadable, discarding: {e}")
+                path.unlink(missing_ok=True)
+                return False
         if any(meta.get(k) != v for k, v in want.items()):
             # The model, adapter or prompt changed since it was written.
             path.unlink(missing_ok=True)
@@ -1826,8 +2019,16 @@ class ChatSession:
         the freshly trained adapter anyway. On a skipped run, a failure, or
         an exception, the previous model is restored before returning.
         """
+        # Both branches end the same way: a trainer child process has exited,
+        # and whoever called this reloads the adapter immediately afterwards.
+        # That reload is a multi-gigabyte allocation landing in the middle of
+        # the child's bulk Metal teardown, which is the sequence that panics
+        # the driver — so the wait goes here, once, rather than at each of the
+        # several places that reload.
         if not self.config.get("gpu", {}).get("unload_model_during_training", True):
-            return training.run_training(self.config, iters=iters)
+            trained = training.run_training(self.config, iters=iters)
+            training.settle_after_trainer_exit(self.config, status_fn=self.output_fn)
+            return trained
 
         self.output_fn("  [Train] Unloading model so the trainer has the GPU to itself...")
         self._unload_model()
@@ -1836,6 +2037,7 @@ class ChatSession:
             trained = training.run_training(self.config, iters=iters)
             return trained
         finally:
+            training.settle_after_trainer_exit(self.config, status_fn=self.output_fn)
             if not trained:
                 self._restore_model()
 
@@ -2653,6 +2855,18 @@ class ChatSession:
             from symbio.app.config import save_config
             rest = user_input[len("/telemetry"):].strip().lower()
             tcfg = self.config.setdefault("telemetry", {})
+            # `/telemetry` with no argument, or `/telemetry activity [days]`,
+            # reads the local activity log back. It had been written to since
+            # day one and never once read — log_path() existed and nothing
+            # called it — so a MEDIUM-risk security alert and a tool failing
+            # four calls in five both sat in the file unnoticed.
+            if rest in ("", "all") or rest.split()[0] in ("activity", "all"):
+                parts = rest.split()
+                verbose = "all" in parts
+                days = next((int(p) for p in parts if p.isdigit()), None)
+                report = local_telemetry.summarise(days=days)
+                self.output_fn(local_telemetry.format_summary(report, verbose=verbose))
+                return True
             if rest in ("on", "enable", "true", "yes", "1"):
                 # Re-ask consent with the full data set disclosed, honoring the
                 # "required consent" rule: the user can say No and keep going.
@@ -3264,9 +3478,21 @@ class ChatSession:
             browser_note = ""
             if self.browser.is_open:
                 browser_note = "\n\n[" + self.browser.status() + "]"
+            # Static parts first, volatile parts last.
+            #
+            # This block is prepended to the last user message, so everything
+            # from the first byte that differs from last turn has to be
+            # re-prefilled. env_note is fixed for the life of the machine;
+            # sitting it after rag_block meant a new retrieval hit pushed it
+            # into the re-prefilled region every time, for nothing.
+            #
+            # Measured on a 349-token block: when the clock ticks alone this
+            # changes nothing (344 tokens reused either way), but when the RAG
+            # hit also changes — the common case, since retrieval runs per
+            # query — reuse goes from 141 tokens to 243.
             context_block = (
-                memory.curated_memory_block(self.config) + rag_block
-                + prompts.env_note() + prompts.time_note() + nudge_block
+                memory.curated_memory_block(self.config) + prompts.env_note()
+                + rag_block + prompts.time_note() + nudge_block
                 + browser_note
             ).lstrip()
             # Greeting guard: the small model sometimes invents random tool
@@ -4049,6 +4275,67 @@ class ChatSession:
                 ok, out = sandbox.run_shell(cmd, self.config, confirm_fn=self.confirm_fn)
                 return f"Shell command exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
             ok, out = sandbox.run_sandboxed(params["cmd"], self.config, confirm_fn=self.confirm_fn)
+
+            # Launch a GUI app the way macOS actually launches one.
+            #
+            # 481 of the 542 run_command failures in the activity log are this
+            # single mistake: the model trying to start a desktop app by a CLI
+            # name that has never existed.
+            #
+            #     241  chrome            120  chromebrowser
+            #     120  chrome-app
+            #
+            # env_note() already tells it, in the prompt, on every single turn,
+            # that "GUI apps have no CLI names like 'chrome'" and to use
+            # `open -a 'Google Chrome'`. It read that and did it anyway, 481
+            # times. Another sentence of prompt is not the fix; this is
+            # deterministic and belongs in code.
+            if not ok:
+                app = _gui_app_for(params["cmd"], out)
+                if app:
+                    self._status(f"  [Shell] '{params['cmd'].strip()}' is a GUI app; "
+                                 f"launching it with open -a '{app}'.")
+                    retry = f"open -a {shlex.quote(app)}"
+                    ok, out = sandbox.run_sandboxed(
+                        retry, self.config, confirm_fn=self.confirm_fn)
+                    local_telemetry.log_event(
+                        "gui_launch_recover", asked=params["cmd"].strip(),
+                        app=app, ok=ok)
+
+                    # Recover the action AND keep the lesson.
+                    #
+                    # This turn's failure-then-fix is normally what feeds the
+                    # mistake-note loop: a tool call that fails followed by one
+                    # that works gets captured, digested, and trained on. By
+                    # recovering internally the loop would never see a failure,
+                    # and the model would go on emitting `chrome` forever with
+                    # nothing to learn from.
+                    #
+                    # Writing the note here keeps that signal. Worth noting the
+                    # loop had this exact lesson available 481 times already and
+                    # the mistake kept happening — so this is not a substitute
+                    # for the deterministic fix above, it is the training data
+                    # the fix would otherwise have destroyed.
+                    if ok:
+                        try:
+                            learn.save_mistake_note(
+                                original_query=f"launch the {app} app",
+                                wrong_answer=f"<cmd>{params['cmd'].strip()}</cmd>",
+                                # Carry the real failure text, not a paraphrase.
+                                # The note is training data, and the model
+                                # needs to see the error it actually produced.
+                                correction=(
+                                    f"Command not found: {params['cmd'].strip()}. "
+                                    f"GUI apps have no CLI name; launch them "
+                                    f"with open -a."),
+                                correct_answer=f"<cmd>{retry}</cmd>",
+                            )
+                        except Exception:
+                            # Never let bookkeeping fail a turn that worked.
+                            pass
+
+                    return (f"Command '{retry}' exited {'ok' if ok else 'error'}.\n"
+                            f"Output:\n{out}")
             return f"Command '{params['cmd']}' exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
         if name == "run_remote":
@@ -4140,7 +4427,63 @@ class ChatSession:
                     "Retry now with <press>down</press>. "
                     "Do not explain the failure — just emit the corrected press tag."
                 )
-            out = browser_action_tools[name]()
+            def _act() -> str:
+                """Run the action, turning a raised 'not open' into the same
+                string the other paths return.
+
+                The browser reports a closed session two different ways and the
+                activity log shows both: 314 failures came back as a returned
+                "Browser click error: Browser is not open...", and another 122
+                as "Tool 'browser_click' failed unexpectedly: Browser is not
+                open..." — an exception caught by the generic handler upstream.
+                Recovering only the returned form would leave more than a
+                quarter of the failures untouched for no reason.
+                """
+                try:
+                    return browser_action_tools[name]()
+                except Exception as exc:
+                    if "browser is not open" in str(exc).lower():
+                        # name already reads "browser_click"; prefixing another
+                        # "Browser" gives "Browser browser_click error".
+                        return f"{name} error: {exc}"
+                    raise
+
+            out = _act()
+
+            # Reopen and retry once when the page is gone.
+            #
+            # This is the single largest tool failure in the system. Of 567
+            # browser_click calls in the local activity log, 453 failed, and
+            # 450 of those failed with "Browser is not open" — the model
+            # clicking at a page that was never opened or whose session was
+            # reset. The old behaviour was to append a sentence telling it to
+            # open a page first, which it had already been told and which
+            # plainly was not working.
+            #
+            # _last_browsed_url has existed since the beginning for exactly
+            # this, described in its own comment as being "used to auto-recover
+            # when a later click/type/scroll/press finds the browser session
+            # was reset or never opened". It was assigned and never once read.
+            #
+            # Recovery is only attempted for a real action (closing a browser
+            # by reopening it first is absurd), only when there is a URL this
+            # session already opened successfully, and only once — a retry loop
+            # against a page that will not load is worse than a clear failure.
+            if (
+                "Browser is not open" in out
+                and name != "browser_close"
+                and self._last_browsed_url
+            ):
+                self._status(f"  [Browser] Session was closed; reopening "
+                             f"{self._last_browsed_url} to retry {name}.")
+                reopened = self.browser.open(self._last_browsed_url)
+                if "blocked" not in reopened and "error" not in reopened.lower():
+                    out = _act()
+                    local_telemetry.log_event(
+                        "browser_recover", url=self._last_browsed_url, tool=name,
+                        ok="Browser is not open" not in out,
+                    )
+
             if "Browser is not open" in out:
                 out = (
                     f"{out} Use <browse>https://...</browse> to load a page first, "

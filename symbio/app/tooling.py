@@ -792,6 +792,160 @@ def _extract_bare_tool_calls(text: str) -> list[tuple[int, int, dict[str, Any]]]
     return out
 
 
+# Canonical tool names only, longest first so `list_cron_jobs` wins over a
+# shorter name that prefixes it.
+#
+# Deliberately NOT including _HERMES_NAME_MAP's short aliases. Those contain
+# bare words like "type", "read" and "open", and the dedicated XML handlers
+# above already parse <type enter="true">...</type> — matching it here too
+# would emit the same call twice. write_note is excluded for the same reason:
+# the self-closing <note/>|<write_note/> handler already covers it.
+_CALLABLE_NAMES = sorted(
+    (n for n in _TOOL_GROUPS if n != "write_note"), key=len, reverse=True)
+_NAME_ALT = "|".join(re.escape(n) for n in _CALLABLE_NAMES)
+
+# Improvised function-call syntax, with arguments.
+#
+# 25 of the 27 tools declared in the <tools> block have no worked example
+# anywhere in the assembled system prompt — only compact_memory and config_set
+# do. A tool the model has seen declared but never seen *called* gets a call
+# shape invented for it, and the invented shape is consistently a dotted or
+# parenthesised function with keyword attributes:
+#
+#     .schedule_job schedule="0 9 * * *" text="stretch"
+#     schedule_job(schedule="0 9 * * *", text="stretch")
+#     <schedule_job schedule="0 9 * * *" text="stretch" />
+#
+# None of these matched any pattern, so the tool silently never ran and the
+# raw text was printed to the user as the reply — a success-looking line for
+# a job that was never created. That is the same failure the self-closing
+# <note/> handler above was written for; this generalises it to every tool
+# instead of fixing them one at a time as each is caught in the wild.
+#
+# Anchored on the exact declared names, so prose cannot trip it.
+_FUNC_ATTR_RE = re.compile(
+    r'[.<]?\b(' + _NAME_ALT + r')\b\s*\(?\s*'
+    r'((?:\w+\s*=\s*(?:"[^"]*"|\'[^\']*\')\s*,?\s*)+)\)?\s*/?>?'
+)
+
+# The same, with no arguments: `.list_cron_jobs` or `list_cron_jobs()`. The
+# dot or the parentheses are required — a bare tool name is far too common in
+# ordinary prose ("I'll delegate_task to the worker") to treat as a call.
+_FUNC_NOARG_RE = re.compile(
+    r'(?:\.(' + _NAME_ALT + r')\b(?!\s*\()|\b(' + _NAME_ALT + r')\s*\(\s*\))'
+)
+
+_ATTR_PAIR_RE = re.compile(r'(\w+)\s*=\s*(["\'])(.*?)\2', re.DOTALL)
+
+
+def _in_code_fence(text: str, index: int) -> bool:
+    """True when `index` falls inside a markdown code fence — the model is
+    showing an example there, not calling anything."""
+    return text[:index].count("```") % 2 == 1
+
+
+def _find_function_attr_calls(
+        reply: str) -> list[tuple[int, int, str, dict[str, Any]]]:
+    """Recognise the improvised function form for any declared tool.
+
+    Returns (start, end, name, params) so callers can both execute the call and
+    cut it out of the visible reply — a recovered call that still printed its
+    raw tag to the user would be a worse bug than not recovering it.
+
+    Regions already wrapped in the XML tool-call tag are masked out so a
+    well-formed call is not also counted here.
+    """
+    masked = list(reply)
+    for m in _WRAPPED_TOOL_CALL_RE.finditer(reply):
+        for i in range(m.start(), m.end()):
+            masked[i] = "\x00"
+    scan = "".join(masked)
+
+    out: list[tuple[int, int, str, dict[str, Any]]] = []
+    seen: set[tuple[int, int]] = set()
+
+    for m in _FUNC_ATTR_RE.finditer(scan):
+        if _in_code_fence(reply, m.start()):
+            continue
+        name = _HERMES_NAME_MAP.get(m.group(1), m.group(1))
+        if name not in _TOOL_GROUPS:
+            continue
+        params = {k.lower(): v for k, _q, v in _ATTR_PAIR_RE.findall(m.group(2))}
+        if not params:
+            continue
+        seen.add((m.start(), m.end()))
+        out.append((m.start(), m.end(), name, _normalize_args(name, params)))
+
+    for m in _FUNC_NOARG_RE.finditer(scan):
+        if _in_code_fence(reply, m.start()):
+            continue
+        if any(s <= m.start() < e for s, e in seen):
+            continue
+        raw = m.group(1) or m.group(2)
+        name = _HERMES_NAME_MAP.get(raw, raw)
+        if name not in _TOOL_GROUPS:
+            continue
+        out.append((m.start(), m.end(), name, {}))
+
+    return out
+
+
+def _extract_function_attr_calls(reply: str) -> list[tuple[str, dict[str, Any]]]:
+    return [(n, p) for _s, _e, n, p in _find_function_attr_calls(reply)]
+
+
+# One key, its value running to the delimiter that ends it: either a comma
+# before the next "key": , or the closing brace of the arguments object.
+_LOOSE_FIELD_RE = re.compile(
+    r'"(?P<key>\w+)"\s*:\s*"(?P<val>.*?)"\s*(?=,\s*"\w+"\s*:|\s*\}\s*\}?\s*$)',
+    re.DOTALL)
+
+
+def _repair_tool_call_json(raw: str) -> dict[str, Any] | None:
+    """Recover a tool call whose JSON the model failed to escape.
+
+    Writing code through a JSON string is the one thing this model reliably
+    gets wrong. Asked to insert a database row it produced:
+
+        {"name": "execute_code", "arguments": {"code": "import sqlite3
+        ...cur.execute("INSERT INTO users ...")"}}
+
+    — a raw newline and an unescaped double quote inside a JSON string. The
+    object does not parse, so the call vanished completely and the turn did
+    nothing, silently. Any code containing a quote hits this, which is most
+    code worth running.
+
+    Rather than guess at arbitrary broken JSON, this pulls out the name and
+    then each "key": "value" pair by scanning to the delimiter that ends it,
+    taking the value verbatim. Returns None when the shape is not recognisable
+    — a wrong repair would be worse than no call.
+    """
+    name_m = re.search(r'"(?:name|function)"\s*:\s*"([^"]+)"', raw)
+    if not name_m:
+        return None
+
+    args_m = re.search(r'"(?:arguments|parameters|args)"\s*:\s*\{(.*)\}',
+                       raw, re.DOTALL)
+    params: dict[str, Any] = {}
+    if args_m:
+        body = args_m.group(1)
+        for f in _LOOSE_FIELD_RE.finditer(body):
+            value = f.group("val")
+            # The model escaped some of it correctly; honour what it did.
+            value = (value.replace("\\n", "\n").replace("\\t", "\t")
+                          .replace('\\"', '"').replace("\\\\", "\\"))
+            params[f.group("key")] = value
+        # Numbers and booleans, which need no quote handling.
+        for f in re.finditer(r'"(\w+)"\s*:\s*(-?\d+(?:\.\d+)?|true|false)\b', body):
+            key, lit = f.group(1), f.group(2)
+            if key in params:
+                continue
+            params[key] = (True if lit == "true" else False if lit == "false"
+                           else float(lit) if "." in lit else int(lit))
+
+    return {"name": name_m.group(1), "arguments": params}
+
+
 def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
     """Extract tool calls from the model reply.
 
@@ -970,7 +1124,9 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
         try:
             call = json.loads(m.group(1).strip())
         except json.JSONDecodeError:
-            continue
+            call = _repair_tool_call_json(m.group(1).strip())
+            if call is None:
+                continue
         if not isinstance(call, dict):
             continue
         name = call.get("name") or call.get("function")
@@ -991,6 +1147,12 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
         if isinstance(name, str):
             internal_name = _HERMES_NAME_MAP.get(name, name)
             tools.append((internal_name, _normalize_args(internal_name, params)))
+
+    # Improvised function form, for the tools the prompt declares but never
+    # demonstrates. Last, so a well-formed call in any supported syntax is
+    # already in `tools` and this only ever adds what nothing else caught.
+    if not tools:
+        tools.extend(_extract_function_attr_calls(reply))
 
     if enabled_groups is not None:
         tools = [
@@ -1123,6 +1285,15 @@ def strip_tool_tags(reply: str) -> str:
     # Drop bare JSON tool-call objects the model may emit unwrapped, so the
     # raw JSON never reaches the visible reply.
     for _start, _end, _c in sorted(_extract_bare_tool_calls(display), key=lambda s: s[0], reverse=True):
+        display = display[:_start] + display[_end:]
+    # And the improvised function forms parse_tools now executes. Recovering
+    # the call but still printing its raw tag is worse than not recovering it:
+    # observed live as
+    #     Caine: >tag
+    #     <schedule_job schedule="0 9 * * *" text="stretch"/>
+    # where the job WAS created and the user was shown the markup anyway.
+    for _start, _end, _n, _p in sorted(
+            _find_function_attr_calls(display), key=lambda s: s[0], reverse=True):
         display = display[:_start] + display[_end:]
     display = _UNTERMINATED_TAG_RE.sub('', display)
     return clean_response(display)
