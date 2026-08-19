@@ -104,25 +104,44 @@ Symbio (for now) runs on Apple Silicon using MLX and Metal performance shaders
 ## Quick start
 
 ```bash
-# Create a virtual environment and install dependencies
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-# Install `symbio` / `symb` as system-wide commands.
-# Editable install links the current repo so code edits take effect immediately:
-pip install -e .
-
-# First launch runs an interactive setup wizard:
-#   - set names, pick a model preset, choose speed mode
-#   - toggle browser, web search, MOA dispatch, Telegram
-#   - add Telegram bot token and allowed chat IDs
-symbio
-# Or the short alias:
-#   symb
-# Re-run the wizard anytime with:
-#   symb setup
+./install.sh
 ```
+
+That is the whole install. It checks you are on Apple silicon with enough RAM
+and disk, creates its own virtualenv, installs everything, fetches the browser
+engine, and then **drops you into a shell with the environment already
+active** — so there is nothing to remember to activate. Type `exit` to leave;
+your original shell is untouched.
+
+Then:
+
+```bash
+symbio        # or the short alias: symb
+```
+
+First launch runs an interactive setup wizard (names, model preset, speed mode,
+and toggles for browser, web search, MOA dispatch and Telegram), downloads the
+model, and spends ~25 seconds warming its prompt cache. Later starts take about
+a second, because that cache is saved to disk. Re-run the wizard any time with
+`symb setup`.
+
+<details>
+<summary>Install options</summary>
+
+```bash
+./install.sh --prefetch-model   # download the 4.1 GB model now, not on first run
+./install.sh --no-browser       # skip the ~150 MB Chromium download
+./install.sh --with-native      # include the experimental symbio_native extras
+./install.sh --dev              # include dev/test dependencies
+./install.sh --no-shell         # install only; do not enter the environment
+./install.sh --venv PATH        # put the virtualenv somewhere else
+```
+
+Requirements are checked before anything is downloaded: macOS on Apple silicon
+(MLX has no CPU fallback), Python 3.10+, ~8 GB free disk, and 16 GB of RAM for
+the default 8B model — less RAM works, but pick a smaller model in the wizard.
+
+</details>
 ## How it works
 
 1. **You talk to the AI** — Ask it anything

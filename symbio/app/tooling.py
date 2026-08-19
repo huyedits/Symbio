@@ -894,6 +894,58 @@ def _extract_function_attr_calls(reply: str) -> list[tuple[str, dict[str, Any]]]
     return [(n, p) for _s, _e, n, p in _find_function_attr_calls(reply)]
 
 
+# One key, its value running to the delimiter that ends it: either a comma
+# before the next "key": , or the closing brace of the arguments object.
+_LOOSE_FIELD_RE = re.compile(
+    r'"(?P<key>\w+)"\s*:\s*"(?P<val>.*?)"\s*(?=,\s*"\w+"\s*:|\s*\}\s*\}?\s*$)',
+    re.DOTALL)
+
+
+def _repair_tool_call_json(raw: str) -> dict[str, Any] | None:
+    """Recover a tool call whose JSON the model failed to escape.
+
+    Writing code through a JSON string is the one thing this model reliably
+    gets wrong. Asked to insert a database row it produced:
+
+        {"name": "execute_code", "arguments": {"code": "import sqlite3
+        ...cur.execute("INSERT INTO users ...")"}}
+
+    — a raw newline and an unescaped double quote inside a JSON string. The
+    object does not parse, so the call vanished completely and the turn did
+    nothing, silently. Any code containing a quote hits this, which is most
+    code worth running.
+
+    Rather than guess at arbitrary broken JSON, this pulls out the name and
+    then each "key": "value" pair by scanning to the delimiter that ends it,
+    taking the value verbatim. Returns None when the shape is not recognisable
+    — a wrong repair would be worse than no call.
+    """
+    name_m = re.search(r'"(?:name|function)"\s*:\s*"([^"]+)"', raw)
+    if not name_m:
+        return None
+
+    args_m = re.search(r'"(?:arguments|parameters|args)"\s*:\s*\{(.*)\}',
+                       raw, re.DOTALL)
+    params: dict[str, Any] = {}
+    if args_m:
+        body = args_m.group(1)
+        for f in _LOOSE_FIELD_RE.finditer(body):
+            value = f.group("val")
+            # The model escaped some of it correctly; honour what it did.
+            value = (value.replace("\\n", "\n").replace("\\t", "\t")
+                          .replace('\\"', '"').replace("\\\\", "\\"))
+            params[f.group("key")] = value
+        # Numbers and booleans, which need no quote handling.
+        for f in re.finditer(r'"(\w+)"\s*:\s*(-?\d+(?:\.\d+)?|true|false)\b', body):
+            key, lit = f.group(1), f.group(2)
+            if key in params:
+                continue
+            params[key] = (True if lit == "true" else False if lit == "false"
+                           else float(lit) if "." in lit else int(lit))
+
+    return {"name": name_m.group(1), "arguments": params}
+
+
 def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
     """Extract tool calls from the model reply.
 
@@ -1072,7 +1124,9 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
         try:
             call = json.loads(m.group(1).strip())
         except json.JSONDecodeError:
-            continue
+            call = _repair_tool_call_json(m.group(1).strip())
+            if call is None:
+                continue
         if not isinstance(call, dict):
             continue
         name = call.get("name") or call.get("function")
