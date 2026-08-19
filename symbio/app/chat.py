@@ -1525,6 +1525,7 @@ class ChatSession:
         messages: list[dict[str, str]],
         chunk_prefix: str = "",
         timings: dict[str, float | None] | None = None,
+        think: bool = True,
     ) -> tuple[str, bool]:
         """Generate the next reply for `messages`.
 
@@ -1572,7 +1573,7 @@ class ChatSession:
             # so a mismatch here is invisible to the regression net.
             prompt_text = self.tokenizer.apply_chat_template(
                 messages, tokenize=False, add_generation_prompt=True,
-                enable_thinking=training.THINKING_ENABLED,
+                enable_thinking=think,
             )
             # Encode the FULL templated prompt (system + tools + conversation).
             # The Mistral chat template only renders the system message inside a
@@ -1781,7 +1782,7 @@ class ChatSession:
         ]
         prompt_text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
-            enable_thinking=training.THINKING_ENABLED,
+            enable_thinking=training.THINKING_ENABLED
         )
         # Make a fresh sampler for deterministic JSON.
         sampler = make_sampler(temp=0.1, top_p=0.9)
@@ -3403,7 +3404,7 @@ class ChatSession:
         browser_retry_nudged = False
         blank_retry_nudged = False
         echo_retry_nudged = False
-        for _ in range(max_rounds):
+        for round_num in range(max_rounds):
             # Once we are inside a tool-followup round, lower the temperature
             # so the model sticks to the tag grammar instead of drifting into
             # prose or inventing fake commands.
@@ -3490,7 +3491,9 @@ class ChatSession:
                 _had_prompt_cache = self._prompt_cache is not None
                 try:
                     raw_reply, streamed_live = self._generate_reply(
-                        messages, chunk_prefix=chunk_prefix, timings=timings)
+                        messages, chunk_prefix=chunk_prefix, timings=timings,
+                        think=(round_num > 0)
+                        )
                     # The thinking block is surfaced to the user (streamed by
                     # StreamingStripper, or printed below when not streaming);
                     # the reply itself stays reasoning-free so tools and
