@@ -39,6 +39,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "iters": 300,
         "epochs": 2,
         "max_iters": 2000,
+        # How long to wait after a trainer child exits before loading a model
+        # again. The child hands every Metal buffer back in one bulk teardown,
+        # and a multi-gigabyte allocation landing in the middle of that is what
+        # panics IOGPUFamily on Apple silicon — three kernel panics in twenty
+        # minutes on 2026-08-17. vm_stat reports the pages free immediately,
+        # so this floor covers the driver-side reclaim that cannot be observed
+        # from userspace; settle_free_gb then polls for the part that can.
+        # Set to 0 to disable (there is no userspace fix, only less exposure).
+        "settle_after_training_seconds": 15,
+        "settle_free_gb": 6.0,
+        "settle_timeout_seconds": 180,
+        # Ceiling on how many passes the `iters` floor may buy a small corpus.
+        # Without it the floor stops being a floor: at 6 samples the old 150
+        # meant 25 epochs, which memorises the samples instead of learning
+        # from them.
+        "max_epochs": 4,
         # Compute the loss only over the assistant's answer. Without this the
         # system prompt — ~99% of every sample's tokens, and identical across
         # all of them — dominates the gradient, and the run measures how well
@@ -93,6 +109,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # model. Costs a few hundred MB in cache/ (KV for the whole prefix);
         # set false to trade the faster start back for the disk.
         "persist_prompt_cache": True,
+        # Start reading that persisted cache off disk *while* the weights are
+        # still loading, rather than after. The two are the slowest parts of
+        # boot and contend for almost nothing, so overlapping them hides the
+        # read almost entirely. Only the read is overlapped — the cache is not
+        # materialized onto the GPU until the weight load has finished, so
+        # there is never a second Metal client during the load window.
+        # Set false on a memory-tight machine: the read raises peak page-cache
+        # residency at the moment the load is already at its high-water mark.
+        "prefetch_prompt_cache_during_load": True,
         # How long a chat front-end should wait before showing a "thinking…"
         # placeholder if the model has not emitted a visible token yet.
         "first_chunk_timeout_ms": 600,
@@ -305,7 +330,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_worker_rounds": 4,
         "worker_golden_set_enabled": True,
         "worker_golden_regression_threshold": 0,
+        # Applies to hand-written eval_tasks.json only. Derived checks grade a
+        # reply by how much of the steps text it reproduces, so a worker that
+        # learns to perform its skill fails them by definition; those report
+        # without reverting (see skill_eval.has_custom_tasks).
         "worker_golden_rollback_on_regression": True,
+        # Append each worker reply to that worker's training corpus. Off by
+        # default: nothing validates the reply first, so this trains a worker
+        # on its own unchecked output.
+        "capture_worker_samples": False,
         # When a worker adapter regresses on a golden case, synthesize extra
         # training samples from the case's ideal reply and do a targeted
         # retrain before deciding whether to roll back.
