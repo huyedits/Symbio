@@ -44,7 +44,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - depends on how it was launched
     TagIndex = None
 
-<<<<<<< HEAD
+
 
 # Bare words the model reaches for when it means "launch this desktop app".
 # Only the ones actually seen failing, plus their obvious spellings — a wide
@@ -88,11 +88,11 @@ def _gui_app_for(cmd: str, output: str) -> str | None:
     return _GUI_APP_ALIASES.get(word.lower())
 
 
-=======
+
 def bare_browser_launch_note(cmd: str, ok: bool) -> str:
     """say what the command did :P"""
     return ""
->>>>>>> 149166f (fixed the <end. tag. HUMAN i love yall <3 make sure people can see this! ^.^ <3)
+
 def _looks_like_shell_command(cmd: str) -> bool:
     """Return True if a command uses shell syntax that shlex+no-shell can't handle.
 
