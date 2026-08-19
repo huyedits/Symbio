@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import shlex
 import sys
 import threading
 import time
@@ -42,6 +43,48 @@ try:
     from tag_rag import TagIndex
 except ModuleNotFoundError:  # pragma: no cover - depends on how it was launched
     TagIndex = None
+
+
+# Bare words the model reaches for when it means "launch this desktop app".
+# Only the ones actually seen failing, plus their obvious spellings — a wide
+# net here would turn a genuine "command not found" into a surprise app launch.
+_GUI_APP_ALIASES: dict[str, str] = {
+    "chrome": "Google Chrome",
+    "chromebrowser": "Google Chrome",
+    "chrome-app": "Google Chrome",
+    "chrome_app": "Google Chrome",
+    "googlechrome": "Google Chrome",
+    "google-chrome": "Google Chrome",
+    "safari": "Safari",
+    "spotify": "Spotify",
+    "finder": "Finder",
+    "terminal.app": "Terminal",
+    "notes": "Notes",
+    "calendar": "Calendar",
+    "messages": "Messages",
+    "mail": "Mail",
+    "preview": "Preview",
+    "vscode": "Visual Studio Code",
+    "code-app": "Visual Studio Code",
+}
+
+
+def _gui_app_for(cmd: str, output: str) -> str | None:
+    """The macOS app a failed bare command was probably trying to launch.
+
+    Returns None unless the command is a single bare word (no arguments, no
+    shell syntax) that names a known GUI app AND the failure was specifically
+    "command not found". A command that failed for any other reason is a real
+    failure and must be reported as one.
+    """
+    if sys.platform != "darwin":
+        return None
+    if "command not found" not in output.lower():
+        return None
+    word = cmd.strip().strip("'\"")
+    if not word or len(word.split()) != 1:
+        return None
+    return _GUI_APP_ALIASES.get(word.lower())
 
 
 def _looks_like_shell_command(cmd: str) -> bool:
@@ -2812,6 +2855,18 @@ class ChatSession:
             from symbio.app.config import save_config
             rest = user_input[len("/telemetry"):].strip().lower()
             tcfg = self.config.setdefault("telemetry", {})
+            # `/telemetry` with no argument, or `/telemetry activity [days]`,
+            # reads the local activity log back. It had been written to since
+            # day one and never once read — log_path() existed and nothing
+            # called it — so a MEDIUM-risk security alert and a tool failing
+            # four calls in five both sat in the file unnoticed.
+            if rest in ("", "all") or rest.split()[0] in ("activity", "all"):
+                parts = rest.split()
+                verbose = "all" in parts
+                days = next((int(p) for p in parts if p.isdigit()), None)
+                report = local_telemetry.summarise(days=days)
+                self.output_fn(local_telemetry.format_summary(report, verbose=verbose))
+                return True
             if rest in ("on", "enable", "true", "yes", "1"):
                 # Re-ask consent with the full data set disclosed, honoring the
                 # "required consent" rule: the user can say No and keep going.
@@ -3423,9 +3478,21 @@ class ChatSession:
             browser_note = ""
             if self.browser.is_open:
                 browser_note = "\n\n[" + self.browser.status() + "]"
+            # Static parts first, volatile parts last.
+            #
+            # This block is prepended to the last user message, so everything
+            # from the first byte that differs from last turn has to be
+            # re-prefilled. env_note is fixed for the life of the machine;
+            # sitting it after rag_block meant a new retrieval hit pushed it
+            # into the re-prefilled region every time, for nothing.
+            #
+            # Measured on a 349-token block: when the clock ticks alone this
+            # changes nothing (344 tokens reused either way), but when the RAG
+            # hit also changes — the common case, since retrieval runs per
+            # query — reuse goes from 141 tokens to 243.
             context_block = (
-                memory.curated_memory_block(self.config) + rag_block
-                + prompts.env_note() + prompts.time_note() + nudge_block
+                memory.curated_memory_block(self.config) + prompts.env_note()
+                + rag_block + prompts.time_note() + nudge_block
                 + browser_note
             ).lstrip()
             # Greeting guard: the small model sometimes invents random tool
@@ -4208,6 +4275,67 @@ class ChatSession:
                 ok, out = sandbox.run_shell(cmd, self.config, confirm_fn=self.confirm_fn)
                 return f"Shell command exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
             ok, out = sandbox.run_sandboxed(params["cmd"], self.config, confirm_fn=self.confirm_fn)
+
+            # Launch a GUI app the way macOS actually launches one.
+            #
+            # 481 of the 542 run_command failures in the activity log are this
+            # single mistake: the model trying to start a desktop app by a CLI
+            # name that has never existed.
+            #
+            #     241  chrome            120  chromebrowser
+            #     120  chrome-app
+            #
+            # env_note() already tells it, in the prompt, on every single turn,
+            # that "GUI apps have no CLI names like 'chrome'" and to use
+            # `open -a 'Google Chrome'`. It read that and did it anyway, 481
+            # times. Another sentence of prompt is not the fix; this is
+            # deterministic and belongs in code.
+            if not ok:
+                app = _gui_app_for(params["cmd"], out)
+                if app:
+                    self._status(f"  [Shell] '{params['cmd'].strip()}' is a GUI app; "
+                                 f"launching it with open -a '{app}'.")
+                    retry = f"open -a {shlex.quote(app)}"
+                    ok, out = sandbox.run_sandboxed(
+                        retry, self.config, confirm_fn=self.confirm_fn)
+                    local_telemetry.log_event(
+                        "gui_launch_recover", asked=params["cmd"].strip(),
+                        app=app, ok=ok)
+
+                    # Recover the action AND keep the lesson.
+                    #
+                    # This turn's failure-then-fix is normally what feeds the
+                    # mistake-note loop: a tool call that fails followed by one
+                    # that works gets captured, digested, and trained on. By
+                    # recovering internally the loop would never see a failure,
+                    # and the model would go on emitting `chrome` forever with
+                    # nothing to learn from.
+                    #
+                    # Writing the note here keeps that signal. Worth noting the
+                    # loop had this exact lesson available 481 times already and
+                    # the mistake kept happening — so this is not a substitute
+                    # for the deterministic fix above, it is the training data
+                    # the fix would otherwise have destroyed.
+                    if ok:
+                        try:
+                            learn.save_mistake_note(
+                                original_query=f"launch the {app} app",
+                                wrong_answer=f"<cmd>{params['cmd'].strip()}</cmd>",
+                                # Carry the real failure text, not a paraphrase.
+                                # The note is training data, and the model
+                                # needs to see the error it actually produced.
+                                correction=(
+                                    f"Command not found: {params['cmd'].strip()}. "
+                                    f"GUI apps have no CLI name; launch them "
+                                    f"with open -a."),
+                                correct_answer=f"<cmd>{retry}</cmd>",
+                            )
+                        except Exception:
+                            # Never let bookkeeping fail a turn that worked.
+                            pass
+
+                    return (f"Command '{retry}' exited {'ok' if ok else 'error'}.\n"
+                            f"Output:\n{out}")
             return f"Command '{params['cmd']}' exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
         if name == "run_remote":
@@ -4299,7 +4427,63 @@ class ChatSession:
                     "Retry now with <press>down</press>. "
                     "Do not explain the failure — just emit the corrected press tag."
                 )
-            out = browser_action_tools[name]()
+            def _act() -> str:
+                """Run the action, turning a raised 'not open' into the same
+                string the other paths return.
+
+                The browser reports a closed session two different ways and the
+                activity log shows both: 314 failures came back as a returned
+                "Browser click error: Browser is not open...", and another 122
+                as "Tool 'browser_click' failed unexpectedly: Browser is not
+                open..." — an exception caught by the generic handler upstream.
+                Recovering only the returned form would leave more than a
+                quarter of the failures untouched for no reason.
+                """
+                try:
+                    return browser_action_tools[name]()
+                except Exception as exc:
+                    if "browser is not open" in str(exc).lower():
+                        # name already reads "browser_click"; prefixing another
+                        # "Browser" gives "Browser browser_click error".
+                        return f"{name} error: {exc}"
+                    raise
+
+            out = _act()
+
+            # Reopen and retry once when the page is gone.
+            #
+            # This is the single largest tool failure in the system. Of 567
+            # browser_click calls in the local activity log, 453 failed, and
+            # 450 of those failed with "Browser is not open" — the model
+            # clicking at a page that was never opened or whose session was
+            # reset. The old behaviour was to append a sentence telling it to
+            # open a page first, which it had already been told and which
+            # plainly was not working.
+            #
+            # _last_browsed_url has existed since the beginning for exactly
+            # this, described in its own comment as being "used to auto-recover
+            # when a later click/type/scroll/press finds the browser session
+            # was reset or never opened". It was assigned and never once read.
+            #
+            # Recovery is only attempted for a real action (closing a browser
+            # by reopening it first is absurd), only when there is a URL this
+            # session already opened successfully, and only once — a retry loop
+            # against a page that will not load is worse than a clear failure.
+            if (
+                "Browser is not open" in out
+                and name != "browser_close"
+                and self._last_browsed_url
+            ):
+                self._status(f"  [Browser] Session was closed; reopening "
+                             f"{self._last_browsed_url} to retry {name}.")
+                reopened = self.browser.open(self._last_browsed_url)
+                if "blocked" not in reopened and "error" not in reopened.lower():
+                    out = _act()
+                    local_telemetry.log_event(
+                        "browser_recover", url=self._last_browsed_url, tool=name,
+                        ok="Browser is not open" not in out,
+                    )
+
             if "Browser is not open" in out:
                 out = (
                     f"{out} Use <browse>https://...</browse> to load a page first, "
