@@ -1,4 +1,4 @@
-# Symbio 🧠
+# Symbio - that fine tuning agent.
 
 > **A local-first AI agent that learns from your corrections.**
 >
@@ -17,10 +17,12 @@
 Most AI agents have a problem:
 
 **They forget.**
+*like forget forget*
+get it cause it was in short term memory? 
 
-You correct an agent today, and tomorrow it makes the same mistake again. You can put instructions in a system prompt, but that makes the prompt larger, harder to maintain, and doesn't really teach the model anything.
+You correct an agent today, and tomorrow it makes the same mistake again. You can put instructions in a system prompt, but that makes the prompt larger, it becomes slower when processing, and doesn't really teach the model anything.
 
-Symbio takes a different approach.
+Symbio takes a different approach - obviously why else make this?
 
 ```text
 You → Agent → Mistake → Correction
@@ -32,38 +34,39 @@ You → Agent → Mistake → Correction
              New adapter
                     ↓
               Agent improves
+       it now can be shown in the layer
 ```
 
 Corrections and successful tool recoveries are automatically collected as training examples. Once enough examples accumulate, Symbio performs a small LoRA fine-tune and reloads the resulting adapter.
 
 The goal is simple:
 
-> **The longer you use Symbio, the more it becomes your agent rather than a generic model.**
+> **The longer you use Symbio, the more you define what AI means to you**
 
-Everything can stay on your machine.
+Everything can stay on your machine, nothing phones "home"
 
 ---
 
-## ✨ Features
+## Le Features
 
-* 🧠 **Learns from corrections** — automatically detects corrections and turns them into training data.
-* 🔧 **Self-corrects tool mistakes** — successful recovery from a failed command can become a training example.
-* 🎓 **Learnable skills** — create a skill as a Markdown procedure and train a dedicated worker adapter for it.
-* 🧬 **LoRA fine-tuning** — only small adapter weights are trained; the base model stays frozen.
-* 🤖 **Mixture of Agents** — a headmaster can delegate bounded tasks to smaller worker models.
-* 💾 **Local memory** — notes, sessions, training data, adapters and caches live locally.
-* 🔎 **RAG retrieval** — relevant notes can be retrieved and supplied as context.
-* 🌐 **Web research** — search the web and automatically save useful discoveries as notes.
-* 🖥️ **Browser automation** — open pages, click, type and scroll through a live browser.
-* 💻 **Shell & Python tools** — execute sandboxed commands and short Python programs.
-* 📱 **Telegram gateway** — use your local Symbio instance from your phone.
-* 🛡️ **Permission gates** — dangerous actions require explicit approval.
-* 🧪 **Golden-set regression protection** — bad fine-tunes can automatically roll back.
-* 📊 **Skill evaluation** — compare base, prompted and adapter performance.
-* ♻️ **Crash recovery** — interrupted training is recorded and can be resumed.
-* 🧹 **Self-pruning** — junk notes and duplicate session turns can be archived.
-* 🔌 **No API required for inference** — the default architecture is designed around local models.
-
+*  **Learns from corrections** — automatically detects corrections and turns them into training data.
+*  **Self-corrects tool mistakes** — successful recovery from a failed command can become a training example.
+*  **Learnable skills** — create a skill as a Markdown procedure and train a dedicated worker adapter for it.
+*  **LoRA fine-tuning** — only small adapter weights are trained; the base model stays frozen.
+*  **Mixture of Agents** — a headmaster can delegate bounded tasks to smaller worker models.
+*  **Local memory** — notes, sessions, training data, adapters and caches live locally.
+*  **RAG retrieval** — relevant notes can be retrieved and supplied as context.
+*  **Web research** — search the web and automatically save useful discoveries as notes.
+*  **Browser automation** — open pages, click, type and scroll through a live browser.
+*  **Shell & Python tools** — execute sandboxed commands and short Python programs.
+*  **Telegram gateway** — use your local Symbio instance from your phone.
+*  **Permission gates** — dangerous actions require explicit approval.
+*  **Golden-set regression protection** — bad fine-tunes can automatically roll back.
+*  **Skill evaluation** — compare base, prompted and adapter performance.
+*  **Crash recovery** — interrupted training is recorded and can be resumed.
+*  **Self-pruning** — junk notes and duplicate session turns can be archived.
+*  **No API required for inference** — the default architecture is designed around local models.
+* 
 ---
 
 ## 🎥 Demo
@@ -92,7 +95,7 @@ Symbio can use a live browser to perform tasks such as opening Chrome and intera
 
 ## Requirements
 
-Symbio currently targets **Apple Silicon Macs** using Apple's MLX stack.
+Symbio currently targets **Apple Silicon Macs** using Apple's MLX stack. (unfortunately until we can get support for CUDA, etc )
 
 ### Recommended
 
@@ -103,7 +106,7 @@ Symbio currently targets **Apple Silicon Macs** using Apple's MLX stack.
 * ~8 GB free disk space for the default setup
 * Additional space for models, adapters and browser data
 
-The default 8B-class configuration is much more comfortable with 16 GB+ RAM. Smaller models can be used on machines with less memory.
+The default 8B-class (or others - check the wizard) configuration is much more comfortable with 16 GB+ RAM. Smaller models can be used on machines with less memory.
 
 > **Hardware compatibility:** Symbio is intended for Apple Silicon Macs. If you test it on different M-series generations or RAM configurations, please open an issue and share the model, RAM and configuration so compatibility can be documented properly.
 
@@ -112,6 +115,8 @@ The default 8B-class configuration is much more comfortable with 16 GB+ RAM. Sma
 ## Install
 
 ```bash
+cd symbio
+git clone https://github.com/huyedits/Symbio
 ./install.sh
 ```
 
@@ -127,7 +132,7 @@ The installer:
 Exit the environment with:
 
 ```bash
-exit
+exit or control + c
 ```
 
 Your original shell is untouched.
@@ -212,7 +217,7 @@ Symbio:   Your name is Alice.
 
 Once the configured threshold is reached, Symbio digests the examples and runs a short LoRA update.
 
-The default threshold is **5 mistake notes**.
+The default threshold is **5 mistake notes** - but you can edit that.
 
 ```text
 notes/mistakes/
@@ -267,7 +272,7 @@ Only a confirmed successful recovery is captured.
 
 ---
 
-# 🧬 Skills
+# Skills
 
 Skills let Symbio turn procedures into dedicated, trainable capabilities.
 
@@ -424,6 +429,7 @@ A larger evaluation using six generated skills produced:
 | Shipping a Parcel Overseas |  0/5 |      5/5 | **5/5** |
 | Sharpening a Kitchen Knife |  1/5 |      4/5 | **5/5** |
 
+WOWIE, that is a BIG BIG jump!!!!
 Overall:
 
 ```text
@@ -454,7 +460,7 @@ Example:
 
 ---
 
-# 🤖 Mixture of Agents
+# Mixture of Agents
 
 Symbio can optionally use a **Mixture of Agents (MoA)** architecture.
 
@@ -522,7 +528,7 @@ Worker training uses the same safety mechanisms as headmaster training:
 
 ---
 
-# 🛡️ Training safety
+# Training safety
 
 Self-training is useful, but blindly training on everything an agent produces is dangerous.
 
@@ -773,30 +779,27 @@ can require an explicit approval before execution.
 
 ---
 
-# 🧰 CLI
-
+#CLI
 ```bash
-symb                       # Start chat
-symb chat                  # Start chat
-symb config                # Show configuration
-symb config get <key>      # Read a config value
-symb config set <key> <value>
-symb train                 # Run LoRA training
-symb skill list            # List skills
-symb skill new <name>      # Create a skill
-symb skill rm <role>       # Delete a skill
-symb skill eval <name>     # Evaluate a skill
-symb eval-lora             # Evaluate headmaster adapter
-symb archive               # Archive idle data
-symb archive --dry-run     # Preview archive actions
-symb gateway status        # Check Telegram
-symb gateway start         # Start Telegram
-symb gateway stop          # Stop Telegram
+symbio # start chat
+symbio config                # Show configuration
+symbio config get <key>      # Read a config value
+symbio config set <key> <value>
+symbio train                 # Run LoRA training
+symbio skill list            # List skills
+symbio skill new <name>      # Create a skill
+symbio skill rm <role>       # Delete a skill
+symbio skill eval <name>     # Evaluate a skill
+symbio eval-lora             # Evaluate headmaster adapter
+symbio archive               # Archive idle data
+symbio archive --dry-run     # Preview archive actions
+symbio gateway status        # Check Telegram
+symbio gateway start         # Start Telegram
+symbio gateway stop          # Stop Telegram
 ```
-
 ---
 
-# 💬 Slash commands
+# Slash commands
 
 Once inside Symbio:
 
@@ -829,7 +832,7 @@ Once inside Symbio:
 
 ---
 
-# 🧬 LoRA fine-tuning
+# LoRA fine-tuning
 
 Symbio uses **LoRA (Low-Rank Adaptation)** through Apple's MLX ecosystem.
 
@@ -885,7 +888,7 @@ Training uses validation checks and can stop early when validation loss plateaus
 
 ---
 
-# ⚙️ Configuration
+#Configuration
 
 Configuration lives in:
 
@@ -925,7 +928,7 @@ Some important settings:
 
 ---
 
-# 🔐 Security
+#Security
 
 Symbio is designed to run locally, but **local does not mean automatically safe**.
 
@@ -935,24 +938,25 @@ The sandbox is intended to reduce accidental damage, not provide a perfect secur
 
 ### Important rules
 
-* Review untrusted code before executing it.
-* Do not give Symbio access to files you would not give a local program access to.
-* Pay attention to permission prompts.
-* A denied action is not retried through another tool.
-* Telegram actions can require explicit approval.
-* Keep secrets such as Telegram tokens out of source control.
+* ### Review untrusted code before executing it.
+* ### Do not give Symbio access to files you would not give a local program access to.
+* ### Pay attention to permission prompts.
+* ### A denied action is not retried through another tool.
+* ### Telegram actions can require explicit approval.
+* ### Keep secrets such as Telegram tokens out of source control.
 
 The environment variable:
 
 ```bash
 SYMBIO_TELEGRAM_TOKEN
+etc
 ```
 
 takes precedence over the token stored in `config.json`.
 
 ---
 
-# 🏗️ Architecture
+# Architecture
 
 The project is organized as a Python package with a thin compatibility wrapper:
 
@@ -1016,7 +1020,7 @@ The project is organized as a Python package with a thin compatibility wrapper:
 
 ---
 
-# 🧪 Tool formats
+# Tool formats
 
 Symbio supports legacy XML tags as well as the preferred Hermes-style tool format.
 
@@ -1060,7 +1064,7 @@ Legacy formats remain supported for compatibility.
 
 ---
 
-# 👤 Dynamic names
+# Dynamic names
 
 Symbio can learn both the user's name and its own name.
 
@@ -1095,7 +1099,7 @@ is intentionally not treated as an assistant rename because smaller models can c
 
 ---
 
-# 📦 Alternative installation
+# Alternative installation
 
 For an isolated install:
 
@@ -1126,7 +1130,7 @@ python main.py --train
 
 ---
 
-# 🗺️ Roadmap
+# Roadmap
 
 ## High priority
 
@@ -1158,7 +1162,7 @@ python main.py --train
 
 ---
 
-# 🤝 Contributing
+# Contributing
 
 Contributions are welcome.
 
@@ -1189,7 +1193,7 @@ If you find a bug, please include:
 
 ---
 
-# ⚠️ Current limitations
+# Current limitations
 
 Symbio is still experimental.
 
@@ -1207,14 +1211,14 @@ If you have a different Apple Silicon configuration, please report whether it wo
 
 ---
 
-# 📜 License
+# License
 
 Apache 2.0
 
 ---
 
-## ⭐ Support the project
+## Support the project :
 
-If Symbio is useful or interesting to you, **a GitHub star helps other people discover it.**
+If Symbio is useful or interesting to you, **a GitHub star helps other people discover it.** :P
 
 If you build something with Symbio, open an issue or discussion and show me what it learned.
