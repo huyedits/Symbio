@@ -18,7 +18,7 @@ Most AI agents have a problem:
 
 **They forget.**
 
-*like forget forget*
+*like forget forget*,
 get it cause it was in short term memory? 
 
 You correct an agent today, and tomorrow it makes the same mistake again. You can put instructions in a system prompt, but that makes the prompt larger, it becomes slower when processing, and doesn't really teach the model anything.
