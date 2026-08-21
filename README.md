@@ -67,7 +67,6 @@ Everything can stay on your machine, nothing phones "home"
 *  **Crash recovery** — interrupted training is recorded and can be resumed.
 *  **Self-pruning** — junk notes and duplicate session turns can be archived.
 *  **No API required for inference** — the default architecture is designed around local models.
-* 
 ---
 
 ## 🎥 Demo
