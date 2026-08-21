@@ -1,677 +1,1226 @@
-# Symbio
+Absolutely. The biggest improvement is **turning this from a development diary into a product README**: lead with what Symbio is, show it working quickly, explain the learning loop, then put deep implementation details behind collapsible sections.
 
-A local-first agent that fine-tunes itself from your corrections — no cloud, no subscriptions, runs on your Mac.
+I’d also avoid claims like “fine-tunes itself” without immediately explaining what that means, because the LoRA/adapter mechanism is actually one of the most interesting parts of the project.
 
-Symbio takes notes, runs shell commands, searches the web, and turns your corrections into LoRA training data so it stops repeating your mistakes.
+Here’s a GitHub-ready rewrite:
 
-[![Live Demo on Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97%20Live%20Demo-Hugging%20Face%20Spaces-blue)](https://huggingface.co/spaces/HuyEdits/symbio-demo) | [GitHub](https://github.com/huyedits/Symbio) | [Try it now](#quick-start)
+# Symbio 🧠
 
-<!-- TODO: drop a 15-20s GIF here showing the CLI status line (adapter "trained Xm ago", mistake counter ticking toward the threshold). 
-     e.g. ffmpeg -i recording.mov -vf "fps=10,scale=960:-1" docs/demo.gif -->
+> **A local-first AI agent that learns from your corrections.**
+>
+> Runs on your Mac. Remembers what matters. Learns new skills. Fine-tunes itself with LoRA. No cloud inference. No subscription.
 
-> **Try the interactive demo** — the real tag parser, self-correction miner, research memory, and RAG retriever running in your browser: https://huggingface.co/spaces/HuyEdits/symbio-demo
+[![Live Demo](https://img.shields.io/badge/%F0%9F%A4%97-Live%20Demo-yellow)](https://huggingface.co/spaces/HuyEdits/symbio-demo)
+[![GitHub](https://img.shields.io/badge/GitHub-Symbio-black?logo=github)](https://github.com/huyedits/Symbio)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](#license)
 
-## What it does
+**[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)**
 
-- Chat through a local CLI or a Telegram bot.
-- Save facts and notes as markdown files in `notes/`.
-- Read, write, search, and patch files inside the project directory.
-- Run sandboxed shell commands and short Python snippets.
-- Check email via IMAP/SMTP (when configured).
-- Digest notes into training data and fine-tune a LoRA adapter on the fly.
-- Persist every conversation turn to JSONL and an SQLite store.
+---
 
-## MOA feature
-Symbio has a **MOA** (Mixture of Agents) mode. Instead of fine-tuning one big model for every task, the headmaster delegates bounded sub-tasks to smaller worker models via tool calls. The worker executes, and if it fails it returns to the headmaster for guidance. Once it works, a note is saved for both sides. If the same mistake repeats past the configured threshold, both the worker and the headmaster are fine-tuned: the worker learns how to execute the task, and the headmaster learns how to delegate it more efficiently.
+## What is Symbio?
 
-## Skill feature
-Symbio can learn **skills** on the fly. A skill starts as a simple markdown note with step-by-step instructions. As errors and corrections accumulate, they are logged in a hidden `.md.health.jsonl` sidecar so the note itself stays clean and readable. Once the mistake threshold is reached, the collected examples are fed into a LoRA fine-tune that creates a dedicated worker adapter for that skill — one adapter = one skill. Adapters are hot-swappable and can be archived if unused.
+Most AI agents have a problem:
 
-Use `/new-skill <name>` or `symb skill new <name>` to create one, `/skill-adapters` to list them, and `/archive` / `/restore` to manage idle notes and adapters.
+**They forget.**
 
-### Proving the skill is actually in the weights
+You correct an agent today, and tomorrow it makes the same mistake again. You can put instructions in a system prompt, but that makes the prompt larger, harder to maintain, and doesn't really teach the model anything.
 
-The obvious objection to "the model learned a skill" is *you could have just put the steps in the prompt*. `symb skill eval <name>` answers that with a number instead of an argument. It runs the same task battery three times:
+Symbio takes a different approach.
 
-| condition | steps in prompt? | what it measures |
-|---|---|---|
-| `base` | no | what the model already knew |
-| `prompted` | **yes** | the "just prompt it" baseline |
-| `adapter` | no — stripped out | what the LoRA weights hold |
-
-The `adapter` arm gets the exact system prompt the worker was **trained** under, which deliberately names the skill but withholds the procedure. If it scores above `base`, the procedure came from the weights, because it was never in the context.
-
-```bash
-symb skill eval "Fix wifi"
-symb skill eval fix_wifi --threshold 0.7 --arms base,adapter
+```text
+You → Agent → Mistake → Correction
+                    ↓
+              Learning data
+                    ↓
+              LoRA training
+                    ↓
+             New adapter
+                    ↓
+              Agent improves
 ```
 
-```
-Skill: Fix wifi   (5 tasks, generated)
-----------------------------------------------------------
-condition   steps in prompt   score     coverage
-----------------------------------------------------------
-base        no                0/5         0%
-prompted    YES               5/5        93%
-adapter     no (in weights)   5/5       100%
-----------------------------------------------------------
-```
+Corrections and successful tool recoveries are automatically collected as training examples. Once enough examples accumulate, Symbio performs a small LoRA fine-tune and reloads the resulting adapter.
 
-Grading is deliberately dumb — the fraction of the skill's own step vocabulary the reply reproduces — so it cannot flatter the adapter, and every raw reply is written to the JSON report so the score can be audited by hand. A null result is reported as a null result.
+The goal is simple:
 
-Read the numbers honestly: `base 0/5` does **not** mean the base model is useless at the task. In the run above it answered with real `networksetup` commands, which is arguably better — it just isn't *your* saved procedure. And on a two-step skill this is memorisation, which is the claim being tested but the weakest form of it. Skills with a substantial procedure give a far more meaningful delta.
+> **The longer you use Symbio, the more it becomes your agent rather than a generic model.**
 
-#### A six-skill run
+Everything can stay on your machine.
 
-To get past that objection, six skills with real procedures, where the **model wrote every step itself** and the training data was generated from those steps by `_seed_skill_training_data` — six samples each, none hand-written:
+---
 
-| skill | base | prompted | adapter |
-|---|---|---|---|
-| Quick Task Helper | 0/5 (5%) | 1/5 (22%) | **5/5** (93%) |
-| Coffee Making | 1/5 (27%) | 5/5 (100%) | **5/5** (100%) |
-| Bicycle Tuning | 1/5 (17%) | 5/5 (96%) | **5/5** (100%) |
-| Repotting a Houseplant | 2/5 (44%) | 5/5 (90%) | **5/5** (100%) |
-| Shipping a Parcel Overseas | 0/5 (24%) | 5/5 (80%) | **5/5** (99%) |
-| Sharpening a Kitchen Knife | 1/5 (32%) | 4/5 (90%) | **5/5** (100%) |
+## ✨ Features
 
-**30/30 adapter, 5/30 base**, step order 100% on every one. Asked only `Sharpen a kitchen knife`, with nothing about the procedure in context, the adapter returns the saved steps verbatim while the base model gives a perfectly reasonable but completely different answer about whetstones.
+* 🧠 **Learns from corrections** — automatically detects corrections and turns them into training data.
+* 🔧 **Self-corrects tool mistakes** — successful recovery from a failed command can become a training example.
+* 🎓 **Learnable skills** — create a skill as a Markdown procedure and train a dedicated worker adapter for it.
+* 🧬 **LoRA fine-tuning** — only small adapter weights are trained; the base model stays frozen.
+* 🤖 **Mixture of Agents** — a headmaster can delegate bounded tasks to smaller worker models.
+* 💾 **Local memory** — notes, sessions, training data, adapters and caches live locally.
+* 🔎 **RAG retrieval** — relevant notes can be retrieved and supplied as context.
+* 🌐 **Web research** — search the web and automatically save useful discoveries as notes.
+* 🖥️ **Browser automation** — open pages, click, type and scroll through a live browser.
+* 💻 **Shell & Python tools** — execute sandboxed commands and short Python programs.
+* 📱 **Telegram gateway** — use your local Symbio instance from your phone.
+* 🛡️ **Permission gates** — dangerous actions require explicit approval.
+* 🧪 **Golden-set regression protection** — bad fine-tunes can automatically roll back.
+* 📊 **Skill evaluation** — compare base, prompted and adapter performance.
+* ♻️ **Crash recovery** — interrupted training is recorded and can be resumed.
+* 🧹 **Self-pruning** — junk notes and duplicate session turns can be archived.
+* 🔌 **No API required for inference** — the default architecture is designed around local models.
 
-One correction worth recording, because it moved the numbers. The first run of this table scored the baseline higher, and it was the metric's fault: `_keywords` counted the bare step numbers `1`–`5` as vocabulary, so any numbered reply collected them for free. The base model's whetstone procedure scored **68%** against a 60% threshold and *passed* a task it had answered differently. Enumerators are now stripped before keywords are extracted (`20-degree` survives; `3.` doesn't), which took that task from 68% to 32%. The adapter arm never moved — it reproduces the steps either way — so the leak had only ever been flattering the baseline the whole comparison rests on.
+---
 
-By default the harness generates five task phrasings, deliberately worded unlike the training seeds so a pass means recall rather than memorised strings. Drop your own in `training_data/workers/<role>/eval_tasks.json` to use a real battery:
+## 🎥 Demo
 
-```json
-[
-  {"id": "no_wifi", "prompt": "wifi's dead again", "must_include": ["toggle"]},
-  "the network dropped, sort it out"
-]
-```
+### Live browser demo
 
-| Flag | Default | Note |
-|---|---|---|
-| `--output` | timestamped file | Where to write the JSON report |
-| `--threshold` | `0.6` | Step-coverage fraction required to pass |
-| `--max-tokens` | `400` | Max reply tokens per task |
-| `--arms` | all three | Subset of `base,prompted,adapter` |
+Try the real tag parser, correction miner, research memory and RAG retriever in your browser:
 
-Because the seeds are rendered with the headmaster's chat template but a worker trains the model named in its own catalog entry, the two can drift apart after a model switch. Training now refuses to run on data tokenized for a different model rather than silently learning another model's turn markers.
+**[https://huggingface.co/spaces/HuyEdits/symbio-demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)**
 
-## Hardware prerequisites 
-Symbio (for now) runs on Apple Silicon using MLX and Metal performance shaders
-- **Recommended Unified RAM requirements** 16gb (the program itself takes 8 but overhead and expansion so comfortably would be 16)
-- **Minimum architecture** any m-series chip ideally. (if you can let me know if it works for m1,m2,m3,m5 and the pro and max variants)
+### Screenshots
 
-## Quick start
+<img width="1300" alt="Symbio CLI" src="https://github.com/user-attachments/assets/c4e02593-f527-44dc-9bcb-181f329360ad" />
+
+<img width="272" alt="Symbio mobile interface" src="https://github.com/user-attachments/assets/e8e7475a-aac8-455b-b978-3996f1d4d3fd" />
+
+### Browser automation
+
+Symbio can use a live browser to perform tasks such as opening Chrome and interacting with pages.
+
+[https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20](https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20)
+
+---
+
+# Quick Start
+
+## Requirements
+
+Symbio currently targets **Apple Silicon Macs** using Apple's MLX stack.
+
+### Recommended
+
+* macOS
+* Apple Silicon M-series Mac
+* **16 GB+ unified memory**
+* Python 3.10+
+* ~8 GB free disk space for the default setup
+* Additional space for models, adapters and browser data
+
+The default 8B-class configuration is much more comfortable with 16 GB+ RAM. Smaller models can be used on machines with less memory.
+
+> **Hardware compatibility:** Symbio is intended for Apple Silicon Macs. If you test it on different M-series generations or RAM configurations, please open an issue and share the model, RAM and configuration so compatibility can be documented properly.
+
+---
+
+## Install
 
 ```bash
 ./install.sh
 ```
 
-That is the whole install. It checks you are on Apple silicon with enough RAM
-and disk, creates its own virtualenv, installs everything, fetches the browser
-engine, and then **drops you into a shell with the environment already
-active** — so there is nothing to remember to activate. Type `exit` to leave;
-your original shell is untouched.
+The installer:
 
-Then:
+1. Checks the machine and available resources.
+2. Creates an isolated virtual environment.
+3. Installs dependencies.
+4. Downloads the browser engine when enabled.
+5. Optionally prefetches the model.
+6. Drops you into an activated environment.
+
+Exit the environment with:
 
 ```bash
-symbio        # or the short alias: symb
+exit
 ```
 
-First launch runs an interactive setup wizard (names, model preset, speed mode,
-and toggles for browser, web search, MOA dispatch and Telegram), downloads the
-model, and spends ~25 seconds warming its prompt cache. Later starts take about
-a second, because that cache is saved to disk. Re-run the wizard any time with
-`symb setup`.
+Your original shell is untouched.
+
+Then start Symbio:
+
+```bash
+symbio
+```
+
+Or use the shorter command:
+
+```bash
+symb
+```
+
+On first launch, an interactive setup wizard asks for your name, Symbio's name, model preset and enabled features.
+
+Re-run the setup wizard at any time:
+
+```bash
+symb setup
+```
+
+### Installer options
 
 <details>
-<summary>Install options</summary>
+<summary>Show installer options</summary>
 
 ```bash
-./install.sh --prefetch-model   # download the 4.1 GB model now, not on first run
-./install.sh --no-browser       # skip the ~150 MB Chromium download
-./install.sh --with-native      # include the experimental symbio_native extras
-./install.sh --dev              # include dev/test dependencies
-./install.sh --no-shell         # install only; do not enter the environment
-./install.sh --venv PATH        # put the virtualenv somewhere else
+./install.sh --prefetch-model   # Download the model during installation
+./install.sh --no-browser       # Skip the Chromium download
+./install.sh --with-native      # Include experimental native extras
+./install.sh --dev              # Install development/test dependencies
+./install.sh --no-shell         # Install without entering the environment
+./install.sh --venv PATH        # Use a custom virtualenv location
 ```
-
-Requirements are checked before anything is downloaded: macOS on Apple silicon
-(MLX has no CPU fallback), Python 3.10+, ~8 GB free disk, and 16 GB of RAM for
-the default 8B model — less RAM works, but pick a smaller model in the wizard.
 
 </details>
-## How it works
 
-1. **You talk to the AI** — Ask it anything
-2. **It makes mistakes** — Sometimes gets it wrong
-3. **You correct it** — "No, it's actually..."
-4. **It learns** — Saves the correction
-5. **After 5+ corrections, it fine-tunes itself**
-6. **Next time: it gets it right** :)))
+---
 
-That's it. No manual training. No API calls. All local.
+# How it learns
 
-[See it in action](#example-screenshot)
+The core learning loop is intentionally simple:
 
-If you prefer an isolated, non-editable install (e.g. with `pipx`):
-
-```bash
-pipx install .
-# or, from any directory containing this repo:
-pipx install /path/to/agi
+```text
+1. You use Symbio
+        ↓
+2. Symbio makes a mistake
+        ↓
+3. You correct it
+        ↓
+4. Symbio detects the correction
+        ↓
+5. The mistake becomes training data
+        ↓
+6. Enough mistakes accumulate
+        ↓
+7. LoRA fine-tuning runs
+        ↓
+8. The adapter is loaded
+        ↓
+9. Symbio has learned from the examples
 ```
 
-Make sure `~/.local/bin` (or your pip/pipx bin directory) is on your `PATH`.
+For example:
 
-On first run, Symbio asks for your name and its name. These are saved to `config.json`.
-## Why custom?
-AI agents tend to forget and also not personalised to the work you want the agent to do, as well as the agent being in the cloud which brings on the costs and privacy risk. This repo helps you have access to a highly aggressive persoanlised model that does not leave your machine unless you ask it to.
+```text
+You:      What is my name?
 
-## Configuration
+Symbio:   Your name is Bob.
 
-Edit `config.json` to change the model, LoRA settings, or agent behavior. You can also use the CLI:
+You:      No, I'm Alice.
+
+Symbio:   Your name is Alice.
+
+          [Correction detected]
+          Saved mistake note
+          1/5 examples collected
+```
+
+Once the configured threshold is reached, Symbio digests the examples and runs a short LoRA update.
+
+The default threshold is **5 mistake notes**.
+
+```text
+notes/mistakes/
+        ↓
+training_data/train.jsonl
+        ↓
+      LoRA
+        ↓
+adapters/
+        ↓
+     Symbio
+```
+
+The `/learn` command can still be used to manually trigger learning from the previous correction.
+
+---
+
+# Learning from tool mistakes
+
+Symbio can also learn from its own successful recovery.
+
+For example:
+
+```text
+You: Open Chrome.
+
+Symbio: <cmd>chrome</cmd>
+
+Tool:
+Command not found: chrome
+
+Symbio:
+'chrome' isn't a command here — trying the native way.
+
+<cmd>open -a 'Google Chrome'</cmd>
+
+[Learn]
+Tool mistake captured.
+```
+
+The failed → successful sequence can become training data.
+
+This means Symbio can learn not only from:
+
+> "No, that's wrong."
+
+but also from:
+
+> "That command failed, so here's what actually worked."
+
+Only a confirmed successful recovery is captured.
+
+---
+
+# 🧬 Skills
+
+Skills let Symbio turn procedures into dedicated, trainable capabilities.
+
+Create one:
 
 ```bash
-symb config                    # show full config (bot token redacted)
-symb config get agent.temperature
-symb config set agent.temperature 0.7
+symb skill new "Fix wifi"
+```
+
+Or from the chat:
+
+```text
+/new-skill Fix wifi
+```
+
+A skill starts as a readable Markdown procedure:
+
+```text
+notes/skills/fix_wifi.md
+```
+
+As the skill is used, mistakes and corrections are tracked separately:
+
+```text
+notes/skills/fix_wifi.md
+notes/skills/fix_wifi.md.health.jsonl
+```
+
+The Markdown file remains clean while the hidden health log collects training examples.
+
+After enough examples accumulate, Symbio trains a dedicated worker adapter:
+
+```text
+Skill
+  ↓
+Training examples
+  ↓
+LoRA
+  ↓
+adapters/workers/fix_wifi/
+```
+
+Each skill can therefore have its own adapter.
+
+Adapters can be:
+
+* loaded
+* hot-swapped
+* evaluated
+* archived
+* restored
+
+Useful commands:
+
+```bash
+symb skill list
+symb skill new "Fix wifi"
+symb skill eval "Fix wifi"
+symb skill rm fix_wifi
+
+symb archive
+symb archive --dry-run
+symb archive --restore adapter fix_wifi
+```
+
+---
+
+# Proving a skill is actually in the weights
+
+There is an obvious objection to learned skills:
+
+> "Couldn't you just put the procedure in the prompt?"
+
+Symbio includes a three-way evaluation harness specifically to test this.
+
+```text
+                ┌─────────────┐
+                │   Skill     │
+                └──────┬──────┘
+                       │
+          ┌────────────┼────────────┐
+          ↓            ↓            ↓
+        Base        Prompted      Adapter
+          │            │            │
+       no steps     steps given   no steps
+          │            │            │
+          └────────────┴────────────┘
+                       ↓
+                    Compare
+```
+
+| Condition  | Procedure in prompt? | Measures                          |
+| ---------- | -------------------: | --------------------------------- |
+| `base`     |                   No | What the base model already knows |
+| `prompted` |              **Yes** | The "just prompt it" baseline     |
+| `adapter`  |                   No | What the LoRA adapter learned     |
+
+Run:
+
+```bash
+symb skill eval "Fix wifi"
+```
+
+Or choose specific arms:
+
+```bash
+symb skill eval fix_wifi --threshold 0.7 --arms base,adapter
+```
+
+Example:
+
+```text
+Skill: Fix wifi
+----------------------------------------------------------
+condition   steps in prompt   score     coverage
+----------------------------------------------------------
+base        no                0/5         0%
+prompted    YES               5/5        93%
+adapter     no (in weights)   5/5        100%
+----------------------------------------------------------
+```
+
+The adapter receives the worker's normal system prompt but **not the procedure itself**.
+
+That makes the experiment much more interesting than simply checking whether the model can follow a prompt containing the answer.
+
+### Evaluation methodology
+
+By default, Symbio:
+
+* generates multiple task phrasings
+* deliberately avoids simply replaying training prompts
+* compares step vocabulary
+* strips enumerators such as `1.` and `2.` from the metric
+* stores raw responses in the JSON report
+* reports null results rather than inventing a score
+
+The goal is to make the evaluation auditable rather than flattering.
+
+> A high adapter score demonstrates recall of the trained procedure. It does not prove general intelligence or deep conceptual understanding.
+
+---
+
+# Six-skill evaluation
+
+A larger evaluation using six generated skills produced:
+
+| Skill                      | Base | Prompted | Adapter |
+| -------------------------- | ---: | -------: | ------: |
+| Quick Task Helper          |  0/5 |      1/5 | **5/5** |
+| Coffee Making              |  1/5 |      5/5 | **5/5** |
+| Bicycle Tuning             |  1/5 |      5/5 | **5/5** |
+| Repotting a Houseplant     |  2/5 |      5/5 | **5/5** |
+| Shipping a Parcel Overseas |  0/5 |      5/5 | **5/5** |
+| Sharpening a Kitchen Knife |  1/5 |      4/5 | **5/5** |
+
+Overall:
+
+```text
+Adapter: 30/30
+Base:     5/30
+```
+
+These numbers should be treated as an experiment, not a benchmark claim. The evaluation metric measures reproduction of the skill's procedure, which is specifically what the experiment is designed to test.
+
+Custom evaluation tasks can be added under:
+
+```text
+training_data/workers/<role>/eval_tasks.json
+```
+
+Example:
+
+```json
+[
+  {
+    "id": "no_wifi",
+    "prompt": "wifi's dead again",
+    "must_include": ["toggle"]
+  },
+  "the network dropped, sort it out"
+]
+```
+
+---
+
+# 🤖 Mixture of Agents
+
+Symbio can optionally use a **Mixture of Agents (MoA)** architecture.
+
+Instead of asking one large model to perform every task, a **headmaster** model can delegate bounded tasks to smaller worker models.
+
+```text
+                         ┌──────────────┐
+                         │  Headmaster  │
+                         └──────┬───────┘
+                                │
+                   delegate bounded task
+                                │
+             ┌──────────────────┼──────────────────┐
+             ↓                  ↓                  ↓
+        Summarizer           Browser            Custom
+          Worker             Worker             Worker
+             │                  │                  │
+             └──────────────────┴──────────────────┘
+                                ↓
+                         Result → Headmaster
+```
+
+Delegation is disabled by default:
+
+```json
+{
+  "dispatch": {
+    "enabled": false
+  }
+}
+```
+
+This is intentional because loading multiple models increases memory usage.
+
+### Included workers
+
+| Worker      | Purpose                                              |
+| ----------- | ---------------------------------------------------- |
+| `summarize` | Condense text supplied by the headmaster             |
+| `browser`   | Choose bounded browser actions from the current page |
+
+Workers are loaded lazily and can be unloaded when idle.
+
+Each worker can also have its **own training corpus and LoRA adapter**:
+
+```text
+training_data/workers/<role>/
+adapters/workers/<role>/
+```
+
+This means the browser worker can learn browser behavior without modifying the headmaster.
+
+### Worker training
+
+Delegated tasks automatically generate `(input, output)` training examples.
+
+Worker training uses the same safety mechanisms as headmaster training:
+
+* golden-set evaluation
+* regression detection
+* automatic rollback
+* separate adapters
+* memory preflight
+* crash recovery
+
+---
+
+# 🛡️ Training safety
+
+Self-training is useful, but blindly training on everything an agent produces is dangerous.
+
+Symbio therefore has several safeguards.
+
+## Golden-set regression testing
+
+Before and after each LoRA update, Symbio runs a fixed golden set.
+
+The set checks behaviors such as:
+
+* identifying itself correctly
+* distinguishing itself from the user
+* producing expected tool formats
+* avoiding repetitive output
+
+If a new adapter causes previously passing cases to fail:
+
+```text
+[Golden] Regression: 2 case(s) newly failing.
+[Golden] Rolled back to the previous adapter.
+```
+
+The previous adapter is restored automatically.
+
+Run manually:
+
+```bash
+/golden
+```
+
+or:
+
+```bash
+symb eval-lora
+```
+
+---
+
+## Retrieval hygiene
+
+A self-learning agent has an unusual failure mode:
+
+```text
+bad output
+   ↓
+saved
+   ↓
+retrieved
+   ↓
+repeated
+   ↓
+trained
+   ↓
+bad output becomes stronger
+```
+
+Symbio tries to break this loop.
+
+Retrieval excludes internal machinery such as:
+
+* tool transcripts
+* tool-call syntax
+* system observation scaffolding
+* other generated machinery
+
+Retrieval also requires meaningful, relatively rare terms rather than simply returning the least-bad matches.
+
+If nothing relevant matches, retrieval is allowed to return **nothing**.
+
+---
+
+## Self-pruning
+
+Junk notes and duplicate session turns can be archived automatically.
+
+```bash
+symb archive
+```
+
+Or preview:
+
+```bash
+symb archive --dry-run
+```
+
+The `/tidy` command performs additional cleanup:
+
+```text
+/tidy
+/tidy dry
+```
+
+Notes are archived rather than silently deleted.
+
+---
+
+## Crash-safe training
+
+Long-running training jobs are recorded before they begin.
+
+If the process crashes:
+
+```text
+[Resume] training for worker 'fix_wifi' was interrupted.
+[Resume] 1 unfinished task(s) carried over.
+```
+
+Check pending work:
+
+```bash
+/resume
+```
+
+Run it:
+
+```bash
+/resume run
+```
+
+Discard it:
+
+```bash
+/resume clear
+```
+
+Training is **not automatically restarted after a crash**. This prevents a machine from repeatedly entering an out-of-memory cycle.
+
+---
+
+# 💻 Tools
+
+Symbio can interact with the local machine through several tool groups.
+
+### Files
+
+Read, write, search and patch files within the project environment.
+
+### Terminal
+
+Run sandboxed shell commands:
+
+```xml
+<tool_call>
+{"name":"terminal","arguments":{"cmd":"ls -la"}}
+</tool_call>
+```
+
+### Python
+
+Execute short Python programs through the controlled execution environment.
+
+### Browser
+
+Interact with a live browser:
+
+* open
+* click
+* type
+* scroll
+* inspect page content
+
+### Notes
+
+Save information for future retrieval:
+
+```xml
+<tool_call>
+{"name":"note","arguments":{
+  "action":"add",
+  "target":"note",
+  "content":"The user likes coffee."
+}}
+</tool_call>
+```
+
+### Web research
+
+Search the web and save useful discoveries as local `Learned:` notes.
+
+### Telegram
+
+Run the same agent through a Telegram gateway.
+
+---
+
+# 📱 Telegram
+
+Start the gateway:
+
+```bash
+symb gateway start
+```
+
+Check readiness:
+
+```bash
+symb gateway status
+```
+
+Stop it:
+
+```bash
+symb gateway stop
+```
+
+Set the bot token through the setup wizard or environment:
+
+```bash
+export SYMBIO_TELEGRAM_TOKEN="..."
+```
+
+You must explicitly configure allowed chat IDs:
+
+```bash
 symb config set telegram.allowed_chat_ids '[123456789]'
 ```
 
-| Key | Default | Note |
-|---|---|---|
-| `model_name` | `Qwen/Qwen3-0.6B` | Base MLX model (the setup wizard offers larger presets) |
-| `assistant_name` | `Symbio` | What the assistant calls itself |
-| `user_name` | *(asked at first run)* | Your name |
-| `agent.max_tool_rounds` | `3` | Max tool rounds per user turn |
-| `agent.temperature` | `0.7` | Sampling temperature |
-| `agent.tool_use_temperature` | `0.2` | Lower temperature used when a tool call is expected |
-| `agent.max_reply_tokens` | `128` | Max tokens generated per reply |
-| `agent.prompt_cache_enabled` | `true` | Reuse the warmed system-prompt KV cache across turns |
-| `agent.persist_prompt_cache` | `true` | Save that cache to `cache/` and reload it on start |
-| `lora.rank` | `8` | LoRA rank (adapter width) |
-| `lora.dropout` | `0.0` | LoRA dropout to reduce overfitting |
-| `lora.scale` | `20.0` | LoRA adapter scale |
-| `lora.num_layers` | `8` | Number of layers to attach adapters to |
-| `lora.iters` | `300` | LoRA iterations per `/train` run |
-| `lora.max_seq_length` | `512` | Maximum sequence length during training |
-| `lora.learning_rate` | `1e-4` | LoRA learning rate |
-| `lora.save_every` | `100` | Checkpoint frequency during training |
-| `lora.steps_per_eval` | `100` | Iterations between validation passes |
-| `lora.early_stop_enabled` | `true` | Stop once validation loss plateaus |
-| `lora.early_stop_patience` | `2` | Validation passes without improvement before stopping |
-| `lora.early_stop_min_delta` | `0.005` | Improvement below this counts as no improvement |
-| `learn.boost_factor` | `3` | Copies of a correction sample written to training data |
-| `learn.batch_train_iters` | `25` | Iterations for threshold-triggered correction training |
-| `learn.mistake_threshold` | `5` | Mistake notes collected before auto-training runs |
-| `telegram.bot_token` | *(prompted)* | Telegram bot token from @BotFather |
-| `telegram.allowed_chat_ids` | `[]` | Chat IDs allowed to use the bot (required) |
+Telegram dangerous actions use inline approval.
 
-## CLI
+For example, actions involving:
 
-After installing (`pip install -e .`) the `symbio` and `symb` commands are available. During development you can use the `symb` wrapper script in the repo root.
+* shell commands
+* browser domains
+* Python execution
+* configuration changes
+* scheduled jobs
+* training
+
+can require an explicit approval before execution.
+
+> **Important:** saying `No` rejects the action for the entire turn. Symbio will not retry the same action through another tool.
+
+### Telegram commands
+
+| Command      | Description                            |
+| ------------ | -------------------------------------- |
+| `/start`     | Welcome message                        |
+| `/help`      | Show available commands                |
+| `/ping`      | Show latency breakdown                 |
+| `/status`    | Show model, adapter and session status |
+| `/golden`    | Run the golden set                     |
+| `/train`     | Start LoRA training                    |
+| `/selfcheck` | Check enabled features                 |
+| `/setup`     | Configuration help                     |
+| `/tools`     | Toggle tool groups                     |
+| `/cancel`    | Clear the current session              |
+
+---
+
+# 🧰 CLI
 
 ```bash
-symb                    # Start interactive chat
-symb chat               # Same as above
-symb config             # Open interactive config editor
-symb config show        # Print config.json (token redacted)
-symb config get <key>   # Print one value, e.g. agent.temperature
+symb                       # Start chat
+symb chat                  # Start chat
+symb config                # Show configuration
+symb config get <key>      # Read a config value
 symb config set <key> <value>
-symb train              # Run LoRA training
-symb skill list         # List saved skills and their adapter status
-symb skill new <name>   # Create a new skill (interactive steps)
-symb skill rm <role>   # Delete a skill, adapter, and training data
-symb skill eval <name>  # Score a skill: base vs prompt-only vs adapter
-symb eval-lora          # Benchmark the headmaster adapter against the base model
-symb archive            # Run auto-archive for idle notes/adapters
-symb archive --dry-run  # Preview what would be archived
-symb archive --restore note|adapter <name>
-symb gateway status     # Check Telegram gateway readiness
-symb gateway start      # Start the Telegram bot
-symb gateway stop       # Stop a running gateway
+symb train                 # Run LoRA training
+symb skill list            # List skills
+symb skill new <name>      # Create a skill
+symb skill rm <role>       # Delete a skill
+symb skill eval <name>     # Evaluate a skill
+symb eval-lora             # Evaluate headmaster adapter
+symb archive               # Archive idle data
+symb archive --dry-run     # Preview archive actions
+symb gateway status        # Check Telegram
+symb gateway start         # Start Telegram
+symb gateway stop          # Stop Telegram
 ```
 
-Legacy `python main.py` flags still work:
+---
+
+# 💬 Slash commands
+
+Once inside Symbio:
+
+| Command                         | Description                          |
+| ------------------------------- | ------------------------------------ |
+| `/quit`                         | Exit                                 |
+| `/save`                         | Save the current conversation        |
+| `/train`                        | Run LoRA training                    |
+| `/train_worker <role>`          | Train a worker                       |
+| `/resume`                       | Show unfinished work                 |
+| `/learn`                        | Learn from the last correction       |
+| `/digest`                       | Convert notes into training data     |
+| `/note [title]`                 | Create a note                        |
+| `/notes`                        | List notes                           |
+| `/new-skill <name>`             | Create a skill                       |
+| `/skills`                       | List skills                          |
+| `/skill-adapters`               | List skill adapters                  |
+| `/archive`                      | Archive idle notes/adapters          |
+| `/restore note\|adapter <name>` | Restore archived data                |
+| `/status`                       | Show current state                   |
+| `/selfcheck`                    | Run health checks                    |
+| `/setup`                        | Re-run setup                         |
+| `/compact`                      | Compress memory                      |
+| `/model`                        | List model presets                   |
+| `/model <preset>`               | Switch model                         |
+| `/run <cmd>`                    | Run a sandboxed command              |
+| `/forget_last`                  | Remove the last exchange             |
+| `/prune`                        | Remove stale adapter checkpoints     |
+| `/tidy`                         | Clean junk notes and duplicate turns |
+
+---
+
+# 🧬 LoRA fine-tuning
+
+Symbio uses **LoRA (Low-Rank Adaptation)** through Apple's MLX ecosystem.
+
+The base model remains frozen.
+
+Only small adapter matrices are trained:
+
+```text
+Base model
+████████████████████████████
+             +
+       Small LoRA adapter
+             ↓
+       Personalized model
+```
+
+Adapters are stored separately:
+
+```text
+adapters/
+adapters/workers/
+```
+
+This allows Symbio to:
+
+* train incrementally
+* keep the base model unchanged
+* switch adapters
+* archive unused adapters
+* roll back failed updates
+* maintain separate adapters for different skills
+
+Run training manually:
+
+```bash
+symb train
+```
+
+### Main LoRA settings
+
+| Setting               | Default |
+| --------------------- | ------: |
+| `lora.rank`           |     `8` |
+| `lora.num_layers`     |     `8` |
+| `lora.scale`          |  `20.0` |
+| `lora.dropout`        |   `0.0` |
+| `lora.learning_rate`  |  `1e-4` |
+| `lora.iters`          |   `300` |
+| `lora.max_seq_length` |   `512` |
+| `lora.save_every`     |   `100` |
+
+Training uses validation checks and can stop early when validation loss plateaus.
+
+---
+
+# ⚙️ Configuration
+
+Configuration lives in:
+
+```text
+config.json
+```
+
+You can edit it directly or use the CLI:
+
+```bash
+symb config
+symb config get agent.temperature
+symb config set agent.temperature 0.7
+```
+
+Some important settings:
+
+| Key                             |           Default | Purpose                          |
+| ------------------------------- | ----------------: | -------------------------------- |
+| `model_name`                    | `Qwen/Qwen3-0.6B` | Base model                       |
+| `assistant_name`                |          `Symbio` | Assistant name                   |
+| `agent.temperature`             |             `0.7` | Generation temperature           |
+| `agent.max_tool_rounds`         |               `3` | Tool rounds per turn             |
+| `agent.max_reply_tokens`        |             `128` | Maximum reply length             |
+| `agent.prompt_cache_enabled`    |            `true` | Reuse prompt KV cache            |
+| `lora.rank`                     |               `8` | LoRA rank                        |
+| `lora.iters`                    |             `300` | Full training iterations         |
+| `learn.enabled`                 |            `true` | Enable learning                  |
+| `learn.auto`                    |            `true` | Detect corrections automatically |
+| `learn.auto_train`              |            `true` | Automatically train at threshold |
+| `learn.mistake_threshold`       |               `5` | Corrections before auto-training |
+| `learn.batch_train_iters`       |              `25` | Auto-training iterations         |
+| `learn.boost_factor`            |               `3` | Correction sample weighting      |
+| `dispatch.enabled`              |           `false` | Enable worker delegation         |
+| `dispatch.max_resident_workers` |               `1` | Workers kept in memory           |
+| `telegram.allowed_chat_ids`     |              `[]` | Authorized Telegram chats        |
+
+---
+
+# 🔐 Security
+
+Symbio is designed to run locally, but **local does not mean automatically safe**.
+
+Shell and Python execution run with the privileges of the user who launched Symbio.
+
+The sandbox is intended to reduce accidental damage, not provide a perfect security boundary.
+
+### Important rules
+
+* Review untrusted code before executing it.
+* Do not give Symbio access to files you would not give a local program access to.
+* Pay attention to permission prompts.
+* A denied action is not retried through another tool.
+* Telegram actions can require explicit approval.
+* Keep secrets such as Telegram tokens out of source control.
+
+The environment variable:
+
+```bash
+SYMBIO_TELEGRAM_TOKEN
+```
+
+takes precedence over the token stored in `config.json`.
+
+---
+
+# 🏗️ Architecture
+
+The project is organized as a Python package with a thin compatibility wrapper:
+
+```text
+.
+├── main.py
+├── symbio/
+│   ├── constants.py
+│   ├── app/
+│   │   ├── cli.py
+│   │   ├── chat.py
+│   │   ├── config.py
+│   │   ├── training.py
+│   │   ├── learn.py
+│   │   ├── golden.py
+│   │   ├── eval.py
+│   │   ├── skill_eval.py
+│   │   ├── prune.py
+│   │   ├── pending.py
+│   │   ├── dispatch.py
+│   │   ├── memory.py
+│   │   ├── sandbox.py
+│   │   ├── computer.py
+│   │   ├── cron.py
+│   │   ├── telegram.py
+│   │   ├── tooling.py
+│   │   ├── prompts.py
+│   │   └── skills.py
+│   └── utils.py
+├── rag.py
+├── models.json
+├── config.json
+├── notes/
+├── training_data/
+├── adapters/
+├── cache/
+├── logs/
+├── sessions/
+├── screenshots/
+└── sandbox/
+```
+
+### Major components
+
+| Component       | Responsibility              |
+| --------------- | --------------------------- |
+| `chat.py`       | Agent loop and sessions     |
+| `training.py`   | LoRA training               |
+| `learn.py`      | Correction detection        |
+| `golden.py`     | Regression protection       |
+| `skill_eval.py` | Skill evaluation            |
+| `dispatch.py`   | Mixture-of-Agents workers   |
+| `memory.py`     | Notes and persistent memory |
+| `sandbox.py`    | Shell/Python execution      |
+| `computer.py`   | Browser automation          |
+| `telegram.py`   | Telegram gateway            |
+| `prune.py`      | Corpus cleanup              |
+| `pending.py`    | Crash-safe unfinished work  |
+| `tooling.py`    | Tool parsing and formatting |
+| `skills.py`     | Skill management            |
+
+---
+
+# 🧪 Tool formats
+
+Symbio supports legacy XML tags as well as the preferred Hermes-style tool format.
+
+### Preferred
+
+```xml
+<tool_call>
+{"name":"read_file","arguments":{"path":"config.json"}}
+</tool_call>
+```
+
+```xml
+<tool_call>
+{"name":"terminal","arguments":{"cmd":"ls -la"}}
+</tool_call>
+```
+
+```xml
+<tool_call>
+{"name":"note","arguments":{
+  "action":"add",
+  "target":"note",
+  "content":"The user likes coffee."
+}}
+</tool_call>
+```
+
+### Legacy
+
+```xml
+<note title="User Preference">
+The user likes coffee.
+</note>
+```
+
+```xml
+<cmd>ls</cmd>
+```
+
+Legacy formats remain supported for compatibility.
+
+---
+
+# 👤 Dynamic names
+
+Symbio can learn both the user's name and its own name.
+
+### User
+
+```text
+"My name is Alice."
+"Call me Bob."
+"You can call me Charlie."
+"From now on call me Dana."
+"Change my name to Eve."
+"I go by Frank."
+```
+
+### Assistant
+
+```text
+"Call yourself Jarvis."
+"I will call you Friday."
+"I'm going to call you HAL."
+"Change your name to Jeeves."
+"Set your name as Alfred."
+```
+
+The phrase:
+
+```text
+"Your name is X"
+```
+
+is intentionally not treated as an assistant rename because smaller models can confuse it with a statement about the user's identity.
+
+---
+
+# 📦 Alternative installation
+
+For an isolated install:
+
+```bash
+pipx install .
+```
+
+Or:
+
+```bash
+pipx install /path/to/Symbio
+```
+
+For development:
+
+```bash
+pip install -e .
+```
+
+The `symbio` and `symb` commands will then be available.
+
+Legacy commands remain supported:
 
 ```bash
 python main.py --telegram
 python main.py --train
 ```
 
-## Telegram bot
-
-Run Symbio as a Telegram bot so you can chat from your phone:
-
-```bash
-symb gateway start
-# Legacy equivalent: python main.py --telegram
-```
-
-Check gateway readiness first:
-
-```bash
-symb gateway status
-```
-
-On first run you will be prompted for a bot token from [@BotFather](https://t.me/botfather). The token is saved to `config.json`. For better security, set the environment variable `SYMBIO_TELEGRAM_TOKEN` instead; it overrides the config file.
-
-You must add your Telegram chat ID to `telegram.allowed_chat_ids`:
-
-```bash
-symb config set telegram.allowed_chat_ids '[123456789]'
-```
-
-Send any message to the bot, then copy the chat ID from the refusal message if you haven't set it yet.
-
-Dangerous actions from Telegram — blocked shell commands, new browser domains, Python code, config changes, cron jobs, digest, and training — ask for approval via an inline keyboard before running.
-
-### Telegram slash commands
-
-| Command | Description |
-|---|---|
-| `/start` | Welcome message |
-| `/help` | List available commands |
-| `/ping` | Last turn latency breakdown |
-| `/status` | Model, adapter, data, and last turn timings |
-| `/golden` | Run golden-set regression check |
-| `/train` | Start LoRA training |
-| `/selfcheck` | Verify enabled features and auto-fix safe issues |
-| `/setup` | How to change configuration |
-| `/tools` | Toggle tool groups |
-| `/cancel` | Clear the current session |
-
-## Slash commands
-
-| Command | Description |
-|---|---|
-| `/quit` | Exit the chat |
-| `/save` | Save the current conversation to training data |
-| `/train` | Run LoRA fine-tuning and reload the adapter |
-| `/train_worker <role>` | Train one worker's adapter, golden-checked and rolled back on regression |
-| `/resume` | List work a previous session didn't finish (`run` to do it, `clear` to drop it) |
-| `/learn` | Manually learn from your last correction (auto-learn is on by default) |
-| `/digest` | Convert notes into training samples |
-| `/note [title]` | Create a markdown note |
-| `/notes` | List saved notes |
-| `/new-skill <name>` | Create a skill note and start training a worker adapter |
-| `/skills` | List saved skill notes |
-| `/skill-adapters` | List skill adapters and their training/idle status |
-| `/archive` | Archive idle notes/adapters (or preview with `--dry-run`) |
-| `/restore note|adapter <name>` | Restore an archived note or adapter |
-| `/status` | Show model, adapter, notes, and session info |
-| `/selfcheck` | Verify enabled features and auto-fix safe issues |
-| `/setup` | Re-run the setup wizard (names, model, features) |
-| `/compact` | Compress memory/profile store and archive the original |
-| `/model` | List model presets |
-| `/model <preset>` | Switch to a named model preset (restart to load) |
-| `/run <cmd>` | Run a sandboxed shell command |
-| `/forget_last` | Remove the last exchange from history |
-| `/prune` | Remove stale adapter checkpoints |
-| `/tidy` | Prune junk notes and duplicate session turns (`/tidy dry` to preview) |
-
-## Learning from corrections
-
-Symbio detects natural corrections automatically and turns them into training data without you typing `/learn`. Instead of training on every single correction, it saves each mistake as a markdown note in `notes/mistakes/` and only fine-tunes once enough notes have accumulated.
-
-Typical flow:
-```
-You:      What is my name?
-Symbio:   Your name is Bob.
-You:      No, I'm Alice.
-Symbio:   Your name is Alice.
-          [System] Correction detected (correction phrase).
-          Saved mistake note: 20260715_123456_What_is_my_name.md
-          1/5 mistake note(s) collected. Training will run after 4 more correction(s).
-```
-
-Symbio will:
-1. Detect correction phrases ("No, ...", "Actually ...", "That's wrong", etc.) or an exact repeat of your last question.
-2. Extract the original question, the wrong answer, the user's correction, and the corrected answer.
-3. Save them as a markdown note in `notes/mistakes/`.
-4. When `learn.mistake_threshold` (default 5) notes have accumulated, digest them into `training_data/train.jsonl` and run a short LoRA update (`learn.batch_train_iters`, default 25).
-5. Archive the used mistake notes to `notes/mistakes/archive/` and reload the adapter.
-
-The `/learn` command is still available to force a mistake note from the last correction, but it is no longer required.
-
-### Learning from its own tool mistakes
-
-The same mistake-note pipeline also captures a second, fully automatic pattern that needs no user involvement at all: a tool call that fails, immediately followed by one that works. This is exactly the "wrong command, try the right one" pattern already hand-seeded into every install's base training data —
-
-```
-You:      Open Chrome.
-Symbio:   <cmd>chrome</cmd>
-          [Tool: run_command]
-          [Observation] Command 'chrome' exited error.
-                        Output:
-                        Command not found: chrome
-Symbio:   'chrome' isn't a command here — trying the native way. <cmd>open -a 'Google Chrome'</cmd>
-          [Learn] Tool mistake captured: 20260721_213045_System_observation_Command_chrome.md
-```
+---
 
-— except now it's learned from real usage, not just the seed examples. It feeds into the exact same `notes/mistakes/` → threshold → digest → guarded-training pipeline as conversational corrections above, so both count toward the same `learn.mistake_threshold`. Nothing is saved if the model keeps failing without ever finding a working alternative within the turn — only a confirmed fix gets captured.
+# 🗺️ Roadmap
 
-Tune the behaviour in `config.json`:
+## High priority
 
-| Key | Default | Note |
-|---|---|---|
-| `learn.enabled` | `true` | Enable correction learning |
-| `learn.auto` | `true` | Detect corrections automatically |
-| `learn.auto_train` | `true` | Run the fine-tune automatically when the threshold is reached |
-| `learn.mistake_threshold` | `5` | Number of mistake notes before a batch fine-tune runs |
-| `learn.batch_train_iters` | `25` | LoRA iterations for the threshold-triggered batch update |
-| `learn.boost_factor` | `3` | Copies of each correction sample written per mistake note |
-| `learn.correction_phrases` | `[...]` | Phrases that trigger correction detection |
+* [ ] **CUDA backend** — Support NVIDIA/AMD hardware through PyTorch or Transformers.
+* [ ] **llama.cpp backend** — Support GGUF models and broader hardware.
+* [ ] **LoRA optimization** — Faster adapter swaps and more memory-efficient training.
+* [ ] **Better architecture separation** — Further isolate inference, tools, training and storage.
+* [ ] **Sparse / quantized adapters** — Explore QLoRA, 4-bit/8-bit models and sparse updates.
+* [ ] **MCP support** — Model Context Protocol.
+* [ ] **Adapter marketplace** — See [`docs/adapter-marketplace.md`](docs/adapter-marketplace.md).
+* [ ] **Additional messaging platforms**.
+* [ ] **Long-term weight pruning**.
 
-## Fine-tuning details
+## Completed
 
-Symbio uses **LoRA** (Low-Rank Adaptation) via Apple's **MLX-LM** framework. The base model weights stay frozen; only small adapter matrices are trained on curated conversation, notes, and corrections. Training is invoked through the official `mlx_lm lora` CLI:
+* [x] More tools
+* [x] Live browser automation
+* [x] Permission-gated sandbox
+* [x] Automatic self-correction
+* [x] Learning new skills
+* [x] Web research memory
+* [x] Telegram bot
+* [x] Mixture of Agents
+* [x] Independently trainable worker adapters
+* [x] Golden-set regression protection
+* [x] Crash-safe training recovery
+* [x] Skill evaluation harness
+* [x] Automatic corpus cleanup
 
-```bash
-symb train            # full pass using lora.iters
-```
+---
 
-The resulting adapter is saved to `adapters/` and loaded automatically on the next start.
+# 🤝 Contributing
 
-| Setting | Default | What it controls |
-|---|---|---|
-| `lora.rank` | `8` | Width of the low-rank matrices |
-| `lora.num_layers` | `8` | How many transformer layers get adapters |
-| `lora.scale` | `20.0` | Adapter output scaling |
-| `lora.dropout` | `0.0` | Dropout for regularization |
-| `lora.learning_rate` | `1e-4` | Training step size |
-| `lora.iters` | `300` | Iterations for `/train` |
-| `lora.max_seq_length` | `512` | Training context length |
-| `lora.save_every` | `100` | Checkpoint frequency |
+Contributions are welcome.
 
-Training stops early once validation loss plateaus for `lora.early_stop_patience` passes, then promotes the best checkpoint to `adapters.safetensors`. It will not stop before a checkpoint exists — with `save_every` at 100, a run that plateaus at iteration 60 keeps going rather than ending with no weights at all.
+Some especially useful areas:
 
-### Golden set: catching a fine-tune that silently breaks things
+1. **Non-Apple hardware support**
+2. **Model/backend integrations**
+3. **Training performance**
+4. **Memory optimization**
+5. **Evaluation methodology**
+6. **Browser automation**
+7. **New worker types**
+8. **Testing and regression coverage**
+9. **Security hardening**
+10. **Documentation**
 
-Every LoRA update (`/train`, the `train_adapter` tool, the auto-training that follows enough corrections, or the end-of-session prompt) is checked against a small, fixed **golden set** — prompts that exercise behavior baked into every install's seed training data: stating its own name, not confusing itself with the user, emitting the right tool tag for code/notes/reminders/search, and not degenerating into repeated phrases. Each check is single-turn and side-effect-free (no tool is actually executed), so it's safe to run automatically.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, testing and pull-request guidelines.
 
-Symbio grades the golden set before training (the baseline) and again after reloading the new adapter. If a case that passed before now fails, it's a **regression**, and the previous adapter is restored automatically:
+If you find a bug, please include:
 
-```
-  [Golden] Regression: 2 case(s) newly failing (run_code_for_math, web_search_unknown).
-  [Golden] Rolled back to the previous adapter.
-```
+* Mac model
+* Apple Silicon generation
+* unified memory
+* model preset
+* relevant configuration
+* error/log output
+* steps to reproduce
 
-Run it manually anytime with `/golden` to see the current pass/fail breakdown without training.
+---
 
-| Key | Default | Note |
-|---|---|---|
-| `learn.golden_set_enabled` | `true` | Grade every LoRA update against the golden set |
-| `learn.golden_rollback_on_regression` | `true` | Automatically restore the previous adapter on a regression |
-| `learn.golden_regression_threshold` | `0` | Newly-failing cases allowed before it counts as a regression |
-| `learn.golden_max_tokens` | `150` | Max tokens generated per golden-set case |
+# ⚠️ Current limitations
 
-### Keeping the corpus clean
+Symbio is still experimental.
 
-A self-training agent has a failure mode a normal chatbot doesn't: its own bad output becomes tomorrow's input. A junk note gets retrieved, echoed, logged, and retrieved again — and if it survives to a digest, it gets trained in. Two mechanisms push back.
+The biggest current limitations are:
 
-**Self-pruning.** On boot (and on demand with `/tidy`) Symbio archives notes that carry no information — empty bodies, degenerate titles, questions with no subject — and collapses duplicate session turns down to `prune.session_max_copies`. Notes are moved to `notes/archive/`, never deleted, and `# Skill:` and identity notes are protected. Preview first with `/tidy dry`.
+* Apple Silicon only
+* Local model size is constrained by unified memory
+* Self-training can still overfit
+* Skill evaluation primarily measures procedural recall
+* Tool sandboxing is best-effort rather than a security boundary
+* Multiple resident models can consume substantial memory
+* Some features are experimental and may change
 
-**Retrieval hygiene.** Anything that looks like machinery is excluded from retrieval rather than fed back as prose: tool transcripts, any tool-call syntax (including the legacy short tags), and the `[System observation: ...]` scaffold the agent uses internally to hand tool results back to the model.
+If you have a different Apple Silicon configuration, please report whether it works. Hardware reports are particularly useful for building a real compatibility matrix rather than guessing based on the chip name.
 
-**Retrieval can also return nothing.** Scoring is IDF-weighted, which ranks well but has no way to say *none of these*. Any note sharing a single common word scored above zero and made the cut, so a query whose topical words matched nothing came back with the three least-bad notes — as confidently as a real match. That is not merely a relevance problem here: a retrieved note is pasted into the model's context, skill notes are procedures, and the model performs them. Measured, before the fix: a request to save a bicycle-tuning skill retrieved the Browser Driver note and produced an eighteen-fold repetition of "Clicking the Steps. Scrolling down." and a real `browser_open` on google.com.
+---
 
-A note now has to share a term that is both **rare** (present in at most a third of notes) and **not a stopword** — the frequency test alone isn't enough, because in a corpus of numbered procedures words like "how" and "do" are genuinely rare and were qualifying unrelated notes on their own. `skill` and `what are the steps` now retrieve nothing, since they distinguish nothing; every skill still retrieves its own note first.
+# 📜 License
 
-That last one matters more than it sounds. The scaffold appears in a sixth of the seed training corpus — always as a *user* turn, always followed by an assistant reply — so a model can learn to write the scaffold itself and then answer its own invented observation, on repeat:
-
-```
-Huy     : yo
-Caine   : system observation: User says 'yo' — how can I help?
-          system observation: User says 'yo' — how can I help?
-          system observation: User says 'yo' — how can I help?
-```
-
-Symbio now detects a reply impersonating the scaffold (matching case- and bracket-insensitively, so near-misses like the one above are caught) or looping a single line, discards it, and regenerates once. The check runs *before* the reply is printed or written to the session store, so a discarded turn never reaches `sessions/` and can never be retrieved or digested into training data later.
-
-The one exception is streaming: with `agent.stream_output` on, tokens have already been emitted to your terminal by the time the reply can be judged, so you may briefly see the start of a bad reply before the `[Echo]` notice replaces it. Nothing is persisted either way.
-
-| Key | Default | Note |
-|---|---|---|
-| `prune.enabled` | `true` | Enable self-pruning |
-| `prune.on_boot` | `true` | Run a prune pass at startup |
-| `prune.notes` | `true` | Archive junk notes |
-| `prune.sessions` | `true` | Collapse duplicate session turns |
-| `prune.session_max_copies` | `2` | Copies of a repeated turn kept |
-
-### Idle-adapter reminders
-
-If a trained adapter exists on disk but the current session isn't using it (most commonly after switching `model_name` to something the adapter isn't compatible with), Symbio tracks how long it's sat unused. Past `learn.adapter_idle_days`, it asks once whether to remove it:
-
-```
-  A saved LoRA adapter hasn't been used in 45 day(s) (not loaded with the
-  current model). Remove it to free up space? [y/N]:
-```
-
-Answering yes deletes it; declining or saying "keep" both just leave it alone and reset the grace period, so the reminder won't repeat until it's been idle that long again. Nothing is ever removed without an explicit yes. Check the current status anytime with `/status`.
-
-| Key | Default | Note |
-|---|---|---|
-| `learn.adapter_idle_reminder_enabled` | `true` | Ask about removing an adapter that's gone unused |
-| `learn.adapter_idle_days` | `30` | Days unused before the reminder fires |
-
-### Surviving a crash mid-fine-tune
-
-A fine-tune is minutes of GPU time that exists only in RAM until it writes an adapter, and on a unified-memory Mac the process can be killed outright — no unwind, no traceback, nothing written down. What that used to cost wasn't the compute, it was *the knowledge that the work was owed*: a skill saved with auto-train would be seeded, never trained, and nothing on the next start remembered it was supposed to be.
-
-Expensive work is now recorded in `logs/pending_tasks.json` **before** it begins, written atomically so a crash mid-write can't truncate it. Whether the owning process is still alive is decided by pid *and* boot id together — after a reboot the kernel reissues low pids, so a pid alone would call a dead trainer healthy forever.
-
-On the next start:
-
-```
-  [Resume] training for worker 'fix_wifi': interrupted mid-run; restored the
-           adapter from the backup it left behind. That backup is kept at
-           adapters/workers/fix_wifi.FIX_WIFI_ITER150.bak — delete it once
-           you are happy.
-  [Resume] 1 unfinished task(s) carried over. Run /resume to pick them up,
-           /resume clear to drop them.
-    - training for worker 'fix_wifi' — owning process died before it finished
-```
-
-Repair is automatic, because a truncated adapter sitting next to a complete backup has only one right answer. Re-running the training is **not** — that is minutes of GPU and a second full copy of the weights, and starting one unprompted at boot is a fair description of how the machine went down in the first place. `/resume` lists, `/resume run` runs them one at a time (headmaster last), `/resume clear` drops them. `/status` shows the same list.
-
-Work that was *refused* is recorded the same way. When the memory preflight declines a run there is no adapter and no error — just a line in a log nobody is reading, which is exactly how a skill ends up permanently untrained. It stays on the list instead, with the reason:
-
-```
-  Unfinished tasks: 1 (/resume)
-    - training for worker 'coffee_making' — training did not produce an
-      adapter (see the log; most often not enough free memory at the time)
-```
-
-## Example screenshots
-<img width="1300" height="89" alt="Screenshot 2026-07-23 at 11 23 21 am" src="https://github.com/user-attachments/assets/c4e02593-f527-44dc-9bcb-181f329360ad" />
-<img width="272" height="475" alt="Screenshot 2026-07-23 at 11 22 52 am" src="https://github.com/user-attachments/assets/e8e7475a-aac8-455b-b978-3996f1d4d3fd" />
-
-## Example video of Symbio opening up google chrome then clicking a button
-https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20
-
-## Mixture of agents: delegating to smaller worker models
-
-One model doing everything — from picking a browser click to answering a factual question — means every micro-decision pays the cost of the headmaster's full system prompt and persona. Symbio can instead hand a bounded sub-task off to a smaller, faster **worker** model, and each worker can be fine-tuned independently on its own narrow task, with its own adapter, separate from the headmaster's.
-
-This is off by default (`dispatch.enabled: false`) — it loads and runs additional models on your machine, a bigger resource commitment than anything else here, so it's opt-in.
-
-### How it works
-
-The headmaster requests delegation the same way it requests any other tool:
-
-```
-<delegate role='summarize'>the full text to condense</delegate>
-```
-
-or the Hermes form: `<tool_call>{"name": "delegate_task", "arguments": {"role": "summarize", "task": "..."}}</tool_call>`.
-
-`symbio/app/worker_models.json` is the catalog of available workers — model, role, description, rough memory footprint. Ships with two roles:
-
-| Role | What it does |
-|---|---|
-| `summarize` | Condenses page/document text handed off by the headmaster |
-| `browser` | Picks the next click/type/scroll action from the current page text, in a bounded loop, using the same `BrowserSession` the headmaster's own browser tools drive |
-
-Workers load lazily on first use and are evicted LRU-style once `dispatch.max_resident_workers` is exceeded, or after sitting idle past `dispatch.worker_idle_unload_minutes` — sequential by default (one resident worker) to fit alongside the headmaster on a typical machine, but this is a real, working setting: raise `max_resident_workers` if you have the RAM to keep several loaded at once.
-
-### Fine-tuning a worker
-
-Every delegated task's (input, output) pair is recorded as a training sample under that worker's own data directory (`training_data/workers/<role>/`) — real usage builds the corpus. Training a worker reuses the exact golden-set-guarded-rollback machinery the headmaster's own `/train` uses: a small, role-scoped golden set (e.g. "does the browser worker still reply with a known action verb") is checked before and after training, and a regression rolls the worker's adapter back automatically, the same way `_guarded_train` protects the headmaster's. Worker adapters live under `adapters/workers/<role>/`, fully separate from the headmaster's own `adapters/`.
-
-| Key | Default | Note |
-|---|---|---|
-| `dispatch.enabled` | `false` | Turn on delegation |
-| `dispatch.max_resident_workers` | `1` | How many worker models can be loaded at once |
-| `dispatch.worker_idle_unload_minutes` | `10` | Unload a worker after this long unused |
-| `dispatch.max_worker_rounds` | `4` | Round cap for a multi-step worker task (e.g. browser) |
-| `dispatch.worker_golden_set_enabled` | `true` | Golden-check a worker's adapter around training |
-| `dispatch.worker_golden_rollback_on_regression` | `true` | Auto-rollback a worker's adapter on regression |
-| `dispatch.hot_swap_adapters` | `true` | Switch between workers sharing a base model by replacing only their LoRA tensors |
-| `dispatch.headmaster_deep_sleep_while_workers` | `false` | Unload the headmaster while a worker runs, for machines that cannot hold both |
-| `dispatch.allow_second_headmaster_copy` | `false` | Permit a worker on the headmaster's own model to load a second full copy |
-
-### One model at a time
-
-The failure mode on a unified-memory Mac is never one model being too big — it is two of them resident at once. Three rules keep that from happening:
-
-- A worker running the **headmaster's own model** is refused rather than loaded, because that is a second copy of the largest allocation on the machine. Hot-swapping its LoRA tensors onto an already-resident model costs ~19 MB instead of gigabytes, and is tried first. The refusal names the reason and tells you which setting overrides it.
-- With `headmaster_deep_sleep_while_workers` on, the headmaster unloads before a worker loads **and the worker unloads before the headmaster comes back**. Reloading it on top of a still-resident worker is the same double residency moved one turn later — which is exactly how this machine went down. The cost is a cold worker on the next delegation; that is the price of the setting.
-- Every eviction hands the memory back immediately. Dropping the reference is not the same as freeing the weights: MLX keeps them charged to the process until the allocator reclaims, so an eviction without that leaves the old worker fully resident right through the load of its replacement.
-
-Training gets its own preflight. A run is refused, with the arithmetic shown, when the machine cannot hold it — and refusing is not the same as forgetting, so the run goes on the `/resume` list instead of vanishing:
-
-```
-  [Train] Not enough free memory to train safely: the run needs about 4.1 GB
-          (2.3 GB of weights plus optimiser state and retained activations)
-          and only 3.1 GB is free. Skipping rather than risking an
-          out-of-memory kill.
-```
-
-Enabling dispatch also needs `"delegate"` in `tools.enabled_groups` — it's included by default going forward, but an existing `config.json` written before this feature won't have picked it up automatically; add it with `/config set tools.enabled_groups '[...]'` if delegation seems to silently do nothing.
-
-## Dynamic names
-
-### Supported user-name phrasings
-
-- *"My name is Alice."*
-- *"Call me Bob."*
-- *"You can call me Charlie."*
-- *"From now on call me Dana."*
-- *"Change my name to Eve."*
-- *"I go by Frank."*
-
-### Supported assistant-name phrasings
-
-- *"Call yourself Jarvis."*
-- *"I will call you Friday."*
-- *"I'm going to call you HAL."*
-- *"Change your name to Jeeves."*
-- *"Set your name as Alfred."*
-
-> Note: *"Your name is X"* is intentionally **not** treated as an assistant rename because small models often confuse it with the user's name.
-
-## Tool formats
-
-Symbio understands two ways to call tools:
-
-- **Legacy XML tags**:
-  - `<note title="User Preference">The user likes coffee.</note>` — save a note
-  - `<cmd>ls</cmd>` — run a sandboxed command (legacy, still supported)
-  - `<digest />` / `<train />` — digest notes or train
-
-- **Hermes JSON-in-XML** (preferred):
-  ```xml
-  <tool_call>{"name": "read_file", "arguments": {"path": "config.json"}}</tool_call>
-  <tool_call>{"name": "terminal", "arguments": {"cmd": "ls -la"}}</tool_call>
-  <tool_call>{"name": "note", "arguments": {"action": "add", "target": "note", "content": "The user likes coffee."}}</tool_call>
-  ```
-
-## Security notes
-
-- `terminal` and `execute_code` are best-effort sandboxes. They run with the privileges of the user who started the program and are scoped to the project directory.
-- `execute_code` requires the script to import from `symbio_tools` (or the backward-compatible `caine_tools` alias) and blocks known dangerous imports.
-- Do not paste untrusted code into the agent without reviewing it first.
-- And also do pay attention to the 'Do you wanna yes/no' questions those are there to keep you from having Symbio do random stuff without your consent because you might not want to do it.
-- **A "no" ends the action for the whole turn, not just for the tool that asked.** Answering `N` to a browser domain prompt used to leave the model free to reach the same end another way — it ran `open -a 'Google Chrome'` through the shell on the next round and reported success. The sandbox is a *denylist*, so `open` was never on it, but the gate you answered was about the action, not about which tool happened to ask. A refusal is also not a retryable error: no second attempt turns a "no" into a "yes", and retrying one only puts the identical prompt in front of you again. The reply now says plainly that it did not happen, instead of describing the blocked action as done.
-
-## Architecture
-
-The project is organized as a `symbio/` Python package with a thin `main.py` wrapper:
-
-```
-.
-├── main.py              # Delegates to the modern CLI in symbio/app/cli.py
-├── symbio/
-│   ├── constants.py     # Paths, DEFAULT_CONFIG
-│   ├── app/
-│   │   ├── cli.py         # symbio / symb command-line interface
-│   │   ├── chat.py        # ChatSession, agent loop, slash commands
-│   │   ├── config.py      # Defaults, loading, redaction, token prompt
-│   │   ├── training.py    # Training data and LoRA fine-tuning via mlx_lm
-│   │   ├── learn.py       # Correction detection and batch learning
-│   │   ├── golden.py      # Golden set: regression checks around every LoRA update
-│   │   ├── eval.py        # Held-out eval set: headmaster adapter vs base model
-│   │   ├── skill_eval.py  # Three-way skill scoring: base vs prompted vs adapter
-│   │   ├── prune.py       # Self-pruning of junk notes and duplicate session turns
-│   │   ├── pending.py     # Durable journal of in-flight work; survives a kill (/resume)
-│   │   ├── dispatch.py    # MoA: WorkerPool, delegated tasks, worker fine-tuning
-│   │   ├── worker_models.json  # Catalog of available worker models/roles
-│   │   ├── memory.py      # Notes, memory, profile management
-│   │   ├── sandbox.py     # Sandboxed commands and Python execution
-│   │   ├── computer.py    # Browser automation helpers
-│   │   ├── cron.py        # Scheduled jobs and reminders
-│   │   ├── telegram.py    # Telegram bot gateway
-│   │   ├── tooling.py     # Tag parsing and tool stripping
-|   |   ├── prompts.py     # just the prompt idk nothing special
-|   |   └── skills.py      # saves the skills as adapters as well as manage the notes/
-│   └── utils.py         # Shared helpers
-├── rag.py               # Lightweight keyword-based RAG
-├── README.md
-├── docs/
-│   └── adapter-marketplace.md  # Design doc, not yet implemented
-├── config.json          # User configuration
-├── models.json          # Model presets
-├── notes/               # Markdown notes / memory
-├── training_data/       # train.jsonl and valid.jsonl (workers/<role>/ for MoA workers)
-├── adapters/            # LoRA adapter weights (workers/<role>/ for MoA workers)
-├── cache/               # Persisted system-prompt KV cache
-
-├── logs/                # Session logs, plus pending_tasks.json (unfinished work)
-├── sessions/            # Session stores
-├── screenshots/         # Browser screenshots
-└── sandbox/             # Scratch space for code execution
-```
-
-## Roadmap / high-priority contributions
-
-We are actively looking for help on:
-
-1. **CUDA port** — MLX is Apple Silicon only. A PyTorch or Transformers backend would let Symbio run on NVIDIA/AMD hardware.
-2. **llama.cpp backend** — Support GGUF models through llama.cpp for broader model coverage and lower memory use.
-3. **LoRA optimization** — Faster adapter swaps, gradient checkpointing, and memory-efficient training.
-4. **Refactoring** — Cleaner separation between inference, tools, training, and storage; better test coverage.
-5. **Sparse / quantized adapters** — Experiment with QLoRA, 8-bit/4-bit base models, and sparse LoRA updates.
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, testing, and how to open issues/PRs.
-
-
- > future projection <
-- [ ] **Add MCP (Model Context Protocol)**
-- [x] **Add More Tools** — live browser (`<browse>`/`<click>`/`<type>`/`<scroll>`), `<skill>`, permission-gated sandbox
-- [x] **Self correction when hallucinating**
-- [x] **Be able to learn new skills on the fly**
-- [x] **Remember new info found from web research** — auto-saved as `Learned:` notes, trained in on digest
-- [x] **Add Telegram bot** — full tool loop with inline-keyboard approval for dangerous actions
-- [x] **Mixture of agents** — headmaster delegates bounded sub-tasks to smaller, independently fine-tunable worker models (`dispatch.enabled`, off by default)
-- [ ] **Adapter marketplace** — design doc: [docs/adapter-marketplace.md](docs/adapter-marketplace.md); not yet implemented
-- [ ] **Add Other Messaging Platforms**
-- [ ] **Prune Old Weights (Future Milestone)**
-## Licence
 Apache 2.0
 
 ---
 
-⭐ If Symbio is useful to you, a star helps others find it.
+## ⭐ Support the project
+
+If Symbio is useful or interesting to you, **a GitHub star helps other people discover it.**
+
+If you build something with Symbio, open an issue or discussion and show me what it learned.
