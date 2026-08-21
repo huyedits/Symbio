@@ -1,9 +1,3 @@
-Absolutely. The biggest improvement is **turning this from a development diary into a product README**: lead with what Symbio is, show it working quickly, explain the learning loop, then put deep implementation details behind collapsible sections.
-
-I’d also avoid claims like “fine-tunes itself” without immediately explaining what that means, because the LoRA/adapter mechanism is actually one of the most interesting parts of the project.
-
-Here’s a GitHub-ready rewrite:
-
 # Symbio 🧠
 
 > **A local-first AI agent that learns from your corrections.**
