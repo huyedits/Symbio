@@ -17,6 +17,7 @@
 Most AI agents have a problem:
 
 **They forget.**
+
 *like forget forget*
 get it cause it was in short term memory? 
 
