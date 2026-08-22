@@ -182,6 +182,16 @@ class AIAgent:
             temp=config["agent"]["temperature"],
             top_p=config["agent"]["top_p"],
         )
+        # Speculative decoding: a tiny draft model predicts ahead cheaply and
+        # the big model verifies several tokens per forward pass. On a
+        # bandwidth-bound 2-bit model this is the single biggest speed lever.
+        # Only loaded if configured — leave "draft_model" unset to disable.
+        self.draft_model = None
+        draft_name = config["agent"].get("draft_model")
+        if draft_name:
+            from mlx_lm import load as _mlx_load
+            self.draft_model, _ = _mlx_load(draft_name)
+
         # Near-greedy sampling on a small overfit model degenerates into
         # repetition loops on out-of-distribution input; penalize repeats.
         self.logits_processors = make_logits_processors(
@@ -234,6 +244,7 @@ class AIAgent:
                 sampler=self.sampler,
                 logits_processors=self.logits_processors,
                 max_tokens=self.config["agent"].get("max_output_len", 1024),
+                draft_model=self.draft_model,
             ):
                 parts.append(response.text)
                 # Runaway-loop breaker: degenerate output (repeated chars,
