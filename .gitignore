@@ -64,6 +64,7 @@ telemetry/
 # Throwaway one-off scripts (tool-use seeding, manual training runner).
 seed_tools.py
 train_runner.py
+test_*.py
 
 # Scratch copies conftest.py points the runtime at during a pytest run. They
 # are removed on a clean exit; ignoring them keeps an interrupted run from
