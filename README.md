@@ -69,14 +69,14 @@ Everything can stay on your machine, nothing phones "home"
 *  **No API required for inference** — the default architecture is designed around local models.
 ---
 
-## 🎥 Demo
+## Demo
 
 ### Live browser demo
 
 Try the real tag parser, correction miner, research memory and RAG retriever in your browser:
 
 **[https://huggingface.co/spaces/HuyEdits/symbio-demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)**
-
+(no fine tuning just actions)
 ### Screenshots
 
 <img width="1300" alt="Symbio CLI" src="https://github.com/user-attachments/assets/c4e02593-f527-44dc-9bcb-181f329360ad" />
@@ -85,7 +85,7 @@ Try the real tag parser, correction miner, research memory and RAG retriever in 
 
 ### Browser automation
 
-Symbio can use a live browser to perform tasks such as opening Chrome and interacting with pages.
+Symbio can use a live browser to perform tasks such as opening Chrome and interacting with pages. wowie
 
 [https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20](https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20)
 
@@ -95,7 +95,7 @@ Symbio can use a live browser to perform tasks such as opening Chrome and intera
 
 ## Requirements
 
-Symbio currently targets **Apple Silicon Macs** using Apple's MLX stack. (unfortunately until we can get support for CUDA, etc )
+Symbio currently targets **Apple Silicon Macs** using Apple's MLX stack. (unfortunately until we can get support for CUDA, and other stuff)
 
 ### Recommended
 
