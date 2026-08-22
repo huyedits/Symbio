@@ -19,7 +19,7 @@ Most AI agents have a problem:
 **They forget.**
 
 *like forget forget*,
-get it cause it was in short term memory? 
+get it? Cause it was in short term memory and you might shut down your computer? 
 
 You correct an agent today, and tomorrow it makes the same mistake again. You can put instructions in a system prompt, but that makes the prompt larger, it becomes slower when processing, and doesn't really teach the model anything.
 
