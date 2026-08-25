@@ -64,8 +64,32 @@ _TOOL_ERROR_RE = re.compile(
 )
 
 
+# Every way this codebase says "the user said no". Only the first of these was
+# listed, and it is the one the browser emits — so a decline at the *security*
+# gate ("Tool 'run_command' was not approved (risk score 3/3: ...)") and one at
+# the Telegram confirm ("Tool 'X' was not approved.") both read as ordinary tool
+# errors. That switched off the whole refusal path for them: no "it did NOT
+# happen, do not try another way" appended, no retry suppression, and
+# user_refused_this_turn never set — which is the flag that stops a denied
+# action being reattempted by another route in the same turn.
+#
+# Seen live 2026-08-24: a curl pipeline was declined at the security gate and
+# the very next line was "I'll run the command using an approved method."
 _USER_REFUSAL_RE = re.compile(
     r"\buser (?:denied|declined|refused|cancelled|canceled)\b", re.IGNORECASE)
+
+# Phrasings specific enough to trust anywhere in the observation, not just on
+# the status line. The line limit exists so a *successful* search whose content
+# mentions a refusal is not read as one — "the proposal was not approved by
+# congress" must not count — so anything matched beyond that line has to be
+# unambiguously this system talking about its own gate. The sandbox puts its
+# refusal three lines down, inside the command output, which is why the limit
+# alone was not enough.
+_EXPLICIT_REFUSAL_RE = re.compile(
+    r"\buser did not approve\b"
+    r"|Tool '[^']+' was not approved"
+    r"|\bwas not approved \(risk score\b",
+    re.IGNORECASE)
 
 
 def is_user_refusal(observation: str) -> bool:
@@ -78,6 +102,8 @@ def is_user_refusal(observation: str) -> bool:
     prompt, so the user is made to decline the identical request twice in a
     single turn, which reads as the agent not taking no for an answer.
     """
+    if _EXPLICIT_REFUSAL_RE.search(observation):
+        return True
     return bool(_USER_REFUSAL_RE.search(observation.split("\n", 1)[0]))
 
 

@@ -284,6 +284,60 @@ GOLDEN_COVERAGE_FLOOR = 0.5
 GOLDEN_ORDER_FLOOR = 0.6
 
 
+RECITED_SPAN_FLOOR = 0.5
+
+
+def recites_steps(reply: str, steps: str) -> bool:
+    """True when a reply restates a procedure instead of reporting an outcome.
+
+    Two signals, because recitation arrives in two shapes and each is invisible
+    to the other's measure. Numbers below are the scrape skill, measured
+    2026-08-24 against its own note:
+
+                                    span   vocab
+      verbatim partial lift         0.99    0.36   <- the live transcript
+      paraphrased full recitation   0.02    0.82   <- the demo's "walk me through"
+      real result ("4 clean, ...")  0.15    0.24
+      real result ("24 rows, ...")  0.17    0.24
+      JSON-shaped result            0.12    0.18
+      answer about another skill    0.10    0.00
+
+    A worker that lifts a step verbatim scores near 1.0 on span overlap while
+    covering little of the vocabulary; one that expands the whole runbook in
+    its own words scores the reverse. Every reply that actually reports work
+    sits low on both, so either floor alone at 0.5 lands mid-gap rather than on
+    a knife edge — which matters, because a false positive tells the headmaster
+    that finished work never happened.
+    """
+    if not reply.strip() or not steps.strip():
+        return False
+    if coverage(reply, _keywords(steps)) >= GOLDEN_COVERAGE_FLOOR:
+        return True
+    return _shared_span(reply, steps) >= RECITED_SPAN_FLOOR
+
+
+def _shared_span(reply: str, steps: str) -> float:
+    """Longest run of text the reply shares with the steps, over reply length.
+
+    Normalised for case, whitespace and list enumerators so "3. Write rows"
+    and "Write rows" are the same text. Long replies are truncated: a verbatim
+    lift shows up in the first couple of thousand characters, and the matcher
+    is quadratic in the worst case.
+    """
+    from difflib import SequenceMatcher
+
+    a = " ".join(_ENUM_RE.sub(" ", reply.lower()).split())[:2000]
+    b = " ".join(_ENUM_RE.sub(" ", steps.lower()).split())[:2000]
+    if not a or not b:
+        return 0.0
+    # autojunk treats characters that are common in a long string as noise,
+    # which on prose means spaces and vowels — exactly the glue holding a
+    # verbatim span together.
+    match = SequenceMatcher(None, a, b, autojunk=False).find_longest_match(
+        0, len(a), 0, len(b))
+    return round(match.size / len(a), 4)
+
+
 def skill_golden_cases(name: str, steps: str) -> list[Any]:
     """Regression cases for a skill, derived from its own procedure.
 

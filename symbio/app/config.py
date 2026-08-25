@@ -95,7 +95,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Short replies keep the model fast: tags + short prose fit easily;
         # long answers can still be requested explicitly. 128 is a sweet spot
         # for quick chat on local MLX.
-        "max_reply_tokens": 128,
+        "max_reply_tokens": 1024,
         "temperature": 0.7,
         "top_p": 0.9,
         "cron_poll_seconds": 20,
@@ -103,6 +103,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Surface the model's Qwen3 thinking block to the user as a
         # "[Reasoning] …" block before the answer. Set false to hide it.
         "show_reasoning": True,
+        # How hard the model is asked to think before answering: none, low,
+        # medium or flurry (see chat.THINKING_LEVELS). Change it live with
+        # /think. "none" ends the prompt with an empty closed think block, so
+        # the model answers directly; the others leave the block open and give
+        # the reasoning a token allowance on top of max_reply_tokens.
+        #
+        # Defaults to none because that is how the tool-call round already ran
+        # (chat.py used think=round_num > 0), and it is the setting the 21-case
+        # battery scored 19/21 on.
+        "thinking_level": "low",
+        # Speculative decoding: a small model drafts, the real one verifies.
+        # Empty disables it. Keep num_draft_tokens low on hybrid
+        # linear-attention models (Qwen3.5) — deeper drafts lose there.
+        "draft_model": "",
+        "num_draft_tokens": 1,
         "prompt_cache_enabled": True,
         # Keep the warmed system-prefix KV cache on disk between runs, so a
         # restart reloads it instead of re-prefilling ~4.3k tokens through the
@@ -129,6 +144,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # prompt's tag rules (browse vs cmd, press vs fake keydown) more
         # strictly instead of drifting into prose or hallucinated commands.
         "tool_use_temperature": 0.2,
+        # Near-greedy sampling on a small, heavily fine-tuned model degenerates
+        # into repetition loops on out-of-distribution input. agent.py has had
+        # this since the start; the CLI's own loop (chat.py) and the worker
+        # dispatch never did, and both ran without any penalty at all.
+        "repetition_penalty": 1.15,
+        "repetition_context_size": 64,
         # Speed preset: "balanced" (default) or "fast". "fast" trades context
         # length and RAG budget for snappier turns.
         "speed_mode": "balanced",
@@ -286,6 +307,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Actions at or above this score get an alert appended to the
         # tool observation so the model sees what it is doing.
         "log_score": 2,
+        # Ask before running a tool that has never run here, on a turn where
+        # retrieved text entered the context — the shape an injected action
+        # takes. Escalates to a confirmation, never to a refusal: this is a
+        # behavioural guess, and a wrong guess must cost a keystroke rather
+        # than the feature. Each tool asks at most once, then it is baselined
+        # in tool_baseline.json.
+        "provenance_enabled": True,
+        # Ask before a shell/filesystem/settings call on a turn where the user
+        # requested no action at all. Escalates to a prompt, never a refusal.
+        "intent_gate_enabled": True,
     },
     "dispatch": {
         # Off by default: MoA delegation loads and runs additional models

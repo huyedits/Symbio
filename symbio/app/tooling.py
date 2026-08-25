@@ -17,6 +17,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "execute_code": "code",
     "web_search": "web_search",
     "read_page": "browser",
+    "fetch_html": "browser",
     "browser_open": "browser",
     "browser_click": "browser",
     "browser_type": "browser",
@@ -70,7 +71,7 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "execute_code",
-        "description": "Run a short Python script in the sandbox directory (pure computation; no os/network imports).",
+        "description": "Run a Python script in the sandbox. Print what you want back — a value is only visible if the script prints it. Beyond the standard library you may `from symbio_tools import read_file, write_file, patch, list_dir, search_files, fetch, select` — read_file/write_file/patch/list_dir/search_files work on project paths, fetch(url) returns a URL's raw body, and select(html, css) returns the matching elements as dicts with 'text' and 'attrs' — use it rather than parsing HTML yourself. requests, selectolax and numpy are installed. os, sys, subprocess, pathlib and urllib are not importable; use symbio_tools instead.",
         "parameters": {
             "type": "object",
             "properties": {"code": {"type": "string", "description": "The Python code to execute."}},
@@ -92,6 +93,15 @@ _TOOLS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {"url": {"type": "string", "description": "The URL to read."}},
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "fetch_html",
+        "description": "Fetch a URL and return its raw HTML with tags and attributes intact. Use this when you need to parse a page by selector (data-testid, class, id) rather than just read its text; read_page strips all markup.",
+        "parameters": {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "The URL to fetch."}},
             "required": ["url"],
         },
     },
@@ -405,6 +415,10 @@ _HERMES_NAME_MAP: dict[str, str] = {
     "google": "web_search",
     "read": "read_page",
     "read_page": "read_page",
+    "fetch_html": "fetch_html",
+    "get_html": "fetch_html",
+    "raw_html": "fetch_html",
+    "html": "fetch_html",
     "fetch": "read_page",
     "browse": "browser_open",
     "open": "browser_open",
@@ -575,10 +589,12 @@ def strip_reasoning_block(text: str) -> str:
     plain answer (or pure reasoning with no answer) and is returned as-is so
     callers can decide; display/history/parse_tools then see only prose.
     """
+    stripped_a_block = False
     while True:
         s = text.lstrip("\n")
         if not s.startswith(_QWEN_THINK_OPEN):
             break
+        stripped_a_block = True
         cidx = s.find(_QWEN_THINK_CLOSE, len(_QWEN_THINK_OPEN))
         if cidx == -1:
             # Lone unclosed open delimiter: the model dropped the close, so
@@ -586,7 +602,24 @@ def strip_reasoning_block(text: str) -> str:
             return s[len(_QWEN_THINK_OPEN):].lstrip("\n")
         # Drop this complete think block and look at what remains.
         text = s[cidx + len(_QWEN_THINK_CLOSE):]
-    return text.lstrip("\n")
+
+    # A close with no open before it. Not malformed output — it is what the
+    # template produces whenever thinking is on: enable_thinking=True ends the
+    # prompt with a bare open delimiter, so the block is already open when
+    # generation starts and the model only ever emits the close. Everything up
+    # to it is reasoning. Without this the whole monologue was printed to the
+    # user ahead of the answer on every round after the first.
+    #
+    # Only when the reply carried no open of its own. Having already consumed
+    # a block proves the model writes its own delimiters, so a later stray
+    # close is junk inside the answer — treating it as a reasoning boundary
+    # there discards real content, which a test caught it doing.
+    s = text.lstrip("\n")
+    if not stripped_a_block:
+        cidx = s.find(_QWEN_THINK_CLOSE)
+        if cidx != -1 and _QWEN_THINK_OPEN not in s[:cidx]:
+            return s[cidx + len(_QWEN_THINK_CLOSE):].lstrip("\n")
+    return s
 
 
 def extract_reasoning(text: str) -> str:
@@ -600,6 +633,12 @@ def extract_reasoning(text: str) -> str:
     """
     s = text.lstrip("\n")
     if not s.startswith(_QWEN_THINK_OPEN):
+        # Mirror strip_reasoning_block's prompt-opened case: with thinking on,
+        # the open delimiter is in the prompt and never in the reply, so the
+        # reasoning is simply everything before the first close.
+        cidx = s.find(_QWEN_THINK_CLOSE)
+        if cidx != -1 and _QWEN_THINK_OPEN not in s[:cidx]:
+            return s[:cidx].strip()
         return ""
     cidx = s.find(_QWEN_THINK_CLOSE, len(_QWEN_THINK_OPEN))
     if cidx == -1:
@@ -837,6 +876,65 @@ _FUNC_NOARG_RE = re.compile(
 
 _ATTR_PAIR_RE = re.compile(r'(\w+)\s*=\s*(["\'])(.*?)\2', re.DOTALL)
 
+# The same improvisation with a colon instead of an equals sign, which is what
+# a model writes when it is copying the tool *schema* rather than an example:
+# `browser_scroll(direction: "down")`.
+_FUNC_COLON_RE = re.compile(
+    r'[.<]?\b(' + _NAME_ALT + r')\b\s*\(\s*'
+    r'((?:\w+\s*:\s*(?:"[^"]*"|\'[^\']*\')\s*,?\s*)+)\)')
+_COLON_PAIR_RE = re.compile(r'(\w+)\s*:\s*(["\'])(.*?)\2', re.DOTALL)
+
+# A single positional argument: `web_search("weather in Tokyo")`. Only safe for
+# the tools in _PRIMARY_ARG, whose one meaningful argument is unambiguous —
+# anywhere else there is no way to know which parameter was meant.
+_FUNC_POSITIONAL_RE = re.compile(
+    r'[.<]?\b(' + _NAME_ALT + r')\s*\(\s*(["\'])(.*?)\2\s*\)', re.DOTALL)
+
+
+def unparsed_tool_tags(reply: str) -> list[str]:
+    """Tool names the reply used as a tag that this module does not parse.
+
+    22 of the declared tools have no `<name>arg</name>` form — the alias table
+    is derived from _PRIMARY_ARG, which only covers single-argument tools, and
+    the rest are reached through their own richer syntax (<note title=...>,
+    <config set=...>, <digest />). When the model reaches for the plain form
+    anyway — which it does, having seen the tool's name in the <tools> catalog
+    — the tag matches nothing, gets stripped from the display, and the turn
+    quietly does nothing at all. No error, no retry, nothing for the model to
+    learn from. Seen live 2026-08-24: <fetch_html>...</fetch_html> was printed
+    as the entire visible reply and no tool ran.
+
+    A malformed <tool_call> is NOT this case: it leaves a dangling tag, which
+    the loop already detects and resamples on. This is the silent one.
+    """
+    used = {m.group(1) for m in re.finditer(r"<([a-z_][a-z0-9_]*)\s*>", reply, re.I)}
+    return sorted(
+        name for name in used
+        if name in _TOOL_GROUPS and not parse_tools(f"<{name}>x</{name}>")
+    )
+
+
+def _unwrap_primary_arg(arg_name: str, raw: str) -> str:
+    """Strip a parameter name the model wrote *inside* the tag body.
+
+    An alias tag carries one value, so the name is redundant — but the model
+    writes it anyway, having seen the tool's JSON schema. Live 2026-08-24:
+    <read_file>path=\'symbio/app/chat.py\'</read_file> arrived as
+    {"path": "path=\'symbio/app/chat.py\'"}, which resolved to a file of that
+    literal name, and the user was told their file did not exist.
+
+    Only the tool's OWN argument name is stripped, so a value that legitimately
+    contains "=" (a URL query string, an env assignment in a command) is left
+    exactly as written.
+    """
+    text = raw.strip()
+    prefix = arg_name + "="
+    if text.lower().startswith(prefix.lower()):
+        text = text[len(prefix):].strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()
+    return text
+
 
 def _in_code_fence(text: str, index: int) -> bool:
     """True when `index` falls inside a markdown code fence — the model is
@@ -875,6 +973,32 @@ def _find_function_attr_calls(
             continue
         seen.add((m.start(), m.end()))
         out.append((m.start(), m.end(), name, _normalize_args(name, params)))
+
+    for m in _FUNC_COLON_RE.finditer(scan):
+        if _in_code_fence(reply, m.start()):
+            continue
+        if any(s <= m.start() < e for s, e in seen):
+            continue
+        name = _HERMES_NAME_MAP.get(m.group(1), m.group(1))
+        if name not in _TOOL_GROUPS:
+            continue
+        params = {k.lower(): v for k, _q, v in _COLON_PAIR_RE.findall(m.group(2))}
+        if not params:
+            continue
+        seen.add((m.start(), m.end()))
+        out.append((m.start(), m.end(), name, _normalize_args(name, params)))
+
+    for m in _FUNC_POSITIONAL_RE.finditer(scan):
+        if _in_code_fence(reply, m.start()):
+            continue
+        if any(s <= m.start() < e for s, e in seen):
+            continue
+        name = _HERMES_NAME_MAP.get(m.group(1), m.group(1))
+        if name not in _TOOL_GROUPS or name not in _PRIMARY_ARG:
+            continue
+        seen.add((m.start(), m.end()))
+        out.append((m.start(), m.end(), name,
+                    _normalize_args(name, {_PRIMARY_ARG[name]: m.group(3)})))
 
     for m in _FUNC_NOARG_RE.finditer(scan):
         if _in_code_fence(reply, m.start()):
@@ -944,6 +1068,82 @@ def _repair_tool_call_json(raw: str) -> dict[str, Any] | None:
                            else float(lit) if "." in lit else int(lit))
 
     return {"name": name_m.group(1), "arguments": params}
+
+
+# Gemma 4's own tool-call dialect, which it falls back to whenever the prompt's
+# examples do not fully take:
+#
+#     <|tool_call>call:read_file{path:<|"|>notes/todo.md<|"|>}<tool_call|>
+#     <|tool_call>call:{"name": "list_cron_jobs", "arguments": {}}<tool_call|>
+#
+# That is not sloppiness — it is the syntax its own chat template teaches, down
+# to the <|"|> string delimiters emitted by the template's format_parameters
+# macro. Unrecognised, read_file failed 3/3 in the tool battery while choosing
+# the right tool and the right path every time.
+_GEMMA_TOOL_CALL_RE = re.compile(
+    r'<\|tool_call>\s*(.*?)\s*<tool_call\|>', re.DOTALL)
+# Channel markers leak into the call body ("call:<|channel>::web_search{...}"),
+# as does the `call:` lead-in itself.
+_GEMMA_NOISE_RE = re.compile(r'<\|channel>|<channel\|>|^\s*call\s*:|^[\s:/]+')
+_GEMMA_QUOTE = '<|"|>'
+# key:<|"|>value<|"|>  or  key:"value"  or  "key":"value"
+_GEMMA_STR_ARG_RE = re.compile(
+    r'"?(\w+)"?\s*:\s*(?:' + re.escape(_GEMMA_QUOTE) + r'(.*?)'
+    + re.escape(_GEMMA_QUOTE) + r'|"(.*?)"|\'(.*?)\')', re.DOTALL)
+_GEMMA_LIT_ARG_RE = re.compile(
+    r'"?(\w+)"?\s*:\s*(-?\d+(?:\.\d+)?|true|false)\b')
+
+
+def _extract_gemma_tool_calls(reply: str) -> list[tuple[str, dict[str, Any]]]:
+    """Recognise Gemma 4's native <|tool_call>…<tool_call|> form."""
+    out: list[tuple[str, dict[str, Any]]] = []
+    for m in _GEMMA_TOOL_CALL_RE.finditer(reply):
+        if _in_code_fence(reply, m.start()):
+            continue
+        body = m.group(1)
+        # Strip the channel/lead-in noise repeatedly: it arrives stacked.
+        prev = None
+        while prev != body:
+            prev = body
+            body = _GEMMA_NOISE_RE.sub("", body).strip()
+
+        if body.startswith("{"):
+            # It reached for the taught JSON shape inside its own wrapper.
+            try:
+                call = json.loads(body)
+            except json.JSONDecodeError:
+                call = _repair_tool_call_json(body)
+            if not isinstance(call, dict):
+                continue
+            name = call.get("name") or call.get("function")
+            params = (call.get("arguments") or call.get("parameters")
+                      or call.get("args") or {})
+            if not isinstance(params, dict):
+                params = {}
+        else:
+            head = re.match(r'([\w.]+)\s*\{(.*)\}\s*$', body, re.DOTALL)
+            if not head:
+                continue
+            name = head.group(1).rsplit(".", 1)[-1]
+            args_body = head.group(2)
+            params = {}
+            for a in _GEMMA_STR_ARG_RE.finditer(args_body):
+                value = next(g for g in a.groups()[1:] if g is not None)
+                params[a.group(1)] = value
+            for a in _GEMMA_LIT_ARG_RE.finditer(args_body):
+                key, lit = a.group(1), a.group(2)
+                if key in params:
+                    continue
+                params[key] = (True if lit == "true" else False if lit == "false"
+                               else float(lit) if "." in lit else int(lit))
+
+        if not isinstance(name, str):
+            continue
+        internal = _HERMES_NAME_MAP.get(name, name)
+        if internal not in _TOOL_GROUPS:
+            continue
+        out.append((internal, _normalize_args(internal, params)))
+    return out
 
 
 def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
@@ -1018,7 +1218,8 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     # intent is unambiguous, so honour it.
     for m in _ALIAS_TAG_RE.finditer(reply):
         tool = _ALIAS_TO_TOOL[m.group(1)]
-        tools.append((tool, {_PRIMARY_ARG[tool]: m.group(2).strip()}))
+        arg = _PRIMARY_ARG[tool]
+        tools.append((tool, {arg: _unwrap_primary_arg(arg, m.group(2))}))
 
     if re.search(r'<browser_close\s*/>', reply) or re.search(r'<browser_close></browser_close>', reply):
         tools.append(("browser_close", {}))
@@ -1062,7 +1263,7 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
 
     # File tools (legacy tag form for quick edits).
     for m in re.finditer(r'<read_file>(.*?)</read_file>', reply, re.DOTALL):
-        tools.append(("read_file", {"path": m.group(1).strip()}))
+        tools.append(("read_file", {"path": _unwrap_primary_arg("path", m.group(1))}))
 
     for m in re.finditer(
         r'<edit_file\s+path=[\'"]([^\'"]*?)[\'"]\s+old_string=[\'"]([^\'"]*?)[\'"]\s+new_string=[\'"]([^\'"]*?)[\'"](?:\s+backup=[\'"]([^\'"]*?)[\'"])?\s*/?>',
@@ -1148,6 +1349,15 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
             internal_name = _HERMES_NAME_MAP.get(name, name)
             tools.append((internal_name, _normalize_args(internal_name, params)))
 
+    # Gemma 4's native wrapper. An explicit call, not an improvisation, so it
+    # is read alongside the other supported syntaxes rather than as a fallback.
+    # When it wraps a well-formed JSON call the bare-JSON scan above has
+    # already found the same one, so drop the repeat — a duplicate here does
+    # not read as noise, it runs the tool twice.
+    for call in _extract_gemma_tool_calls(reply):
+        if call not in tools:
+            tools.append(call)
+
     # Improvised function form, for the tools the prompt declares but never
     # demonstrates. Last, so a well-formed call in any supported syntax is
     # already in `tools` and this only ever adds what nothing else caught.
@@ -1184,6 +1394,11 @@ _COMPLETE_TAG_PATTERNS: list[str] = [
     r'<browser_close>(.*?)</browser_close>',
     r'<end\s*/?>',
     r'</end>',
+    # Gemma 4's native call wrapper and its thought channel. Executed above, so
+    # they must be stripped too — a recovered call that still prints its raw
+    # tag to the user is the bug the recovery was meant to fix.
+    r'<\|tool_call>(.*?)<tool_call\|>',
+    r'<\|channel>thought(.*?)<channel\|>',
     r'<skill\s+name=[\'"][^\'"]*?[\'"]>(.*?)</skill>',
     r'<memory[^>]*>(.*?)</memory>',
     r'<profile[^>]*>(.*?)</profile>',
@@ -1224,6 +1439,12 @@ _PRIMARY_ARG: dict[str, str] = {
     "execute_code": "code",
     "web_search": "query",
     "read_page": "url",
+    # Registering the primary arg is what makes <fetch_html>URL</fetch_html>
+    # parse, via _ALIAS_TO_TOOL below. Without it the model emitted exactly
+    # that tag — the obvious guess once it has seen the tool's name in the
+    # catalog — and it matched nothing, so the tag was printed as the visible
+    # reply and the turn silently did nothing. Observed live 2026-08-24.
+    "fetch_html": "url",
     "browser_open": "url",
     "browser_click": "target",
     "browser_type": "text",
@@ -1451,8 +1672,21 @@ class StreamingStripper:
         # open delimiter ("<th") that never resolved — that is prose, not
         # reasoning, so fall through and flush it.
         self._think_state = "done"
-        remaining = strip_tool_tags(
-            self._buffer.replace(_QWEN_THINK_OPEN, "").replace(_QWEN_THINK_CLOSE, ""))
+        self._buffer = self._buffer.replace(_QWEN_THINK_OPEN, "").replace(
+            _QWEN_THINK_CLOSE, "")
+        # Whatever _first_ambiguous_lt is still holding never completed:
+        # generation ended mid-tag, or the reply was nothing but tool tags and
+        # this is the leftover '<'. That is truncated syntax, not prose.
+        # strip_tool_tags below only removes tags it can recognize, so a lone
+        # '<' survives it and gets printed as the entire reply — seen live as
+        # "Caine   : <" on a reply that was 25 <run_command/> tags. Cut the
+        # fragment here instead. Prose is unaffected: a '<' is only held when
+        # it is at the very end of the buffer or already matches a tag name,
+        # so "x < 5" was never in the buffer to begin with.
+        cut = self._first_ambiguous_lt()
+        if cut != -1:
+            self._buffer = self._buffer[:cut]
+        remaining = strip_tool_tags(self._buffer)
         self._buffer = ""
         if not self._answer_started:
             return remaining.lstrip()

@@ -220,8 +220,25 @@ class Retriever:
         my me you your yours it its they them their we us our
         one two some any all no not so just now new get got make made made
         need want like use used using please tell show give take put
+        making getting doing having save saved saving
         thing things stuff way ways time times step steps skill skills
+        up down out off back away here there
+        ever never always again still yet already
+        very really quite much more most less least too also even
+        anything something nothing everything anyone someone everyone
         """.split())
+    # Particles and degree adverbs are in that list for a specific reason. The
+    # preposition half was there from the start; the particles were not, and
+    # "up" is the whole story of one live failure: an abstract question —
+    # "weigh UP ... whether a small model can understand anything" — retrieved
+    # the Browser Driver note, whose triggers say "pull up / bring up / throw
+    # up / chuck up". It was the only query term the note contained, so it both
+    # made the note eligible and supplied 11.8 of its 22.9 score. The headmaster
+    # delegated to the browser worker and tried to open google.com.
+    #
+    # IDF cannot catch this and in fact makes it worse: "up" is rare ACROSS
+    # notes, so it earns a high IDF, while being frequent WITHIN one note.
+    # Rarity is not aboutness.
 
     @classmethod
     def _is_discriminative(cls, term: str, appears: int, total: int) -> bool:
@@ -285,15 +302,33 @@ class Retriever:
         return idf
 
     def _score(self, query_terms: list[str], text: str,
-               idf: dict[str, float] | None = None) -> float:
+               idf: dict[str, float] | None = None,
+               restrict: set[str] | None = None) -> float:
+        """Rank a note against the query, on topical terms only.
+
+        The eligibility gate and the ranking used to disagree with each other:
+        _discriminative_terms decided WHETHER to answer using a filtered set of
+        terms, and then this scored every query term, stopwords included. So a
+        note admitted on a real content word could still be ranked above its
+        rivals by "from" and "can" — and one admitted on a junk term was ranked
+        by that same junk term. Scoring the terms the gate already rejected is
+        the bug the gate exists to prevent, arriving one step later.
+
+        `restrict` is that gate's own set, so the two now agree by construction.
+        """
         terms = _normalize(text)
         if not terms:
             return 0.0
         counts = Counter(terms)
+        scoring = [t for t in query_terms if t not in self._NEVER_DISCRIMINATIVE]
+        if restrict is not None:
+            scoring = [t for t in scoring if t in restrict]
+        if not scoring:
+            return 0.0
         if idf is None:
-            score = sum(counts[t] for t in query_terms)
+            score = sum(counts[t] for t in scoring)
         else:
-            score = sum(counts[t] * idf.get(t, 0.0) for t in query_terms)
+            score = sum(counts[t] * idf.get(t, 0.0) for t in scoring)
         # Normalize by document length so long docs do not always win.
         return score / (len(terms) ** 0.5 + 1)
 
@@ -336,12 +371,28 @@ class Retriever:
         discriminative = self._discriminative_terms(query_terms, normalized.values())
         if discriminative is not None and not discriminative:
             return []
+        # One rare word in common is coincidence; two is aboutness. Requiring a
+        # single overlap admitted a note on the strength of one incidental term
+        # and then pasted its procedure into the model's context: "weigh up ...
+        # whether a small model can understand anything" matched Quick Task
+        # Helper on "small" alone, and before "up" was stoplisted it matched
+        # Browser Driver on "up" alone and opened a browser.
+        #
+        # Measured over the routing cases: every correct match shares 2-6
+        # discriminative terms with its note, every wrong one shares exactly 1.
+        # The floor is a count, not a score threshold, so it does not need
+        # retuning as the corpus grows.
+        #
+        # min() so a genuinely one-word query ("colemak") can still match on
+        # its single term — the rule is "use what the query gives you", not
+        # "demand two words the user never typed".
+        required = min(2, len(discriminative)) if discriminative is not None else 0
         scored = []
         for name, text in notes.items():
-            if discriminative is not None and not (
-                    discriminative & set(normalized[name])):
+            if discriminative is not None and len(
+                    discriminative & set(normalized[name])) < required:
                 continue
-            s = self._score(query_terms, text, idf)
+            s = self._score(query_terms, text, idf, restrict=discriminative)
             if s > 0:
                 scored.append({
                     "source": "note",

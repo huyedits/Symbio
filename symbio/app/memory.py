@@ -89,7 +89,12 @@ def save_skill(
     LoRA adapter for the skill and return a result dict. Otherwise just save
     the note and return its path (legacy behavior).
     """
-    path = save_note(f"Skill: {name}", steps)
+    # The note carries a derived Triggers block, not just the steps: retrieval
+    # is term-frequency over the body, and a bare four-line procedure loses to
+    # any longer note that repeats a common word. See skills.skill_note_body.
+    from symbio.app import skills as _skills
+
+    path = save_note(f"Skill: {name}", _skills.skill_note_body(name, steps))
     if config is not None and tokenizer is not None:
         from symbio.app import skills
 

@@ -7,7 +7,7 @@ from typing import Any
 import json
 
 from symbio import constants
-from symbio.app import sandbox
+from symbio.app import sandbox, security
 
 
 def load_cron_jobs() -> list[dict[str, Any]]:
@@ -245,11 +245,27 @@ def check_due_jobs(config: dict[str, Any], now: datetime | None = None) -> list[
             text = job.get("text", "")
             if text.startswith("cmd:"):
                 shell_cmd = text[4:].strip()
-                ok, out = sandbox.run_sandboxed(shell_cmd, config, interactive=False)
-                events.append(
-                    f"Scheduled job {job.get('id')} ran '{shell_cmd}' "
-                    f"({'ok' if ok else 'error'}):\n{out}"
-                )
+                # Checked again here, not only where the job was created. This
+                # is the one place a stored command actually becomes a running
+                # one, and it is reached by jobs written before the guard
+                # existed and by anything that edits cron_jobs.json directly —
+                # neither of which passed through the tool chokepoint. It fires
+                # with interactive=False, so there is nobody to ask either.
+                blocked = security.block_reason("run_command", {"cmd": shell_cmd})
+                if blocked is not None:
+                    # Reported, not run — and then treated exactly like a job
+                    # that did fire, so a one-shot still drops. Keeping it
+                    # would re-refuse the same command every minute forever.
+                    events.append(
+                        f"Scheduled job {job.get('id')} was not run: '{shell_cmd}' "
+                        f"is refused.\n{blocked}"
+                    )
+                else:
+                    ok, out = sandbox.run_sandboxed(shell_cmd, config, interactive=False)
+                    events.append(
+                        f"Scheduled job {job.get('id')} ran '{shell_cmd}' "
+                        f"({'ok' if ok else 'error'}):\n{out}"
+                    )
             else:
                 events.append(f"Scheduled reminder: {text}")
 

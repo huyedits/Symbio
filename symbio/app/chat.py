@@ -5,6 +5,7 @@ import gc
 import hashlib
 import json
 import logging
+import os
 import re
 import shlex
 import sys
@@ -22,7 +23,7 @@ from mlx_lm.models.cache import (
     can_trim_prompt_cache, load_prompt_cache, make_prompt_cache,
     save_prompt_cache, trim_prompt_cache,
 )
-from mlx_lm.sample_utils import make_sampler
+from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 from rag import Retriever
 from symbio import constants
@@ -70,6 +71,47 @@ _GUI_APP_ALIASES: dict[str, str] = {
 }
 
 
+# The app each invented name is reaching for, keyed by the word that survives
+# whatever the model wrapped around it. _GUI_APP_ALIASES below is an exact-match
+# table of misspellings, and an exact-match table of misspellings is a game you
+# cannot win: it covered chrome/chromebrowser/chrome-app, so the model moved on
+# to launch-chrome, chrome-x and start-chrome — 56 failures the table could not
+# see, 15 of them on 2026-08-24 alone, in five identical three-step cycles.
+#
+# There is no need to guess the wrapper. By the time this is consulted the shell
+# has already said the binary does not exist, so the only question left is which
+# app the word was gesturing at, and a stem answers that for every spelling at
+# once — including the ones nobody has invented yet.
+_GUI_APP_STEMS: dict[str, str] = {
+    "chrome": "Google Chrome",
+    "safari": "Safari",
+    "spotify": "Spotify",
+    "finder": "Finder",
+    "vscode": "Visual Studio Code",
+    "calendar": "Calendar",
+    "messages": "Messages",
+    "preview": "Preview",
+    "terminal": "Terminal",
+}
+
+
+def _gui_app_from_stem(word: str) -> str | None:
+    """The app a non-existent single-word command was gesturing at, or None.
+
+    Matches a stem as a whole part once the word is split on the separators
+    models actually use (launch-chrome, chrome_app, start.chrome), and as a bare
+    substring only for stems long enough that a coincidence is implausible
+    (chromebrowser). Only ever reached for a word the shell has already failed
+    to find, so a real binary can never be captured by it.
+    """
+    lowered = word.lower()
+    parts = set(re.split(r"[-_.]+", lowered))
+    for stem, app in _GUI_APP_STEMS.items():
+        if stem in parts or (len(stem) >= 5 and stem in lowered):
+            return app
+    return None
+
+
 def _gui_app_for(cmd: str, output: str) -> str | None:
     """The macOS app a failed bare command was probably trying to launch.
 
@@ -85,13 +127,8 @@ def _gui_app_for(cmd: str, output: str) -> str | None:
     word = cmd.strip().strip("'\"")
     if not word or len(word.split()) != 1:
         return None
-    return _GUI_APP_ALIASES.get(word.lower())
+    return _GUI_APP_ALIASES.get(word.lower()) or _gui_app_from_stem(word)
 
-
-
-def bare_browser_launch_note(cmd: str, ok: bool) -> str:
-    """say what the command did :P"""
-    return ""
 
 def _looks_like_shell_command(cmd: str) -> bool:
     """Returns true for those cmmds that uses shell syntax, saves ya time. it checks headers and common things ifykykyk."""
@@ -263,6 +300,180 @@ def _is_action_request(text: str) -> bool:
         "go to ", "open ", "browse ", "click ", "press ", "type ", "scroll ",
         "read the webpage", "read the page", "read this", "navigate", "visit ",
     ))
+
+
+# Verbs that make a turn a request to DO something. Deliberately broad, and
+# biased toward answering "yes, they asked": this feeds a confirmation gate, and
+# a gate that interrupts ordinary work is one the user turns off. The cost of a
+# false "yes" is the status quo; the cost of a false "no" is a prompt on a turn
+# that deserved none. So the gate fires only on turns carrying no action verb at
+# all — a question asked purely for discussion.
+_ACTION_VERBS = frozenset("""
+run runs execute launch start stop restart kill open close
+install uninstall delete remove create make build deploy write edit change
+set update fix send download upload copy move rename clear reset apply
+enable disable turn put add save train schedule click type press scroll
+browse visit navigate go read check test try use call fetch scrape search
+find show list tell give pull push commit sync backup restore print
+mkdir touch rm ls cat grep chmod curl wget git npm pip brew
+""".split())
+
+_PATHY_RE = re.compile(
+    "https?://"
+    r"|(?:^|\s)[~.]?/\S"
+    r"|\b\w+\.(?:py|js|ts|json|md|txt|sh|log|csv|ya?ml|toml|html|css)\b")
+
+
+# "do" is an action verb in "do it" and an auxiliary in "what do you reckon".
+# Matched separately so the second does not read as a request.
+_IMPERATIVE_DO_RE = re.compile(
+    r"^\s*(?:please\s+|just\s+|now\s+)*do\b|\bdo\s+(?:it|this|that|so)\b",
+    re.IGNORECASE)
+
+
+def _asks_for_action(text: str) -> bool:
+    """Did the user's own turn request that something be done?
+
+    Used only to decide whether a shell/filesystem call needs confirming, never
+    to refuse one. A turn with no action verb, no path and no URL is a question
+    asked for its answer — and a tool that reaches the machine on such a turn
+    was the model's own idea, which is worth one prompt.
+    """
+    if not text or not text.strip():
+        return False
+    if text.strip().startswith("/"):
+        return True  # a slash command is itself an instruction
+    if _is_action_request(text) or _PATHY_RE.search(text):
+        return True
+    if _IMPERATIVE_DO_RE.search(text):
+        return True
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    return bool(words & _ACTION_VERBS)
+
+
+def _repair_project_path_command(cmd: str) -> str | None:
+    """Rewrite a command whose path argument names a real project file wrongly.
+
+    Returns the corrected command, or None when there is nothing to fix.
+
+    Telling the model was not enough. The observation already names the file,
+    the directory the command ran in, and what to use instead — and live
+    2026-08-25 the model answered "Let me re-try that using the correct path"
+    and reissued the identical /Users/huygpt/agi/... path it had just been
+    told was wrong. This is the same shape as the GUI-app launches: a repeated,
+    unambiguous mistake that another sentence of prompt does not fix.
+
+    Substitution can only ever point INTO the project — _project_paths_in
+    verifies containment — so a repaired command cannot reach anything the
+    original was not already allowed to.
+    """
+    from symbio import constants as _c
+    try:
+        args = shlex.split(cmd)
+    except ValueError:
+        return None
+    if not args:
+        return None
+    changed = False
+    for i, arg in enumerate(args[1:], start=1):
+        if arg.startswith("-") or not arg.strip():
+            continue
+        # Judge the path the way the command will: relative paths resolve
+        # against the sandbox directory it runs in, not against this process's
+        # cwd — which is the project, and would make every project-relative
+        # path look fine right up until the shell failed to find it.
+        as_written = Path(arg) if Path(arg).is_absolute() else _c.SANDBOX_DIR / arg
+        if as_written.exists():
+            continue
+        matches = _project_paths_in(f"x {arg}")
+        if len(matches) != 1:
+            continue
+        args[i] = str(_c.PROJECT_DIR / matches[0])
+        changed = True
+    return " ".join(shlex.quote(a) for a in args) if changed else None
+
+
+def _annotate_sandbox_cwd(cmd: str, out: str) -> str:
+    """Explain a "no such file" that is really a working-directory mismatch.
+
+    Keyed on the OUTPUT, not the exit status: a pipeline reports the exit code
+    of its last stage, so `ls missing.txt | awk '{print $5}'` exits 0 and the
+    harness announces "Shell command exited ok" over an ls that failed. Seen
+    live 2026-08-24, twice, and both times the model concluded the user's file
+    did not exist.
+    """
+    if "no such file" not in out.lower():
+        return out
+    from symbio import constants as _c
+    missing = _project_paths_in(cmd)
+    if not missing:
+        return out
+    return out + (
+        f"\n[These exist in the project and are almost certainly what was "
+        f"meant: {', '.join(missing)}. Commands run in {_c.SANDBOX_DIR}, not "
+        f"the project root, so a relative path is resolved against that "
+        f"directory — the file is there, this command looked in the wrong "
+        f"place. Use read_file, which resolves against the project, or pass "
+        f"the full path. Do NOT tell the user the file does not exist.]")
+
+
+def _project_paths_in(cmd: str) -> list[str]:
+    """Path-looking arguments of `cmd` that exist under the project root.
+
+    Used only to explain a "no such file" failure: shell commands are run from
+    the sandbox directory, so a project-relative path the model wrote is real
+    but unreachable, and the shell's error cannot say so.
+    """
+    from symbio import constants as _c
+    try:
+        args = shlex.split(cmd)
+    except ValueError:
+        args = cmd.split()
+    found: list[str] = []
+    for arg in args[1:]:
+        if arg.startswith("-") or not arg.strip():
+            continue
+        rel = arg.lstrip("./").lstrip("/")
+        if not rel:
+            continue
+        # Try the path as written, then progressively drop leading components.
+        # A model that invents an absolute path usually gets the tail right and
+        # the prefix wrong: live 2026-08-25 it asked for
+        # /Users/huygpt/agi/symbio/app/web.py — the real tree is under
+        # .../Downloads/agi — and on being told "no such file" reported that the
+        # user's file did not exist. The suffix symbio/app/web.py names it
+        # exactly.
+        #
+        # At least two components must survive, so this never resolves a bare
+        # filename that several directories could satisfy.
+        parts = [q for q in rel.split("/") if q not in ("", ".")]
+        for start in range(len(parts) - 1):
+            suffix = "/".join(parts[start:])
+            try:
+                candidate = (_c.PROJECT_DIR / suffix).resolve()
+                candidate.relative_to(_c.PROJECT_DIR.resolve())
+            except (ValueError, OSError):
+                break
+            if candidate.exists():
+                if suffix not in found:
+                    found.append(suffix)
+                break
+    return found
+
+
+def _is_substantive(text: str) -> bool:
+    """Does this reply contain an answer, as opposed to merely characters?
+
+    A turn that ends with "." or "+" has told the user nothing, but it passes
+    every `display.strip()` check in the loop and so counts as a real reply:
+    the blank-retry nudge does not fire and neither does the end-of-turn
+    fallback. Seen live 2026-08-24 — a save_memory call succeeded and the
+    entire visible answer was a single full stop.
+
+    One alphanumeric character is enough. "42" and "ok" are real answers; a
+    line of punctuation is not.
+    """
+    return any(ch.isalnum() for ch in text)
 
 
 # navigation
@@ -468,6 +679,53 @@ def _make_chat_logger() -> logging.Logger:
     return logger
 
 
+# The thinking dial. Qwen exposes no reasoning-effort parameter — its template
+# offers exactly one switch, enable_thinking, which either closes the think
+# block immediately (answer directly) or leaves it open (reason first). So the
+# levels above "none" all leave it open and differ in the token allowance the
+# reasoning gets, added on top of max_reply_tokens.
+#
+# That allowance is a budget, not a leash: it is room to think in, and a model
+# that wants to ramble will still be cut off at the end of it rather than
+# talked out of rambling. What it does buy is that a longer setting cannot eat
+# the answer — without it, reasoning and reply compete for the same tokens and
+# a thoughtful turn ends mid-sentence.
+#
+#                     (enable_thinking, extra reasoning tokens)
+THINKING_LEVELS: dict[str, tuple[bool, int]] = {
+    "none": (False, 0),
+    "low": (True, 128),
+    "medium": (True, 384),
+    "flurry": (True, 1024),
+}
+THINKING_ORDER: tuple[str, ...] = ("none", "low", "medium", "flurry")
+
+# xterm-256 stops around the hue circle. Skipping pure blue (21) keeps every
+# glyph legible on a dark terminal.
+_RAINBOW_COLORS: tuple[int, ...] = (196, 202, 220, 46, 51, 33, 129)
+
+
+def rainbow(text: str) -> str:
+    """Colour each visible character a step further around the hue circle.
+
+    Falls back to the bare text when colour would be wrong or unwanted: a
+    redirected stdout (logs, the piped harnesses), or NO_COLOR set. Spaces are
+    left uncoloured so the cycle tracks glyphs rather than gaps.
+    """
+    if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+        return text
+    out: list[str] = []
+    step = 0
+    for ch in text:
+        if ch.isspace():
+            out.append(ch)
+            continue
+        out.append(f"\033[38;5;{_RAINBOW_COLORS[step % len(_RAINBOW_COLORS)]}m{ch}")
+        step += 1
+    out.append("\033[0m")
+    return "".join(out)
+
+
 class _Spinner:
     """Terminal spinner shown while waiting for visible model output.
 
@@ -623,7 +881,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn(f"   Data   : {dataset_size:,} bytes")
     output_fn(f"   Notes  : {note_count}")
     output_fn("-" * 50)
-    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /resume  /golden [audit|prune]  /security  /learn  /forget_last  /status  /prune  /selfcheck  /setup  /compact  /help")
+    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /resume  /golden [audit|prune]  /security  /learn  /forget_last  /status  /think  /backup  /restore-adapter  /prune  /selfcheck  /setup  /compact  /help")
     output_fn("         /run <cmd>  /note [title]  /notes  /index-notes [--force]  /auto-index on|off  /new-skill <name>  /skills  /skill-adapters  /digest  /cron  /config  /archive  /restore")
     output_fn("         /build-mcp <name> | <description>  /mcp-tools  /hosts  /telemetry on|off  /feedback <text>")
     output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
@@ -739,6 +997,12 @@ class ChatSession:
         # under it (adapter reload, a generation that errored mid-stream).
         self._prompt_cache: list | None = None
         self._cached_prompt_ids: list[int] | None = None
+        # Speculative decoding's draft model, loaded on first use. A small
+        # model proposes several tokens, the real one verifies them in a single
+        # pass; on a memory-bound Mac that is where the speedup comes from.
+        # None means it is off, either unconfigured or it failed to load.
+        self._draft_model = None
+        self._draft_tried = False
         # The system-prompt prefill runs on a daemon thread at boot so the user
         # can read the banner and type their first message while the ~4000-token
         # system+tools prefix is processed into the KV cache, instead of paying
@@ -884,6 +1148,19 @@ class ChatSession:
             temp=temp,
             top_p=self.config["agent"]["top_p"],
         )
+        # Without this the headmaster generates with no repetition penalty at
+        # all. agent.py has carried one since the beginning, with the reason
+        # written next to it — "near-greedy sampling on a small overfit model
+        # degenerates into repetition loops on out-of-distribution input" — but
+        # agent.py is not the loop the CLI runs. Observed live 2026-08-24:
+        # single-token answers ("wegen", ".", "+") and a worker that replied
+        # with "![](https://777.777.777.77777777777..." for 300 characters.
+        agent_cfg = self.config.get("agent", {})
+        penalty = float(agent_cfg.get("repetition_penalty", 1.15) or 0)
+        self.logits_processors = make_logits_processors(
+            repetition_penalty=penalty or None,
+            repetition_context_size=int(agent_cfg.get("repetition_context_size", 64)),
+        ) if penalty else None
 
     def _cron_worker(self):
         while True:
@@ -977,7 +1254,7 @@ class ChatSession:
         """
         if not getattr(self, "model", None):
             return
-        self._status("  [Dispatch] Headmaster going to sleep (unloading 8B model)...")
+        self._status("  [Dispatch] Headmaster going to sleep (unloading the base model)...")
         self._unload_model()
         self._status("  [Dispatch] Headmaster asleep.")
 
@@ -999,10 +1276,24 @@ class ChatSession:
         """
         if getattr(self, "model", None) is not None:
             return
-        self._status("  [Dispatch] Headmaster waking up (reloading 8B model)...")
+        self._status("  [Dispatch] Headmaster waking up (reloading the base model)...")
         self._start_prompt_cache_prefetch()
         try:
-            if self.adapter_config.exists():
+            # The same compatibility check boot makes. This used to ask only
+            # whether an adapter *exists*, so waking after a worker dispatch
+            # re-applied one trained for a different base — boot had already
+            # refused that adapter and said so, and the wake silently put it
+            # back. Every generation afterwards died in the matmul:
+            #     [matmul] Last dimension of first input with shape
+            #     (1,512,5120) must match second to last dimension of second
+            #     input with shape (4096,8)
+            # 5120 is the served model's width, 4096 the adapter's. A session
+            # that boots fine and breaks the first time a worker runs is worse
+            # than one that never loads the adapter at all.
+            if self.adapter_config.exists() and not _adapter_matches_model(self.config):
+                self.model, self.tokenizer = load(self.config["model_name"])
+                self.adapter_loaded = False
+            elif self.adapter_config.exists():
                 self.model, self.tokenizer = load(
                     self.config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
                 )
@@ -1235,6 +1526,61 @@ class ChatSession:
         except Exception:
             pass
 
+    def _ensure_draft_model(self):
+        """The configured draft model, loaded once, or None when there isn't one.
+
+        A draft that fails to load must not take the session with it — the
+        model still generates fine without one, just slower.
+        """
+        if self._draft_tried:
+            return self._draft_model
+        self._draft_tried = True
+        path = str(self.config.get("agent", {}).get("draft_model", "") or "").strip()
+        if not path or self.stream_fn is not stream_generate:
+            return None
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            candidate = constants.PROJECT_DIR / candidate
+        try:
+            self._draft_model, _ = load(str(candidate))
+        except Exception as e:
+            self.output_fn(f"  [Draft] speculative decoding off: {e}")
+            self._draft_model = None
+        return self._draft_model
+
+    def _new_prompt_cache(self):
+        """An empty cache in the layout the generation path expects.
+
+        With a draft model that is the two models' caches concatenated, which
+        is how mlx-lm's speculative step splits them apart again.
+        """
+        caches = make_prompt_cache(self.model)
+        draft = self._ensure_draft_model()
+        if draft is not None:
+            caches = caches + make_prompt_cache(draft)
+        return caches
+
+    def _prefill_new_cache(self, ids):
+        """A fresh cache with `ids` already processed into it.
+
+        Both models have to be walked over the same tokens: the draft predicts
+        from its own cache, so if it were left behind it would be guessing from
+        a different context than the target verifies against, and every draft
+        would be rejected.
+        """
+        model_cache = make_prompt_cache(self.model)
+        for _ in generate_step(mx.array(ids), self.model, max_tokens=0,
+                               sampler=self.sampler, prompt_cache=model_cache):
+            pass
+        draft = self._ensure_draft_model()
+        if draft is None:
+            return model_cache
+        draft_cache = make_prompt_cache(draft)
+        for _ in generate_step(mx.array(ids), draft, max_tokens=0,
+                               sampler=self.sampler, prompt_cache=draft_cache):
+            pass
+        return model_cache + draft_cache
+
     def _prefill_system_prompt_cache(self, show_spinner: bool = True):
         """Process the system prompt through the model once at boot so the
         first user turn skips re-processing it. This is a pure latency win;
@@ -1283,25 +1629,22 @@ class ChatSession:
                     return
                 # A cache saved by an earlier run covers this exact prefix and
                 # these exact weights — load it and skip the prefill entirely.
+                # Not with a draft model: the file holds one model's layers,
+                # while the live cache is two models' concatenated, so the
+                # split in the speculative step would land in the wrong place.
                 if (self.config.get("agent", {}).get("persist_prompt_cache", True)
+                        and self._ensure_draft_model() is None
                         and self._load_persisted_prompt_cache(system_ids)):
                     return
-                self._prompt_cache = make_prompt_cache(self.model)
-                # max_tokens=0 processes the prompt into the KV cache and stops
-                # before generating any output tokens.
-                for _ in generate_step(
-                    mx.array(system_ids),
-                    self.model,
-                    max_tokens=0,
-                    sampler=self.sampler,
-                    prompt_cache=self._prompt_cache,
-                ):
-                    pass
+                # max_tokens=0 processes the prompt into the KV cache and
+                # stops before generating any output tokens.
+                self._prompt_cache = self._prefill_new_cache(system_ids)
                 self._cached_prompt_ids = list(system_ids)
                 # Persist the cache while it holds exactly the system prefix.
                 # Saving at exit instead would store the whole conversation,
                 # which the next run's prefix diff could not reuse.
-                if self.config.get("agent", {}).get("persist_prompt_cache", True):
+                if (self.config.get("agent", {}).get("persist_prompt_cache", True)
+                        and self._ensure_draft_model() is None):
                     self._save_persisted_prompt_cache(system_ids)
             except Exception as e:
                 # Prefill is an optimization, never a hard requirement. Clear any
@@ -1520,12 +1863,23 @@ class ChatSession:
         thread.join()
         self._prefill_thread = None
 
+    def thinking_setting(self) -> tuple[bool, int]:
+        """Resolve agent.thinking_level to (enable_thinking, reasoning budget).
+
+        An unknown level falls back to "none" rather than raising: this is read
+        on every generation, and a typo in config.json should cost the feature,
+        not the session.
+        """
+        level = str(self.config.get("agent", {}).get("thinking_level", "none")).lower()
+        return THINKING_LEVELS.get(level, THINKING_LEVELS["none"])
+
     def _generate_reply(
         self,
         messages: list[dict[str, str]],
         chunk_prefix: str = "",
         timings: dict[str, float | None] | None = None,
         think: bool = True,
+        reasoning_budget: int = 0,
     ) -> tuple[str, bool]:
         """Generate the next reply for `messages`.
 
@@ -1588,7 +1942,11 @@ class ChatSession:
             if timings is not None:
                 timings["prompt_tokens"] = prompt_tokens
                 timings["prompt_chars"] = len(prompt_text)
-            max_tokens = int(agent_cfg["max_reply_tokens"])
+            # Reasoning gets its own allowance on top of the reply budget.
+            # Sharing one number means a turn that thinks is a turn that stops
+            # mid-answer, which reads as the model breaking rather than as the
+            # dial being turned up.
+            max_tokens = int(agent_cfg["max_reply_tokens"]) + max(0, int(reasoning_budget))
 
             if not agent_cfg.get("prompt_cache_enabled", True):
                 # Caching off: the exact original call, unchanged.
@@ -1627,14 +1985,14 @@ class ChatSession:
                 timings["cached_tokens"] = reused
                 timings["new_tokens"] = len(ids) - reused
             if self._prompt_cache is None or reused == 0:
-                self._prompt_cache = make_prompt_cache(self.model)
+                self._prompt_cache = self._new_prompt_cache()
                 feed = ids
             else:
                 stale = len(self._cached_prompt_ids) - reused
                 if stale and can_trim_prompt_cache(self._prompt_cache):
                     trim_prompt_cache(self._prompt_cache, stale)
                 elif stale:
-                    self._prompt_cache = make_prompt_cache(self.model)
+                    self._prompt_cache = self._new_prompt_cache()
                     reused = 0
                 feed = ids[reused:] if reused else ids
             if not feed:
@@ -1649,7 +2007,7 @@ class ChatSession:
                     trim_prompt_cache(self._prompt_cache, 1)
                     feed = ids[-1:]
                 else:
-                    self._prompt_cache = make_prompt_cache(self.model)
+                    self._prompt_cache = self._new_prompt_cache()
                     feed = ids
         finally:
             tokenizing_spinner.stop()
@@ -1697,9 +2055,26 @@ class ChatSession:
         # Mark the model as busy so the background indexer waits.
         self._indexing_now = True
         try:
+            # A draft model turns each generation step into "guess several,
+            # verify in one pass". Passed only when one actually loaded, so the
+            # ordinary path is byte-for-byte what it was.
+            _draft = self._ensure_draft_model()
+            _spec_kw = {} if _draft is None else {
+                "draft_model": _draft,
+                "num_draft_tokens": int(
+                    self.config.get("agent", {}).get("num_draft_tokens", 1)),
+            }
+            # Only for the real generator: front-ends and tests inject their own
+            # stream_fn, and those fakes take the arguments this loop has always
+            # passed. speculative_generate_step accepts it too, so the draft
+            # path is covered.
+            if self.stream_fn is stream_generate and getattr(
+                    self, "logits_processors", None):
+                _spec_kw["logits_processors"] = self.logits_processors
             for response in self.stream_fn(
                 self.model, self.tokenizer, feed, max_tokens=max_tokens,
                 sampler=self.sampler, prompt_cache=self._prompt_cache,
+                **_spec_kw,
             ):
                 text_parts.append(response.text)
                 raw_acc += response.text
@@ -1747,15 +2122,16 @@ class ChatSession:
             tail = stripper.finish()
             if tail:
                 _emit(tail)
-            # If nothing was emitted during the stream (e.g. the entire reply
-            # was a tool tag or was held back as ambiguous), make sure a
-            # newline is still sent so the terminal cursor is in the right
-            # place and any later non-streamed print starts on a fresh line.
-            if self.stream_chunk_fn is not None:
-                if not shown and chunk_prefix:
-                    self.stream_chunk_fn(chunk_prefix + "\n")
-                else:
-                    self.stream_chunk_fn("\n")
+            # Only close the line if something was actually written to it.
+            # When nothing streamed (the whole reply was a tool tag, or
+            # reasoning that stayed hidden) the spinner's stop() already
+            # cleared its line, so the cursor is at column 0 and no newline is
+            # owed — and emitting the reply prefix there printed an answerless
+            # "Caine   : " above every [Tool]/[Blank] notice. The consolidated
+            # print below handles that case: streamed_live is False, so the
+            # caller prints the real reply with its own prefix.
+            if self.stream_chunk_fn is not None and shown:
+                self.stream_chunk_fn("\n")
 
         if timings is not None:
             timings["gen_ms"] = (time.perf_counter() - gen_start) * 1000
@@ -2238,6 +2614,18 @@ class ChatSession:
             if sum(len(c) for c in window) <= max_history_chars:
                 break
             self.history.pop(0)
+        # Popping one message at a time can leave a tool observation at the
+        # front whose assistant turn — the call that produced it — has just
+        # been dropped. The window then opens on a result with no request,
+        # which is not invalid for the template but is a claim about work the
+        # model can no longer see itself having asked for. (This history holds
+        # only user/assistant roles; observations are user messages, so the
+        # orphaned-tool-role problem that affects agent.py cannot arise here.)
+        while (len(self.history) > 1
+               and self.history[0].get("role") == "user"
+               and str(self.history[0].get("content", "")).startswith(
+                   "[System observation:")):
+            self.history.pop(0)
 
     # ---- Slash commands ----
 
@@ -2577,6 +2965,64 @@ class ChatSession:
                         display += f" (port {port})"
                     self.output_fn(f"    - {alias}: {display}")
 
+        elif cmd.startswith("/backup"):
+            # training.backup_adapter has always existed — run_training calls it
+            # so the golden set can roll a regression back — but nothing exposed
+            # it to the user. Taking a snapshot before a deliberate experiment
+            # (a new base model, a corpus change) meant knowing the internals or
+            # copying the directory by hand.
+            label = user_input[len("/backup"):].strip() or None
+            if label and not re.fullmatch(r"[\w.-]+", label):
+                self.output_fn(
+                    "  Label must be letters, digits, dot, dash or underscore "
+                    "— it becomes a directory name.")
+            else:
+                try:
+                    made = training.backup_adapter(label=label)
+                    if made is None:
+                        self.output_fn(
+                            "  No adapter to back up yet — nothing has been trained "
+                            "for this model.")
+                    else:
+                        size_mb = sum(
+                            f.stat().st_size for f in made.rglob("*") if f.is_file()
+                        ) // (1024 * 1024)
+                        self.output_fn(f"  Backed up to {made.name} ({size_mb} MB)")
+                        self.output_fn(f"  Roll back with: /restore-adapter {made.name}")
+                except Exception as e:
+                    self.output_fn(f"  Backup failed: {e}")
+
+        elif cmd.startswith("/restore-adapter"):
+            name = user_input[len("/restore-adapter"):].strip()
+            backups = sorted(
+                (p for p in constants.ADAPTER_DIR.parent.glob(
+                    f"{constants.ADAPTER_DIR.name}.*.bak") if p.is_dir()),
+                key=lambda p: p.stat().st_mtime, reverse=True)
+            if not name:
+                if not backups:
+                    self.output_fn("  No adapter backups yet. Take one with /backup.")
+                else:
+                    self.output_fn("  Adapter backups, newest first:")
+                    for p in backups[:15]:
+                        when = datetime.fromtimestamp(p.stat().st_mtime)
+                        self.output_fn(f"    {p.name}  ({when:%Y-%m-%d %H:%M})")
+                    self.output_fn("  Roll back with: /restore-adapter <name>")
+            else:
+                target = next((p for p in backups if p.name == name), None)
+                if target is None:
+                    self.output_fn(f"  No backup named '{name}'. /restore-adapter lists them.")
+                else:
+                    try:
+                        # Snapshot what is about to be overwritten. Restoring is
+                        # how you undo a bad train; without this, restoring the
+                        # wrong one is an undo you cannot undo.
+                        training.backup_adapter(label="PRE_RESTORE")
+                        training.restore_adapter(target)
+                        self.output_fn(f"  Restored {target.name}.")
+                        self.output_fn("  Restart Symbio to load it.")
+                    except Exception as e:
+                        self.output_fn(f"  Restore failed: {e}")
+
         elif cmd.startswith("/archive"):
             # startswith, not equality: `cmd` is the whole input line, so an
             # equality test drops every argument. The README documents
@@ -2688,6 +3134,34 @@ class ChatSession:
                 msg, _ = memory.compact_store(store, self.config, summarize_fn=_summarize)
                 self.retriever.invalidate_cache()
                 self.output_fn(f"  {msg}")
+
+        elif cmd.startswith("/think"):
+            parts = cmd.split(None, 1)
+            current = str(self.config.get("agent", {}).get(
+                "thinking_level", "none")).lower()
+            if len(parts) < 2:
+                self.output_fn("  " + rainbow("Thinking dial") + ":")
+                for name in THINKING_ORDER:
+                    on, budget = THINKING_LEVELS[name]
+                    marker = "*" if name == current else " "
+                    room = f"+{budget} tokens to reason in" if on else "answer directly"
+                    label = rainbow(name) if name == current else name
+                    self.output_fn(f"    [{marker}] {label:<8} {room}")
+                self.output_fn("  Turn it with: /think none|low|medium|flurry")
+            else:
+                want = parts[1].strip().lower()
+                if want not in THINKING_LEVELS:
+                    self.output_fn(
+                        f"  Unknown level: {want}. "
+                        f"Pick one of {', '.join(THINKING_ORDER)}.")
+                else:
+                    from symbio.app.config import save_config
+                    self.config.setdefault("agent", {})["thinking_level"] = want
+                    save_config(self.config)
+                    on, budget = THINKING_LEVELS[want]
+                    room = (f"reasoning gets {budget} tokens of its own"
+                            if on else "answering directly, no reasoning")
+                    self.output_fn(f"  Thinking set to {rainbow(want)} — {room}.")
 
         elif cmd == "/status":
             files = sorted(constants.NOTES_DIR.glob("*.md"))
@@ -2910,16 +3384,39 @@ class ChatSession:
             return
         self.output_fn(f"\n  $ {shell_cmd}")
         ok, output = sandbox.run_sandboxed(shell_cmd, self.config, confirm_fn=self.confirm_fn)
+        # The same GUI-app recovery the model's <cmd> path gets. Without it
+        # `/run chrome` typed by hand died on "command not found" while the
+        # identical command from the model was quietly corrected to `open -a` —
+        # the person driving got less help than the thing being driven.
+        # No mistake note here: the user typed this, and their typo is not a
+        # lesson about the model's behaviour.
+        if not ok:
+            app = _gui_app_for(shell_cmd, output)
+            if app:
+                shell_cmd = f"open -a {shlex.quote(app)}"
+                self.output_fn(f"  [Shell] that names a GUI app; retrying as:")
+                self.output_fn(f"\n  $ {shell_cmd}")
+                ok, output = sandbox.run_sandboxed(
+                    shell_cmd, self.config, confirm_fn=self.confirm_fn)
         self.output_fn(f"  [{'ok' if ok else 'err'}]")
         for line in output.splitlines():
             self.output_fn(f"  {line}")
-        training.append_chat_pair(
-            user_msg=f"Run this sandbox command and show the output:\n{shell_cmd}",
-            assistant_msg=output,
-            tokenizer=self.tokenizer,
-            system_prompt=self.system_prompt,
-        )
-        self.output_fn("  -> Logged to training data.\n")
+        # A silent command is not a training example. `open -a`, mkdir, touch
+        # and most successful writes print nothing, and logging those pairs
+        # teaches the model that the correct answer to a command is no answer —
+        # the exact behaviour that shows up as a blank reply. Seen while
+        # testing: one `/run` of `open -a 'Google Chrome'` wrote a sample whose
+        # assistant turn was empty.
+        if output.strip():
+            training.append_chat_pair(
+                user_msg=f"Run this sandbox command and show the output:\n{shell_cmd}",
+                assistant_msg=output,
+                tokenizer=self.tokenizer,
+                system_prompt=self.system_prompt,
+            )
+            self.output_fn("  -> Logged to training data.\n")
+        else:
+            self.output_fn("  -> No output; not logged to training data.\n")
 
     def _cmd_note(self, title: str):
         if not title:
@@ -3349,6 +3846,15 @@ class ChatSession:
         # the agent isn't sitting silent before the spinner starts. Hits are
         # always shown; a no-match is only mentioned when retrieval was slow
         # enough that the pause would otherwise look like a stall.
+        # Retrieved notes are text the assistant did not write this turn and the
+        # user did not type — the carrier injection actually travels on. Record
+        # that it entered, so assess_provenance can tell a tool the user asked
+        # for from one that appeared right after some retrieved text did.
+        self._untrusted_this_turn = bool(rag_results)
+        # Whether the user asked for anything to be done this turn; read by the
+        # intent gate in _execute_tool.
+        self._action_asked_this_turn = _asks_for_action(user_input)
+
         if self.retriever.rag_cfg.get("enabled", True):
             if rag_results:
                 labels = sorted({
@@ -3372,6 +3878,11 @@ class ChatSession:
 
         max_rounds = self.config["agent"]["max_tool_rounds"]
         executed_calls: set[str] = set()
+        # executed_calls is "calls not to repeat", and the retry path below
+        # DISCARDS from it when a call fails and is still retry-eligible — so
+        # it is empty after a failed tool, and cannot answer "did anything
+        # run this turn". The end-of-turn fallback needs that second question.
+        any_tool_ran = False
         # How many times each call has failed this turn, so a retry after a
         # fixed precondition is allowed but a persistently failing call is not.
         failed_calls: dict[str, int] = {}
@@ -3403,8 +3914,11 @@ class ChatSession:
         user_refused_this_turn = False
         browser_retry_nudged = False
         blank_retry_nudged = False
+        unparsed_tag_nudged = False
         echo_retry_nudged = False
-        for round_num in range(max_rounds):
+        # The round index used to select thinking (think=round_num > 0);
+        # agent.thinking_level owns that now, so nothing reads the counter.
+        for _round_num in range(max_rounds):
             # Once we are inside a tool-followup round, lower the temperature
             # so the model sticks to the tag grammar instead of drifting into
             # prose or inventing fake commands.
@@ -3490,9 +4004,10 @@ class ChatSession:
                 # or the handler below can never tell.
                 _had_prompt_cache = self._prompt_cache is not None
                 try:
+                    _think, _budget = self.thinking_setting()
                     raw_reply, streamed_live = self._generate_reply(
                         messages, chunk_prefix=chunk_prefix, timings=timings,
-                        think=(round_num > 0)
+                        think=_think, reasoning_budget=_budget,
                         )
                     # The thinking block is surfaced to the user (streamed by
                     # StreamingStripper, or printed below when not streaming);
@@ -3564,6 +4079,33 @@ class ChatSession:
 
             tools = tooling.parse_tools(reply, self.enabled_groups)
             display = tooling.strip_tool_tags(reply)
+
+            # A tool tag this module cannot parse is the quietest failure in
+            # the loop: it matches nothing, strip_tool_tags removes it from the
+            # display, and the turn ends having done nothing, told the user
+            # nothing and given the model nothing to correct. 22 of the
+            # declared tools have no <name>arg</name> form, so this is reachable
+            # for most of the catalog. Say so once per turn, with the syntax
+            # that does work.
+            if not tools and not unparsed_tag_nudged:
+                unparsed = tooling.unparsed_tool_tags(reply)
+                if unparsed:
+                    unparsed_tag_nudged = True
+                    names = ", ".join(unparsed)
+                    self.output_fn(f"  [Tool] <{unparsed[0]}> is not a tag I can "
+                                   f"parse; telling the model the right form.")
+                    self.history.append({"role": "assistant", "content": reply})
+                    self.history.append({"role": "user", "content": (
+                        f"[System observation: you wrote <{names}> as a tag. "
+                        f"That is a tool NAME, not a tag this system parses, so "
+                        f"nothing ran and nothing changed. Call it in the "
+                        f"JSON form instead, exactly:\n"
+                        f'<tool_call>{{"name": "{unparsed[0]}", "arguments": '
+                        f'{{...}}}}</tool_call>\n'
+                        f"Do not describe the call — emit it.]"
+                    )})
+                    self._trim_history()
+                    continue
 
             # A model that emits the same tool tag over and over in one
             # response (e.g. "<scroll/> Scrolling down. <scroll/> Scrolling
@@ -3698,14 +4240,22 @@ class ChatSession:
                 # below — a real question that blanks should search, not nudge.
 
                 action_req = _is_action_request(user_input)
-                if (not display.strip() and not blank_retry_nudged
-                        and (executed_calls or _is_greeting(user_input)
+                # any_tool_ran, not executed_calls: the retry path discards a
+                # failed call from executed_calls so it can be attempted again,
+                # which empties the set precisely when a tool has just FAILED —
+                # the moment the model most needs prompting. Live 2026-08-25: a
+                # wc on a bad path failed, the observation explained exactly how
+                # to recover, the nudge did not fire because the set was empty,
+                # and the turn ended on "Running 'wc -c' on the file." with no
+                # answer.
+                if (not _is_substantive(display) and not blank_retry_nudged
+                        and (any_tool_ran or _is_greeting(user_input)
                              or action_req)):
                     blank_retry_nudged = True
                     self.output_fn(
                         "  [Blank] Reply came back empty; "
                         "prompting the model to respond...")
-                    if action_req and not executed_calls:
+                    if action_req and not any_tool_ran:
                         act_hint = (
                             "The user asked you to perform an action (open/go to/"
                             "click/press/read a page) but you emitted no tool call. "
@@ -3718,7 +4268,7 @@ class ChatSession:
                     else:
                         act_hint = ""
                     mid_task = "You are mid-task — a tool already ran this turn " \
-                               "and the user's request is not yet answered. " if executed_calls else ""
+                               "and the user's request is not yet answered. " if any_tool_ran else ""
                     self.history.append({"role": "user", "content": (
                         "[System observation: your last reply was empty after "
                         "removing internal reasoning and the mood tag. "
@@ -3815,21 +4365,31 @@ class ChatSession:
                 # BUT: if the user asked for an action (open/click/type/etc.)
                 # and the model only talked about doing it without actually
                 # calling a tool, nudge it once to use the right tool.
-                if action_req and not executed_calls and not blank_retry_nudged:
+                # any_tool_ran, not executed_calls: the retry path empties
+                # executed_calls when a call FAILS, so this fired mid-task on a
+                # turn where execute_code had already run three times. And the
+                # hint below was browser-only, so it answered a Python task with
+                # "emit <browse>" — live 2026-08-25 the model dutifully switched
+                # to browser_press and hit "Browser is not open". A nudge that
+                # names one toolset drags every unfinished turn towards it.
+                if action_req and not any_tool_ran and not blank_retry_nudged:
                     blank_retry_nudged = True
                     self.output_fn(
                         "  [Action] Model described the action but didn't "
                         "call a tool — prompting to retry...")
                     self.history.append({"role": "user", "content": (
                         "[System observation: you described what you would do "
-                        "but did not actually call a tool. The user asked you "
-                        "to perform an action. Emit one of these tags exactly, "
-                        "on its own: <browse>https://...</browse> to open a "
-                        "page, <click>visible text</click> to click, "
-                        "<type>words</type> to type, <press>Enter</press> to "
-                        "press a key, <read>https://...</read> to read a page. "
-                        "Then answer in one short line. Do not just describe "
-                        "what you will do — actually do it.]"
+                        "but did not actually call a tool. Emit the call you "
+                        "intended, on its own. To act on a web page: "
+                        "<browse>https://...</browse> to open one, "
+                        "<click>visible text</click>, <type>words</type>, "
+                        "<press>Enter</press>. To read one: "
+                        "<read>https://...</read> for its text, "
+                        "<fetch_html>https://...</fetch_html> for its markup. "
+                        "To compute, fetch or write files: <py>...</py>. "
+                        "To run a command: <cmd>...</cmd>. Pick the one that "
+                        "fits what you were already doing — do not switch "
+                        "toolset. Then answer in one short line.]"
                     )})
                     self._trim_history()
                     continue
@@ -3841,6 +4401,7 @@ class ChatSession:
             name, params = fresh_tools[0]
             tool_key = json.dumps([name, params], sort_keys=True)
             executed_calls.add(tool_key)
+            any_tool_ran = True
             extra = fresh_tools[1:]
 
             # There are tools to execute
@@ -4009,6 +4570,24 @@ class ChatSession:
                     and not learn.sounds_like_tool_error(observation)):
                 break
 
+        # A turn must never end with nothing on screen. The blank-reply nudge
+        # above fires at most once per turn; when the retry comes back blank as
+        # well — a Qwen3 thinking block that never closed, most often — the loop
+        # simply breaks and the user is handed their prompt back with no answer
+        # and no explanation. Seen live 2026-08-24 on a run_remote turn: the
+        # command ran, its output was sitting right there in the observation,
+        # and the whole session printed one assistant line for three exchanges.
+        #
+        # Deliberately NOT written into final_display: no answer was produced,
+        # and the research-note path below must not memorize this as one.
+        if not _is_substantive(final_display):
+            self.output_fn(
+                f"{self.config['assistant_name']:8}: "
+                + ("(No reply — I could not summarize it. The tool output above "
+                   "is the result.)" if any_tool_ran else
+                   "(No reply — the model returned only internal reasoning.)"))
+            self.logger.info("Turn ended with no visible reply.")
+
         timings["total_ms"] = (time.perf_counter() - turn_start) * 1000
         self.last_turn_timings = timings
         self.logger.info(f"Timings: {timings}")
@@ -4043,6 +4622,22 @@ class ChatSession:
         target = Path(raw_path)
         if not target.is_absolute():
             target = constants.PROJECT_DIR / target
+        elif not target.exists():
+            # A rooted path that names nothing at the filesystem root, but does
+            # name something inside the project, is a project path the model
+            # wrote with a leading slash. Observed live 2026-08-24: asked for
+            # the size of symbio/app/chat.py it sent "/symbio/app/chat.py",
+            # which resolved outside the project, tripped the path_escape risk
+            # flag, asked the user to approve a HIGH-risk action, and then
+            # failed anyway with "Must be inside the project directory".
+            #
+            # This can only ever move a path INTO the project — the
+            # relative_to check below still runs, and a rooted path that does
+            # exist is left alone — so it narrows what is reachable rather than
+            # widening it.
+            relocated = constants.PROJECT_DIR / raw_path.lstrip("/")
+            if relocated.exists():
+                target = relocated
         try:
             target.resolve().relative_to(constants.PROJECT_DIR.resolve())
         except ValueError:
@@ -4130,11 +4725,19 @@ class ChatSession:
         # it and the wrong one here, because the attack this guards against is
         # precisely an instruction that arrived pretending to be them. A file
         # that can be unlocked by a convincing enough message is not locked.
-        if security.blocks_tool_call(name, params):
-            safety.log_security_event("policy_write_blocked", {
-                "tool": name, "params": params,
-            })
-            return security.refusal_message(f"tool '{name}'")
+        blocked = security.block_reason(name, params)
+        if blocked is not None:
+            # Two different refusals now come through here — a write to the
+            # policy, and a command that would destroy the assistant's own
+            # state. Log them apart: one is someone probing the rules, the
+            # other is an `rm -rf adapters` that nearly happened, and reading
+            # them as the same event hides which.
+            kind = ("self_destruction_blocked"
+                    if security.text_destroys_vital(
+                        params.get(security.FREE_TEXT_TOOLS.get(name, ""), ""))
+                    else "policy_write_blocked")
+            safety.log_security_event(kind, {"tool": name, "params": params})
+            return blocked
 
         # Respect tool-group enable/disable settings.
         group = tooling.tool_group(name)
@@ -4152,6 +4755,32 @@ class ChatSession:
         # the alert. High-risk actions require explicit approval; medium-risk
         # ones run but annotate the observation so the model sees the warning.
         risk = safety.assess_tool_risk(name, params, self.config)
+        # Where did this call come from? A tool that has never run here, on a
+        # turn that pulled in retrieved text, is the shape an injected action
+        # takes — so ask, rather than assume the model chose it freely.
+        # Only when someone can actually answer. This escalation exists to turn
+        # a suspicious call into a question; with no confirm_fn — a scripted
+        # run, a test, the Telegram bot mid-poll — there is nobody to ask, and
+        # "ask" silently degrades into "refuse". Blocking a real action on a
+        # behavioural guess that was never even voiced is worse than not
+        # guessing, so headless runs keep the risk score they earned.
+        # "Is there anyone to ask?" is safety's question to answer, not this
+        # module's. Asking it as `confirm_fn is not None` disabled both
+        # escalations in the interactive CLI — which supplies no confirm_fn and
+        # prompts on the TTY instead — while leaving them on for the front-ends
+        # that do supply one. The guard was off wherever a human was actually
+        # sitting there.
+        if safety.can_prompt(self.confirm_fn):
+            risk = safety.assess_provenance(
+                name, risk, self.config,
+                untrusted_in_context=getattr(self, "_untrusted_this_turn", False))
+            # Provenance stops firing once a tool is familiar; this does not.
+            # A shell call on a turn that asked for nothing is the model's own
+            # idea however many times it has run before.
+            risk = safety.assess_request_intent(
+                name, params, risk, self.config,
+                user_asked_for_action=getattr(
+                    self, "_action_asked_this_turn", True))
         allowed, reason = safety.maybe_confirm(name, params, risk, self.config, self.confirm_fn)
         if not allowed:
             safety.log_security_event("tool_blocked", {
@@ -4172,6 +4801,11 @@ class ChatSession:
             observation = self._dispatch_tool(name, params)
         except Exception as e:
             return f"Tool '{name}' failed unexpectedly: {e}"
+
+        # Only now does this tool stop being novel. Recording it before the
+        # confirmation would let a refused call teach the baseline that it was
+        # normal — the next identical attempt would sail through unasked.
+        safety.record_tool_use(name)
 
         log_score = self.config.get("safety", {}).get("log_score", 2)
         if risk["risk_score"] >= log_score:
@@ -4218,6 +4852,18 @@ class ChatSession:
             # user gets the behavior they expect from a normal terminal.
             if _looks_like_shell_command(cmd):
                 ok, out = sandbox.run_shell(cmd, self.config, confirm_fn=self.confirm_fn)
+                if "no such file" in out.lower():
+                    repaired = _repair_project_path_command(cmd)
+                    if repaired:
+                        self._status(f"  [Shell] that path is not under "
+                                     f"{constants.SANDBOX_DIR.name}/; retrying "
+                                     f"with the project path.")
+                        ok2, out2 = sandbox.run_shell(
+                            repaired, self.config, confirm_fn=self.confirm_fn)
+                        if "no such file" not in out2.lower():
+                            return (f"Shell command '{repaired}' exited "
+                                    f"{'ok' if ok2 else 'error'}.\nOutput:\n{out2}")
+                out = _annotate_sandbox_cwd(cmd, out)
                 return f"Shell command exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
             ok, out = sandbox.run_sandboxed(params["cmd"], self.config, confirm_fn=self.confirm_fn)
 
@@ -4281,10 +4927,33 @@ class ChatSession:
 
                     return (f"Command '{retry}' exited {'ok' if ok else 'error'}.\n"
                             f"Output:\n{out}")
+            # Repair a path that names a real project file wrongly, then run
+            # it again — the same failure-then-fix shape as the GUI-app
+            # recovery below, and for the same reason: the model was told the
+            # correct path in the observation and reissued the wrong one.
+            if not ok and "no such file" in out.lower():
+                repaired = _repair_project_path_command(params["cmd"])
+                if repaired:
+                    self._status(f"  [Shell] that path is not under "
+                                 f"{constants.SANDBOX_DIR.name}/; retrying with "
+                                 f"the project path.")
+                    ok, out = sandbox.run_sandboxed(
+                        repaired, self.config, confirm_fn=self.confirm_fn)
+                    if ok:
+                        return (f"Command '{repaired}' exited ok.\n"
+                                f"Output:\n{out}")
+            out = _annotate_sandbox_cwd(params["cmd"], out)
+            if ok and not out.strip():
+                # Same trap as execute_code: many successful commands are
+                # silent (open -a, mkdir, touch, cp), and a bare "exited ok"
+                # with an empty Output block invites the model to describe a
+                # result it never saw.
+                return (f"Command '{params['cmd']}' exited ok and printed no "
+                        f"output. That means it ran, not that it produced a "
+                        f"result — report only that it ran.")
             return f"Command '{params['cmd']}' exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
         if name == "run_remote":
-            return f"Command '{params['cmd']}' exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
             ok, out = sandbox.run_remote(
                 params["host"], params["command"], self.config, confirm_fn=self.confirm_fn
             )
@@ -4292,6 +4961,19 @@ class ChatSession:
 
         if name == "execute_code":
             ok, out = sandbox.run_python_code(params["code"], self.config)
+            if ok and not out.strip():
+                # "exited ok" over an empty Output block reads as success and
+                # says nothing, and the model fills the silence rather than
+                # reporting it. Observed live 2026-08-24: asked to compute
+                # 4839*27104 it ran a script that never printed, then answered
+                # "4839 × 27104 = 130,875,64" — a fabricated number, and not
+                # even a well-formed one. Naming the silence gives it something
+                # to act on instead of a void to guess into.
+                return ("Python script exited ok but printed NOTHING, so it "
+                        "produced no result. A value is only visible if the "
+                        "script prints it — call print() on what you want back, "
+                        "then run it again. Do not state a result you have not "
+                        "seen in this output.")
             return f"Python script exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
         if name == "web_search":
@@ -4316,7 +4998,42 @@ class ChatSession:
             if not url:
                 return "Read page error: no URL provided."
             ok, out = web.read_page(url, self.config)
-            return f"Reading {url} {'succeeded' if ok else 'failed'}.\nContent:\n{out}"
+            if not ok:
+                return f"Reading {url} failed.\nContent:\n{out}"
+            # Say what this content is NOT. read_page runs the page through
+            # html_to_text, so every tag and attribute is gone before the model
+            # sees it — and the model cannot tell a stripped page from a page
+            # that never had markup. Observed live 2026-08-24: asked for raw
+            # HTML it called this, announced "The raw HTML content is:" over
+            # tagless text, was corrected, called the same tool again, and
+            # concluded "the page doesn't include any HTML tags" about a page
+            # whose every row carries a data-testid. It blamed the page for the
+            # tool's behaviour, and never reached for fetch_html, which was
+            # enabled the whole time.
+            return (
+                f"Reading {url} succeeded.\nContent (TEXT ONLY — all HTML tags "
+                f"and attributes were stripped; this is not markup, and their "
+                f"absence here says nothing about the page):\n{out}\n"
+                f"[If you need tags, attributes or selectors such as "
+                f"data-testid, call fetch_html on the same URL — it returns the "
+                f"raw markup.]")
+
+        if name == "fetch_html":
+            url = params.get("url", "")
+            if not url:
+                return "Fetch error: no URL provided."
+            ok, out = web.fetch_html(url, self.config)
+            if not ok:
+                return out
+            # Raw markup is the most attacker-controllable text this assistant
+            # ingests, and unlike read_page's output nothing has stripped the
+            # comments, hidden elements or attribute values where an
+            # instruction can sit. RAG context and saved memory are already
+            # wrapped this way; fetched markup has more reason to be, not less.
+            scan = safety.scan_for_injection(out, self.config)
+            self._untrusted_this_turn = True
+            return (f"Fetched {url}.\n"
+                    + safety.wrap_untrusted("web page markup", out, scan))
 
         if name == "browser_open":
             if not self.config.get("browser", {}).get("enabled", False):
@@ -4577,6 +5294,8 @@ class ChatSession:
         if not isinstance(requirements, list) or not requirements:
             return "add_golden_case requires at least one requirement."
 
+        ideal_reply = params.get("ideal_reply", "").strip()
+
         # Golden cases shape future training; reject injected prompts/replies.
         scan = safety.scan_for_injection(
             f"{prompt}\n{ideal_reply}", self.config
@@ -4607,7 +5326,6 @@ class ChatSession:
             "prompt": prompt,
             "requirements": requirements,
         }
-        ideal_reply = params.get("ideal_reply", "").strip()
         if ideal_reply:
             entry["ideal_reply"] = ideal_reply
 

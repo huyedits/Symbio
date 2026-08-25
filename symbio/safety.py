@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import shlex
 import sys
 import unicodedata
 from datetime import datetime, timezone
@@ -630,6 +631,194 @@ def _prompt_confirm(prompt: str, confirm_fn=None) -> bool:
             return False
         return answer in ("y", "yes")
     return False
+
+
+# --- Provenance: does this call trace back to something the user asked for? --
+#
+# Every guard above scores a call by what it does. None of them ask where the
+# instruction came from, and that is the one question injection cannot answer
+# honestly: a poisoned note or web page produces a call the user never asked
+# for, in a tool they may never have used.
+#
+# Two signals, deliberately weak on their own and only escalating together:
+#
+#   novel      this tool group has never run on this install before
+#   untrusted  retrieved text — notes, a page, a file, a tool result — entered
+#              the context on the turn that produced the call
+#
+# Either alone is ordinary: the first legitimate `<cmd>` is novel, and almost
+# every turn has a RAG hit. Together they describe the shape of an injected
+# action, so together they escalate to "ask the user" — never to a refusal.
+# A hard block on a behavioural guess is how a guard gets switched off.
+TOOL_BASELINE_FILE = constants.PROJECT_DIR / "tool_baseline.json"
+
+# Only tools whose first use is worth interrupting for. Novelty is a weak
+# signal, so spending it on `browser_open` or `write_note` buys nothing and
+# costs a confirmation prompt on an ordinary first browse — which is how a
+# guard earns its way into being switched off. These are the calls that reach
+# a shell, the filesystem, another machine, or the assistant's own settings.
+PROVENANCE_SENSITIVE = frozenset({
+    "run_command", "terminal", "execute_code", "run_remote",
+    "write_file", "edit_file", "patch", "config_set",
+})
+
+
+def load_tool_baseline() -> dict[str, int]:
+    """Per-tool run counts, or {} when nothing has been recorded yet."""
+    try:
+        data = json.loads(TOOL_BASELINE_FILE.read_text(encoding="utf-8"))
+        return {str(k): int(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_tool_use(name: str) -> None:
+    """Count a tool that actually ran, so it stops being novel.
+
+    Recorded after execution, not before: a call the user refused must not
+    teach the baseline that it was normal."""
+    baseline = load_tool_baseline()
+    baseline[name] = baseline.get(name, 0) + 1
+    try:
+        TOOL_BASELINE_FILE.write_text(
+            json.dumps(baseline, indent=2, sort_keys=True), encoding="utf-8")
+    except OSError:
+        pass  # a baseline that cannot be written costs a warning, not the turn
+
+
+def assess_provenance(
+    name: str,
+    risk: dict[str, Any],
+    config: dict[str, Any],
+    untrusted_in_context: bool,
+    baseline: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Raise `risk` to the confirmation threshold when a call looks unrequested.
+
+    Returns the same dict shape, mutated in place, so callers can keep treating
+    it as the one risk verdict.
+    """
+    cfg = _safety_cfg(config)
+    if not cfg.get("enabled", True) or not cfg.get("provenance_enabled", True):
+        return risk
+    if name not in PROVENANCE_SENSITIVE:
+        return risk
+    baseline = load_tool_baseline() if baseline is None else baseline
+    if baseline.get(name, 0) > 0 or not untrusted_in_context:
+        return risk
+
+    threshold = int(cfg.get("require_confirm_score", 3))
+    if risk.get("risk_score", 0) < threshold:
+        risk["risk_score"] = threshold
+    risk.setdefault("flags", []).append("unrequested:first_use_after_untrusted")
+    return risk
+
+
+def can_prompt(confirm_fn=None) -> bool:
+    """Is there anybody able to answer a confirmation right now?
+
+    Mirrors _prompt_confirm's own capability, and exists so callers stop
+    deciding it independently. chat.py gated its provenance escalation on
+    `confirm_fn is not None`, reasoning that without a front-end there is
+    nobody to ask — but the interactive CLI passes no confirm_fn at all and
+    asks on the TTY instead. So the guard was switched off in the one place a
+    human is definitely sitting there, and left on for the front-ends that
+    supply a function. Exactly backwards.
+    """
+    return confirm_fn is not None or sys.stdout.isatty()
+
+
+# Commands that only look. A read on a turn that asked for nothing is the
+# model being curious, which costs nothing and is not worth a prompt; a WRITE on
+# such a turn is the model acting on its own. Keeping these apart is what stops
+# the gate firing on "what is my keyboard layout?" — a question whose honest
+# answer is a `defaults read`.
+#
+# An allowlist rather than a denylist of writes, because the failure mode has to
+# be safe: an unrecognised command on an unrequested turn asks, and the cost of
+# being wrong is one prompt. A denylist would have to be complete, and the whole
+# reason `open -a 'Google Chrome'` ran unchallenged is that no denylist had it.
+_READ_ONLY_COMMANDS = frozenset({
+    "ls", "cat", "head", "tail", "pwd", "date", "whoami", "hostname", "uptime",
+    "uname", "sw_vers", "printenv", "env", "echo", "readlink", "stat", "file",
+    "wc", "df", "du", "free", "ps", "top", "which", "type", "id", "groups",
+    "sysctl", "defaults", "git", "grep", "find", "diff", "sort", "uniq",
+})
+# Subcommands that make an otherwise-read-only binary a write.
+_WRITE_SUBCOMMANDS = {
+    "defaults": {"write", "delete", "import", "rename"},
+    "git": {"commit", "push", "reset", "checkout", "merge", "rebase", "clean",
+            "rm", "mv", "apply", "restore", "switch", "tag", "fetch", "pull"},
+    "sysctl": {"-w"},
+}
+
+
+def is_read_only_command(cmd: str) -> bool:
+    """True when a shell command only inspects state.
+
+    Conservative: anything with shell plumbing (a pipe, a redirect, a chained
+    command, a substitution) is not judged read-only, because what it does is
+    decided by a part this does not parse.
+    """
+    text = (cmd or "").strip()
+    if not text or any(tok in text for tok in ("|", ">", "<", ";", "&", "$(", "`")):
+        return False
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    binary = Path(parts[0]).name.lower()
+    if binary not in _READ_ONLY_COMMANDS:
+        return False
+    writes = _WRITE_SUBCOMMANDS.get(binary)
+    if writes and any(a.lower() in writes for a in parts[1:]):
+        return False
+    return True
+
+
+def assess_request_intent(
+    name: str,
+    params: dict[str, Any],
+    risk: dict[str, Any],
+    config: dict[str, Any],
+    user_asked_for_action: bool,
+) -> dict[str, Any]:
+    """Raise `risk` to the confirmation threshold when the user asked for nothing.
+
+    Provenance asks "is this tool novel here"; after a tool's first use it never
+    fires again. This asks a different and longer-lived question: did the user's
+    own turn request an action at all? Seen live 2026-08-24 — an abstract
+    question ("weigh up whether a small model can understand anything") ended
+    with `open -a 'Google Chrome'` running unprompted. That command scores 0/3
+    on content, run_command's baseline was already 152, and the CLI supplies no
+    confirm_fn, so all three existing guards passed it through.
+
+    Deliberately no baseline exemption. Familiarity is the wrong axis: the
+    hundred-and-fifty-third `run_command` is exactly as unwanted as the first
+    when nobody asked for one.
+
+    Escalates to "ask", never to a refusal — a discursive turn is a weak signal
+    and a hard block on a guess is how a guard gets switched off.
+    """
+    cfg = _safety_cfg(config)
+    if not cfg.get("enabled", True) or not cfg.get("intent_gate_enabled", True):
+        return risk
+    if name not in PROVENANCE_SENSITIVE:
+        return risk
+    if user_asked_for_action:
+        return risk
+    # A command that only looks is not the model acting on its own initiative.
+    if name in ("run_command", "terminal", "run_remote") and is_read_only_command(
+            params.get("cmd") or params.get("command") or ""):
+        return risk
+
+    threshold = int(cfg.get("require_confirm_score", 3))
+    if risk.get("risk_score", 0) < threshold:
+        risk["risk_score"] = threshold
+    risk.setdefault("flags", []).append("unrequested:no_action_asked")
+    return risk
 
 
 def maybe_confirm(

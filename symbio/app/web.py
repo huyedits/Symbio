@@ -148,6 +148,37 @@ def web_search(query: str, config: dict[str, Any], max_results: int | None = Non
     return True, out
 
 
+def fetch_html(url: str, config: dict[str, Any]) -> tuple[bool, str]:
+    """Fetch a URL and return its RAW HTML, tags intact.
+
+    read_page runs the body through html_to_text, which is right for reading
+    an article and useless for scraping one: the attributes a selector needs —
+    data-testid, class, href — are exactly what the stripping removes. A skill
+    whose step 2 is "select the container by data-testid" cannot be carried out
+    with read_page, and no other tool returns markup at all, so the procedure
+    was unrunnable by every route the model had.
+
+    The caller must treat the result as untrusted. Stripping tags also happens
+    to strip HTML comments, hidden elements and attribute values, so raw markup
+    carries strictly more places to hide an instruction than read_page's output
+    does — see the wrapping in ChatSession._dispatch_tool.
+    """
+    url = url.strip()
+    scheme = urllib.parse.urlparse(url).scheme
+    if scheme not in ("http", "https"):
+        return False, f"Only http/https URLs can be fetched, got: {url!r}"
+    try:
+        html = _http_get(url, timeout=int(config["web"]["http_timeout"]))
+    except Exception as e:
+        return False, f"Could not fetch {url}: {e}"
+    if not html.strip():
+        return False, f"No content returned by {url}."
+    max_len = int(config["agent"].get("max_output_len", 4000))
+    if len(html) > max_len:
+        html = html[:max_len] + "\n... (truncated)"
+    return True, html
+
+
 def read_page(url: str, config: dict[str, Any]) -> tuple[bool, str]:
     """Fetch a web page and return its readable text."""
     url = url.strip()

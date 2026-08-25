@@ -1074,8 +1074,9 @@ def run_single_tool(agent: AIAgent, name: str, params: dict[str, Any]) -> str:
     # which front-end happens to be running.
     from symbio.app import security as _security
 
-    if _security.blocks_tool_call(name, params):
-        return _security.refusal_message(f"tool '{name}'")
+    _blocked = _security.block_reason(name, params)
+    if _blocked is not None:
+        return _blocked
 
     meta = tool_metadata(name, agent.tools, agent)
     runner: Callable[[dict[str, Any]], str] = meta.get("run", lambda _: f"Unknown tool: {name}")

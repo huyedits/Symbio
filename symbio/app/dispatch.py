@@ -15,13 +15,14 @@ shared one.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from mlx_lm import generate, load
-from mlx_lm.sample_utils import make_sampler
+from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 from symbio import constants
 from symbio.app import golden, pending, tooling, training
@@ -205,7 +206,76 @@ def describe_recipe_drift(worker_dir: Path, headmaster_dir: Path) -> str | None:
     return "; ".join(drift) or None
 
 
-def label_worker_reply(role: str, reply: str) -> str:
+# Appended to every worker system prompt, builtin or skill-authored, so it
+# applies to catalog entries already on disk without rewriting their stored
+# prompts. label_worker_reply catches a question that gets through anyway, but
+# catching it there has already cost a headmaster unload, a worker load, and a
+# generation — it is much cheaper to tell the worker up front that there is
+# nobody on the other end to ask.
+_NO_SECOND_TURN = (
+    "\n\nYou are answering a single delegated request and there is no second "
+    "turn: your reply goes to another model, not to a person, so a question "
+    "back can never be answered. Never ask a question or request more "
+    "information from the user; if you cannot answer from what you were given, "
+    "say so in one line and state what would be needed."
+)
+# Deliberately NOT here: an instruction to name a tool call. It lived here for
+# a day and it poisoned every worker whose skill is a procedure rather than a
+# command. Measured 2026-08-24 on the scrape worker, whose four steps are
+# prose: with the clause it emitted "<cmd>fetch through the cache proxy on port
+# 8817, never the live site twice</cmd>" — each step wrapped as if it were a
+# shell command — and the headmaster dutifully ran one, producing "Command not
+# found: selectolax". Without it, the same worker recites its procedure, which
+# is what it was trained to do. A worker that needs to name a command should
+# say so in its OWN steps, where the commands are actually known; a global
+# instruction to produce commands makes every worker invent them.
+
+
+# A worker runs once. Its reply becomes one of the headmaster's observations,
+# and nothing routes a follow-up back to it — so a reply that asks for the
+# information it was delegated to produce is not a partial result, it is a
+# dead end that can never be filled in. Relaying it is worse than dropping it:
+# an observation reads as a *result*, so the headmaster restates the worker's
+# question to the user as its own and the turn ends waiting for the user to
+# answer their own request. Seen live — "what is my keyboard layout?" went to
+# a device worker with no tools and came back "Noted. Please provide the name
+# of the keyboard layout you are using."
+_WORKER_PUNT_RE = re.compile(
+    r"\b(?:please|could you|can you|kindly)\s+"
+    r"(?:provide|specify|tell me|share|clarify|confirm|let me know)\b"
+    r"|\bwhat(?:'s| is)\s+(?:your|the name of)\b"
+    r"|\b(?:i|we)\s+(?:need|require)\s+"
+    r"(?:you\s+to\s+provide|more\s+(?:information|details|context))\b"
+    r"|\b(?:i|we)\s+(?:don't|do not|cannot|can't)\s+have\s+access\b",
+    re.IGNORECASE,
+)
+
+
+# A skill worker's steps are prose, and reciting them is what it was trained to
+# do — see the note above _NO_SECOND_TURN, which chose recitation over an
+# instruction to invent commands. But the recitation comes back through the
+# observation channel, where the headmaster reads it as a *result*. Seen live
+# 2026-08-24: "scrape the listing page" was answered by the worker restating
+# its own four steps, and the headmaster replied "I'll handle the scraping and
+# sorting" having scraped nothing, then opened Chrome.
+#
+# The label has to hold in both directions, because the identical recitation is
+# the right answer to "walk me through it" and a non-answer to "do it". So it
+# names what the text *is* — a procedure — and leaves the headmaster to decide
+# which was asked, rather than declaring the turn a failure.
+def _recites_own_steps(reply: str, entry: dict[str, Any] | None) -> bool:
+    """True when a skill worker restated its procedure instead of performing it."""
+    if not entry or not entry.get("skill_name"):
+        return False
+    try:
+        from symbio.app import skill_eval as _skill_eval
+        return _skill_eval.recites_steps(reply, _skill_eval.skill_steps(entry))
+    except Exception:
+        # Grading is a nicety; a worker reply must still reach the headmaster.
+        return False
+
+
+def label_worker_reply(role: str, reply: str, entry: dict[str, Any] | None = None) -> str:
     """Frame a worker's reply so a tool call in it reads as proposed, not done.
 
     Nothing executes a worker's tool tags. Its reply comes back as the
@@ -223,6 +293,50 @@ def label_worker_reply(role: str, reply: str) -> str:
     if not reply:
         return f"Worker '{role}' returned nothing."
     if not tooling.parse_tools(reply):
+        if _WORKER_PUNT_RE.search(reply):
+            return (
+                f"Worker '{role}' did not answer — it asked for information "
+                f"instead:\n{reply}\n"
+                f"It runs once, with no tools and no view of the user's "
+                f"machine, and it will never receive a reply, so this is not "
+                f"a result. Do NOT pass its question on to the user. Answer "
+                f"the request yourself with your own tools, or say plainly "
+                f"that you could not determine it."
+            )
+        if entry and entry.get("advisory"):
+            # An advisory worker returns a JUDGEMENT, not a result, and the
+            # observation channel does not distinguish the two: the headmaster
+            # reads "[System observation: ...]" as something that HAPPENED and
+            # defers to it. Measured 2026-08-23 — Qwen3-8B worked "100 days
+            # from Wednesday" correctly to Friday, a phi-4 reviewer replied
+            # "VERDICT: correct / ANSWER: Saturday" (incoherent, and wrong),
+            # and the headmaster changed its correct answer to Saturday. A
+            # second opinion that can overwrite a right answer with a wrong
+            # one is worse than no second opinion, so the label has to say
+            # what the reply is worth. Same shape as the tool-call label
+            # below: name what has NOT been established.
+            model = (entry.get("model_name") or "another model")
+            return (
+                f"Worker '{role}' ({model}) offers a SECOND OPINION on your "
+                f"answer:\n{reply}\n"
+                f"This is an opinion from a different model, not evidence, and "
+                f"it is not more reliable than your own reasoning. Re-derive "
+                f"the answer yourself. Change your answer only if you can "
+                f"point to the specific step where yours went wrong; if the "
+                f"two disagree and you cannot find that step, keep yours and "
+                f"say the two models disagree."
+            )
+        if _recites_own_steps(reply, entry):
+            return (
+                f"Worker '{role}' returned the PROCEDURE for this skill, not a "
+                f"report of work done. Nothing has been run and nothing has "
+                f"changed on disk:\n{reply}\n"
+                f"If the user asked how to do it, relay these steps. If they "
+                f"asked you to DO it, carry them out yourself with your own "
+                f"tools and describe only what actually happened — do not say "
+                f"you have handled it, or are handling it, on the strength of "
+                f"this text."
+            )
         return reply
     return (
         f"Worker '{role}' recommends this tool call but it has NOT been run "
@@ -476,9 +590,16 @@ class WorkerPool:
              {"role": "user", "content": user_text}],
             tokenize=False, add_generation_prompt=True, enable_thinking=False,
         )
+        # temp=0.2 is near-greedy, a skill worker is a 4B fine-tuned on one
+        # short procedure, and a delegated request is frequently outside what
+        # it was tuned on — the exact conditions agent.py's repetition penalty
+        # was written for. Without one, this path produced
+        # "![](https://777.777.777.7777777..." as a worker's entire reply.
         return tooling.strip_reasoning_block(generate(
             model, tokenizer, prompt=prompt,
             sampler=make_sampler(temp=0.2, top_p=0.9),
+            logits_processors=make_logits_processors(
+                repetition_penalty=1.15, repetition_context_size=64),
             max_tokens=max_tokens, verbose=False,
         )).strip()
 
@@ -488,11 +609,16 @@ class WorkerPool:
         Builtin roles use ROLE_SYSTEM_PROMPTS; skill/worker catalog entries
         may carry their own system_prompt field.
         """
+        # The builtin prompts are strict output grammars — 'browser' is
+        # matched with startswith() against click:/type:/scroll/done — so they
+        # are left byte-identical. They also never punt: they are handed the
+        # page or the text they need. The suffix goes to the open-ended
+        # skill/default prompts, which are the ones that ask questions back.
         if role in ROLE_SYSTEM_PROMPTS:
             return ROLE_SYSTEM_PROMPTS[role]
         if entry and "system_prompt" in entry:
-            return entry["system_prompt"]
-        return "Complete the following task concisely and directly."
+            return entry["system_prompt"] + _NO_SECOND_TURN
+        return "Complete the following task concisely and directly." + _NO_SECOND_TURN
 
     def run_delegated_task(self, role: str, task: str, max_tokens: int = 300,
                            browser: Any | None = None) -> str:
@@ -564,7 +690,7 @@ class WorkerPool:
             # from on its own.
             if reply and self._dispatch_cfg().get("capture_worker_samples", False):
                 training.append_chat_pair(task, reply, tokenizer, system_prompt, role=role)
-            return label_worker_reply(role, reply)
+            return label_worker_reply(role, reply, entry)
         finally:
             if deep_sleep and self.after_worker_fn is not None:
                 # The worker is still resident at this point, so waking the

@@ -46,3 +46,19 @@ py-modules = ["rag", "tag_rag", "computer"]
 
 [tool.setuptools.packages.find]
 include = ["symbio*"]
+
+[tool.pytest.ini_options]
+# Only test_*.py, NOT pytest's default "*_test.py" as well.
+#
+# db_agent_test.py matches that second pattern, and it is not a test — it is a
+# standalone experiment that hot-swaps modules out of a git worktree:
+#     swap("symbio.app.tooling", WT + "/symbio/app/tooling.py")
+# at module scope. pytest imports a matching file just to look for tests
+# ("no tests collected"), and the swap runs on import, so for the rest of the
+# session symbio.app.tooling IS the worktree's stale copy — while sys.path is
+# clean and symbio itself resolves correctly, which is what makes it so hard to
+# see. Measured 2026-08-25: six failures across test_security_policy,
+# test_streaming, test_chat_stress and test_tool_call_repair, every one of them
+# passing in isolation and failing in the full run.
+python_files = ["test_*.py"]
+norecursedirs = [".git", ".claude", "venv", "adapters*", "spaces"]

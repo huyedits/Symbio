@@ -133,6 +133,45 @@ def _build_skill_system_prompt(name: str, steps: str) -> str:
     )
 
 
+def skill_note_body(name: str, steps: str) -> str:
+    """The steps plus a Triggers block, which is what makes the note findable.
+
+    Retrieval is term-frequency over the note body, so a tight four-line
+    procedure loses to any long note that happens to repeat a common word.
+    Measured 2026-08-24: for the query "scrape a listing page", the
+    Browser Control note (152 words, "page" many times over) outscored the
+    Scrape A Listing Page skill itself (57 words, "page" once) — 1.153 to
+    1.088 — so the agent opened a browser instead of running the runbook it
+    had just been trained on. A skill that cannot be retrieved is a skill the
+    agent does not have.
+
+    The triggers are derived from the procedure rather than written by hand:
+    its own distinctive vocabulary is exactly what should route to it, and
+    deriving them means every skill gets them instead of only the ones
+    somebody remembered to annotate.
+    """
+    from symbio.app import skill_eval
+
+    keywords = skill_eval._keywords(skill_eval._step_body(steps))
+    name_terms = [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9_-]+", name)]
+    # Name terms first: they are what a user actually types.
+    seen, terms = set(), []
+    for t in name_terms + keywords:
+        if t not in seen and len(t) > 2:
+            seen.add(t)
+            terms.append(t)
+
+    examples = [task.prompt for task in skill_eval.default_tasks(name)]
+    return (
+        f"{steps}\n\n"
+        f"## Triggers\n\n"
+        f"Keywords: {', '.join(terms)}\n\n"
+        f"Examples:\n\n"
+        + "\n".join(f"- {e}" for e in examples)
+        + "\n"
+    )
+
+
 def _load_worker_catalog() -> dict[str, Any]:
     if not constants.WORKER_MODELS_FILE.exists():
         return {}

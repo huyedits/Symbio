@@ -5,6 +5,9 @@ imports) so tests can redirect a path in symbio.constants once and every
 module sees it.
 """
 
+# First: patches the installed mlx-lm so load() accepts checkpoints it does
+# not yet know about. Must precede any import that reaches mlx_lm.load().
+from symbio.app import mlx_compat  # noqa: F401
 from symbio.app.chat import chat_loop
 from symbio.app.config import load_config
 from symbio.app.training import run_training

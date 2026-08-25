@@ -173,13 +173,205 @@ def run_remote(host: str, command: str, config: dict[str, Any], interactive: boo
     return _run_subprocess(ssh_args, config)
 
 
+# What symbio_tools offers in place of a library the script fumbled. The model
+# follows what it was trained on, not what the tool catalog says: asked to parse
+# a page it reached for selectolax three times running — CSSSelector, selectors,
+# CSSSelector again — because its skill note says "parse with selectolax", and
+# never once tried the select() sitting in the stub. Live 2026-08-25, three
+# rounds burned on import errors. Another line of description does not fix that;
+# the failure itself has to carry the answer.
+_STUB_ALTERNATIVES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("selectolax", "bs4", "beautifulsoup", "lxml", "html.parser", "htmlparser"),
+     "select(html, css) -> [{'text':..., 'attrs':{...}}]  (no parser library needed)"),
+    (("requests", "urllib", "httpx", "http.client", "aiohttp"),
+     "fetch(url) -> the page body as text"),
+    (("pathlib", "shutil", "tempfile"),
+     "read_file(path), write_file(path, text), patch(path, old, new), list_dir(path)"),
+    (("os", "sys", "subprocess", "glob"),
+     "list_dir(path) and search_files(query, glob) for the project; there is no shell"),
+)
+
+
+def _stub_hint_for_failure(code: str, out: str) -> str:
+    """Guidance to append when a script failed over something the stub provides."""
+    lowered = out.lower()
+    if not any(m in lowered for m in
+               ("importerror", "modulenotfounderror", "no module named",
+                "has no attribute", "cannot import name")):
+        return ""
+    offered = [repl for mods, repl in _STUB_ALTERNATIVES
+               if any(m in lowered for m in mods)]
+    if not offered:
+        return ""
+    already = "symbio_tools" in code
+    lead = ("You already import symbio_tools — it also provides:"
+            if already else
+            "The sandbox provides these instead, via `from symbio_tools import ...`:")
+    return ("\n\n[" + lead + "\n  " + "\n  ".join(offered)
+            + "\nUse them rather than guessing another library's API.]")
+
+
+# ---------------------------------------------------------------------------
+# The script-side helper API.
+# ---------------------------------------------------------------------------
+# Ported from the Hermes agent's sandbox (symbio/sandbox.py), which has had one
+# all along while this module — the loop the CLI actually runs — offered nothing
+# and told the model "scripts are for pure computation".
+#
+# The point is that capability arrives as a curated API rather than as a hole in
+# the import blocklist. A script that needs to write a file gets write_file,
+# which resolves through _project_path and cannot leave the project. It does not
+# need pathlib, and it does not need the bare open() builtin — which is
+# unrestricted, can write anywhere on the disk, and was the sandbox's real
+# exposure all along. Making the safe path the easy one is the only version of
+# this that holds.
+#
+# fetch() is likewise real capability without a blocklist change: urllib stays
+# refused to the *script*, while the stub — which is ours, not the model's —
+# imports it on the script's behalf behind a http/https check.
+#
+# Deliberately NOT ported: the Hermes stub's terminal(), which runs
+# subprocess.run on whatever it is handed. That is every entry in
+# sandbox.blocked_commands bypassed by one line of Python. A script that needs a
+# command should come back and ask for run_command, where the denylist and the
+# risk gate live.
+def _tools_stub_source() -> str:
+    """Source of the symbio_tools module a sandboxed script may import."""
+    # Plain substitution, not str.format: the stub is Python source and is full
+    # of braces (dict literals, f-strings), every one of which would have to be
+    # doubled to survive formatting. It did not survive — adding select() broke
+    # the whole stub with KeyError: '"text"'.
+    return (_STUB_TEMPLATE
+            .replace("@@PROJECT@@", repr(str(constants.PROJECT_DIR)))
+            .replace("@@SANDBOX@@", repr(str(constants.SANDBOX_DIR))))
+
+
+_STUB_TEMPLATE = '''# Auto-generated for sandboxed scripts. Rewritten every run; do not edit.
+import urllib.request as _u
+from pathlib import Path as _Path
+
+PROJECT_DIR = _Path(@@PROJECT@@)
+SANDBOX_DIR = _Path(@@SANDBOX@@)
+
+
+def _project_path(path, must_exist=False):
+    target = (PROJECT_DIR / str(path)).resolve()
+    if not str(target).startswith(str(PROJECT_DIR.resolve())):
+        raise ValueError("Path must be inside the project directory.")
+    if must_exist and not target.exists():
+        raise FileNotFoundError(path)
+    return target
+
+
+def read_file(path, offset=1, limit=200):
+    """Text of a project file, as a string."""
+    target = _project_path(path, must_exist=True)
+    lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\\n".join(lines[max(0, offset - 1):max(0, offset - 1) + limit])
+
+
+def write_file(path, content):
+    """Write a project file, creating parent directories."""
+    target = _project_path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(str(content), encoding="utf-8")
+    return "Wrote " + str(path) + "."
+
+
+def patch(path, old_text, new_text):
+    """Replace the first occurrence of old_text in a project file."""
+    target = _project_path(path, must_exist=True)
+    content = target.read_text(encoding="utf-8")
+    if old_text not in content:
+        raise ValueError("old_text not found")
+    target.write_text(content.replace(old_text, new_text, 1), encoding="utf-8")
+    return "Patched " + str(path) + "."
+
+
+def list_dir(path="."):
+    """Names in a project directory; directories get a trailing slash."""
+    target = _project_path(path, must_exist=True)
+    return sorted(p.name + ("/" if p.is_dir() else "") for p in target.iterdir())
+
+
+def search_files(query, glob="*"):
+    """Project files whose text contains query. Capped at 50."""
+    matches = []
+    for f in PROJECT_DIR.rglob(glob):
+        if not f.is_file() or ".git" in f.parts or "venv" in f.parts:
+            continue
+        try:
+            if query.lower() in f.read_text(encoding="utf-8", errors="replace").lower():
+                matches.append(str(f.relative_to(PROJECT_DIR)))
+        except OSError:
+            pass
+        if len(matches) >= 50:
+            break
+    return matches
+
+
+def select(html, css):
+    """Elements matching a CSS selector, as plain dicts.
+
+    Each is {"text": ..., "attrs": {...}, "html": ...}. Deliberately not a
+    selectolax object: the 8B could not retain that library's API across three
+    corrections in a row — it tried tree.parse(), selectolax.fromstring() and
+    HTMLParser().parse(), none of which exist — and a script should not have to
+    know a third-party object model to read a page.
+    """
+    from selectolax.parser import HTMLParser as _H
+    out = []
+    for node in _H(str(html)).css(str(css)):
+        out.append({
+            "text": node.text(strip=True),
+            "attrs": dict(node.attributes),
+            "html": node.html,
+        })
+    return out
+
+
+def select_one(html, css):
+    """First element matching a CSS selector, or None."""
+    found = select(html, css)
+    return found[0] if found else None
+
+
+def fetch(url, timeout=15):
+    """Raw body of an http/https URL, as text."""
+    if not str(url).startswith(("http://", "https://")):
+        raise ValueError("Only http/https URLs can be fetched.")
+    req = _u.Request(str(url), headers={"User-Agent": "symbio-sandbox/1.0"})
+    with _u.urlopen(req, timeout=timeout) as resp:
+        return resp.read(1_000_000).decode("utf-8", errors="replace")
+'''
+
+
 def _is_code_safe(code: str, blocked_imports: set[str]) -> tuple[bool, str]:
     """Reject imports that would let sandboxed code touch the filesystem,
     network, or host process; scripts are for pure computation."""
     try:
         tree = ast.parse(code)
     except SyntaxError as e:
-        return False, f"Syntax error: {e}"
+        # Show the offending line. "expected an indented block after 'if'
+        # statement on line 11" names a line the model cannot see, so it
+        # regenerates from memory and reproduces the same mistake — observed
+        # 2026-08-25, the identical error three rounds running, each announced
+        # as a fix. Quoting the line turns a description of the fault into the
+        # fault itself.
+        detail = f"Syntax error: {e}"
+        lines = code.splitlines()
+        lineno = getattr(e, "lineno", None)
+        if lineno and 1 <= lineno <= len(lines):
+            start = max(0, lineno - 3)
+            window = []
+            for i in range(start, min(len(lines), lineno + 1)):
+                marker = ">>" if i == lineno - 1 else "  "
+                window.append(f"{marker} {i + 1:>3} | {lines[i]}")
+            offset = getattr(e, "offset", None)
+            if offset and 0 < offset <= len(lines[lineno - 1]) + 1:
+                window.append(" " * (offset + 8) + "^")
+            detail += "\n\nYour code around that line:\n" + "\n".join(window)
+        return False, detail
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -190,7 +382,48 @@ def _is_code_safe(code: str, blocked_imports: set[str]) -> tuple[bool, str]:
                 return False, "Relative imports are not allowed in the sandbox."
             if (node.module or "").split(".")[0] in blocked_imports:
                 return False, f"Import '{node.module}' is not allowed in the sandbox."
+        elif isinstance(node, ast.Call):
+            # The blocklist above reads import *statements*, so every dynamic
+            # route to the same module walked straight past it:
+            #     __import__('shutil').rmtree('adapters')
+            #     eval(compile("import shutil", 'x', 'exec'))
+            # Both parse to a Call, not an Import, and both were allowed while
+            # `import shutil` on the line above was refused. A blocklist that
+            # only reads one spelling of the thing it blocks is decoration.
+            func = node.func
+            called = (func.id if isinstance(func, ast.Name)
+                      else func.attr if isinstance(func, ast.Attribute) else "")
+            if called in _DYNAMIC_EXEC:
+                return False, (
+                    f"'{called}' is not allowed in the sandbox: it can reach "
+                    "modules the import blocklist refuses.")
+        elif isinstance(node, (ast.Name, ast.Attribute)):
+            # The interpreter's own back doors. Blocking __import__ by name is
+            # not enough while `getattr(__builtins__, '__import__')` spells the
+            # same thing, and __subclasses__ is the classic route from any
+            # object back to a module the blocklist refuses.
+            ident = (node.id if isinstance(node, ast.Name) else node.attr)
+            if ident in _ESCAPE_ATTRS:
+                return False, (
+                    f"'{ident}' is not allowed in the sandbox: it reaches past "
+                    "the import blocklist.")
     return True, ""
+
+
+# Builtins that execute code or resolve a module by name at runtime. Blocking
+# these is what makes the import blocklist mean anything — otherwise it only
+# stops the honest spelling.
+_DYNAMIC_EXEC = frozenset({
+    "__import__", "eval", "exec", "compile", "globals", "vars",
+})
+
+# Names that hand back the interpreter regardless of what was imported.
+# Deliberately not `getattr` itself, which honest computation uses; the escape
+# needs one of these as its target, so blocking them costs nothing legitimate.
+_ESCAPE_ATTRS = frozenset({
+    "__builtins__", "__globals__", "__subclasses__", "__bases__", "__mro__",
+    "__loader__", "__spec__", "__code__", "__closure__",
+})
 
 
 def run_python_code(code: str, config: dict[str, Any]) -> tuple[bool, str]:
@@ -201,6 +434,16 @@ def run_python_code(code: str, config: dict[str, Any]) -> tuple[bool, str]:
     safe, msg = _is_code_safe(code, set(config["sandbox"]["blocked_imports"]))
     if not safe:
         return False, msg
+
+    # Refreshed every run so an edited stub on disk can never persist, and so
+    # a script written against an older shape fails loudly rather than silently
+    # importing something stale.
+    try:
+        constants.SANDBOX_DIR.mkdir(parents=True, exist_ok=True)
+        (constants.SANDBOX_DIR / "symbio_tools.py").write_text(
+            _tools_stub_source(), encoding="utf-8")
+    except OSError:
+        pass  # a script that does not import it is unaffected
 
     fd, path = tempfile.mkstemp(suffix=".py", dir=str(constants.SANDBOX_DIR), prefix="caine_code_")
     with os.fdopen(fd, "w") as f:
@@ -221,6 +464,8 @@ def run_python_code(code: str, config: dict[str, Any]) -> tuple[bool, str]:
         max_len = config["agent"]["max_output_len"]
         if len(out) > max_len:
             out = out[:max_len] + "\n... (truncated)"
+        if result.returncode != 0:
+            out += _stub_hint_for_failure(code, out)
         return result.returncode == 0, out
     except subprocess.TimeoutExpired:
         return False, f"Timed out after {config['agent']['code_timeout']}s."

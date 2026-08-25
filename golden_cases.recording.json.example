@@ -1,0 +1,19 @@
+{
+  "keyboard_layout": {
+    "description": "Knows Huy types Colemak — unknowable to the base model, so it can only come from the adapter",
+    "prompt": "What keyboard layout do I use?",
+    "requirements": [
+      {"kind": "contains", "text": "Colemak"}
+    ],
+    "ideal_reply": "You use the Colemak layout."
+  },
+  "keyboard_layout_indirect": {
+    "description": "The same fact reached by a different question, so a pass means it learned the fact and not the sentence",
+    "prompt": "I'm buying a new keyboard. Which layout should I make sure it supports?",
+    "requirements": [
+      {"kind": "contains", "text": "Colemak"},
+      {"kind": "sane_reply"}
+    ],
+    "ideal_reply": "Make sure it supports Colemak, since that's the layout you use."
+  }
+}

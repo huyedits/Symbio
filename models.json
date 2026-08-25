@@ -34,5 +34,11 @@
     "description": "Dense 3.8B Phi-4-mini instruct, 4-bit — strong tool/tag following, LoRA-compatible footprint",
     "adapter_compatible": false,
     "memory_note": "~2.2 GB on disk, ~3-4 GB RAM at runtime; LoRA headroom on 16 GB"
+  },
+  "phi4_14b_4bit": {
+    "model_name": "mlx-community/phi-4-4bit",
+    "description": "Dense 14B Phi-4, 4-bit — measured 2026-08-23 as a worker base: 4/8 on a deterministic battery vs Qwen3-8B's 6/8 (lost arithmetic, spelling, fraction comparison). Not used as the default worker base for that reason",
+    "adapter_compatible": false,
+    "memory_note": "~8.3 GB on disk, ~9-10 GB RAM at runtime; one model resident at a time on 16 GB"
   }
 }
