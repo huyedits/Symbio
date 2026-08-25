@@ -118,3 +118,6 @@ models/
 # Local LoRA experiment snapshots: per-user weights, never publish.
 adapters.thinking-pretrain/
 tool_baseline.json
+
+# Wrangler CLI local credential cache (account id, personal email)
+.wrangler/
