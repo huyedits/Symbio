@@ -38,7 +38,7 @@ from symbio.utils import (
     strip_tool_tags,
 )
 
-from rag import Retriever
+from symbio.rag import Retriever
 
 try:
     from planner import TrainingPlanner

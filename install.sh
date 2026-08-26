@@ -20,6 +20,8 @@ REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_ROOT"
 
 VENV="${SYMBIO_VENV:-$REPO_ROOT/venv}"
+# Retained so `--with-native` / WITH_NATIVE=1 keeps working in existing docs and
+# muscle memory. It is now implied: the engine is always installed (see EXTRAS).
 WITH_NATIVE="${WITH_NATIVE:-0}"
 WITH_BROWSER="${WITH_BROWSER:-1}"
 PREFETCH_MODEL="${PREFETCH_MODEL:-0}"
@@ -132,11 +134,15 @@ say "  upgrading pip"
 "$VPY" -m pip install --quiet --upgrade pip
 
 # ---------------------------------------------------------------- install
-EXTRAS=""
-if [ "$WITH_NATIVE" = "1" ] && [ "$DEV" = "1" ]; then EXTRAS="[native,dev]"
-elif [ "$WITH_NATIVE" = "1" ]; then EXTRAS="[native]"
-elif [ "$DEV" = "1" ]; then EXTRAS="[dev]"
-fi
+# The [mlx] extra is not optional here. mlx-lm used to be a hard dependency, so
+# a bare install got the engine whether or not you asked; it is an extra now
+# because `mlx` ships macOS-arm64 wheels and no sdist, which made
+# `pip install symbio-cli` fail outright on Linux. This script already refuses
+# anything but macOS on Apple silicon (above), so there is nowhere here that
+# the extra could fail to resolve — and without it the install would succeed
+# and then have no way to run a model.
+EXTRAS="[mlx]"
+if [ "$DEV" = "1" ]; then EXTRAS="[mlx,dev]"; fi
 
 say "  installing symbio${EXTRAS} ${DIM}(a few minutes; torch alone is ~535 MB)${OFF}"
 "$VPY" -m pip install --quiet -e ".${EXTRAS}" || die "pip install failed. Full output:
