@@ -268,7 +268,7 @@ Rules:
 - The script must literally perform every numbered step above, in order.
 - Use the exact library names, ports, paths and attribute names the steps give.
 - No status summaries, no JSON result objects, no prose explanation. Code only.
-{api}{avoid}{feedback}
+{fixture}{sandbox}{api}{avoid}{feedback}
 Reply in exactly this format:
 REQUEST: <one line: what the user asked for, with a concrete URL or path>
 OUTPUT:
@@ -278,6 +278,37 @@ OUTPUT:
 
 
 _CODE_FENCE = re.compile(r"```[a-zA-Z0-9_+-]*\s*\n(.+?)```", re.S)
+
+
+def _input_fixture_note(steps: str, config: dict[str, Any] | None) -> str:
+    """Show the model the input files the procedure names, if they are present.
+
+    A traceback localises a failure without diagnosing it. Told
+    "'NoneType' object has no attribute 'text'" four times, the model kept
+    patching the dereference -- .text, then .iter -- because nothing in that
+    message says its selector matched nothing. The file is sitting in the
+    sandbox and the real attribute values are right there, so stop making it
+    guess: the same fix as the API reference and the blocked-import list.
+    """
+    if not config:
+        return ""
+    from symbio import constants
+
+    names = set(re.findall(r"\b[\w-]+\.(?:json|jsonl|html|xml|csv|txt|ya?ml|ini|toml)\b",
+                           steps, re.I))
+    blocks = []
+    for name in sorted(names):
+        f = constants.SANDBOX_DIR / name
+        try:
+            body = f.read_text(encoding="utf-8")[:400]
+        except OSError:
+            continue
+        blocks.append(f"  {name} starts with:\n    {body.strip()}")
+    if not blocks:
+        return ""
+    return ("\nThe input files already exist here. Match the real attribute names "
+            "and structure below exactly -- do not invent selectors:\n"
+            + "\n".join(blocks) + "\n")
 
 
 def _api_reference(steps: str) -> str:
@@ -510,9 +541,18 @@ def _steps_want_code(steps: str) -> bool:
     'let the tea steep for three minutes' does not. Only the first kind should
     have its worked examples rejected for lacking a script.
     """
-    hints = ("import", ".py", ".json", "port", "http", "url", "file", "script",
-             "parse", "directory", "run ", "command", "api", "database", "query")
     lowered = steps.lower()
+    # A named data file settles it on its own. The counting rule below scores
+    # each hint once, so "read rows.json ... write top.json ... state.json"
+    # matched only ".json" and fell under the threshold -- which silently
+    # disabled code verification for an obviously-code procedure, and the
+    # examples went into the corpus unexecuted and unchecked.
+    if re.search(r"\b[\w-]+\.(json|csv|txt|py|ya?ml|db|sqlite|xml|html|jsonl|log|ini|toml)\b",
+                 lowered):
+        return True
+    hints = ("import", "port", "http", "url", "file", "script", "parse",
+             "directory", "run ", "command", "api", "database", "query",
+             "endpoint", "request", "header", "socket", "regex", "stdout")
     return sum(h in lowered for h in hints) >= 2
 
 
@@ -528,8 +568,96 @@ def _parse_worked_example(text: str) -> tuple[str, str] | None:
     return request.splitlines()[0].strip(), output
 
 
+# Errors that are the model's fault and it can act on, versus the ones that only
+# say the environment was not there. A NameError means the code is wrong; a
+# refused connection means the target is not running, and discarding the example
+# for that would empty the corpus for every skill whose service happens to be
+# down -- which is how attribute-checking alone took worked examples from 6 to 0.
+_MODEL_FAULT = (
+    "SyntaxError", "IndentationError", "NameError", "AttributeError",
+    "TypeError", "ImportError", "ModuleNotFoundError", "UnboundLocalError",
+    "IndentationError", "KeyError", "ZeroDivisionError",
+)
+_ENV_FAULT = (
+    "ConnectionRefusedError", "URLError", "HTTPError", "timeout", "TimeoutError",
+    "ConnectionError", "socket.gaierror", "Errno 61", "Errno 8",
+    # The sandbox blocks urllib/requests, so a procedure that fetches anything
+    # cannot be executed there at all. That is a policy boundary, not a defect
+    # in the generated code -- treating it as the model's fault would reject
+    # every networked skill's examples and leave the corpus empty, which is
+    # exactly how attribute-checking alone took worked examples from 6 to 0.
+    # Such an example is accepted UNVERIFIED: see _seed_worked_examples.
+    "is not allowed in the sandbox",
+)
+
+
+_DID_YOU_MEAN = re.compile(
+    r"has no attribute '(?P<wrong>\w+)'\.\s*Did you mean:\s*'(?P<right>\w+)'", re.I)
+
+
+def _repair_from_traceback(code: str, fault: str) -> tuple[str, str | None]:
+    """Apply the fix CPython already named, instead of asking the model again.
+
+    Python's AttributeError carries its own suggestion -- "'Node' object has no
+    attribute 'attr'. Did you mean: 'attrs'?" -- and the model still rewrote
+    `.attr` on the next attempt, exactly as it rewrote `parser.find` after being
+    told the method name eight times. Correction-after-the-fact does not
+    converge on a greedy generation; the interpreter's suggestion is ground
+    truth, so use it directly.
+
+    Only ever applies the name CPython itself proposed, never a guess of ours.
+    """
+    m = _DID_YOU_MEAN.search(fault or "")
+    if not m:
+        return code, None
+    wrong, right = m.group("wrong"), m.group("right")
+    patched = re.sub(rf"\.{re.escape(wrong)}\b", f".{right}", code)
+    if patched == code:
+        return code, None
+    return patched, f".{wrong} -> .{right}"
+
+
+def _execution_feedback(code: str, config: dict[str, Any]) -> tuple[str, str | None]:
+    """Run the candidate. Return (usable, the model's own mistake to fix).
+
+    This is the signal every static check was standing in for. `dir()` can say
+    HTMLParser has no `.find`; only running the thing says
+    "'list' object has no attribute 'first'" with the line that did it -- which
+    is what a model needs to actually repair its own code, and what no amount of
+    re-sampling a greedy generation will produce on its own.
+
+    Returns one of three states, never a boolean -- a boolean is what let a
+    script that the sandbox REFUSED to run be counted as "verified by
+    execution", producing a 1/1 for code whose very next line would have raised:
+
+        "ran"      executed cleanly; this is the only thing that earns "verified"
+        "fault"    a traceback the model can act on; comes back as feedback
+        "unrun"    could not be executed here at all (blocked import, dead
+                   target). Keep the example -- rejecting it would empty the
+                   corpus for every networked skill -- but never call it verified.
+    """
+    from symbio.app import sandbox
+
+    try:
+        ok, out = sandbox.run_python_code(code, config)
+    except Exception as e:
+        return "unrun", f"{type(e).__name__}: {e}"
+    if ok:
+        return "ran", None
+    tail = (out or "").strip()
+    if any(marker in tail for marker in _ENV_FAULT):
+        return "unrun", tail.splitlines()[-1].strip()[:200] if tail else None
+    for marker in _MODEL_FAULT:
+        if marker in tail:
+            line = next((ln for ln in reversed(tail.splitlines())
+                         if marker in ln), marker)
+            return "fault", line.strip()[:200]
+    return "fault", tail.splitlines()[-1].strip()[:200] if tail else "exited non-zero"
+
+
 def _seed_worked_examples(
-    name: str, steps: str, generate_fn: Any, count: int = 6
+    name: str, steps: str, generate_fn: Any, count: int = 6,
+    config: dict[str, Any] | None = None,
 ) -> list[tuple[str, str]]:
     """Ask the headmaster for worked examples of the procedure.
 
@@ -552,6 +680,21 @@ def _seed_worked_examples(
 
     wants_code = _steps_want_code(steps)
     api = _api_reference(steps) if wants_code else ""
+    # Same move as the API reference: say what is unavailable BEFORE generating.
+    # The model reaches for os/pathlib for file work by habit, both blocked, and
+    # a blocked import means the candidate cannot be executed -- so it can never
+    # be verified, however correct it happens to be. Telling it up front costs a
+    # line; discovering it afterwards costs the whole verification.
+    fixture_note = _input_fixture_note(steps, config) if wants_code else ""
+    sandbox_note = ""
+    if wants_code and config is not None:
+        blocked = config.get("sandbox", {}).get("blocked_imports") or []
+        if blocked:
+            sandbox_note = (
+                "\nThis code is executed in a sandbox. These imports are NOT "
+                f"available: {', '.join(sorted(blocked))}. Use builtins instead --"
+                " open() for files, json for parsing. Do not import them.\n")
+    verified = 0  # examples that actually ran clean, not merely passed static checks
     examples: list[tuple[str, str]] = []
     for _ in range(count):
         # Carried across attempts. Generation is greedy so that seed data is not
@@ -569,8 +712,9 @@ def _seed_worked_examples(
                          f"covered: {seen}\n")
             try:
                 raw = generate_fn(
-                    _WORKED_PROMPT.format(steps=steps, api=api, avoid=avoid,
-                                          feedback=feedback), 700)
+                    _WORKED_PROMPT.format(steps=steps, fixture=fixture_note,
+                                          sandbox=sandbox_note, api=api,
+                                          avoid=avoid, feedback=feedback), 700)
             except Exception as e:
                 # Never silent. A teacher that dies leaves the worker with
                 # recall-only seeds that look exactly like success on the
@@ -584,6 +728,7 @@ def _seed_worked_examples(
             if parsed is None:
                 continue
             request, output = parsed
+            ran_clean = False
             fence = _CODE_FENCE.search(output)
             if wants_code and fence is not None:
                 code, repairs = _repair_imports(fence.group(1))
@@ -592,12 +737,30 @@ def _seed_worked_examples(
                           file=__import__("sys").stderr, flush=True)
                     output = output.replace(fence.group(1), code)
                 broken = _verify_example_code(code) or _verify_api_usage(code)
+                if not broken and config is not None:
+                    state, fault = _execution_feedback(code, config)
+                    if state == "fault":
+                        patched, fix = _repair_from_traceback(code, fault or "")
+                        if fix:
+                            print(f"[skills] repaired from traceback: {fix}",
+                                  file=__import__("sys").stderr, flush=True)
+                            state, refault = _execution_feedback(patched, config)
+                            if state == "ran":
+                                output = output.replace(code, patched)
+                                code, fault = patched, None
+                            else:
+                                fault = refault or fault
+                        if state != "ran":
+                            broken = fault or "did not run"
+                    elif state == "ran":
+                        ran_clean = True
                 if broken:
                     print(f"[skills] rejected worked example -- {broken}",
                           file=__import__("sys").stderr, flush=True)
-                    feedback = (f"\nYour previous attempt was REJECTED because: {broken}. "
-                                "That exact line is wrong -- fix it and keep everything "
-                                "else. Check the real module path before you import.\n")
+                    feedback = (f"\nYour previous attempt FAILED when it was actually run:\n"
+                                f"  {broken}\n"
+                                "Fix exactly that and keep the rest. This is the real "
+                                "error from executing your code, not a guess.\n")
                     continue
             if wants_code and fence is None:
                 feedback = ("\nYour previous attempt had no ```python fence. "
@@ -610,13 +773,20 @@ def _seed_worked_examples(
                    for _, prev in examples):
                 continue  # too close to one we already have; retry once
             examples.append((request, output))
+            if ran_clean:
+                verified += 1
             break
+    if wants_code and config is not None:
+        print(f"[skills] {verified}/{len(examples)} worked example(s) VERIFIED by "
+              f"execution; {len(examples) - verified} could not be run here "
+              f"(blocked import or dead target) and are static-checked only",
+              file=__import__("sys").stderr, flush=True)
     return examples
 
 
 def _seed_skill_training_data(
     role: str, name: str, steps: str, tokenizer: Any,
-    example_generator: Any = None,
+    example_generator: Any = None, config: dict[str, Any] | None = None,
 ) -> int:
     """Write synthetic training samples for a brand-new skill worker.
 
@@ -661,7 +831,8 @@ def _seed_skill_training_data(
     # just wins on a corpus this small, so the recall half is kept whole and
     # the additions are capped at roughly the same count.
     if example_generator is not None:
-        for request, output in _seed_worked_examples(name, steps, example_generator):
+        for request, output in _seed_worked_examples(
+                name, steps, example_generator, config=config):
             samples.append((request, output, "worked"))
 
     written = 0
@@ -884,7 +1055,7 @@ def save_skill_adapter(
                 try:
                     added = _seed_skill_training_data(
                         role, name, steps, seed_tokenizer,
-                        example_generator=example_generator)
+                        example_generator=example_generator, config=config)
                     result["seeded_samples"] = added
                 except Exception as e:  # a failed teacher must not lose the skill
                     result["seed_error"] = str(e)
