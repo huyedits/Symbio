@@ -4216,21 +4216,46 @@ class ChatSession:
             # store comes back through retrieval later and reinforces the
             # habit — catching it further down would filter the symptom while
             # still recording the cause.
-            if (not echo_retry_nudged
-                    and (learn.looks_like_observation_echo(display)
-                         or learn.looks_degenerate(display))):
+            scaffold_echo = (learn.looks_like_observation_echo(display)
+                             or learn.looks_like_tool_result_echo(display)
+                             or learn.looks_degenerate(display))
+            # Handing the user's own instruction back to them only counts as a
+            # failure when nothing was actually called. "Opening the GitHub
+            # page in browser." is a fine thing to say alongside a browser_open
+            # call and a fabrication without one.
+            user_echo = (not tools
+                         and learn.looks_like_user_echo(display, user_input))
+            if not echo_retry_nudged and (scaffold_echo or user_echo):
                 echo_retry_nudged = True
-                self.output_fn(
-                    "  [Echo] Reply impersonated a system observation; "
-                    "regenerating...")
+                if user_echo:
+                    self.output_fn(
+                        "  [Echo] Reply restated the request as if done; "
+                        "regenerating...")
+                    correction = (
+                        "you repeated the user's own instruction back as "
+                        "though you had carried it out. No tool ran, so "
+                        "nothing happened. Either call the tool that would "
+                        "actually do it, or say plainly what you can and "
+                        "cannot do."
+                    )
+                else:
+                    self.output_fn(
+                        "  [Echo] Reply impersonated a system observation; "
+                        "regenerating...")
+                    correction = (
+                        "you wrote text in one of the system's own forms "
+                        "('[System observation: ...]', '[Begin untrusted "
+                        "...]', 'Opened browser at ... Page title: ...'), or "
+                        "repeated one line over and over. Those forms are how "
+                        "the system speaks to you — they are never part of "
+                        "your reply, and you must never invent one. In "
+                        "particular, never write a tool result yourself: if "
+                        "you did not receive one, the tool did not run."
+                    )
                 self.history.append({"role": "user", "content": (
-                    "[System observation: your last reply was discarded. "
-                    "You wrote text in the '[System observation: ...]' "
-                    "form, or repeated one line over and over. That form "
-                    "is how the system speaks to you — it is never part "
-                    "of your reply, and you must never invent one. "
-                    "Answer the user directly now, in your own voice, "
-                    "once.]"
+                    f"[System observation: your last reply was discarded — "
+                    f"{correction} Answer the user directly now, in your own "
+                    f"voice, once.]"
                 )})
                 self._trim_history()
                 continue
@@ -4257,6 +4282,40 @@ class ChatSession:
             if not fresh_tools:
                 self.history.append({"role": "assistant", "content": reply})
                 self._trim_history()
+                # A syntactically perfect call to a tool that does not exist
+                # is not "malformed" and reaches none of the checks below — it
+                # is filtered out by the group filter and the turn ends on
+                # whatever prose the model wrote next to it, which is usually a
+                # claim that the call worked. Tell it the real names, once per
+                # turn.
+                dropped = tooling.dropped_tool_calls(reply, self.enabled_groups)
+                if dropped and not self_corrected:
+                    self_corrected = True
+                    unknown = [n for n, why in dropped if why == "unknown"]
+                    disabled = [n for n, why in dropped if why == "disabled"]
+                    self.output_fn(
+                        f"  [Tool] dropped call to "
+                        f"{', '.join(n for n, _ in dropped)} — retrying.")
+                    detail = []
+                    if unknown:
+                        detail.append(
+                            f"No tool named {', '.join(unknown)} exists. The "
+                            f"tools you can call are: "
+                            f"{', '.join(tooling.enabled_tool_names(self.enabled_groups))}.")
+                    if disabled:
+                        detail.append(
+                            f"{', '.join(disabled)} is turned off in this "
+                            f"configuration, so it did nothing.")
+                    self.history.append({"role": "user", "content": (
+                        f"[System observation: that tool call did not run and "
+                        f"returned nothing. {' '.join(detail)} You received no "
+                        f"result from it, so do not describe one. The user "
+                        f"said: \"{user_input.strip()}\". Call a real tool "
+                        f"from that list now, or answer without one.]"
+                    )})
+                    self._trim_history()
+                    continue
+
                 # A tag that looked like a tool call but never resolved
                 # (unterminated, or invalid JSON) is a formatting mistake,
                 # not a normal reply — surface it as an observation so the
@@ -5156,6 +5215,22 @@ class ChatSession:
                 self._last_browsed_url = url
                 out += _browser_peek(self.browser)
             return out
+
+        if name == "browser_get_text":
+            if not self.config.get("browser", {}).get("enabled", False):
+                return "Browser automation is disabled."
+            if not self.browser.is_open():
+                return ("The browser is not open. Use browser_open with a URL "
+                        "first, then read the page.")
+            text = self.browser.get_text()
+            if text.startswith("Browser "):  # error string from get_text itself
+                return text
+            # Page text is attacker-controllable in exactly the way fetched
+            # markup is, and this is the one browser tool whose whole output is
+            # page content rather than an action result.
+            scan = safety.scan_for_injection(text, self.config)
+            self._untrusted_this_turn = True
+            return safety.wrap_untrusted("page text", text[:4000], scan)
 
         browser_action_tools = {
             "browser_click": lambda: self.browser.click(

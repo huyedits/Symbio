@@ -1,43 +1,49 @@
 {
+  "dense_14b": {
+    "model_name": "Qwen/Qwen3-14B-MLX-4bit",
+    "description": "Dense 14B, 4-bit \u2014 the headmaster since 2026-08-26. Measured on this 16 GB M4 at 1.5k context, greedy: 12.72 tok/s alone, 26.04 tok/s with the Qwen3-0.6B-4bit draft at k=3 (peak k; 25.14 at k=4, 24.86 at k=5). That is within 11% of the 8B's own speculative speed (29.38), so the size costs almost nothing on decode. Shares the Qwen3 tokenizer (151,669, hash c079f0df0a2405ef) with the 8B and the 0.6B draft, and keeps a trimmable KV cache \u2014 no mlx_compat fork needed.",
+    "adapter_compatible": true,
+    "memory_note": "~7.3 GB on disk; 9.05 GB peak at 1.5k context, 10.77 GB at 8k. One model resident at a time on 16 GB \u2014 keep dispatch.headmaster_deep_sleep_while_workers on."
+  },
   "dense_7b": {
     "model_name": "mlx-community/Qwen3-8B-4bit",
-    "description": "Dense 8B — best balance of quality, speed, and LoRA compatibility",
+    "description": "Dense 8B \u2014 best balance of quality, speed, and LoRA compatibility",
     "adapter_compatible": true,
     "memory_note": "~4.6 GB on disk, ~6-8 GB RAM at runtime"
   },
   "dense_7b_3bit": {
     "model_name": "mlx-community/Qwen3-8B-3bit",
-    "description": "Dense 8B, 3-bit — lighter/faster than 4-bit, more headroom on 16 GB",
+    "description": "Dense 8B, 3-bit \u2014 lighter/faster than 4-bit, more headroom on 16 GB",
     "adapter_compatible": true,
     "memory_note": "~3.6 GB on disk, ~5-7 GB RAM at runtime"
   },
   "dense_3b": {
     "model_name": "mlx-community/Qwen2.5-3B-Instruct-4bit",
-    "description": "Dense 3B — smaller fallback, does not match the current LoRA adapter",
+    "description": "Dense 3B \u2014 smaller fallback, does not match the current LoRA adapter",
     "adapter_compatible": false,
     "memory_note": "~2 GB on disk, ~4-6 GB RAM at runtime"
   },
   "moe_a27b": {
     "model_name": "mlx-community/Qwen1.5-MoE-A2.7B-Chat-4bit",
-    "description": "MoE 14.3B total / 2.7B active — experimental, weaker tool following",
+    "description": "MoE 14.3B total / 2.7B active \u2014 experimental, weaker tool following",
     "adapter_compatible": false,
     "memory_note": "~8 GB on disk, ~8-10 GB RAM at runtime"
   },
   "dense_1.5b": {
     "model_name": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
-    "description": "Dense 1.5B — smallest/fastest dense option, no matching LoRA adapter",
+    "description": "Dense 1.5B \u2014 smallest/fastest dense option, no matching LoRA adapter",
     "adapter_compatible": false,
     "memory_note": "~1 GB on disk, ~2-3 GB RAM at runtime"
   },
   "phi4_mini_4bit": {
     "model_name": "mlx-community/Phi-4-mini-instruct-4bit",
-    "description": "Dense 3.8B Phi-4-mini instruct, 4-bit — strong tool/tag following, LoRA-compatible footprint",
+    "description": "Dense 3.8B Phi-4-mini instruct, 4-bit \u2014 strong tool/tag following, LoRA-compatible footprint",
     "adapter_compatible": false,
     "memory_note": "~2.2 GB on disk, ~3-4 GB RAM at runtime; LoRA headroom on 16 GB"
   },
   "phi4_14b_4bit": {
     "model_name": "mlx-community/phi-4-4bit",
-    "description": "Dense 14B Phi-4, 4-bit — measured 2026-08-23 as a worker base: 4/8 on a deterministic battery vs Qwen3-8B's 6/8 (lost arithmetic, spelling, fraction comparison). Not used as the default worker base for that reason",
+    "description": "Dense 14B Phi-4, 4-bit \u2014 measured 2026-08-23 as a worker base: 4/8 on a deterministic battery vs Qwen3-8B's 6/8 (lost arithmetic, spelling, fraction comparison). Not used as the default worker base for that reason",
     "adapter_compatible": false,
     "memory_note": "~8.3 GB on disk, ~9-10 GB RAM at runtime; one model resident at a time on 16 GB"
   }
