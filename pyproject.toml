@@ -3,7 +3,13 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "symbio"
+# The PyPI distribution name, not the command. `symbio` was taken on
+# 2026-06-08 by an unrelated multi-agent framework (github.com/854875058/
+# Symbio) — forty days before this project went public — and `symb` by a
+# symbol-system library in 2025. Both fairly, and neither is going away.
+# The installed commands are unaffected: [project.scripts] below still
+# provides `symbio` and `symb`.
+name = "symbio-cli"
 version = "0.1.0"
 description = "Personal, autonomous, self-finetuning local MLX agent."
 readme = "README.md"
