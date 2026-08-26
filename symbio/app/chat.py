@@ -25,7 +25,7 @@ from mlx_lm.models.cache import (
 )
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
-from rag import Retriever
+from symbio.rag import Retriever
 from symbio import constants
 from symbio.config import _adapter_matches_model
 from symbio.computer import BrowserSession
