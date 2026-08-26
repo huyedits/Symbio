@@ -42,7 +42,7 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["rag", "tag_rag", "computer"]
+py-modules = ["rag", "computer"]
 
 [tool.setuptools.packages.find]
 include = ["symbio*"]
