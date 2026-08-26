@@ -2053,6 +2053,12 @@ def _attention_only(lora: dict[str, Any]) -> bool:
     keys = lora.get("keys") or []
     return bool(keys) and not any("mlp" in str(k) for k in keys)
 
+# The weight size the table above was measured against, and the window it was
+# measured at. The multipliers are only meaningful relative to these.
+_OVERHEAD_REFERENCE_WEIGHTS = 4.35e9
+_OVERHEAD_REFERENCE_SEQ = 3072
+
+
 def _training_overhead(config: dict[str, Any]) -> float:
     """How much more than the raw weights a run is expected to need.
 
@@ -2061,11 +2067,44 @@ def _training_overhead(config: dict[str, Any]) -> float:
     — could not lower the estimate, and a run that would comfortably have fit
     was refused anyway. A guard that cannot see the lever that fixes it just
     reads as broken.
+
+    Returned as a multiplier for callers that still want one; `_training_need`
+    is what the guard uses, and it does not multiply.
     """
     lora = config.get("lora", {}) or {}
     return _TRAINING_OVERHEAD[
         (bool(lora.get("grad_checkpoint", False)), _attention_only(lora))
     ]
+
+
+def _training_need(config: dict[str, Any], weights: int) -> int:
+    """Bytes a LoRA run is expected to need: weights plus overhead, ADDED.
+
+    The overhead above the weights is optimiser state (a few MB at rank 8) and
+    retained activations, which scale with the window and the layer count — not
+    with how big the frozen weights are. Multiplying by weight size therefore
+    over-predicts worse the larger the model gets, and on 2026-08-26 that
+    refused a run this machine had already completed:
+
+        14B 4-bit, q+v, checkpointing, 2k window, 8 layers
+        predicted 14.1 GB (1.8 x 7.85)   measured 9.018 GB   (train_14b_scrape_v4.log)
+
+    Same bucket on the 8B the table was built from measured 7.535 GB over 4.35
+    GB of weights — 3.2 GB of overhead against the 14B's 1.2 GB. The overhead
+    did not grow with the model, so it was never a multiplier.
+
+    Reading the table as an additive constant at its own reference size
+    reproduces every 8B threshold it was measured at (7.83 GB predicted vs
+    7.535 measured; 15.66 vs 15.583 for the unchecked-pointed case) and
+    predicts 10.2 GB for the 14B run above — still 13% pessimistic, which is
+    the margin this guard is supposed to carry.
+    """
+    lora = config.get("lora", {}) or {}
+    seq = max(1, int(lora.get("max_seq_length", _OVERHEAD_REFERENCE_SEQ)))
+    overhead = ((_training_overhead(config) - 1.0)
+                * _OVERHEAD_REFERENCE_WEIGHTS
+                * min(1.0, seq / _OVERHEAD_REFERENCE_SEQ))
+    return int(weights + overhead)
 
 # A load-and-generate needs the weights plus a KV cache, with no optimiser
 # state and no retained activations, so it sits far below any of the training
@@ -2120,7 +2159,7 @@ def _memory_shortfall(config: dict[str, Any],
     free = free_ram_bytes()
     if weights is None or free is None:
         return None  # Unknown on either side is not evidence of a problem.
-    needed = int(weights * _training_overhead(config))
+    needed = _training_need(config, weights)
     if free >= needed:
         return None
     hint = ("" if config.get("lora", {}).get("grad_checkpoint", False) else

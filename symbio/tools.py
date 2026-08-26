@@ -506,6 +506,31 @@ def tool_few_shots(config: dict[str, Any]) -> list[dict[str, str]]:
         {"role": "assistant", "content": "Done — Wikipedia is open. The homepage links to language editions; English has over 6 million articles." + E},
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": f"Hi {uname}! What can I do for you?" + E},
+        # Close the examples out explicitly. Everything above is injected into
+        # `messages` as ordinary user/assistant turns, so from inside the model
+        # it is indistinguishable from things that actually happened — and the
+        # last browser observation in it says Wikipedia is open.
+        #
+        # Live 2026-08-26, after a turn that used fetch_html and never touched
+        # the browser at all:
+        #   Huy  : NOW READ THE PAGE AGAIN AND TELL ME THE STAR COUNT
+        #   Caine: I don't see any GitHub repository open right now - the
+        #          current page is Wikipedia's homepage.
+        # That is not a hallucination; it is an accurate reading of a prompt
+        # that lied to it. Same shape as the invented "[Cloudflare pricing page
+        # open in the browser. Page title: Cloudflare Pricing]" from earlier
+        # that day — the corpus is full of `Page title:` observations to
+        # pattern-complete from.
+        #
+        # This costs one turn, is constant across every request, and folds into
+        # the cached prefix, so it is free per turn.
+        {"role": "user", "content":
+            "[System observation: the exchanges above this line are formatting "
+            "examples, not history. None of them happened: no page is open, no "
+            "command has run, no note was saved, and Wikipedia is not loaded. "
+            "Never describe their contents as the current state, and never cite "
+            "one as something you did. The real conversation begins below.]"},
+        {"role": "assistant", "content": "Understood." + E},
     ]
 
 

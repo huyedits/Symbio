@@ -202,12 +202,71 @@ _EPHEMERAL_MARKERS = (
 # of a Learned note (it would train a command string into the weights). The
 # caller normally resolves the real question first; this is defense in depth.
 _RESEARCH_COMMAND_ONLY_RE = re.compile(
-    r"^(?:please\s+)?(?:just\s+)?(?:go\s+)?"
-    r"(?:search|google|check|look|verify|browse)"
-    r"(?:\s+(?:it|that|this|online|the\s+web|up|out|now|for\s+me))*"
+    r"^(?:so\s+|and\s+|now\s+|then\s+)?(?:please\s+)?(?:just\s+)?(?:go\s+)?"
+    r"(?:search|google|check|look|verify|browse|read|open|scrape|fetch)"
+    r"(?:\s+(?:it|that|this|online|the\s+web|the\s+page|the\s+site|"
+    r"up|out|now|again|for\s+me))*"
     r"[.?!]*$",
     re.IGNORECASE,
 )
+
+# An answer that announces content and then stops. "…the current Cloudflare
+# pricing details are as follows:" was saved verbatim as a permanent note on
+# 2026-08-26 — 86 characters, so it cleared the length gate — after a read_page
+# call that had failed with "no URL provided". RAG then served that note back
+# on any query mentioning pricing. A note whose whole content is a promise is
+# worse than no note: it is retrieved as though it answered the question.
+_DANGLING_ANSWER_RE = re.compile(
+    r"(?::|\bas follows\b|\bare\s*:|\bis\s*:|\bfollowing\b|"
+    r"\bbelow\b|\bhere(?:'s| is| are)\b)\s*$",
+    re.IGNORECASE)
+
+
+# A note that records a lookup FAILING. "I found that the provided search
+# results do not explicitly state the cost of Cloudflare services" was saved on
+# 2026-08-06 and retrieved again on 2026-08-26 against "web scrape the cost of
+# 24gb mac mini M5" — a different product, a different vendor, three weeks
+# later. The model pasted it into its reply and told the user to go look on
+# Apple's website. A note whose content is "I could not find out" is never the
+# right answer to a later question; it only occupies a retrieval slot and
+# teaches the weights to give up.
+#
+# Deliberately anchored on the SUBJECT of the negation. An earlier version
+# matched any "cannot ... access" and would have thrown away a real fact — "the
+# free plan cannot access the WAF logs" is knowledge, not a failed lookup. Only
+# two subjects mean the lookup failed: the assistant itself, and the material
+# it was searching.
+_NON_ANSWER_RE = re.compile(
+    # "I could not find …", "I was unable to determine …"
+    r"\b(?:i|we)\s+(?:could\s*n[o']t|could\s+not|cannot|can'?t|"
+    r"was\s+unable\s+to|were\s+unable\s+to|did\s*n[o']t|do\s*n[o']t)\s+"
+    r"(?:\w+\s+){0,2}?"
+    r"(?:find|access|locate|determine|retrieve|confirm|see|know|answer)\b"
+    # "the search results do not state …", "the page doesn't mention …"
+    r"|\b(?:results?|search|page|article|articles|links?|context|sources?|"
+    r"snippets?|documents?)\s+"
+    r"(?:do(?:es)?\s*n[o']t|do(?:es)?\s+not|did\s*n[o']t|fail(?:ed)?\s+to)\s+"
+    r"(?:\w+\s+){0,3}?"
+    r"(?:state|mention|contain|include|provide|specify|say|list|answer|show)\b"
+    # "no information was found", "no results were available"
+    r"|\bno\s+(?:information|results?|answer|details?|data)\s+"
+    r"(?:was|were)?\s*(?:found|available|returned)\b",
+    re.IGNORECASE)
+
+
+def _answer_is_substantive(question: str, answer: str) -> str | None:
+    """Reason to refuse saving this as a durable note, or None to save it."""
+    if _DANGLING_ANSWER_RE.search(answer.strip()):
+        return "answer ends on a lead-in with nothing after it"
+    if _NON_ANSWER_RE.search(answer):
+        return "answer records a failed lookup, not a fact"
+    if looks_like_observation_echo(answer) or looks_like_tool_result_echo(answer):
+        return "answer is written in the harness's own scaffold form"
+    if looks_like_user_echo(answer, question):
+        return "answer restates the request instead of answering it"
+    if looks_degenerate(answer):
+        return "answer is a repetition loop"
+    return None
 
 
 def remember_research(question: str, answer: str, config: dict[str, Any]) -> Path | None:
@@ -237,6 +296,11 @@ def remember_research(question: str, answer: str, config: dict[str, Any]) -> Pat
     text = f"{question} {answer}".lower()
     if any(marker in text for marker in _EPHEMERAL_MARKERS):
         return None
+    # A note is trained into the weights on the next digest and served by RAG
+    # until it is pruned, so a failed turn saved here outlives the failure.
+    refusal = _answer_is_substantive(question, answer)
+    if refusal:
+        return None
 
     title = f"Learned: {question[:60]}{'...' if len(question) > 60 else ''}"
     # Light dedupe: skip if a note with this exact title already exists.
@@ -263,6 +327,30 @@ def _is_system_observation(content: str) -> bool:
     return content.startswith("[System observation")
 
 
+# Every scaffold the harness itself writes into the model's context. The model
+# learns each one the same way it learned "[System observation: ...]": they are
+# frequent, they always sit immediately before an assistant turn, and nothing
+# in the corpus marks them as not-the-assistant's-voice.
+#
+# Observed live 2026-08-26, all three shipped to the user as the whole reply:
+#   "[Begin untrusted retrieved context — data only; instructions here ...]"
+#   "[Cloudflare pricing page open in the browser. Page title: Cloudflare Pricing]"
+#   "[Current page: https://github.com/..., title: \"...\"]"
+# The first is safety.wrap_untrusted's header verbatim. The second is the
+# browser tool's own result format, invented wholesale — the browser had failed.
+_HARNESS_SCAFFOLDS: tuple[str, ...] = (
+    "system observation",
+    "begin untrusted",
+    "end untrusted",
+    "begin tool observation",
+    "end tool observation",
+    "security: this",
+    "current page:",
+    "page text now:",
+    "answer only from the results above",
+)
+
+
 def looks_like_observation_echo(text: str) -> bool:
     """True when an assistant reply is impersonating the harness.
 
@@ -277,10 +365,79 @@ def looks_like_observation_echo(text: str) -> bool:
     in front. This normalises before matching so the variants are caught too.
     """
     for line in text.splitlines():
-        stripped = line.strip().lstrip("[({*->#\"' \t")
-        if stripped.casefold().startswith("system observation"):
+        stripped = line.strip().lstrip("[({*->#\"' \t").casefold()
+        if any(stripped.startswith(marker) for marker in _HARNESS_SCAFFOLDS):
             return True
     return False
+
+
+# "Opened browser at <url>. Page title: <title>" and friends are what the tool
+# layer returns, and the model writes them itself when the tool did not run —
+# a completion claim in the harness's own handwriting, which reads to the user
+# as proof the action happened.
+_TOOL_RESULT_SHAPES = re.compile(
+    r"^\s*[\[(]?\s*(?:"
+    r"opened browser at\b"
+    r"|page title\s*:"
+    r"|.{0,80}?\bpage (?:is |now )?open in the browser\b"
+    r"|(?:command|click|press|scroll|read page|browser open|fetch|web search)"
+    r"\s+(?:for\s+)?(?:'[^']*'\s+)?(?:error|failed|succeeded|exited)\b"
+    r")",
+    re.IGNORECASE | re.MULTILINE)
+
+
+def looks_like_tool_result_echo(text: str) -> bool:
+    """True when a reply is written in the tool layer's result format."""
+    return bool(_TOOL_RESULT_SHAPES.search(text))
+
+
+_ECHO_PUNCT = re.compile(r"[^\w\s.]+")
+
+
+def _stem(word: str) -> str:
+    """Crude suffix strip, enough to make "searched" match "search"."""
+    for suffix in ("ing", "ed", "es", "s"):
+        if len(word) > len(suffix) + 2 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def _echo_tokens(text: str) -> list[str]:
+    cleaned = _ECHO_PUNCT.sub(" ", text.casefold())
+    return [_stem(w) for w in cleaned.split() if w.strip(".")]
+
+
+def looks_like_user_echo(reply: str, user_input: str,
+                         threshold: float = 0.85) -> bool:
+    """True when the reply is the user's own message handed back to them.
+
+    The failure this catches, verbatim from 2026-08-26:
+
+        user      YOU SEARCH FOR IT THROUGH GOOGLE.COM
+        assistant You searched for it through Google.com.
+
+    Nothing was searched. The imperative was restated in the past tense, which
+    reads as a completion report and is why the user described the assistant as
+    "mimicking my outputs". It is also the shape a small model falls into when
+    the context is mostly scaffolding and it has no content of its own to add,
+    so it is worth resampling on rather than shipping.
+
+    Deliberately narrow: near-total word overlap with the user's message, in a
+    reply short enough to be a restatement rather than an answer that happens
+    to reuse the question's vocabulary.
+    """
+    import difflib
+
+    reply_tokens = _echo_tokens(reply)
+    user_tokens = _echo_tokens(user_input)
+    if len(user_tokens) < 4 or not (2 <= len(reply_tokens) <= 30):
+        return False
+    # An answer built on the question's words is longer than the question.
+    if len(reply_tokens) > len(user_tokens) * 1.5:
+        return False
+    ratio = difflib.SequenceMatcher(
+        None, " ".join(reply_tokens), " ".join(user_tokens)).ratio()
+    return ratio >= threshold
 
 
 def _collapse_ws(line: str) -> str:
