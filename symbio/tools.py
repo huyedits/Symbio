@@ -449,17 +449,24 @@ def openai_tool_schemas(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def tool_few_shots(config: dict[str, Any]) -> list[dict[str, str]]:
-    """Minimal legacy short-tag examples matching the LoRA training data:
-    greetings -> prose (no tool), actions -> one legacy tag.
+    """Minimal tool-use examples in Hermes JSON-in-<tool_call> format.
 
-    Note: the Qwen3 chat template strips think blocks from non-final assistant
-    turns when add_generation_prompt=True, so these render as bare answers to
-    the model regardless of whether a reasoning block is included here — keep
-    them simple. The greeting is placed LAST so ambiguous input (e.g. "hi")
-    defaults to the final example (small models copy the last few-shot).
+    The examples MUST match the format the runtime actually parses: parse_tools
+    (symbio/utils.py) and the registry (build_tool_registry) accept JSON inside
+    <tool_call> — never legacy short tags like <browse>/<click>/<search>. The
+    system prompt (app/prompts.py) teaches the same JSON format, so the few-shots
+    reinforce it instead of contradicting it. Keep every emitted tool name and
+    argument key aligned with the registry schema so a parsed call resolves.
+
+    Greetings -> prose (no tool). The greeting is placed LAST so ambiguous input
+    (e.g. "hi") defaults to the final example (small models copy the last few-shot).
     """
     uname = config["user_name"]
-    import json
+    def _tc(name, args):
+        # One canonical Hermes tool_call. Built via dict() so no literal JSON
+        # ends up in source.
+        return "<tool_call>" + json.dumps(
+            dict(name=name, arguments=args), ensure_ascii=False) + "</tool_call>"
     def _resp(name, content):
         # Hermes-style tool_result wrapper the app stack feeds back after a tool
         # runs (see chat.py observation append). Built via dict() so no literal
@@ -473,28 +480,28 @@ def tool_few_shots(config: dict[str, Any]) -> list[dict[str, str]]:
     E = " <end>"
     return [
         {"role": "user", "content": "open chrome to the apple website"},
-        {"role": "assistant", "content": "<browse>https://www.apple.com</browse>" + chr(10) + "Opening Apple.com in the browser." + E},
+        {"role": "assistant", "content": _tc("browser_open", {"url": "https://www.apple.com"}) + chr(10) + "Opening Apple.com in the browser." + E},
         {"role": "user", "content": "what's the weather in sydney"},
-        {"role": "assistant", "content": "<search>current weather Sydney</search>" + chr(10) + "Looking up the weather for you." + E},
+        {"role": "assistant", "content": _tc("web_search", {"query": "current weather Sydney"}) + chr(10) + "Looking up the weather for you." + E},
         {"role": "user", "content": f"remember that {uname} likes coffee"},
-        {"role": "assistant", "content": f'<note title="User Preference">{uname} likes coffee.</note>' + chr(10) + 'Noted.' + E},
+        {"role": "assistant", "content": _tc("note", {"action": "add", "target": "note", "title": "User Preference", "content": f"{uname} likes coffee."}) + chr(10) + 'Noted.' + E},
         {"role": "user", "content": "how much free disk space do I have"},
-        {"role": "assistant", "content": "<cmd>df -h</cmd>" + chr(10) + "Checking disk space." + E},
+        {"role": "assistant", "content": _tc("terminal", {"cmd": "df -h"}) + chr(10) + "Checking disk space." + E},
         {"role": "user", "content": "click the continue button"},
-        {"role": "assistant", "content": "<click>Continue</click>" + chr(10) + "Clicking the Continue button." + E},
+        {"role": "assistant", "content": _tc("browser_click", {"text": "Continue"}) + chr(10) + "Clicking the Continue button." + E},
         {"role": "user", "content": "press the enter key"},
-        {"role": "assistant", "content": "<press>enter</press>" + chr(10) + "Pressing Enter." + E},
+        {"role": "assistant", "content": _tc("browser_press", {"key": "Enter"}) + chr(10) + "Pressing Enter." + E},
         {"role": "user", "content": "scroll down the page"},
-        {"role": "assistant", "content": "<scroll dir=\"down\"/>" + chr(10) + "Scrolling down." + E},
+        {"role": "assistant", "content": _tc("browser_scroll", {"direction": "down"}) + chr(10) + "Scrolling down." + E},
         {"role": "user", "content": "read the webpage at https://example.com"},
-        {"role": "assistant", "content": "<read>https://example.com</read>" + chr(10) + "Reading that page for you." + E},
+        {"role": "assistant", "content": _tc("web_extract", {"url": "https://example.com"}) + chr(10) + "Reading that page for you." + E},
         # Post-observation pattern: after a tool runs, the result comes back as a
         # [System observation: ...] + <tool_response>...</tool_response> user turn.
         # Answer with ONE short prose summary and STOP — do not fire another tool
         # and do not go blank. This is the missing example behind Caine auto-
         # clicking after opening a page and then blanking. Greeting stays LAST.
         {"role": "user", "content": "open the browser to the wikipedia homepage"},
-        {"role": "assistant", "content": "<browse>https://en.wikipedia.org</browse>" + chr(10) + "Opening Wikipedia." + E},
+        {"role": "assistant", "content": _tc("browser_open", {"url": "https://en.wikipedia.org"}) + chr(10) + "Opening Wikipedia." + E},
         {"role": "user", "content": "[System observation: " + wiki_obs + "]" + chr(10) + _resp("browser_open", wiki_obs)},
         {"role": "assistant", "content": "Done — Wikipedia is open. The homepage links to language editions; English has over 6 million articles." + E},
         {"role": "user", "content": "hi"},
