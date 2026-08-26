@@ -1121,6 +1121,12 @@ pip install -e .
 
 The `symbio` and `symb` commands will then be available.
 
+> **Note on the name:** the distribution is `symbio-cli`. Plain `symbio` on
+> PyPI is an unrelated multi-agent framework that had the name first, so
+> `pip install symbio` will fetch someone else's project — install from this
+> repository as shown above. The commands you type are still `symbio` and
+> `symb`.
+
 Legacy commands remain supported:
 
 ```bash

@@ -82,6 +82,7 @@ def save_skill(
     config: dict[str, Any] | None = None,
     tokenizer: Any | None = None,
     auto_train_adapter: bool = True,
+    example_generator: Any = None,
 ) -> Path | dict[str, Any]:
     """Persist a reusable multi-step skill as a 'Skill:' note.
 
@@ -99,7 +100,8 @@ def save_skill(
         from symbio.app import skills
 
         result = skills.save_skill_adapter(
-            name, steps, config, tokenizer, auto_train=auto_train_adapter
+            name, steps, config, tokenizer, auto_train=auto_train_adapter,
+            example_generator=example_generator,
         )
         result["note_path"] = str(path)
         return result

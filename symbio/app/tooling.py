@@ -24,6 +24,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_scroll": "browser",
     "browser_press": "browser",
     "browser_close": "browser",
+    "browser_get_text": "browser",
     "save_memory": "memory",
     "compact_memory": "memory",
     "read_file": "terminal",
@@ -112,6 +113,14 @@ _TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {"url": {"type": "string", "description": "The URL to open."}},
             "required": ["url"],
+        },
+    },
+    {
+        "name": "browser_get_text",
+        "description": "Return the visible text of the page already open in the live browser. Use this to re-read the current page — after a click, after a scroll, or when you need to check what is on screen before acting. Takes no arguments and does not navigate.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
         },
     },
     {
@@ -436,6 +445,21 @@ _HERMES_NAME_MAP: dict[str, str] = {
     "browser_press": "browser_press",
     "close": "browser_close",
     "browser_close": "browser_close",
+    # "browser_read" is the name the model reaches for when it wants to re-read
+    # the open page, and until 2026-08-26 no such tool existed in this runtime:
+    # the call parsed to an unknown name, was dropped by the group filter
+    # without a word, and the prose beside it ("That page's text: ...") shipped
+    # to the user as if a read had happened. chat.py's own browser-retry nudge
+    # was telling the model to "use browser_get_text" the whole time.
+    "browser_read": "browser_get_text",
+    "browser_get_text": "browser_get_text",
+    "get_text": "browser_get_text",
+    "page_text": "browser_get_text",
+    "read_current_page": "browser_get_text",
+    # Same silent drop: the model correctly chose to hand the task to a worker
+    # and wrote {"name": "delegate", ...}. The canonical name is delegate_task.
+    "delegate": "delegate_task",
+    "delegate_task": "delegate_task",
     "note": "write_note",
     "save_note": "write_note",
     "write_note": "write_note",
@@ -455,6 +479,8 @@ _ARG_ALIASES: dict[str, dict[str, str]] = {
     "browser_type": {"text": "text", "value": "text", "input": "text", "content": "text", "string": "text", "enter": "enter", "press_enter": "enter", "return": "enter"},
     "browser_scroll": {"direction": "direction", "dir": "direction", "way": "direction", "amount": "direction"},
     "browser_press": {"key": "key", "keys": "key", "press": "key", "button": "key"},
+    "delegate_task": {"role": "role", "worker": "role", "agent": "role", "to": "role",
+                      "task": "task", "prompt": "task", "instruction": "task", "query": "task"},
     "write_note": {"title": "title", "body": "body", "content": "body", "text": "body", "note": "body", "value": "body", "subject": "title"},
 }
 
@@ -1020,8 +1046,20 @@ def _extract_function_attr_calls(reply: str) -> list[tuple[str, dict[str, Any]]]
 
 # One key, its value running to the delimiter that ends it: either a comma
 # before the next "key": , or the closing brace of the arguments object.
+# The terminator lookahead has to accept a bare end-of-string, not just a
+# closing brace. `_repair_tool_call_json` extracts the argument body with a
+# greedy `\{(.*)\}`, which consumes the object's own closing brace OUTSIDE the
+# group — so when the model drops exactly one brace, the body handed to this
+# regex ends at the final quote with no `}` behind it and every field failed to
+# match. A single-argument call then repaired to `arguments: {}`.
+#
+# Observed live 2026-08-26, six rounds in a row:
+#   {"name": "browser_open", "arguments": {"url": "https://www.cloudflare.com/pricing/"}
+# The URL was right every time; the harness threw it away and answered
+# "Browser open error: no URL provided", and the model eventually invented
+# "[Cloudflare pricing page open in the browser...]" to paper over it.
 _LOOSE_FIELD_RE = re.compile(
-    r'"(?P<key>\w+)"\s*:\s*"(?P<val>.*?)"\s*(?=,\s*"\w+"\s*:|\s*\}\s*\}?\s*$)',
+    r'"(?P<key>\w+)"\s*:\s*"(?P<val>.*?)"\s*(?=,\s*"\w+"\s*:|\s*\}*\s*$)',
     re.DOTALL)
 
 
@@ -1050,6 +1088,13 @@ def _repair_tool_call_json(raw: str) -> dict[str, Any] | None:
 
     args_m = re.search(r'"(?:arguments|parameters|args)"\s*:\s*\{(.*)\}',
                        raw, re.DOTALL)
+    if args_m is None:
+        # Not one closing brace anywhere — the reply was cut off mid-object
+        # (token budget, or a stop sequence landing early). Scan to the end;
+        # _LOOSE_FIELD_RE still needs a real "key": "value" pair to match, so
+        # a truncated final value is dropped rather than half-recovered.
+        args_m = re.search(r'"(?:arguments|parameters|args)"\s*:\s*\{(.*)$',
+                           raw, re.DOTALL)
     params: dict[str, Any] = {}
     if args_m:
         body = args_m.group(1)
@@ -1370,6 +1415,43 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
             if _TOOL_GROUPS.get(name) in enabled_groups
         ]
     return tools
+
+
+def dropped_tool_calls(reply: str,
+                       enabled_groups: set[str] | None) -> list[tuple[str, str]]:
+    """Tool calls `parse_tools` discarded, as (name, reason) pairs.
+
+    A well-formed <tool_call> naming a tool that does not exist parses fine and
+    is then removed by the group filter above without a trace: no tool runs, no
+    error is shown, and whatever prose sat beside the call becomes the visible
+    reply. Live 2026-08-26 that produced "That page's text: <invented summary>"
+    three turns running from a call to the non-existent `browser_read`, and a
+    turn that ended on "After that, I'll ask what's next." because `delegate`
+    was dropped. Both are now aliased, but the next invented name would fail
+    the same silent way, so report the drop instead of swallowing it.
+    """
+    if enabled_groups is None:
+        return []
+    dropped: list[tuple[str, str]] = []
+    for name, _params in parse_tools(reply, None):
+        group = _TOOL_GROUPS.get(name)
+        if group is None:
+            dropped.append((name, "unknown"))
+        elif group not in enabled_groups:
+            dropped.append((name, "disabled"))
+    return dropped
+
+
+def enabled_tool_names(enabled_groups: set[str] | None) -> list[str]:
+    """The tool names the <tools> catalog advertises, filtered to what is on."""
+    names = []
+    for spec in _TOOLS:
+        advertised = spec["name"]
+        internal = _HERMES_NAME_MAP.get(advertised, advertised)
+        group = _TOOL_GROUPS.get(internal)
+        if enabled_groups is None or group in enabled_groups:
+            names.append(advertised)
+    return names
 
 
 # Each pattern matches only a COMPLETE tag pair (open...close, or a

@@ -10,6 +10,7 @@ Unused skills and adapters are archived after a configurable idle threshold.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import shutil
@@ -253,8 +254,539 @@ def _seed_user_turns(name: str) -> list[str]:
 # with fewer iterations over a tiny corpus. Not worth shipping as it stood.
 
 
+_LAST_TEACHER_ERROR: list[str] = []
+
+_WORKED_PROMPT = """A specialist worker must carry out this procedure exactly:
+
+{steps}
+
+Write ONE training example showing the worker DOING it -- not describing it, not \
+reporting what it would have done.
+
+Rules:
+- The output must be a complete, runnable Python script in a ```python fence.
+- The script must literally perform every numbered step above, in order.
+- Use the exact library names, ports, paths and attribute names the steps give.
+- No status summaries, no JSON result objects, no prose explanation. Code only.
+{fixture}{sandbox}{api}{avoid}{feedback}
+Reply in exactly this format:
+REQUEST: <one line: what the user asked for, with a concrete URL or path>
+OUTPUT:
+```python
+<the complete script>
+```"""
+
+
+_CODE_FENCE = re.compile(r"```[a-zA-Z0-9_+-]*\s*\n(.+?)```", re.S)
+
+
+def _input_fixture_note(steps: str, config: dict[str, Any] | None) -> str:
+    """Show the model the input files the procedure names, if they are present.
+
+    A traceback localises a failure without diagnosing it. Told
+    "'NoneType' object has no attribute 'text'" four times, the model kept
+    patching the dereference -- .text, then .iter -- because nothing in that
+    message says its selector matched nothing. The file is sitting in the
+    sandbox and the real attribute values are right there, so stop making it
+    guess: the same fix as the API reference and the blocked-import list.
+    """
+    if not config:
+        return ""
+    from symbio import constants
+
+    names = set(re.findall(r"\b[\w-]+\.(?:json|jsonl|html|xml|csv|txt|ya?ml|ini|toml)\b",
+                           steps, re.I))
+    blocks = []
+    for name in sorted(names):
+        f = constants.SANDBOX_DIR / name
+        try:
+            body = f.read_text(encoding="utf-8")[:400]
+        except OSError:
+            continue
+        blocks.append(f"  {name} starts with:\n    {body.strip()}")
+    if not blocks:
+        return ""
+    return ("\nThe input files already exist here. Match the real attribute names "
+            "and structure below exactly -- do not invent selectors:\n"
+            + "\n".join(blocks) + "\n")
+
+
+def _api_reference(steps: str) -> str:
+    """Real signatures for any library the steps name, read off this machine.
+
+    Correcting the teacher after the fact does not work: told eight times, with
+    the right method named in the message, an 8B at temperature 0 rewrites the
+    same `parser.find(...)` byte for byte. It cannot derive an API it never
+    learned, and greedy decoding means a retry is not another sample.
+
+    So ground the INPUT instead. The procedure says "parse with selectolax";
+    selectolax is installed; its real classes and methods are one import away.
+    Handing those over before generation costs nothing and removes the guess.
+    """
+    import importlib
+    import importlib.util
+
+    words = {w.strip(".,:;()[]'\"").lower()
+             for w in re.split(r"[\s/]+", steps) if len(w.strip(".,:;()[]'\"")) > 2}
+    # Ordinary English words that are also importable modules. "select the
+    # container by data-testid" is not a request for the stdlib select module,
+    # and dumping its kqueue API into the prompt is pure noise.
+    skip = {"the", "and", "for", "with", "from", "never", "step", "then", "each",
+            "port", "site", "twice", "rows", "last", "before", "move", "write",
+            "select", "code", "string", "time", "calendar", "platform", "this",
+            "keyword", "operator", "token", "types", "copy", "array", "queue",
+            "signal", "stat", "glob", "parser", "pipes", "sched", "grp", "cmd"}
+    blocks: list[str] = []
+    for word in sorted(words - skip):
+        if not word.isidentifier():
+            continue
+        try:
+            if importlib.util.find_spec(word) is None:
+                continue
+            mod = importlib.import_module(word)
+        except Exception:
+            continue
+        lines = [f"{word}:"]
+        # Prefer the submodule that actually holds the classes -- selectolax's
+        # HTMLParser lives in selectolax.parser, not the package root.
+        targets = [(word, mod)]
+        for sub in ("parser", "core", "api", "client"):
+            try:
+                targets.append((f"{word}.{sub}", importlib.import_module(f"{word}.{sub}")))
+            except Exception:
+                pass
+        for modname, m in targets:
+            for attr in sorted(a for a in dir(m) if not a.startswith("_")):
+                obj = getattr(m, attr, None)
+                if isinstance(obj, type):
+                    methods = sorted(a for a in dir(obj) if not a.startswith("_"))[:14]
+                    lines.append(f"  from {modname} import {attr}"
+                                 f"   # methods: {', '.join(methods)}")
+        if len(lines) > 1:
+            blocks.append("\n".join(lines[:16]))
+    if not blocks:
+        return ""
+    return ("\nThese libraries are installed here. Use these exact names and "
+            "methods -- do not invent others:\n" + "\n".join(blocks) + "\n")
+
+
+def _repair_imports(script: str) -> tuple[str, list[str]]:
+    """Fix imports the machine can prove wrong, using the installed packages.
+
+    The teacher writes `from selectolax import HTMLParser` and, told precisely
+    that selectolax.HTMLParser does not exist, writes it again -- eight times,
+    identically, because generation is greedy and an 8B that does not know the
+    real module path cannot derive it from a one-line error. Asking a model to
+    guess harder is the wrong move when the answer is sitting in site-packages.
+
+    So the system looks it up: walk the package's submodules for one that really
+    exports the name and rewrite the import to match. Ground truth from the
+    environment, not another sample from a model that has already been wrong.
+
+    Returns (script, list of repairs made).
+    """
+    import importlib
+    import pkgutil
+
+    repairs: list[str] = []
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        return script, repairs
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or node.level or not node.module:
+            continue
+        try:
+            mod = importlib.import_module(node.module)
+        except Exception:
+            continue
+        missing = [a.name for a in node.names
+                   if a.name != "*" and not hasattr(mod, a.name)]
+        if not missing:
+            continue
+        # Walk the package for a submodule that actually exports every name.
+        found = None
+        for info in pkgutil.iter_modules(getattr(mod, "__path__", [])):
+            candidate = f"{node.module}.{info.name}"
+            try:
+                sub = importlib.import_module(candidate)
+            except Exception:
+                continue
+            if all(hasattr(sub, n) for n in missing):
+                found = candidate
+                break
+        if found:
+            names = ", ".join(a.name for a in node.names)
+            script = script.replace(f"from {node.module} import {names}",
+                                    f"from {found} import {names}")
+            repairs.append(f"{node.module} -> {found} for {', '.join(missing)}")
+    return script, repairs
+
+
+def _verify_example_code(script: str) -> str | None:
+    """Reason this script cannot possibly run, or None if it might.
+
+    The headmaster is being asked for a procedure that, by construction, nothing
+    pre-trained contains -- so it guesses APIs. Its first attempts here included
+    `from selectolax import HTMLParser` (the class lives in selectolax.parser)
+    and calls to methods that do not exist. Seeding those teaches the worker to
+    reproduce broken code forever, and no amount of training iterations recovers
+    from a corpus that is wrong.
+
+    So the system refuses to train on code it cannot compile and whose imports
+    it cannot resolve. This does not make a script CORRECT -- only runnable --
+    which is why execution against the real target is the layer above this one.
+    """
+    import importlib
+    import importlib.util
+
+    try:
+        tree = ast.parse(script)
+    except SyntaxError as e:
+        return f"syntax: {e.msg} (line {e.lineno})"
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if importlib.util.find_spec(root) is None:
+                    return f"no module {alias.name!r}"
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or not node.module:
+                continue
+            root = node.module.split(".")[0]
+            try:
+                if importlib.util.find_spec(node.module) is None:
+                    return f"no module {node.module!r}"
+            except (ImportError, ValueError, ModuleNotFoundError):
+                return f"no module {node.module!r}"
+            # `from selectolax import HTMLParser` resolves the module and still
+            # fails, so the imported names have to be checked too.
+            try:
+                mod = importlib.import_module(node.module)
+            except Exception as e:
+                return f"import {node.module!r} failed: {type(e).__name__}"
+            for alias in node.names:
+                if alias.name != "*" and not hasattr(mod, alias.name):
+                    if importlib.util.find_spec(f"{node.module}.{alias.name}") is None:
+                        return f"{node.module}.{alias.name} does not exist"
+    return None
+
+
+def _verify_api_usage(script: str) -> str | None:
+    """Reject method calls the installed classes do not actually have.
+
+    Import repair fixed `from selectolax import HTMLParser`, and the very next
+    line was still `parser.find('div[data-testid=...]')` -- HTMLParser has no
+    `find`; the real API is `css_first`/`css`. That is an AttributeError at
+    runtime, so import checking cannot see it, and executing the script cannot
+    reach it either without a live site to fetch first.
+
+    But the class is importable right here, so the machine can simply ask it.
+    Track variables assigned from a constructor of an imported class, then check
+    every attribute taken off them. The message names close matches, because
+    "no .find" tells an 8B nothing while "no .find; did you mean css_first, css"
+    is a correction it can act on.
+    """
+    import difflib
+    import importlib
+
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        return None  # the syntax check already covers this
+
+    # imported name -> live object
+    imported: dict[str, Any] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            try:
+                mod = importlib.import_module(node.module)
+            except Exception:
+                continue
+            for alias in node.names:
+                obj = getattr(mod, alias.name, None)
+                if obj is not None:
+                    imported[alias.asname or alias.name] = obj
+
+    # var -> class, for `x = SomeImportedClass(...)`
+    instances: dict[str, Any] = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id in imported):
+            instances[node.targets[0].id] = imported[node.value.func.id]
+
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id in instances):
+            cls = instances[node.value.id]
+            if hasattr(cls, node.attr):
+                continue
+            options = [a for a in dir(cls) if not a.startswith("_")]
+            near = difflib.get_close_matches(node.attr, options, n=3, cutoff=0.3)
+            hint = f"; did you mean {', '.join(near)}" if near else ""
+            name = getattr(cls, "__name__", node.value.id)
+            return f"{name} has no .{node.attr}{hint}"
+    return None
+
+
+def _steps_want_code(steps: str) -> bool:
+    """Does this procedure produce a program, or something a human does?
+
+    'Bump the cursor in state.json' and 'parse with selectolax' name software;
+    'let the tea steep for three minutes' does not. Only the first kind should
+    have its worked examples rejected for lacking a script.
+    """
+    lowered = steps.lower()
+    # A named data file settles it on its own. The counting rule below scores
+    # each hint once, so "read rows.json ... write top.json ... state.json"
+    # matched only ".json" and fell under the threshold -- which silently
+    # disabled code verification for an obviously-code procedure, and the
+    # examples went into the corpus unexecuted and unchecked.
+    if re.search(r"\b[\w-]+\.(json|csv|txt|py|ya?ml|db|sqlite|xml|html|jsonl|log|ini|toml)\b",
+                 lowered):
+        return True
+    hints = ("import", "port", "http", "url", "file", "script", "parse",
+             "directory", "run ", "command", "api", "database", "query",
+             "endpoint", "request", "header", "socket", "regex", "stdout")
+    return sum(h in lowered for h in hints) >= 2
+
+
+def _parse_worked_example(text: str) -> tuple[str, str] | None:
+    """Pull (request, output) out of a generated example, or None."""
+    if "REQUEST:" not in text or "OUTPUT:" not in text:
+        return None
+    _, rest = text.split("REQUEST:", 1)
+    request, output = rest.split("OUTPUT:", 1)
+    request, output = request.strip(), output.strip()
+    if not request or not output or len(request) > 400:
+        return None
+    return request.splitlines()[0].strip(), output
+
+
+# Errors that are the model's fault and it can act on, versus the ones that only
+# say the environment was not there. A NameError means the code is wrong; a
+# refused connection means the target is not running, and discarding the example
+# for that would empty the corpus for every skill whose service happens to be
+# down -- which is how attribute-checking alone took worked examples from 6 to 0.
+_MODEL_FAULT = (
+    "SyntaxError", "IndentationError", "NameError", "AttributeError",
+    "TypeError", "ImportError", "ModuleNotFoundError", "UnboundLocalError",
+    "IndentationError", "KeyError", "ZeroDivisionError",
+)
+_ENV_FAULT = (
+    "ConnectionRefusedError", "URLError", "HTTPError", "timeout", "TimeoutError",
+    "ConnectionError", "socket.gaierror", "Errno 61", "Errno 8",
+    # The sandbox blocks urllib/requests, so a procedure that fetches anything
+    # cannot be executed there at all. That is a policy boundary, not a defect
+    # in the generated code -- treating it as the model's fault would reject
+    # every networked skill's examples and leave the corpus empty, which is
+    # exactly how attribute-checking alone took worked examples from 6 to 0.
+    # Such an example is accepted UNVERIFIED: see _seed_worked_examples.
+    "is not allowed in the sandbox",
+)
+
+
+_DID_YOU_MEAN = re.compile(
+    r"has no attribute '(?P<wrong>\w+)'\.\s*Did you mean:\s*'(?P<right>\w+)'", re.I)
+
+
+def _repair_from_traceback(code: str, fault: str) -> tuple[str, str | None]:
+    """Apply the fix CPython already named, instead of asking the model again.
+
+    Python's AttributeError carries its own suggestion -- "'Node' object has no
+    attribute 'attr'. Did you mean: 'attrs'?" -- and the model still rewrote
+    `.attr` on the next attempt, exactly as it rewrote `parser.find` after being
+    told the method name eight times. Correction-after-the-fact does not
+    converge on a greedy generation; the interpreter's suggestion is ground
+    truth, so use it directly.
+
+    Only ever applies the name CPython itself proposed, never a guess of ours.
+    """
+    m = _DID_YOU_MEAN.search(fault or "")
+    if not m:
+        return code, None
+    wrong, right = m.group("wrong"), m.group("right")
+    patched = re.sub(rf"\.{re.escape(wrong)}\b", f".{right}", code)
+    if patched == code:
+        return code, None
+    return patched, f".{wrong} -> .{right}"
+
+
+def _execution_feedback(code: str, config: dict[str, Any]) -> tuple[str, str | None]:
+    """Run the candidate. Return (usable, the model's own mistake to fix).
+
+    This is the signal every static check was standing in for. `dir()` can say
+    HTMLParser has no `.find`; only running the thing says
+    "'list' object has no attribute 'first'" with the line that did it -- which
+    is what a model needs to actually repair its own code, and what no amount of
+    re-sampling a greedy generation will produce on its own.
+
+    Returns one of three states, never a boolean -- a boolean is what let a
+    script that the sandbox REFUSED to run be counted as "verified by
+    execution", producing a 1/1 for code whose very next line would have raised:
+
+        "ran"      executed cleanly; this is the only thing that earns "verified"
+        "fault"    a traceback the model can act on; comes back as feedback
+        "unrun"    could not be executed here at all (blocked import, dead
+                   target). Keep the example -- rejecting it would empty the
+                   corpus for every networked skill -- but never call it verified.
+    """
+    from symbio.app import sandbox
+
+    try:
+        ok, out = sandbox.run_python_code(code, config)
+    except Exception as e:
+        return "unrun", f"{type(e).__name__}: {e}"
+    if ok:
+        return "ran", None
+    tail = (out or "").strip()
+    if any(marker in tail for marker in _ENV_FAULT):
+        return "unrun", tail.splitlines()[-1].strip()[:200] if tail else None
+    for marker in _MODEL_FAULT:
+        if marker in tail:
+            line = next((ln for ln in reversed(tail.splitlines())
+                         if marker in ln), marker)
+            return "fault", line.strip()[:200]
+    return "fault", tail.splitlines()[-1].strip()[:200] if tail else "exited non-zero"
+
+
+def _seed_worked_examples(
+    name: str, steps: str, generate_fn: Any, count: int = 6,
+    config: dict[str, Any] | None = None,
+) -> list[tuple[str, str]]:
+    """Ask the headmaster for worked examples of the procedure.
+
+    The seeds above teach a worker to RECITE a procedure -- the assistant turn
+    is the steps verbatim -- so a worker trained only on them can state what it
+    would do and cannot do it. That is fine for a procedure a human then
+    follows, and useless for one whose whole point is an artifact.
+
+    This is the big-model-teaches-small-model half of the loop: the headmaster
+    is already resident in chat, so producing examples costs no extra load, and
+    generation finishes before the worker's trainer starts (no double residency).
+
+    Diversity is enforced rather than hoped for. A batch of near-identical
+    targets is what made an earlier hand-built scrape corpus score 7/8 on the
+    page it had memorised and 1/8 on any other -- mean pairwise similarity 0.987
+    -- so each request is generated knowing the previous ones, and a duplicate
+    is retried once and then dropped.
+    """
+    from difflib import SequenceMatcher
+
+    wants_code = _steps_want_code(steps)
+    api = _api_reference(steps) if wants_code else ""
+    # Same move as the API reference: say what is unavailable BEFORE generating.
+    # The model reaches for os/pathlib for file work by habit, both blocked, and
+    # a blocked import means the candidate cannot be executed -- so it can never
+    # be verified, however correct it happens to be. Telling it up front costs a
+    # line; discovering it afterwards costs the whole verification.
+    fixture_note = _input_fixture_note(steps, config) if wants_code else ""
+    sandbox_note = ""
+    if wants_code and config is not None:
+        blocked = config.get("sandbox", {}).get("blocked_imports") or []
+        if blocked:
+            sandbox_note = (
+                "\nThis code is executed in a sandbox. These imports are NOT "
+                f"available: {', '.join(sorted(blocked))}. Use builtins instead --"
+                " open() for files, json for parsing. Do not import them.\n")
+    verified = 0  # examples that actually ran clean, not merely passed static checks
+    examples: list[tuple[str, str]] = []
+    for _ in range(count):
+        # Carried across attempts. Generation is greedy so that seed data is not
+        # a dice roll, which means an identical prompt reproduces an identical
+        # rejection -- eight retries of "selectolax.HTMLParser does not exist"
+        # taught nothing. The verifier already names the defect precisely, so
+        # the retry hands it back and asks for that one thing to be fixed. A
+        # teacher does not have to be right first time, only correctable.
+        feedback = ""
+        for attempt in range(4):
+            avoid = ""
+            if examples:
+                seen = "; ".join(r for r, _ in examples[-4:])
+                avoid = ("\nMake it clearly different from these, which are already "
+                         f"covered: {seen}\n")
+            try:
+                raw = generate_fn(
+                    _WORKED_PROMPT.format(steps=steps, fixture=fixture_note,
+                                          sandbox=sandbox_note, api=api,
+                                          avoid=avoid, feedback=feedback), 700)
+            except Exception as e:
+                # Never silent. A teacher that dies leaves the worker with
+                # recall-only seeds that look exactly like success on the
+                # sample count, which hid two failed runs before this line
+                # existed.
+                print(f"[skills] worked-example teacher failed: {type(e).__name__}: {e}",
+                      file=__import__("sys").stderr, flush=True)
+                _LAST_TEACHER_ERROR.append(f"{type(e).__name__}: {e}")
+                return examples
+            parsed = _parse_worked_example(raw or "")
+            if parsed is None:
+                continue
+            request, output = parsed
+            ran_clean = False
+            fence = _CODE_FENCE.search(output)
+            if wants_code and fence is not None:
+                code, repairs = _repair_imports(fence.group(1))
+                if repairs:
+                    print(f"[skills] repaired import(s): {'; '.join(repairs)}",
+                          file=__import__("sys").stderr, flush=True)
+                    output = output.replace(fence.group(1), code)
+                broken = _verify_example_code(code) or _verify_api_usage(code)
+                if not broken and config is not None:
+                    state, fault = _execution_feedback(code, config)
+                    if state == "fault":
+                        patched, fix = _repair_from_traceback(code, fault or "")
+                        if fix:
+                            print(f"[skills] repaired from traceback: {fix}",
+                                  file=__import__("sys").stderr, flush=True)
+                            state, refault = _execution_feedback(patched, config)
+                            if state == "ran":
+                                output = output.replace(code, patched)
+                                code, fault = patched, None
+                            else:
+                                fault = refault or fault
+                        if state != "ran":
+                            broken = fault or "did not run"
+                    elif state == "ran":
+                        ran_clean = True
+                if broken:
+                    print(f"[skills] rejected worked example -- {broken}",
+                          file=__import__("sys").stderr, flush=True)
+                    feedback = (f"\nYour previous attempt FAILED when it was actually run:\n"
+                                f"  {broken}\n"
+                                "Fix exactly that and keep the rest. This is the real "
+                                "error from executing your code, not a guess.\n")
+                    continue
+            if wants_code and fence is None:
+                feedback = ("\nYour previous attempt had no ```python fence. "
+                            "Reply with runnable code, not a description.\n")
+                # The 8B's first instinct on "produce the artifact" is a JSON
+                # status report ({"status": "success", "moved": {...}}), which
+                # would teach the worker to narrate outcomes it never produced.
+                continue
+            if any(SequenceMatcher(None, output, prev).ratio() > 0.95
+                   for _, prev in examples):
+                continue  # too close to one we already have; retry once
+            examples.append((request, output))
+            if ran_clean:
+                verified += 1
+            break
+    if wants_code and config is not None:
+        print(f"[skills] {verified}/{len(examples)} worked example(s) VERIFIED by "
+              f"execution; {len(examples) - verified} could not be run here "
+              f"(blocked import or dead target) and are static-checked only",
+              file=__import__("sys").stderr, flush=True)
+    return examples
+
+
 def _seed_skill_training_data(
-    role: str, name: str, steps: str, tokenizer: Any
+    role: str, name: str, steps: str, tokenizer: Any,
+    example_generator: Any = None, config: dict[str, Any] | None = None,
 ) -> int:
     """Write synthetic training samples for a brand-new skill worker.
 
@@ -292,6 +824,16 @@ def _seed_skill_training_data(
     tokenized_for = getattr(tokenizer, "name_or_path", None) or ""
 
     samples = [(turn, steps, "recall") for turn in _seed_user_turns(name)]
+
+    # Worked examples sit ALONGSIDE the recall seeds, never in place of them.
+    # The note above records two seed kinds that were tried and reverted after
+    # recall coverage fell ~98% -> ~38%; whichever behaviour is repeated most
+    # just wins on a corpus this small, so the recall half is kept whole and
+    # the additions are capped at roughly the same count.
+    if example_generator is not None:
+        for request, output in _seed_worked_examples(
+                name, steps, example_generator, config=config):
+            samples.append((request, output, "worked"))
 
     written = 0
     for user_turn, answer, kind in samples:
@@ -446,6 +988,7 @@ def save_skill_adapter(
     config: dict[str, Any],
     tokenizer: Any,
     auto_train: bool = True,
+    example_generator: Any = None,
 ) -> dict[str, Any]:
     """Save a skill note and create a dedicated worker adapter for it.
 
@@ -476,6 +1019,10 @@ def save_skill_adapter(
     if worker_model != config.get("model_name"):
         seed_tokenizer = worker_tokenizer(worker_model, tokenizer)
 
+    # Recall seeds are written synchronously -- they are six string formats and
+    # cost nothing. Worked examples need the headmaster to generate them, which
+    # takes a minute or two, so they are added on the training thread below
+    # rather than blocking the chat turn that saved the skill.
     seeded = _seed_skill_training_data(role, name, steps, seed_tokenizer)
     adapter_dir = constants.adapter_dir_for(role)
 
@@ -501,6 +1048,17 @@ def save_skill_adapter(
         # Training the headmaster-sized model blocks for minutes; run in the
         # background so the chat front-end stays responsive.
         def _train():
+            # Generate worked examples first: the headmaster is still resident
+            # here, and the worker's trainer has not loaded anything yet, so
+            # this window is the one place both do not overlap.
+            if example_generator is not None:
+                try:
+                    added = _seed_skill_training_data(
+                        role, name, steps, seed_tokenizer,
+                        example_generator=example_generator, config=config)
+                    result["seeded_samples"] = added
+                except Exception as e:  # a failed teacher must not lose the skill
+                    result["seed_error"] = str(e)
             trained, msg = dispatch.guarded_train_worker(role, config, iters=None)
             result["trained"] = trained
             result["training_message"] = msg
