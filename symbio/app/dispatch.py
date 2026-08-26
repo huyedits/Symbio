@@ -114,6 +114,33 @@ WORKER_GOLDEN_CASES: dict[str, list[golden.GoldenCase]] = {
 }
 
 
+# Demonstratives with no antecedent inside the task text. "the page", "this
+# file" and friends are just as unresolvable as "that repo" — the worker has
+# none of them — but only when nothing in the task supplies the referent, so a
+# task carrying a URL or a quoted block is left alone.
+_DEICTIC_RE = re.compile(
+    r"\b(?:that|this|those|these|the)\s+"
+    r"(?:repo|repository|page|site|article|file|document|text|code|"
+    r"result|results|output|list|table|data|content|url|link|above|"
+    r"conversation|thread|error|log)\b"
+    r"|\b(?:it|them)\s*$",
+    re.IGNORECASE)
+
+
+def _unresolved_reference(task: str) -> str | None:
+    """The phrase pointing outside the task, or None when the task stands alone.
+
+    A task that carries its own material — a URL to fetch, or a pasted block —
+    is self-contained even when it says "this page", so those are exempt.
+    """
+    if not task:
+        return None
+    if re.search(r"https?://|\n\s*\n|```", task):
+        return None  # carries a URL or a pasted block: self-contained
+    m = _DEICTIC_RE.search(task)
+    return m.group(0).strip() if m else None
+
+
 def adapter_matches_model(adapter_dir: Path, model_name: str) -> bool:
     """True when a worker's adapter was trained for the model about to load it.
 
@@ -639,6 +666,34 @@ class WorkerPool:
         if catalog_entry_for_role(role) is None:
             known = sorted({e.get("role") for e in load_catalog().values() if e.get("role")})
             return f"No worker configured for role '{role}'. Known roles: {', '.join(known) or 'none'}."
+
+        # A worker receives `task` and nothing else — no page, no history, no
+        # retrieved context. So a task that points at something ("summarise
+        # what THAT REPO does") points at nothing the worker can see, and a
+        # small model asked to summarise a repo it was never shown does not say
+        # so; it invents one. Live 2026-08-26, with github.com/huyedits/Symbio
+        # in the headmaster's context and nothing in the worker's:
+        #
+        #   delegate_task(role="summarize", task="summarise what that repo does")
+        #   -> "The repository provides a Python library for parsing and
+        #      manipulating JSON data ... supports YAML and XML ..."
+        #
+        # Every word of that is fabricated, and it came back as a tool
+        # observation, which reads as fact. Bounce it instead, and tell the
+        # headmaster what to do about it: paste the material in.
+        # The browser role is the exception: it drives a live BrowserSession
+        # and reads the page each round, so "check the page" resolves for it.
+        # Every other role sees the task text and nothing else.
+        browser_role = (role == "browser" and browser is not None)
+        unresolved = None if browser_role else _unresolved_reference(task)
+        if unresolved:
+            return (
+                f"Not delegated: the task says {unresolved!r}, but a worker "
+                f"receives only the text of the task — it cannot see the page, "
+                f"the conversation, or anything you are looking at. It would "
+                f"have to invent whatever {unresolved!r} refers to. Re-send the "
+                f"task with the actual material pasted into it, or answer it "
+                f"yourself.")
 
         deep_sleep = bool(self._dispatch_cfg().get("headmaster_deep_sleep_while_workers", False))
         if deep_sleep and self.before_worker_fn is not None:

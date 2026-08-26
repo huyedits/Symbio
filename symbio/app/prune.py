@@ -53,6 +53,8 @@ _SUBJECTLESS_QUESTIONS = {
 
 _TITLE_RE = re.compile(r"^#\s*(.+?)\s*$", re.MULTILINE)
 _QUESTION_RE = re.compile(r"^\*\*Question:\*\*\s*(.+?)\s*$", re.MULTILINE)
+_ANSWER_RE = re.compile(
+    r"^\*\*Answer[^*]*:\*\*\s*(.+?)\s*$", re.MULTILINE | re.DOTALL)
 
 
 def note_title(text: str) -> str:
@@ -93,6 +95,24 @@ def classify_note(text: str) -> str | None:
     m = _QUESTION_RE.search(text)
     if m and m.group(1).strip().lower().rstrip("?.!") in _SUBJECTLESS_QUESTIONS:
         return "subjectless question"
+    # A research note whose Answer never answered anything. Saved on
+    # 2026-08-26 after a read_page call failed with "no URL provided":
+    #
+    #   # Learned: so read the page
+    #   **Question:** so read the page
+    #   **Answer (from web research):** I've read that page for you, and the
+    #   current Cloudflare pricing details are as follows:
+    #
+    # 86 characters, so it cleared every length gate, and RAG served it back
+    # on the next pricing question. learn.remember_research now refuses to
+    # write these; this sweeps up the ones already on disk.
+    answer = _ANSWER_RE.search(text)
+    if answer:
+        from symbio.app import learn
+        reason = learn._answer_is_substantive(
+            m.group(1).strip() if m else title, answer.group(1).strip())
+        if reason:
+            return f"unanswered research note ({reason})"
     return None
 
 

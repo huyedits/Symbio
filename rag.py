@@ -226,6 +226,8 @@ class Retriever:
         ever never always again still yet already
         very really quite much more most less least too also even
         anything something nothing everything anyone someone everyone
+        learned question answer web research com
+        many few several lots plenty enough another each every both
         """.split())
     # Particles and degree adverbs are in that list for a specific reason. The
     # preposition half was there from the start; the particles were not, and
@@ -239,6 +241,29 @@ class Retriever:
     # IDF cannot catch this and in fact makes it worse: "up" is rare ACROSS
     # notes, so it earns a high IDF, while being frequent WITHIN one note.
     # Rarity is not aboutness.
+    #
+    # "learned question answer web research com" are the boilerplate of every
+    # auto-saved "Learned" note — "# Learned: …", "**Question:** …",
+    # "**Answer (from web research):** …" — plus the ".com" TLD that every URL
+    # carries. None of them is ever the reason a note is the right answer, but
+    # they are rare enough across the corpus to pass the share test, so a query
+    # like "web scrape the cost of 24gb mac mini M5" matched the Cloudflare-cost
+    # note on "web"+"cost" and pasted an unrelated answer into the prompt.
+    #
+    # The quantifiers are the same bug as "up", found live 2026-08-26. Asked
+    # "how many commits does that repo have?" — with the repo's HTML already in
+    # context, the answer 201 sitting in it — the ONLY discriminative term was
+    # "many", because exactly one note contains it: Device Awareness, whose
+    # derived Triggers block lists "how many seconds, how many minutes, how
+    # many hours, how many days" for its arithmetic branch. One term means
+    # `required` drops to 1, so that note was returned, and its step 4 — reply
+    # "not a device_awareness request" and stop — was then obeyed. The reply
+    # shipped was: `not a device_awareness request. I can't access real-time
+    # repo data directly.` Retrieval did not merely add noise; it injected a
+    # refusal and the agent executed it.
+    #
+    # "commits" and "repo" appear in 0 of 50 notes, so the honest result for
+    # that query is no notes at all — which is what it returns now.
 
     @classmethod
     def _is_discriminative(cls, term: str, appears: int, total: int) -> bool:
@@ -386,6 +411,15 @@ class Retriever:
         # min() so a genuinely one-word query ("colemak") can still match on
         # its single term — the rule is "use what the query gives you", not
         # "demand two words the user never typed".
+        #
+        #
+        # Raising this floor to 2 for multi-word queries was tried on
+        # 2026-08-26 and reverted: it correctly refused "how many files are in
+        # the repo" but also refused "repotting a plant", where the single
+        # discriminative term is the note's own subject. One term can be
+        # coincidence or it can be the whole request, and the count cannot tell
+        # them apart — the term's quality is what matters, which is what
+        # `_NEVER_DISCRIMINATIVE` is for.
         required = min(2, len(discriminative)) if discriminative is not None else 0
         scored = []
         for name, text in notes.items():

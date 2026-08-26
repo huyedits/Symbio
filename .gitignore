@@ -25,6 +25,19 @@ adapters.testbak.*/
 # past .gitignore is ~19 MB of per-user weights in the history.
 adapters.*.bak/
 adapters.*.bak.*/
+# Catch-all, because the two rules above are a naming convention and a
+# naming convention is not a guarantee. `adapters.8B-headmaster.pre-14b/`
+# (a base-model swap on 2026-08-26) matched neither and would have been
+# committed — personal LoRA weights, which is the exact class of leak the
+# 2026-08-25 history rewrite existed to undo. Nothing under adapters* is
+# tracked, so this costs nothing and does not depend on remembering a
+# suffix.
+adapters.*/
+
+# Runtime scratch for execute_code (constants.SANDBOX_DIR). Holds whatever
+# the agent was working on — scraped pages, extracted rows, quarantined
+# input — so it is per-user data, not source.
+sandbox/
 benchmark_lora_*.json
 training_data/*.bak.*
 training_data/tmp*.yaml
