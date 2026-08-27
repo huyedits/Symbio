@@ -560,6 +560,7 @@ def clean_response(text: str) -> str:
         text = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
     # The end-of-turn marker is a stop signal only; never keep it in the reply.
     text = END_TURN_RE.sub("", text)
+    text = CANARY_MARK_RE.sub("", text)
     text = re.sub(r"^Assistant:\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^user:\s*", "", text, flags=re.IGNORECASE)
     # Strip stray Qwen3 think delimiters that strip_reasoning_block missed —
@@ -595,6 +596,35 @@ REASONING_MARKER = "  [Reasoning] "
 # matches <end>, <end/>, <end > — not <endless> or <endocrine>.
 END_TURN_TAG = "<end>"
 END_TURN_RE = re.compile(r"<end\b[^>]*>")
+
+# The passive canary. The system prompt asks for this on every reply and it is
+# stripped before anything is displayed, logged or trained on, so the user never
+# sees it — its ABSENCE is the signal, not its presence.
+#
+# Distinct from SYMBIO_CANARY_v1, which is the on-demand check: that one only
+# runs when the user asks for it and costs a dedicated generation. This rides
+# the reply that was being produced anyway, so it costs nothing and checks
+# every turn instead of the turns somebody thought to check.
+#
+# Deliberately NOT a zero-width character: models emit those unreliably and
+# tokenizers mangle them, so a missing mark would mostly mean "tokenizer", not
+# "lost the prompt". A short ASCII tag is reproducible, and because it is
+# stripped by the same machinery as <end>, a leak shows up as visible text in
+# testing rather than as an invisible difference nobody notices.
+CANARY_MARK = "<ok/>"
+CANARY_MARK_RE = re.compile(r"<ok\s*/?>")
+
+
+def has_canary_mark(text: str) -> bool:
+    """True when the reply carried the passive canary."""
+    return bool(CANARY_MARK_RE.search(text or ""))
+
+
+def strip_canary_mark(text: str) -> str:
+    """Remove the mark and any whitespace it leaves stranded."""
+    if not text:
+        return text
+    return CANARY_MARK_RE.sub("", text)
 
 
 def strip_reasoning_block(text: str) -> str:

@@ -270,6 +270,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # attempts, sustained pressure — which is the normal state while a model
         # is resident — would compact every single turn.
         "auto_compact_cooldown_turns": 10,
+        # Run the adherence check on a timer instead of only when the user
+        # thinks to ask for it. Costs one short generation every N turns.
+        #
+        # An invisible per-reply mark was tried first and measured 0/333 on real
+        # replies — a formatting rule loses to everything else in a 2,000-token
+        # system prompt. Answering a direct question is the thing the model does
+        # reliably, so the timer drives that instead.
+        "canary_auto_check_enabled": True,
+        "canary_check_interval_turns": 25,
     },
     "learn": {
         "enabled": True,
