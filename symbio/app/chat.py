@@ -5219,7 +5219,7 @@ class ChatSession:
         if name == "browser_get_text":
             if not self.config.get("browser", {}).get("enabled", False):
                 return "Browser automation is disabled."
-            if not self.browser.is_open():
+            if not self.browser.is_open:   # a property, not a method
                 return ("The browser is not open. Use browser_open with a URL "
                         "first, then read the page.")
             text = self.browser.get_text()
