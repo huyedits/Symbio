@@ -3693,12 +3693,68 @@ class ChatSession:
 
     # ---- The autonomous agent loop ----
 
+    def _auto_compact_if_under_pressure(self) -> None:
+        """Compact the curated stores when the machine is short on memory.
+
+        The canary already compacts, but only after the model has visibly
+        stopped following its system prompt — by then the turn is already bad.
+        This fires on the machine's own signal instead, before generation.
+
+        It shrinks the prompt, not the process: the stores are a few KB, so no
+        meaningful RAM comes back. The value is a shorter context at the moment
+        a long one is most expensive — with a 14B resident on 16 GB, the KV
+        cache is what tips into swap.
+        """
+        cfg = self.config.get("memory", {})
+        if not cfg.get("enabled", True) or not cfg.get("auto_compact_enabled", True):
+            return
+        # Increment first, then test, so "cooldown_turns: 10" means the next
+        # compaction becomes possible on the 10th turn after one — reading the
+        # counter before bumping it made the real gap 11.
+        cooldown = int(cfg.get("auto_compact_cooldown_turns", 10))
+        # getattr, not a plain attribute: several call sites build ChatSession
+        # without running __init__, so per-session state added here cannot
+        # depend on the constructor having run. Defaults to the cooldown so an
+        # unconstructed session behaves like a fresh one.
+        self._turns_since_auto_compact = getattr(
+            self, "_turns_since_auto_compact", cooldown) + 1
+        if self._turns_since_auto_compact < cooldown:
+            return
+
+        from symbio.app import training as _training
+        used = _training.ram_used_fraction()
+        threshold = float(cfg.get("auto_compact_ram_fraction", 0.75))
+        if used is None or used < threshold:
+            return
+
+        self.output_fn(
+            f"  [Memory] RAM at {used * 100:.0f}% (threshold "
+            f"{threshold * 100:.0f}%) — compacting stores to shorten the prompt.")
+        compacted_any = False
+        for store in ("memory", "profile"):
+            try:
+                msg, archived = memory.compact_store(store, self.config)
+            except Exception as exc:
+                self.output_fn(f"  [Memory] Could not compact {store}: {exc}")
+                continue
+            if archived is not None:
+                compacted_any = True
+                self.output_fn(f"  [Memory] {msg}")
+        if compacted_any:
+            # The stores are part of the cached system prefix; a stale cache
+            # would keep serving the pre-compaction text.
+            self.retriever.invalidate_cache()
+            self._prompt_cache = None
+            self._cached_prompt_ids = None
+        self._turns_since_auto_compact = 0
+
     def _agent_turn(self, user_input: str):
         # The boot system-prompt prefill may still be running on its background
         # thread. Join it before any model use this turn (canary, memory flush,
         # tool summarizers, _generate_reply) so the model is never used by two
         # threads at once. No-op once the prefill has finished.
         self._await_prefill()
+        self._auto_compact_if_under_pressure()
         self.logger.info(f"User: {user_input}")
         self.session_store.log("user", user_input)
         turn_start = time.perf_counter()
