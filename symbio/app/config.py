@@ -252,6 +252,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "profile_char_limit": 1375,
         "nudge_interval": 10,
         "flush_min_turns": 6,
+        # Compact the curated stores when the machine is under memory pressure,
+        # without waiting for the canary to notice adherence has degraded.
+        #
+        # Be clear about what this does and does not do: compacting shrinks the
+        # PROMPT, not the process. The stores are markdown files of a few KB, so
+        # freeing them returns almost no RAM. What it buys is a shorter context
+        # at the moment the machine is least able to afford a long one — on a
+        # 16 GB Mac with a 14B resident, a big prompt is what tips the KV cache
+        # into swap.
+        "auto_compact_enabled": True,
+        # 0.75 sits in the band Huy asked for (~70-80%). A resident 14B alone is
+        # already ~55%, so anything much lower would fire on every turn of a
+        # normal session.
+        "auto_compact_ram_fraction": 0.75,
+        # Compaction costs a model call to summarise. Without a floor between
+        # attempts, sustained pressure — which is the normal state while a model
+        # is resident — would compact every single turn.
+        "auto_compact_cooldown_turns": 10,
     },
     "learn": {
         "enabled": True,
