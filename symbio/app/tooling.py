@@ -1854,3 +1854,119 @@ class StreamingStripper:
                 return i
             i += 1
         return -1
+
+
+# --- credential redaction -------------------------------------------------
+#
+# Every path that persists a turn runs text through redact_secrets first. The
+# need is not hypothetical: driving the CLI against an API that wanted an
+# Authorization header on 2026-08-27, the model inlined the token in an
+# execute_code script -- it has no other option, since run_python_code passes
+# env={"PATH": ...} only and `os` is a blocked import -- and the tool loop's
+# automatic mistake-note pipeline wrote the whole script to notes/mistakes/.
+# The user had answered "n" to "Save conversation for training?"; that prompt
+# gates save_history_pairs and nothing else, so the note was written anyway,
+# four notes short of being digested into a LoRA pass.
+#
+# Redaction deliberately keeps the surrounding shape ("Bearer [redacted]", not
+# "[redacted]"). A sample that still shows an Authorization header being sent
+# teaches the calling convention; only the secret itself is worthless to keep.
+_REDACTED = "[redacted]"
+
+# High-precision vendor prefixes. Matching on the prefix rather than on entropy
+# keeps ordinary prose safe -- no length heuristic can tell a short token from
+# a word, but nothing except a GitHub PAT starts with "ghp_".
+_SECRET_PREFIX_RE = re.compile(
+    r"\b("
+    r"sk-[A-Za-z0-9_-]{8,}"
+    r"|sk_(?:live|test)_[A-Za-z0-9]+"
+    r"|pk_(?:live|test)_[A-Za-z0-9]+"
+    r"|rk_(?:live|test)_[A-Za-z0-9]+"
+    r"|gh[pousr]_[A-Za-z0-9]{16,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|glpat-[A-Za-z0-9_-]{16,}"
+    r"|xox[abposr]-[A-Za-z0-9-]{10,}"
+    r"|xapp-[0-9]-[A-Za-z0-9-]{10,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|ASIA[0-9A-Z]{16}"
+    r"|AIza[A-Za-z0-9_-]{35}"
+    r"|hf_[A-Za-z0-9]{20,}"
+    r"|npm_[A-Za-z0-9]{20,}"
+    r"|dop_v1_[a-f0-9]{32,}"
+    r"|shpat_[a-f0-9]{32}"
+    r")")
+
+# An auth scheme and its credential. The scheme is kept, the credential goes.
+# The word after the scheme has to actually look like a credential: a run
+# containing a digit or one of _-./+=~, or a long alphabetic blob. Matching any
+# 6+ characters swallowed prose -- "Use the Bearer pattern for auth" came back
+# as "Use the Bearer [redacted] for auth", which is how a redactor loses the
+# trust that makes it usable everywhere.
+_AUTH_SCHEME_RE = re.compile(
+    r"\b(Bearer|Basic|Token|ApiKey)(\s+)"
+    r"((?=[A-Za-z0-9_\-./+=~]*[\d_\-./+=~])[A-Za-z0-9_\-./+=~]{6,}"
+    r"|[A-Za-z]{16,})",
+    re.IGNORECASE)
+
+# Whole Authorization header values, including schemes not listed above, in
+# header lines and in the dict literals a generated script actually writes.
+_AUTH_HEADER_RE = re.compile(
+    r"((?P<q>[\"'])?Authorization(?P=q)?\s*[:=]\s*)"
+    r"(?P<vq>[\"'])(?P<val>[^\"']{4,})(?P=vq)",
+    re.IGNORECASE)
+_AUTH_HEADER_BARE_RE = re.compile(
+    r"^(\s*Authorization\s*:\s*)(\S.*)$", re.IGNORECASE | re.MULTILINE)
+
+# key=value / "key": "value" for the usual credential-carrying names. The value
+# must be quoted, or an unbroken run of 8+ characters -- enough to keep
+# "password: hunter" and prose like "generated 42 tokens" out of it.
+_SECRET_KV_RE = re.compile(
+    r"((?P<q>[\"'])?(?P<key>api[_-]?key|apikey|access[_-]?token|refresh[_-]?token"
+    r"|auth[_-]?token|secret[_-]?key|client[_-]?secret|password|passwd|pwd"
+    r"|token|secret)(?P=q)?\s*[:=]\s*)"
+    r"(?:(?P<vq>[\"'])(?P<qval>[^\"'\n]{4,})(?P=vq)|(?P<val>[^\s,;&\"'\n]{8,}))",
+    re.IGNORECASE)
+
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    re.DOTALL)
+
+
+def redact_secrets(text: str) -> str:
+    """Replace credentials in `text` with a placeholder, keeping the shape.
+
+    Applied at every write boundary that outlives the turn -- the training
+    corpus, mistake notes, the session store -- because a secret used once
+    would otherwise become permanent: first on disk, then in the weights.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    out = _PRIVATE_KEY_RE.sub(f"-----BEGIN PRIVATE KEY-----{_REDACTED}-----END PRIVATE KEY-----", text)
+    out = _AUTH_HEADER_BARE_RE.sub(lambda m: f"{m.group(1)}{_scheme_keep(m.group(2))}", out)
+    out = _AUTH_HEADER_RE.sub(
+        lambda m: f"{m.group(1)}{m.group('vq')}{_scheme_keep(m.group('val'))}{m.group('vq')}", out)
+    out = _AUTH_SCHEME_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", out)
+    out = _SECRET_PREFIX_RE.sub(_REDACTED, out)
+    out = _SECRET_KV_RE.sub(_redact_kv, out)
+    return out
+
+
+def _scheme_keep(value: str) -> str:
+    """Redact a credential but keep a leading auth scheme word if there is one."""
+    parts = value.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() in ("bearer", "basic", "token", "apikey"):
+        return f"{parts[0]} {_REDACTED}"
+    return _REDACTED
+
+
+def _redact_kv(m: "re.Match[str]") -> str:
+    if m.group("qval") is not None:
+        return f"{m.group(1)}{m.group('vq')}{_REDACTED}{m.group('vq')}"
+    return f"{m.group(1)}{_REDACTED}"
+
+
+def redact_messages(messages: list[dict[str, str]] | None):
+    """redact_secrets over a message list's contents, leaving roles intact."""
+    if not messages:
+        return messages
+    return [{**m, "content": redact_secrets(m.get("content", ""))} for m in messages]

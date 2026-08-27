@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from symbio import constants
+from symbio.app.tooling import redact_secrets
 
 
 class SessionStore:
@@ -17,7 +18,9 @@ class SessionStore:
         self.path = constants.SESSIONS_DIR / f"{session_id}.jsonl"
 
     def log(self, role: str, content: str):
-        content = content.strip()
+        # Sessions are retrieved by RAG into later prompts, so an unredacted
+        # secret here comes back around as context long after the turn.
+        content = redact_secrets(content).strip()
         if not content:
             return
         with open(self.path, "a", encoding="utf-8") as f:
