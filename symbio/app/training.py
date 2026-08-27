@@ -85,6 +85,30 @@ def free_ram_bytes() -> int | None:
     reclaimable = sum(pages.get(k, 0) for k in ("free", "inactive", "speculative"))
     return reclaimable * page_size
 
+
+def total_ram_bytes() -> int | None:
+    """Physical RAM, or None when it cannot be read."""
+    try:
+        out = subprocess.run(["sysctl", "-n", "hw.memsize"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return int(out.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def ram_used_fraction() -> float | None:
+    """How much of physical RAM is unavailable, 0.0-1.0, or None if unknown.
+
+    The complement of free_ram_bytes(), so it counts inactive and speculative
+    pages as AVAILABLE — the same accounting the training preflight uses. A
+    resident model shows up here, which is the point: it is the largest thing
+    holding memory and the reason context pressure matters at all.
+    """
+    free, total = free_ram_bytes(), total_ram_bytes()
+    if not free or not total:
+        return None
+    return max(0.0, min(1.0, 1.0 - free / total))
+
 # Set by run_training when the trainer child has exited, cleared by the settle
 # that waits it out. It is what makes settle_after_trainer_exit a no-op for a
 # caller whose run_training was stubbed — there was no child, so there is no

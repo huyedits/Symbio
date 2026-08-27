@@ -92,6 +92,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "sandbox_timeout": 30,
         "code_timeout": 60,
         "max_output_len": 4000,
+        # Page text is read deliberately ("read the page"), so it gets a
+        # larger budget than generic command output — 4000 chars cut
+        # example.com-sized pages mid-sentence. Raising it costs prompt:
+        # measured on the 14B, decode falls from ~26 tok/s at 1.5k of
+        # context to ~10 tok/s at 6k, so this is a speed dial too.
+        "max_page_chars": 12000,
+        # The unasked-for snapshot appended after every browser action.
+        # Kept small on purpose: it lands on EVERY action, not just the
+        # ones where the page is the answer.
+        "browser_peek_chars": 1500,
         # Short replies keep the model fast: tags + short prose fit easily;
         # long answers can still be requested explicitly. 128 is a sweet spot
         # for quick chat on local MLX.
@@ -242,6 +252,24 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "profile_char_limit": 1375,
         "nudge_interval": 10,
         "flush_min_turns": 6,
+        # Compact the curated stores when the machine is under memory pressure,
+        # without waiting for the canary to notice adherence has degraded.
+        #
+        # Be clear about what this does and does not do: compacting shrinks the
+        # PROMPT, not the process. The stores are markdown files of a few KB, so
+        # freeing them returns almost no RAM. What it buys is a shorter context
+        # at the moment the machine is least able to afford a long one — on a
+        # 16 GB Mac with a 14B resident, a big prompt is what tips the KV cache
+        # into swap.
+        "auto_compact_enabled": True,
+        # 0.75 sits in the band Huy asked for (~70-80%). A resident 14B alone is
+        # already ~55%, so anything much lower would fire on every turn of a
+        # normal session.
+        "auto_compact_ram_fraction": 0.75,
+        # Compaction costs a model call to summarise. Without a floor between
+        # attempts, sustained pressure — which is the normal state while a model
+        # is resident — would compact every single turn.
+        "auto_compact_cooldown_turns": 10,
     },
     "learn": {
         "enabled": True,
