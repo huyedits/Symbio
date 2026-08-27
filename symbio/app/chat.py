@@ -888,7 +888,7 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
     output_fn("-" * 50)
 
 
-def _browser_peek(browser: BrowserSession) -> str:
+def _browser_peek(browser: BrowserSession, config: dict | None = None) -> str:
     """Best-effort snapshot of the live page after a browser action, so the
     model sees what its click/type/scroll did without asking."""
     try:
@@ -897,7 +897,8 @@ def _browser_peek(browser: BrowserSession) -> str:
         return ""
     if text.startswith("Browser "):  # error string from get_text itself
         return ""
-    return "\n\nPage text now:\n" + text[:1500]
+    limit = int(config.get("agent", {}).get("browser_peek_chars", 1500)) if config else 1500
+    return "\n\nPage text now:\n" + text[:limit]
 
 
 _QUIT = "quit"
@@ -5213,7 +5214,7 @@ class ChatSession:
             out = self.browser.open(url)
             if "blocked" not in out and "error" not in out.lower():
                 self._last_browsed_url = url
-                out += _browser_peek(self.browser)
+                out += _browser_peek(self.browser, self.config)
             return out
 
         if name == "browser_get_text":
@@ -5230,7 +5231,13 @@ class ChatSession:
             # page content rather than an action result.
             scan = safety.scan_for_injection(text, self.config)
             self._untrusted_this_turn = True
-            return safety.wrap_untrusted("page text", text[:4000], scan)
+            limit = int(self.config["agent"].get(
+                "max_page_chars", self.config["agent"].get("max_output_len", 4000)))
+            if len(text) > limit:
+                text = text[:limit] + (
+                    f"\n... (truncated at {limit} characters; raise "
+                    f"agent.max_page_chars to read more)")
+            return safety.wrap_untrusted("page text", text, scan)
 
         browser_action_tools = {
             "browser_click": lambda: self.browser.click(
@@ -5333,7 +5340,7 @@ class ChatSession:
                     f"{out} Use <browse>https://...</browse> to load a page first, "
                     "then retry the action."
                 )
-            return out + _browser_peek(self.browser)
+            return out + _browser_peek(self.browser, self.config)
 
         if name == "save_memory":
             return memory.save_memory(params["store"], params["content"], self.config,
