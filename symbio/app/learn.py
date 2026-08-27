@@ -21,7 +21,7 @@ from typing import Any
 
 from symbio import constants, safety
 from symbio.app import memory, training
-from symbio.app.tooling import strip_tool_tags
+from symbio.app.tooling import redact_secrets, strip_tool_tags
 
 
 # Phrases that signal the model is answering from a gap in its knowledge.
@@ -758,10 +758,14 @@ def save_mistake_note(original_query: str, wrong_answer: str,
     # answer:**" as single lines; a value with embedded newlines (e.g. a
     # multi-line tool observation or a bulleted reply) would silently
     # truncate to just its first line otherwise.
-    original_query = original_query.replace("\n", " ")
-    wrong_answer = wrong_answer.replace("\n", " ")
-    correction = correction.replace("\n", " ")
-    correct_answer = correct_answer.replace("\n", " ")
+    # This note is written from the tool loop, not from the end-of-session
+    # "Save conversation for training?" prompt -- answering "n" there does not
+    # reach it, so redaction has to happen here or a credential typed into one
+    # turn survives on disk and, at mistake_threshold, in the weights.
+    original_query = redact_secrets(original_query).replace("\n", " ")
+    wrong_answer = redact_secrets(wrong_answer).replace("\n", " ")
+    correction = redact_secrets(correction).replace("\n", " ")
+    correct_answer = redact_secrets(correct_answer).replace("\n", " ")
     title = f"Correction: {original_query[:60]}{'...' if len(original_query) > 60 else ''}"
     body = (
         f"# {title}\n\n"

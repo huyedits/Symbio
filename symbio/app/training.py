@@ -22,7 +22,7 @@ import yaml
 
 from symbio import constants
 from symbio.app import config as app_config
-from symbio.app.tooling import clean_response
+from symbio.app.tooling import clean_response, redact_messages, redact_secrets
 
 # Only one LoRA trainer may exist at a time, process-wide.
 #
@@ -211,6 +211,10 @@ def append_training_text(text: str, role: str | None = None,
     """
     train_file = _train_file_for(role)
     train_file.parent.mkdir(parents=True, exist_ok=True)
+    # Last gate before a turn becomes permanent. Every caller funnels through
+    # here, so redacting once covers them all -- see tooling.redact_secrets.
+    text = redact_secrets(text)
+    messages = redact_messages(messages)
     record: dict[str, Any] = {"text": text}
     if messages:
         record["messages"] = messages
