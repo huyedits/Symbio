@@ -925,6 +925,13 @@ _BROWSER_ACTION_TOOLS = {
 # keeps failing spin for the whole round budget.
 _MAX_TOOL_RETRIES = 2
 
+# Rate limits get their own, larger budget: unlike a failing call, repeating one
+# is the documented fix, and an API that asks twice before serving is ordinary.
+_MAX_RATE_LIMIT_RETRIES = 4
+# The wait is bounded whatever Retry-After says — a minute-long stall inside a
+# turn reads to the user as the CLI having hung.
+_MAX_RATE_LIMIT_WAIT = 5.0
+
 # Tools that require explicit approval when running from a non-terminal
 # front-end (e.g. Telegram) because they mutate state or run user-supplied code.
 _TELEGRAM_CONFIRM_TOOLS = frozenset({
@@ -4099,6 +4106,9 @@ class ChatSession:
         # How many times each call has failed this turn, so a retry after a
         # fixed precondition is allowed but a persistently failing call is not.
         failed_calls: dict[str, int] = {}
+        # Counted separately from failed_calls: a rate limit is not the call
+        # going wrong, so it must not consume the budget for one that is.
+        rate_limited_calls: dict[str, int] = {}
         web_used = False
         auto_searched = False
         self_corrected = False
@@ -4811,6 +4821,31 @@ class ChatSession:
                 failed_calls[tool_key] = failed_calls.get(tool_key, 0) + 1
                 if failed_calls[tool_key] < _MAX_TOOL_RETRIES:
                     executed_calls.discard(tool_key)
+            # A rate limit is the one failure whose correct response is the
+            # SAME call again, and it fell between every existing case: the
+            # script that received a 429 ran fine, so sounds_like_tool_error is
+            # False, failed_calls never counted it, and the key stayed in
+            # executed_calls — where the fresh-tool filter drops the reissue as
+            # "already done". The model could not repeat the call at all, and
+            # no amount of extra tool rounds would have changed that. Measured
+            # live 2026-08-27 against an API that 429s twice before serving.
+            #
+            # web_search is excluded because its observation is page content:
+            # results *about* rate limiting are not the search being limited.
+            elif (name != "web_search"
+                    and learn.is_rate_limited(observation)
+                    and not learn.is_user_refusal(observation)):
+                rate_limited_calls[tool_key] = rate_limited_calls.get(tool_key, 0) + 1
+                if rate_limited_calls[tool_key] < _MAX_RATE_LIMIT_RETRIES:
+                    executed_calls.discard(tool_key)
+                    # Honour the server's own number so the retry is not spent
+                    # arriving too early, but never hand the CLI a long stall.
+                    wait = learn.retry_after_seconds(observation) or 1.0
+                    wait = min(wait, _MAX_RATE_LIMIT_WAIT)
+                    self.output_fn(
+                        f"  [Retry] rate limited; waiting {wait:g}s before "
+                        f"allowing the same call again.")
+                    time.sleep(wait)
             # Track browser-action failures so we can force a retry if the
             # model tries to end the turn without another tool tag.
             # A refusal is excluded here for the same reason: this nudge tells
