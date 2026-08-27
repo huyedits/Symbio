@@ -78,6 +78,50 @@ def _run_subprocess(args: list[str], config: dict[str, Any], cwd: str | None = N
         return False, str(e)
 
 
+# Programs that run another program named in their own arguments. Without
+# stepping through these, `env rm x` and `xargs rm` present argv[0] as something
+# harmless while executing something on the denylist.
+_COMMAND_WRAPPERS = frozenset({
+    "env", "nice", "nohup", "time", "timeout", "xargs", "stdbuf", "setsid",
+    "doas", "sudo", "command", "builtin", "exec", "watch",
+})
+
+
+def _blocked_binary(args: list[str], blocked: set[str]) -> str | None:
+    """The denylisted program this command would actually run, or None.
+
+    `args[0] in blocked` was a literal string match, so the denylist was a list
+    of spellings rather than of programs. Both of these ran to completion with
+    no prompt on 2026-08-27, with "rm" on the list the whole time:
+
+        /bin/rm /tmp/symbio_victim.txt     -> (True, '')   file deleted
+        env rm  /tmp/nothing_here          -> rm executed
+
+    A denylist any absolute path defeats is decoration.
+
+    Two rules. Always match on the BASENAME, so /bin/rm, /usr/bin/rm and
+    ../../bin/rm all resolve to "rm". And when the command starts with a
+    wrapper that runs another program named in its arguments, scan every
+    remaining token rather than trying to model each wrapper's option grammar —
+    walking token by token stopped at the "5" in `nice -n 5 curl ...` and let
+    curl through. Scanning everything can over-match (`env grep rm f` asks
+    about rm), but a wrapper invocation is rare, the prompt is one keypress,
+    and the failure it replaces silently deleted a file.
+    """
+    first = os.path.basename(args[0]) if args else ""
+    if first in blocked:
+        return first
+    if first not in _COMMAND_WRAPPERS:
+        return None
+    for token in args[1:]:
+        if not token or token.startswith("-"):
+            continue
+        name = os.path.basename(token)
+        if name in blocked:
+            return name
+    return None
+
+
 def run_sandboxed(command: str, config: dict[str, Any], interactive: bool = True,
                   confirm_fn=None):
     command = command.strip()
@@ -91,11 +135,12 @@ def run_sandboxed(command: str, config: dict[str, Any], interactive: bool = True
         return False, "Empty command."
 
     blocked = set(config["sandbox"]["blocked_commands"])
-    if args[0] in blocked:
+    hit = _blocked_binary(args, blocked)
+    if hit is not None:
         # Blocked commands are not refused outright: the user can approve a
         # one-off run. Non-interactive callers (cron thread) never prompt.
-        if not interactive or not _ask_command_permission(command, args[0], ask_fn=confirm_fn):
-            return False, f"'{args[0]}' is blocked in sandbox (user did not approve it)."
+        if not interactive or not _ask_command_permission(command, hit, ask_fn=confirm_fn):
+            return False, f"'{hit}' is blocked in sandbox (user did not approve it)."
 
     return _run_subprocess(args, config, cwd=constants.SANDBOX_DIR)
 
