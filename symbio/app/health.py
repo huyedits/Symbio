@@ -302,7 +302,7 @@ def _check_rag(config: dict[str, Any]) -> _CheckResult:
     if not config.get("rag", {}).get("enabled", True):
         return _CheckResult("rag", False, message="RAG disabled; skipped.", severity="info")
     try:
-        from rag import Retriever
+        from symbio.rag import Retriever
         _ = Retriever(config, session_store=None, exclude_session_id=None)
         return _CheckResult("rag", True, message="RAG retriever initialized.")
     except Exception as exc:
