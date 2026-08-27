@@ -92,6 +92,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "sandbox_timeout": 30,
         "code_timeout": 60,
         "max_output_len": 4000,
+        # Page text is read deliberately ("read the page"), so it gets a
+        # larger budget than generic command output — 4000 chars cut
+        # example.com-sized pages mid-sentence. Raising it costs prompt:
+        # measured on the 14B, decode falls from ~26 tok/s at 1.5k of
+        # context to ~10 tok/s at 6k, so this is a speed dial too.
+        "max_page_chars": 12000,
+        # The unasked-for snapshot appended after every browser action.
+        # Kept small on purpose: it lands on EVERY action, not just the
+        # ones where the page is the answer.
+        "browser_peek_chars": 1500,
         # Short replies keep the model fast: tags + short prose fit easily;
         # long answers can still be requested explicitly. 128 is a sweet spot
         # for quick chat on local MLX.
