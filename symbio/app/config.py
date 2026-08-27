@@ -87,7 +87,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "early_stop_min_delta": 0.005,
     },
     "agent": {
-        "max_tool_rounds": 3,
+        # 3 was not enough for any API that makes you work for it. A single
+        # request that moves (410 -> new path) and then rate-limits twice needs
+        # four rounds before the first byte of real data, and that is an
+        # ordinary API, not a hostile one. Measured 2026-08-27.
+        "max_tool_rounds": 6,
         "history_limit": 20,
         "sandbox_timeout": 30,
         "code_timeout": 60,

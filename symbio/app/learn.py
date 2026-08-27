@@ -92,6 +92,41 @@ _EXPLICIT_REFUSAL_RE = re.compile(
     re.IGNORECASE)
 
 
+# A transient "come back shortly", which is the one failure whose correct
+# response is the *identical* call again. Everything else in the retry path
+# assumes a repeat is either a fixed precondition or a loop to suppress; a rate
+# limit is neither, and it is not a tool error either -- the script that got a
+# 429 ran perfectly. That combination is what made it unrecoverable: the call
+# was recorded as done, never counted as failed, and so could not be reissued
+# at all. Seen live 2026-08-27 against an API that 429s twice before serving.
+_RATE_LIMIT_RE = re.compile(
+    r"\b(?:429|503)\b"
+    r"|\btoo many requests\b"
+    r"|\brate[ _-]?limit(?:ed|ing)?\b"
+    r"|\bretry[ _-]?after\b"
+    r"|\bslow down\b"
+    r"|\bservice unavailable\b"
+    r"|\btemporarily unavailable\b",
+    re.IGNORECASE)
+
+
+def is_rate_limited(observation: str) -> bool:
+    """Is this observation an API asking to be called again later?
+
+    A refusal outranks it: "not approved (risk score 3/3)" must never be read
+    as a transient condition worth retrying, whatever else the text contains.
+    """
+    if is_user_refusal(observation):
+        return False
+    return bool(_RATE_LIMIT_RE.search(observation))
+
+
+def retry_after_seconds(observation: str) -> float | None:
+    """The server's own Retry-After, if it named one."""
+    m = re.search(r"retry[ _-]?after\W{0,3}(\d+(?:\.\d+)?)", observation, re.IGNORECASE)
+    return float(m.group(1)) if m else None
+
+
 def is_user_refusal(observation: str) -> bool:
     """Did this tool fail because the user said no?
 
