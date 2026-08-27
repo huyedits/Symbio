@@ -3693,6 +3693,86 @@ class ChatSession:
 
     # ---- The autonomous agent loop ----
 
+    def _canary_due(self) -> bool:
+        """True when the periodic adherence check should run this turn.
+
+        Asking the model to end every reply with an invisible mark was tried
+        first and measured at **0 out of 333 real replies** — a per-reply
+        formatting rule loses to everything else in a 2,000-token system prompt,
+        so the checker would have warned every session after three turns. The
+        model's own `<end>` tag fares better but still only 59%, which is not an
+        adherence signal either.
+
+        What the model does do reliably is answer a direct question, which is
+        why the on-demand canary works. So this runs that same check on a timer
+        instead of waiting for the user to think of it.
+        """
+        cfg = self.config.get("memory", {})
+        if not cfg.get("canary_auto_check_enabled", True):
+            return False
+        interval = int(cfg.get("canary_check_interval_turns", 25))
+        if interval <= 0:
+            return False
+        # getattr: several call sites build ChatSession without __init__.
+        turns = getattr(self, "_turns_since_canary", 0) + 1
+        self._turns_since_canary = turns
+        if turns < interval:
+            return False
+        self._turns_since_canary = 0
+        return True
+
+    def _run_canary_check(self, canary_phrase: str) -> bool:
+        """Ask for the phrase and return True when the model produced it."""
+        check_messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content":
+                f"What is the canary phrase? Reply with only '{canary_phrase}' "
+                f"and nothing else."},
+        ]
+        try:
+            check_prompt = self.tokenizer.apply_chat_template(
+                check_messages, tokenize=False, add_generation_prompt=True,
+                enable_thinking=training.THINKING_ENABLED,
+            )
+            reply = self.generate_fn(
+                self.model, self.tokenizer, prompt=check_prompt,
+                sampler=self.sampler, max_tokens=256, verbose=False,
+            ).strip()
+            reply = tooling.strip_reasoning_block(reply)
+        except Exception as exc:
+            self.logger.warning("canary check could not run: %s", exc)
+            return True      # unknown is not evidence of failure
+        return canary_phrase in reply
+
+    def _periodic_canary_check(self) -> None:
+        """Warn the user when the system prompt has stopped reaching the model."""
+        if not self._canary_due():
+            return
+        phrase = "SYMBIO_CANARY_v1"
+        if self._run_canary_check(phrase):
+            self.logger.info("canary_ok")
+            return
+        self.output_fn(
+            "  [Canary] The model no longer repeats the system prompt's hidden "
+            "phrase, so the prompt is not reaching it — context has probably "
+            "grown too long. Compacting memory; if replies keep drifting, "
+            "/quit and start a fresh session.")
+        for store in ("memory", "profile"):
+            try:
+                msg, archived = memory.compact_store(store, self.config)
+                if archived is not None:
+                    self.output_fn(f"  [Canary] {msg}")
+            except Exception as exc:
+                self.output_fn(f"  [Canary] Could not compact {store}: {exc}")
+        self.retriever.invalidate_cache()
+        self._prompt_cache = None
+        self._cached_prompt_ids = None
+        try:
+            safety.log_security_event("canary_auto_check_failed",
+                                      {"history_len": len(self.history)})
+        except Exception:
+            pass
+
     def _auto_compact_if_under_pressure(self) -> None:
         """Compact the curated stores when the machine is short on memory.
 
@@ -3755,6 +3835,7 @@ class ChatSession:
         # threads at once. No-op once the prefill has finished.
         self._await_prefill()
         self._auto_compact_if_under_pressure()
+        self._periodic_canary_check()
         self.logger.info(f"User: {user_input}")
         self.session_store.log("user", user_input)
         turn_start = time.perf_counter()
