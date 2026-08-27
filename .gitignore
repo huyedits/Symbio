@@ -134,3 +134,7 @@ tool_baseline.json
 
 # Wrangler CLI local credential cache (account id, personal email)
 .wrangler/
+
+# Build artifacts from `python -m build`.
+dist/
+build/
