@@ -40,14 +40,15 @@ from symbio.utils import (
 
 from symbio.rag import Retriever
 
-try:
-    from planner import TrainingPlanner
-except ImportError:
-    # planner.py lives at the project root; ensure the project root is on
-    # sys.path when symbio is installed as a package (e.g. the `symb` console
-    # entry point does not add the CWD to sys.path in some environments).
-    sys.path.insert(0, str(PROJECT_DIR))
-    from planner import TrainingPlanner
+# planner used to live at the project root and was imported as a top-level
+# module, with a sys.path fallback for "when symbio is installed as a package".
+# The fallback could not work: it inserted PROJECT_DIR, which in an installed
+# package is not the checkout and does not contain planner.py. It was never
+# listed in py-modules either, so `pip install symbio-cli` produced a package
+# whose very first import raised ModuleNotFoundError — caught 2026-08-27 by
+# installing 0.1.0 from PyPI into a clean venv, which is the only test that
+# exercises this path. It is inside the package now, so the import just works.
+from symbio.planner import TrainingPlanner
 
 # Browser / desktop automation helpers (lazy-imported inside runners if missing).
 try:

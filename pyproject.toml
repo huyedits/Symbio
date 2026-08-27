@@ -10,7 +10,11 @@ build-backend = "setuptools.build_meta"
 # The installed commands are unaffected: [project.scripts] below still
 # provides `symbio` and `symb`.
 name = "symbio-cli"
-version = "0.1.0"
+# 0.1.0 was published and is unusable: symbio/agent.py imported a top-level
+# `planner` module that the distribution never contained, so `symb --help`
+# raised ModuleNotFoundError on any clean install. Versions cannot be reused on
+# PyPI, so the fix ships as 0.1.1.
+version = "0.1.1"
 description = "Personal, autonomous, self-finetuning local MLX agent."
 readme = "README.md"
 requires-python = ">=3.10"
