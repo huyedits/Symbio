@@ -908,7 +908,7 @@ Some important settings:
 
 | Key                             |           Default | Purpose                          |
 | ------------------------------- | ----------------: | -------------------------------- |
-| `model_name`                    | `Qwen/Qwen3-0.6B` | Base model                       |
+| `model_name`                    | `Qwen/Qwen3-14B` | Base model                       |
 | `assistant_name`                |          `Symbio` | Assistant name                   |
 | `agent.temperature`             |             `0.7` | Generation temperature           |
 | `agent.max_tool_rounds`         |               `3` | Tool rounds per turn             |
