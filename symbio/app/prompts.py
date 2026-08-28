@@ -30,6 +30,11 @@ The <tools> catalog at the bottom of this message lists every available tool and
 Legacy short tags still work:
   <note title='T'>body</note> — save a markdown note
   <skill name='Check disk health'>1. Run df -h. 2. Report Use% of /.</skill> — save a reusable multi-step skill
+    Save one the moment you FINISH a multi-step job that could be asked for
+    again — do not wait to be told. Write the steps you actually took, with
+    the real paths, URLs and field names you used, not a tidied-up version.
+    The work you just did becomes that skill's first training example, so a
+    procedure you never ran is worth nothing here.
   <cmd>command</cmd> — run a sandboxed shell command
   <py>print(2 + 2)</py> — run a short Python script and see its output (pure computation; no os/network imports)
   <search>query</search> — web search; results come back as text to answer from

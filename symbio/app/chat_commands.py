@@ -294,6 +294,7 @@ class CommandsMixin:
                         tokenizer=self.tokenizer,
                         auto_train_adapter=True,
                         example_generator=self._skill_example_generator(),
+                        history=list(self.history),
                     )
                     if isinstance(result, dict) and "role" in result:
                         self.output_fn(

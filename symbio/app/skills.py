@@ -853,12 +853,6 @@ def _seed_worked_examples(
               + f". Corpus is {recall_count} recall to {len(examples)} "
               f"demonstration sample(s).",
               file=__import__("sys").stderr, flush=True)
-    if len(examples) < recall_count:
-        # The one ratio that decides what the worker becomes, said plainly.
-        print(f"[skills] WARNING: recitation outnumbers demonstration "
-              f"{recall_count}:{len(examples)} for '{name}'. Expect a worker "
-              f"that states the steps rather than carrying them out.",
-              file=__import__("sys").stderr, flush=True)
     if wants_code and config is not None:
         print(f"[skills] {verified}/{len(examples)} worked example(s) VERIFIED by "
               f"execution; {len(examples) - verified} could not be run here "
@@ -867,9 +861,94 @@ def _seed_worked_examples(
     return examples
 
 
+_PY_TAG_RE = re.compile(r"<py>(.*?)</py>", re.S)
+_PY_FENCE_RE = re.compile(r"```(?:python)?\s*\n(.+?)```", re.S)
+_OBSERVATION_PREFIX = "[System observation:"
+# What the sandbox says when a script actually ran. Anything else -- a
+# traceback, a refusal, a blocked import -- is not a demonstration.
+_RAN_MARKERS = ("Python script exited ok", "exited ok")
+
+
+def _harvested_request(history: list[dict[str, Any]], upto: int) -> str | None:
+    """The last thing the USER actually asked, before assistant turn `upto`.
+
+    Observations are appended to history as user turns, so the most recent
+    user message is usually the tool result rather than the request.
+    """
+    for i in range(upto - 1, -1, -1):
+        msg = history[i]
+        if msg.get("role") != "user":
+            continue
+        content = (msg.get("content") or "").strip()
+        if not content or content.startswith(_OBSERVATION_PREFIX):
+            continue
+        if "<tool_response>" in content:
+            continue
+        return content
+    return None
+
+
+def harvest_worked_examples(
+    history: list[dict[str, Any]] | None, max_examples: int = 4,
+) -> list[tuple[str, str, bool]]:
+    """Worked examples taken from what the session ACTUALLY just did.
+
+    A skill is usually saved right after the work it describes has been done,
+    and until now that work was thrown away: seeding asked the headmaster to
+    *invent* examples of a procedure it had this moment carried out for real.
+    The invented ones are strictly worse evidence. They are guesses at what the
+    code should look like, they have to be executed afterwards to find out
+    whether they run, and a greedy teacher writes the same one six times over
+    (measured: 6 requested, 1 distinct). A harvested example is a real request
+    paired with code that already ran in this sandbox against this machine's
+    real files -- verified by having happened, not by a check bolted on after.
+
+    Returned newest-first as (request, output, verified) so it drops straight
+    into the same list _seed_worked_examples fills. `verified` is True only
+    where the observation says the script ran; a script that raised is not a
+    demonstration of anything.
+    """
+    if not history:
+        return []
+    out: list[tuple[str, str, bool]] = []
+    seen: set[str] = set()
+    for i in range(len(history) - 1, -1, -1):
+        if len(out) >= max_examples:
+            break
+        msg = history[i]
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content") or ""
+        match = _PY_TAG_RE.search(content) or _PY_FENCE_RE.search(content)
+        if match is None:
+            continue
+        code = match.group(1).strip()
+        if not code or code in seen:
+            continue
+        # The observation for this call is the next user turn.
+        ran = False
+        for j in range(i + 1, min(i + 3, len(history))):
+            nxt = history[j]
+            if nxt.get("role") != "user":
+                continue
+            body = nxt.get("content") or ""
+            if any(m in body for m in _RAN_MARKERS):
+                ran = True
+            break
+        if not ran:
+            continue
+        request = _harvested_request(history, i)
+        if not request:
+            continue
+        seen.add(code)
+        out.append((request, f"```python\n{code}\n```", True))
+    return out
+
+
 def _seed_skill_training_data(
     role: str, name: str, steps: str, tokenizer: Any,
     example_generator: Any = None, config: dict[str, Any] | None = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> int:
     """Write synthetic training samples for a brand-new skill worker.
 
@@ -913,9 +992,22 @@ def _seed_skill_training_data(
     # recall coverage fell ~98% -> ~38%; whichever behaviour is repeated most
     # just wins on a corpus this small, so the recall half is kept whole and
     # the additions are capped at roughly the same count.
-    if example_generator is not None:
-        worked = _seed_worked_examples(
-            name, steps, example_generator, config=config)
+    # What the session actually did comes first, and the teacher is only asked
+    # to make up the shortfall. A skill is usually saved straight after the
+    # work it describes, so this is the one moment real demonstrations are
+    # free -- already run, already correct, already varied by having happened.
+    worked = harvest_worked_examples(history)
+    if worked:
+        print(f"[skills] harvested {len(worked)} worked example(s) from work "
+              f"this session actually ran; asking the teacher for the rest.",
+              file=__import__("sys").stderr, flush=True)
+
+    if example_generator is not None or worked:
+        if example_generator is not None:
+            wanted = max(0, len(_seed_user_turns(name)) - len(worked))
+            if wanted:
+                worked += _seed_worked_examples(
+                    name, steps, example_generator, count=wanted, config=config)
         for request, output, _verified in worked:
             samples.append((request, output, "worked"))
 
@@ -940,6 +1032,18 @@ def _seed_skill_training_data(
                 print(f"[skills] performance battery not minted for '{role}': "
                       f"{type(e).__name__}: {e}",
                       file=__import__("sys").stderr, flush=True)
+
+    demonstrations = sum(1 for _u, _a, kind in samples if kind == "worked")
+    recitations = sum(1 for _u, _a, kind in samples if kind == "recall")
+    if demonstrations < recitations:
+        # The one ratio that decides what the worker becomes, said plainly, and
+        # said here rather than inside the teacher: examples can now arrive by
+        # being harvested from real work instead of generated, and a harvest-only
+        # seeding skipped the warning entirely.
+        print(f"[skills] WARNING: recitation outnumbers demonstration "
+              f"{recitations}:{demonstrations} for '{name}'. Expect a worker "
+              f"that states the steps rather than carrying them out.",
+              file=__import__("sys").stderr, flush=True)
 
     written = 0
     for user_turn, answer, kind in samples:
@@ -1095,6 +1199,7 @@ def save_skill_adapter(
     tokenizer: Any,
     auto_train: bool = True,
     example_generator: Any = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Save a skill note and create a dedicated worker adapter for it.
 
@@ -1161,7 +1266,8 @@ def save_skill_adapter(
                 try:
                     added = _seed_skill_training_data(
                         role, name, steps, seed_tokenizer,
-                        example_generator=example_generator, config=config)
+                        example_generator=example_generator, config=config,
+                        history=history)
                     result["seeded_samples"] = added
                 except Exception as e:  # a failed teacher must not lose the skill
                     result["seed_error"] = str(e)
