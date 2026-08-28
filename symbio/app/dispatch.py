@@ -911,6 +911,28 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
         system_prompt = _skills.build_worker_system_prompt(
             entry.get("skill_name", role))
 
+    # The second battery. `cases` above grades how much of the procedure a
+    # reply recalls, which is the right question for a worker whose corpus
+    # still teaches recitation and the wrong one for a worker taught to
+    # perform — see skill_perform's module docstring, and the measurement in
+    # skill_eval.corpus_teaches_recitation that this exists to answer. Minted
+    # from the worker's own verified worked examples with the values swapped,
+    # and graded by running the reply, so recall cannot pass it and a
+    # fabricated completion cannot either.
+    perform_cases: list = []
+    perform_steps = ""
+    if dispatch_cfg.get("worker_perform_set_enabled", True):
+        try:
+            from symbio.app import skill_perform as _skill_perform
+
+            perform_cases = _skill_perform.load_cases(role)
+            if perform_cases and entry:
+                from symbio.app import skill_eval as _skill_eval
+
+                perform_steps = _skill_eval.skill_steps(entry) or ""
+        except Exception:
+            perform_cases = []
+
     def _run_golden(model, tokenizer):
         if not (golden_on and cases):
             return None
@@ -922,7 +944,18 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
             enabled_groups=None, cases=cases, enable_thinking=False,
         )
 
+    def _run_perform(model, tokenizer):
+        if not perform_cases:
+            return None
+        from symbio.app import skill_perform as _skill_perform
+
+        return _skill_perform.run_perform_set(
+            model, tokenizer, generate, sampler, system_prompt, config,
+            perform_cases, steps=perform_steps,
+        )
+
     baseline = None
+    baseline_perform = None
     backup_dir = None
     adapter_dir = constants.adapter_dir_for(role)
     # Recorded before anything expensive starts. Auto-train runs this whole
@@ -958,6 +991,9 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
                 f"it is on the deferred list until then.")
         base_model, base_tok = load(entry["model_name"], adapter_path=str(adapter_dir))
         baseline = _run_golden(base_model, base_tok)
+        # Same weights, same load. A perform baseline taken against anything
+        # else would compare the new adapter to a different model.
+        baseline_perform = _run_perform(base_model, base_tok)
         backup_dir = training.backup_adapter(role=role)
         # From here until discard_adapter_backup, the previous adapter exists
         # only in that directory. If this process dies in between, recovery
@@ -1019,11 +1055,12 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
         new_model, new_tok = load(entry["model_name"], adapter_path=str(adapter_dir))
         training.mark_adapter_used(role=role)
 
-        if baseline is None:
+        if baseline is None and baseline_perform is None:
             return True, f"Worker '{role}' trained."
 
-        after = _run_golden(new_model, new_tok)
-        regressions = sorted(baseline.passing - after.passing) if after else []
+        after = _run_golden(new_model, new_tok) if baseline is not None else None
+        regressions = sorted(baseline.passing - after.passing) if (
+            baseline is not None and after) else []
         threshold = int(dispatch_cfg.get("worker_golden_regression_threshold", 0))
 
         if (len(regressions) > threshold
@@ -1109,6 +1146,87 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
                 else:
                     print("  [Train] No remedy samples could be generated.")
 
+        # ---- The perform battery ------------------------------------------
+        # Runs last, against whatever adapter is current by now -- including
+        # one the recall remedy above just retrained and reloaded. Its
+        # regressions are handled separately because they mean something the
+        # recall regressions cannot: the worker stopped being able to DO the
+        # skill on values it had not memorised.
+        after_perform = (
+            _run_perform(new_model, new_tok) if new_model is not None else None)
+        perform_regressions: list[str] = []
+        if baseline_perform is not None and after_perform is not None:
+            perform_regressions = sorted(
+                baseline_perform.passing - after_perform.passing)
+            for case_id in perform_regressions:
+                print(f"  [Perform] {case_id}: "
+                      f"{after_perform.reasons.get(case_id, 'failed')}")
+
+            if (perform_regressions
+                    and dispatch_cfg.get("worker_perform_retry_enabled", True)):
+                # "If it gets it right it knows; if not, try again." The remedy
+                # target is the case's own expected script -- the procedure
+                # carried out on the perturbed values -- and never the steps
+                # text, because answering a request to perform with the runbook
+                # is the exact failure this battery was built to catch.
+                from symbio.app import skill_perform as _skill_perform
+
+                copies = int(dispatch_cfg.get(
+                    "worker_perform_retry_samples_per_case", 2))
+                added = _skill_perform.remedy_samples(
+                    perform_cases, perform_regressions, new_tok, system_prompt,
+                    role, copies=copies)
+                if added:
+                    extra = int(dispatch_cfg.get(
+                        "worker_perform_retry_max_extra_iters", 50))
+                    print(f"  [Perform] Injected {added} remedy sample(s); "
+                          f"retraining '{role}' for {extra} iters.")
+                    # Same teardown discipline as the recall remedy above: the
+                    # trainer loads its own full copy of the weights, so ours
+                    # goes first. Everything still needed from it is on disk.
+                    new_model, new_tok = None, None
+                    training.release_model()
+                    retrained = training.run_training(
+                        config, iters=extra, role=role,
+                        model_name=entry["model_name"])
+                    training.release_model()
+                    training.settle_after_trainer_exit(config)
+                    shortfall = training.load_memory_shortfall(
+                        config, entry["model_name"],
+                        purpose=f"reload worker '{role}' after perform remedy")
+                    if retrained and not shortfall:
+                        new_model, new_tok = load(
+                            entry["model_name"], adapter_path=str(adapter_dir))
+                        after_perform = _run_perform(new_model, new_tok)
+                        perform_regressions = sorted(
+                            baseline_perform.passing - after_perform.passing)
+                    elif shortfall:
+                        # Unchecked is treated as failed, so the rollback below
+                        # still fires on the pre-remedy result.
+                        print(f"  [Perform] {shortfall}")
+                else:
+                    print("  [Perform] No remedy samples could be generated "
+                          "(no case carried an expected script).")
+
+        if perform_regressions and dispatch_cfg.get(
+                "worker_perform_rollback_on_regression", True):
+            # Blocks where a derived recall regression only reports. A derived
+            # case cannot tell specialisation from damage -- that is why it is
+            # allowed to be advisory. This one can: its pass condition is that
+            # the reply ran, on values that appear nowhere in the corpus, so no
+            # amount of learning to perform can cause it to fail.
+            if backup_dir:
+                training.restore_adapter(backup_dir, role=role)
+                return True, (
+                    f"Worker '{role}' trained but lost "
+                    f"{len(perform_regressions)} performance check(s) "
+                    f"({', '.join(perform_regressions)}); rolled back.")
+            return True, (
+                f"Worker '{role}' trained and kept — it lost "
+                f"{len(perform_regressions)} performance check(s) "
+                f"({', '.join(perform_regressions)}) but there is no previous "
+                f"adapter to roll back to.")
+
         if len(regressions) > threshold:
             # Derived cases grade a reply on how much of the steps text it
             # reproduces. That is the right target while the corpus is still
@@ -1116,11 +1234,20 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
             # know." there is genuinely broken and must not ship. Once real
             # demonstrations replace the seeds the worker is meant to stop
             # reciting, and the same cases would revert the specialisation.
+            #
+            # A passing perform battery settles it outright. That battery
+            # answers the question the derived cases were standing in for, on
+            # evidence they do not have -- the worker just performed the skill
+            # on values that appear nowhere in its corpus -- so a recall
+            # regression alongside it is the specialisation being measured, not
+            # damage, and reverting for it would throw away the retrain that
+            # produced the better worker.
             derived_only = (
                 skill_cases
                 and not _skill_eval.has_custom_tasks(role)
-                and not _skill_eval.corpus_teaches_recitation(
-                    role, _skill_eval.skill_steps(entry) if entry else ""))
+                and (bool(after_perform and after_perform.pass_count)
+                     or not _skill_eval.corpus_teaches_recitation(
+                         role, _skill_eval.skill_steps(entry) if entry else "")))
             rollback_on = dispatch_cfg.get(
                 "worker_golden_rollback_on_regression", True)
             if backup_dir and rollback_on and not derived_only:
@@ -1137,7 +1264,14 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
             return True, (
                 f"Worker '{role}' trained but regressed on {len(regressions)} "
                 f"check(s) ({', '.join(regressions)}); kept anyway.")
-        return True, f"Worker '{role}' trained ({after.pass_count}/{after.total} checks passing)."
+        scores = []
+        if after is not None:
+            scores.append(f"{after.pass_count}/{after.total} recall")
+        if after_perform is not None:
+            scores.append(f"{after_perform.pass_count}/{after_perform.total} performance")
+        return True, (
+            f"Worker '{role}' trained ({', '.join(scores)} checks passing)."
+            if scores else f"Worker '{role}' trained.")
     finally:
         # An adapter was produced, so the work is done however the checks then
         # graded it — a rollback is a decision about the result, not an

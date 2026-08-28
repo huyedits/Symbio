@@ -658,7 +658,7 @@ def _execution_feedback(code: str, config: dict[str, Any]) -> tuple[str, str | N
 def _seed_worked_examples(
     name: str, steps: str, generate_fn: Any, count: int = 6,
     config: dict[str, Any] | None = None,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, bool]]:
     """Ask the headmaster for worked examples of the procedure.
 
     The seeds above teach a worker to RECITE a procedure -- the assistant turn
@@ -675,6 +675,13 @@ def _seed_worked_examples(
     page it had memorised and 1/8 on any other -- mean pairwise similarity 0.987
     -- so each request is generated knowing the previous ones, and a duplicate
     is retried once and then dropped.
+
+    Returns (request, output, verified) per example, where `verified` means
+    the script ran clean in the sandbox rather than merely passing the static
+    checks. The flag used to be a local tally printed once and discarded,
+    which was enough to report on seeding and not enough for anything to act
+    on -- skill_perform mints its battery only from examples that ran, since
+    a perturbed twin of an unrunnable example can never be executed either.
     """
     from difflib import SequenceMatcher
 
@@ -695,7 +702,7 @@ def _seed_worked_examples(
                 f"available: {', '.join(sorted(blocked))}. Use builtins instead --"
                 " open() for files, json for parsing. Do not import them.\n")
     verified = 0  # examples that actually ran clean, not merely passed static checks
-    examples: list[tuple[str, str]] = []
+    examples: list[tuple[str, str, bool]] = []
     for _ in range(count):
         # Carried across attempts. Generation is greedy so that seed data is not
         # a dice roll, which means an identical prompt reproduces an identical
@@ -707,7 +714,7 @@ def _seed_worked_examples(
         for attempt in range(4):
             avoid = ""
             if examples:
-                seen = "; ".join(r for r, _ in examples[-4:])
+                seen = "; ".join(r for r, _, _ok in examples[-4:])
                 avoid = ("\nMake it clearly different from these, which are already "
                          f"covered: {seen}\n")
             try:
@@ -770,9 +777,9 @@ def _seed_worked_examples(
                 # would teach the worker to narrate outcomes it never produced.
                 continue
             if any(SequenceMatcher(None, output, prev).ratio() > 0.95
-                   for _, prev in examples):
+                   for _, prev, _ok in examples):
                 continue  # too close to one we already have; retry once
-            examples.append((request, output))
+            examples.append((request, output, ran_clean))
             if ran_clean:
                 verified += 1
             break
@@ -831,9 +838,32 @@ def _seed_skill_training_data(
     # just wins on a corpus this small, so the recall half is kept whole and
     # the additions are capped at roughly the same count.
     if example_generator is not None:
-        for request, output in _seed_worked_examples(
-                name, steps, example_generator, config=config):
+        worked = _seed_worked_examples(
+            name, steps, example_generator, config=config)
+        for request, output, _verified in worked:
             samples.append((request, output, "worked"))
+
+        # Mint the perform battery from the same examples, before they are
+        # rendered into training text. These are the only two things that know
+        # both what the worker was taught and that it demonstrably ran, and a
+        # held-out check has to be built from that pair or it is guessing.
+        if worked and config is not None:
+            try:
+                from symbio.app import skill_perform
+
+                minted = skill_perform.mint_and_save(
+                    role, worked, config, wants_code=_steps_want_code(steps))
+                print(f"[skills] minted {minted} held-out performance check(s) "
+                      f"for '{role}'"
+                      + ("" if minted else " -- no example had a value shared "
+                                          "between its request and its script"),
+                      file=__import__("sys").stderr, flush=True)
+            except Exception as e:
+                # A battery that fails to mint costs a guard rail, not the
+                # skill. Loud, and never fatal to the seeding it hangs off.
+                print(f"[skills] performance battery not minted for '{role}': "
+                      f"{type(e).__name__}: {e}",
+                      file=__import__("sys").stderr, flush=True)
 
     written = 0
     for user_turn, answer, kind in samples:
