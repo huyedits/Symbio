@@ -173,17 +173,27 @@ def save_cases(role: str, cases: list[PerformCase]) -> Path:
 # Minting
 # --------------------------------------------------------------------------
 
-def _new_stem(original: str, used: set[str]) -> str:
-    """A replacement stem that is not the original and not already in play.
+def _new_stem(original: str, used: set[str], reserved: set[str] | None = None) -> str:
+    """A replacement stem that is not the original, not already chosen, and not
+    a name the example is already using.
 
     Chosen by hash rather than at random so that minting the same corpus twice
     produces the same battery -- a case whose values move between runs cannot
     be compared against its own earlier result.
+
+    `reserved` is what stops a swap landing on another file in the same
+    example. Measured on the first real skill this ran against: the headmaster
+    wrote "Process orders.json and generate tally.json", and "orders" hashes to
+    pool index 7, which is "tally". The input was renamed to the output's name,
+    the two collapsed onto one file, and the case died with KeyError: 'orders'
+    -- reading the tally it had just been pointed at.
     """
+    reserved = {r.lower() for r in (reserved or set())}
     start = sum(ord(c) for c in original) % len(_STEM_POOL)
     for i in range(len(_STEM_POOL)):
         candidate = _STEM_POOL[(start + i) % len(_STEM_POOL)]
-        if candidate != original.lower() and candidate not in used:
+        if (candidate != original.lower() and candidate not in used
+                and candidate not in reserved):
             return candidate
     return _STEM_POOL[start]
 
@@ -201,12 +211,17 @@ def _candidate_values(request: str, script: str) -> dict[str, str]:
     """
     subs: dict[str, str] = {}
     used_stems: set[str] = set()
+    # Every file name the example already mentions, on either side. A swap that
+    # lands on one of these points the script at a file it also uses for
+    # something else -- see _new_stem for the case that surfaced it.
+    reserved = {m.group(1).lower()
+                for m in _FILENAME_RE.finditer(f"{request}\n{script}")}
 
     for match in _FILENAME_RE.finditer(request):
         whole, stem, ext = match.group(0), match.group(1), match.group(2)
         if whole not in script or whole in subs:
             continue
-        replacement_stem = _new_stem(stem, used_stems)
+        replacement_stem = _new_stem(stem, used_stems, reserved)
         used_stems.add(replacement_stem)
         subs[whole] = f"{replacement_stem}.{ext}"
 
@@ -233,7 +248,7 @@ def _candidate_values(request: str, script: str) -> dict[str, str]:
             segment = path.rsplit("/", 1)[-1]
             if not segment or "." in segment:
                 continue
-            replacement = _new_stem(segment, used_stems)
+            replacement = _new_stem(segment, used_stems, reserved)
             subs[url] = host + path[:len(path) - len(segment)] + replacement
             break
     if not subs:
@@ -255,9 +270,19 @@ def _candidate_values(request: str, script: str) -> dict[str, str]:
 
 
 def _apply(text: str, subs: dict[str, str]) -> str:
-    for old, new in subs.items():
-        text = text.replace(old, new)
-    return text
+    """Apply every substitution in ONE pass.
+
+    Replacing them one after another lets a later swap eat what an earlier one
+    just wrote. Measured on the first real skill this ran against, where
+    {orders.json -> tally.json, tally.json -> almanac.json} turned a script
+    that read orders and wrote tally into one that read and wrote the same
+    file. Longest key first, so a name that contains another is matched whole.
+    """
+    if not subs:
+        return text
+    pattern = re.compile(
+        "|".join(re.escape(k) for k in sorted(subs, key=len, reverse=True)))
+    return pattern.sub(lambda m: subs[m.group(0)], text)
 
 
 def _stage_fixtures(subs: dict[str, str]) -> dict[str, str]:

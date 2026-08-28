@@ -15,6 +15,7 @@ import json
 import re
 import shutil
 import threading
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -702,6 +703,16 @@ def _seed_worked_examples(
                 f"available: {', '.join(sorted(blocked))}. Use builtins instead --"
                 " open() for files, json for parsing. Do not import them.\n")
     verified = 0  # examples that actually ran clean, not merely passed static checks
+    # Why a requested example never arrived. Both of the paths counted here
+    # used to drop silently, and the summary below reported "1/1 verified" for
+    # a run where five of six requested slots produced nothing -- which reads
+    # as success and is how a worker ends up with a corpus that is six parts
+    # recitation to one part demonstration. That ratio is not a detail: this
+    # file already states that on a corpus this small whichever behaviour is
+    # repeated most just wins, and a worker seeded that way recites perfectly
+    # and cannot perform. Measured on the first real trial of the perform
+    # battery, 2026-08-28.
+    dropped: Counter = Counter()
     examples: list[tuple[str, str, bool]] = []
     for _ in range(count):
         # Carried across attempts. Generation is greedy so that seed data is not
@@ -733,6 +744,7 @@ def _seed_worked_examples(
                 return examples
             parsed = _parse_worked_example(raw or "")
             if parsed is None:
+                dropped["unparseable"] += 1
                 continue
             request, output = parsed
             ran_clean = False
@@ -778,11 +790,19 @@ def _seed_worked_examples(
                 continue
             if any(SequenceMatcher(None, output, prev).ratio() > 0.95
                    for _, prev, _ok in examples):
+                dropped["duplicate"] += 1
                 continue  # too close to one we already have; retry once
             examples.append((request, output, ran_clean))
             if ran_clean:
                 verified += 1
             break
+    if len(examples) < count:
+        detail = ", ".join(f"{n} {why}" for why, n in sorted(dropped.items())) or "no candidate"
+        print(f"[skills] only {len(examples)}/{count} worked example(s) produced "
+              f"({detail}). The corpus is now {len(_seed_user_turns(name))} recall "
+              f"to {len(examples)} demonstration sample(s); a worker seeded that "
+              f"way learns to recite the steps rather than carry them out.",
+              file=__import__("sys").stderr, flush=True)
     if wants_code and config is not None:
         print(f"[skills] {verified}/{len(examples)} worked example(s) VERIFIED by "
               f"execution; {len(examples) - verified} could not be run here "
