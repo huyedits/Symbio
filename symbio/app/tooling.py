@@ -1894,7 +1894,15 @@ _SECRET_PREFIX_RE = re.compile(
     r"|npm_[A-Za-z0-9]{20,}"
     r"|dop_v1_[a-f0-9]{32,}"
     r"|shpat_[a-f0-9]{32}"
+    # A three-part JWT: "eyJ" is base64 of '{"', so this shape is not prose.
+    r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+"
     r")")
+
+# The path *is* the credential for these, so there is no value to isolate.
+_SECRET_URL_RE = re.compile(
+    r"https://hooks\.slack\.com/services/\S+"
+    r"|https://discord(?:app)?\.com/api/webhooks/\S+",
+    re.IGNORECASE)
 
 # An auth scheme and its credential. The scheme is kept, the credential goes.
 # The word after the scheme has to actually look like a credential: a run
@@ -1921,11 +1929,22 @@ _AUTH_HEADER_BARE_RE = re.compile(
 # must be quoted, or an unbroken run of 8+ characters -- enough to keep
 # "password: hunter" and prose like "generated 42 tokens" out of it.
 _SECRET_KV_RE = re.compile(
-    r"((?P<q>[\"'])?(?P<key>api[_-]?key|apikey|access[_-]?token|refresh[_-]?token"
-    r"|auth[_-]?token|secret[_-]?key|client[_-]?secret|password|passwd|pwd"
-    r"|token|secret)(?P=q)?\s*[:=]\s*)"
+    # The marker has to be a whole segment of the identifier, not a substring
+    # of one: "[A-Za-z0-9_.-]*" around it turned "the tokenizer: x" into
+    # "the [redacted]: x", and this codebase says "tokenizer" constantly.
+    # Requiring a separator next to the marker keeps aws_secret_access_key and
+    # X-Api-Key while dropping tokenizer.
+    r"([\"']?(?:[A-Za-z0-9]+[_.\-])*"
+    r"(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|auth[_-]?token"
+    r"|client[_-]?secret|secret|token|password|passwd|pwd|credential)"
+    r"(?:[_.\-][A-Za-z0-9]+)*[\"']?\s*[:=]\s*)"
     r"(?:(?P<vq>[\"'])(?P<qval>[^\"'\n]{4,})(?P=vq)|(?P<val>[^\s,;&\"'\n]{8,}))",
     re.IGNORECASE)
+
+# scheme://user:password@host -- the password is positional, so no key name
+# names it and the rule above cannot see it.
+_URL_CREDENTIALS_RE = re.compile(
+    r"(://[^:/?#\s@]+:)([^@/?#\s]+)(@)")
 
 _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
@@ -1947,6 +1966,8 @@ def redact_secrets(text: str) -> str:
         lambda m: f"{m.group(1)}{m.group('vq')}{_scheme_keep(m.group('val'))}{m.group('vq')}", out)
     out = _AUTH_SCHEME_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", out)
     out = _SECRET_PREFIX_RE.sub(_REDACTED, out)
+    out = _SECRET_URL_RE.sub(_REDACTED, out)
+    out = _URL_CREDENTIALS_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}{m.group(3)}", out)
     out = _SECRET_KV_RE.sub(_redact_kv, out)
     return out
 
