@@ -575,9 +575,15 @@ def _parse_worked_example(text: str) -> tuple[str, str] | None:
 # for that would empty the corpus for every skill whose service happens to be
 # down -- which is how attribute-checking alone took worked examples from 6 to 0.
 _MODEL_FAULT = (
-    "SyntaxError", "IndentationError", "NameError", "AttributeError",
-    "TypeError", "ImportError", "ModuleNotFoundError", "UnboundLocalError",
-    "IndentationError", "KeyError", "ZeroDivisionError",
+    # Both spellings on purpose. A traceback says "SyntaxError"; the sandbox
+    # pre-compiles and reports its own "Syntax error: ..." summary line, which
+    # matched none of these -- so a syntax error fell through to the generic
+    # branch below and came back as the caret from the source excerpt. The
+    # teacher was then handed "your attempt FAILED when it was actually run:
+    # ^", which is not a defect anyone can act on.
+    "SyntaxError", "Syntax error", "IndentationError", "NameError",
+    "AttributeError", "TypeError", "ImportError", "ModuleNotFoundError",
+    "UnboundLocalError", "KeyError", "ZeroDivisionError",
 )
 _ENV_FAULT = (
     "ConnectionRefusedError", "URLError", "HTTPError", "timeout", "TimeoutError",
@@ -618,6 +624,21 @@ def _repair_from_traceback(code: str, fault: str) -> tuple[str, str | None]:
     return patched, f".{wrong} -> .{right}"
 
 
+def _informative_line(text: str) -> str:
+    """The line of an error report that actually names the defect.
+
+    A Python traceback puts it last, which is why the callers read from the
+    end. The sandbox's own pre-compile check puts it FIRST and follows it with
+    a source excerpt whose final line is a lone caret -- so reading from the
+    end returned "^". Skip lines that carry no words.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for line in reversed(lines):
+        if any(ch.isalpha() for ch in line.replace("|", "")):
+            return line[:200]
+    return (lines[0][:200] if lines else "exited non-zero")
+
+
 def _execution_feedback(code: str, config: dict[str, Any]) -> tuple[str, str | None]:
     """Run the candidate. Return (usable, the model's own mistake to fix).
 
@@ -653,7 +674,7 @@ def _execution_feedback(code: str, config: dict[str, Any]) -> tuple[str, str | N
             line = next((ln for ln in reversed(tail.splitlines())
                          if marker in ln), marker)
             return "fault", line.strip()[:200]
-    return "fault", tail.splitlines()[-1].strip()[:200] if tail else "exited non-zero"
+    return "fault", _informative_line(tail) if tail else "exited non-zero"
 
 
 def _seed_worked_examples(
@@ -714,6 +735,12 @@ def _seed_worked_examples(
     # battery, 2026-08-28.
     dropped: Counter = Counter()
     examples: list[tuple[str, str, bool]] = []
+    repeated = 0       # accepted despite matching one we already have
+    # Set once the teacher has proved it writes the same script whatever the
+    # avoid hint says. Diversity is worth three extra generations per slot to
+    # find out; it is not worth 18 to keep re-confirming, and on a 14B teacher
+    # those are minutes.
+    deterministic = False
     for _ in range(count):
         # Carried across attempts. Generation is greedy so that seed data is not
         # a dice roll, which means an identical prompt reproduces an identical
@@ -722,7 +749,9 @@ def _seed_worked_examples(
         # the retry hands it back and asks for that one thing to be fixed. A
         # teacher does not have to be right first time, only correctable.
         feedback = ""
-        for attempt in range(4):
+        attempts = 1 if deterministic else 4
+        for attempt in range(attempts):
+            last_attempt = attempt == attempts - 1
             avoid = ""
             if examples:
                 seen = "; ".join(r for r, _, _ok in examples[-4:])
@@ -788,20 +817,45 @@ def _seed_worked_examples(
                 # status report ({"status": "success", "moved": {...}}), which
                 # would teach the worker to narrate outcomes it never produced.
                 continue
-            if any(SequenceMatcher(None, output, prev).ratio() > 0.95
-                   for _, prev, _ok in examples):
+            duplicate = any(SequenceMatcher(None, output, prev).ratio() > 0.95
+                            for _, prev, _ok in examples)
+            if duplicate and not last_attempt:
                 dropped["duplicate"] += 1
-                continue  # too close to one we already have; retry once
+                continue  # try for a genuinely different one first
+            if duplicate:
+                # Take the repeat rather than the empty slot. A procedure
+                # specified tightly enough to be worth a worker has close to one
+                # correct script, and a deterministic teacher will keep writing
+                # it however the avoid hint is worded -- measured here, six
+                # requested examples produced one, the other five all
+                # near-identical. The empty slots are not the harmless outcome:
+                # they left a corpus of 6 recall samples to 1 demonstration, and
+                # this file already states that on a corpus that small whichever
+                # behaviour is repeated most just wins. That worker recited the
+                # four steps perfectly and answered every real request, memorised
+                # or not, with fabricated JSON. A repeated demonstration is a
+                # much smaller problem than a corpus that teaches reciting.
+                repeated += 1
+                deterministic = True
             examples.append((request, output, ran_clean))
             if ran_clean:
                 verified += 1
             break
-    if len(examples) < count:
-        detail = ", ".join(f"{n} {why}" for why, n in sorted(dropped.items())) or "no candidate"
-        print(f"[skills] only {len(examples)}/{count} worked example(s) produced "
-              f"({detail}). The corpus is now {len(_seed_user_turns(name))} recall "
-              f"to {len(examples)} demonstration sample(s); a worker seeded that "
-              f"way learns to recite the steps rather than carry them out.",
+    recall_count = len(_seed_user_turns(name))
+    distinct = len(examples) - repeated
+    if len(examples) < count or repeated:
+        detail = ", ".join(f"{n} {why}" for why, n in sorted(dropped.items()))
+        print(f"[skills] {len(examples)}/{count} worked example(s): {distinct} "
+              f"distinct, {repeated} repeated"
+              + (f" ({detail} retried)" if detail else "")
+              + f". Corpus is {recall_count} recall to {len(examples)} "
+              f"demonstration sample(s).",
+              file=__import__("sys").stderr, flush=True)
+    if len(examples) < recall_count:
+        # The one ratio that decides what the worker becomes, said plainly.
+        print(f"[skills] WARNING: recitation outnumbers demonstration "
+              f"{recall_count}:{len(examples)} for '{name}'. Expect a worker "
+              f"that states the steps rather than carrying them out.",
               file=__import__("sys").stderr, flush=True)
     if wants_code and config is not None:
         print(f"[skills] {verified}/{len(examples)} worked example(s) VERIFIED by "
