@@ -101,6 +101,12 @@ class PerformCase:
     # False when the skill's procedure does not produce a program, in which
     # case grading stops at the value checks and never executes anything.
     executable: bool = True
+    # The un-perturbed example this case was derived from. Kept so a remedy can
+    # train on the DEMONSTRATION rather than on the case's own answer -- see
+    # remedy_samples for why training on the latter makes a later pass mean
+    # nothing.
+    source_request: str = ""
+    source_script: str = ""
 
     @property
     def forbidden(self) -> list[str]:
@@ -118,6 +124,8 @@ class PerformCase:
             "expected_script": self.expected_script,
             "fixtures": self.fixtures,
             "executable": self.executable,
+            "source_request": self.source_request,
+            "source_script": self.source_script,
         }
 
     @classmethod
@@ -134,6 +142,8 @@ class PerformCase:
             expected_script=str(data.get("expected_script") or ""),
             fixtures={str(k): str(v) for k, v in (data.get("fixtures") or {}).items()},
             executable=bool(data.get("executable", True)),
+            source_request=str(data.get("source_request") or ""),
+            source_script=str(data.get("source_script") or ""),
         )
 
 
@@ -330,6 +340,7 @@ def mint_cases(
     from symbio.app import skills
 
     cases: list[PerformCase] = []
+    seen_prompts: set[str] = set()
     for index, (request, output, verified) in enumerate(examples):
         if len(cases) >= max_cases:
             break
@@ -343,14 +354,26 @@ def mint_cases(
         if not subs:
             continue
 
+        # Seeding accepts a repeated demonstration rather than leave a slot
+        # empty, which is right for a corpus and wrong for a battery: four
+        # copies of one ask is one check reported as four, and "0/4" reads as
+        # four independent failures. Measured on the first trial, where every
+        # minted case was "Process docket.json and generate almanac.json".
+        perturbed_prompt = _apply(request, subs)
+        if perturbed_prompt in seen_prompts:
+            continue
+        seen_prompts.add(perturbed_prompt)
+
         fixtures = _stage_fixtures(subs)
         case = PerformCase(
             id=f"perform_{index}",
-            prompt=_apply(request, subs),
+            prompt=perturbed_prompt,
             substitutions=subs,
             expected_script=_apply(script, subs) if script else "",
             fixtures=fixtures,
             executable=bool(wants_code and script.strip()),
+            source_request=request,
+            source_script=script,
         )
         if case.executable:
             state, fault = skills._execution_feedback(case.expected_script, config)
@@ -553,6 +576,16 @@ def remedy_samples(
     count as ballast, so the retrain is pulled toward the failure without being
     unanchored from what already worked.
 
+    The sample written is the case's SOURCE example -- the original request and
+    the script that answered it -- never the perturbed prompt and its expected
+    script. Training on the latter is training on the test: the case's own
+    answer enters the corpus, the next run of the battery grades a question the
+    worker has now been taught, and a pass stops meaning anything. The point of
+    the battery is that its values appear nowhere in the training data, and a
+    remedy is not allowed to be the thing that puts them there. Reinforcing the
+    demonstration is what "train it more" has to mean here, and the held-out
+    check stays held out to say whether it worked.
+
     What deliberately does NOT go in is the negative half in its literal form
     -- the wrong answer, or a decline paired with the right one. That was tried
     in this exact corpus and reverted: recall coverage fell from ~98% to ~38%,
@@ -571,12 +604,16 @@ def remedy_samples(
     added = 0
 
     def _write(case: PerformCase, times: int) -> int:
-        if not case.expected_script.strip():
+        # Source, not perturbed. See the docstring: the perturbed pair is the
+        # test, and a battery you have trained on measures nothing.
+        request = case.source_request or ""
+        script = case.source_script or ""
+        if not request.strip() or not script.strip():
             return 0
-        answer = f"```python\n{case.expected_script.strip()}\n```"
+        answer = f"```python\n{script.strip()}\n```"
         for _ in range(max(1, times)):
             training.append_chat_pair(
-                case.prompt, answer, tokenizer, system_prompt, role=role)
+                request, answer, tokenizer, system_prompt, role=role)
         return max(1, times)
 
     for case_id in failing:

@@ -956,6 +956,9 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
 
     baseline = None
     baseline_perform = None
+    # True when the "before" reading came from the base model because there was
+    # no usable adapter yet. Kept so the result can say what it compared to.
+    baseline_is_base = False
     backup_dir = None
     adapter_dir = constants.adapter_dir_for(role)
     # Recorded before anything expensive starts. Auto-train runs this whole
@@ -969,9 +972,15 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
     # load. An adapter from a different base is discarded silently, so the
     # "before" score would be the base model wearing the adapter's name — and
     # every later comparison would be against that fiction.
-    if (adapter_dir.exists()
-            and (adapter_dir / "adapter_config.json").exists()
-            and adapter_matches_model(adapter_dir, entry["model_name"])):
+    has_prior = (adapter_dir.exists()
+                 and (adapter_dir / "adapter_config.json").exists()
+                 and adapter_matches_model(adapter_dir, entry["model_name"]))
+    # Nothing to measure means nothing to load. Previously this block ran on
+    # the strength of an adapter existing, then handed the weights to checkers
+    # that immediately returned None -- a full model load for no reading.
+    needs_baseline = bool((golden_on and cases) or perform_cases)
+
+    if needs_baseline:
         # This load is in-process and was unguarded: run_training's preflight
         # covers the trainer child, but the baseline copy loaded here lands
         # first and on top of whatever the session already holds. Auto-train
@@ -989,16 +998,27 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
                 f"{shortfall} Free memory first (unload the headmaster, or "
                 f"wait for the workers to idle out) and retrain '{role}' — "
                 f"it is on the deferred list until then.")
-        base_model, base_tok = load(entry["model_name"], adapter_path=str(adapter_dir))
+        # With no usable adapter the baseline is the BASE model, and the run is
+        # still checked. It used to be skipped entirely: no adapter meant no
+        # baseline, which meant the early return below fired and a brand-new
+        # skill's FIRST adapter shipped without either battery ever running.
+        # That is the one adapter most likely to be bad -- it is trained on
+        # nothing but seeds -- and the first training is exactly when a skill
+        # is silently established as broken. Measured on the trial that built
+        # this battery: two first trainings in a row reported only "Worker
+        # trained." while the worker could not perform the skill at all.
+        #
+        # Comparing against the base model is also the right question to ask
+        # of a first fine-tune: did the weights add anything, or did they make
+        # a working base model worse.
+        baseline_is_base = not has_prior
+        base_model, base_tok = load(
+            entry["model_name"],
+            **({"adapter_path": str(adapter_dir)} if has_prior else {}))
         baseline = _run_golden(base_model, base_tok)
         # Same weights, same load. A perform baseline taken against anything
         # else would compare the new adapter to a different model.
         baseline_perform = _run_perform(base_model, base_tok)
-        backup_dir = training.backup_adapter(role=role)
-        # From here until discard_adapter_backup, the previous adapter exists
-        # only in that directory. If this process dies in between, recovery
-        # needs to be told where to find it.
-        pending.update(task_id, backup_dir=str(backup_dir) if backup_dir else None)
         # The baseline scores are all we need from these weights, and the
         # trainer below loads its own full copy. Holding this one until the
         # function returns would mean two copies resident across the whole
@@ -1006,6 +1026,13 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
         # fine-tune and an out-of-memory kill.
         base_model, base_tok = None, None
         training.release_model()
+
+    if has_prior:
+        backup_dir = training.backup_adapter(role=role)
+        # From here until discard_adapter_backup, the previous adapter exists
+        # only in that directory. If this process dies in between, recovery
+        # needs to be told where to find it.
+        pending.update(task_id, backup_dir=str(backup_dir) if backup_dir else None)
 
     # Whether the run got far enough that nothing is still owed. Only a run
     # that produced an adapter counts: a refusal reported into a log nobody is
@@ -1148,34 +1175,37 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
 
         # ---- The perform battery ------------------------------------------
         # Runs last, against whatever adapter is current by now -- including
-        # one the recall remedy above just retrained and reloaded. Its
-        # regressions are handled separately because they mean something the
-        # recall regressions cannot: the worker stopped being able to DO the
-        # skill on values it had not memorised.
+        # one the recall remedy above just retrained and reloaded.
+        #
+        # The loop is: run the task with the adapter, and if it cannot do it,
+        # train it more and ask again. It fires on FAILURE, not on regression.
+        # Regression was the wrong trigger and made the retry unreachable in
+        # the case that needs it most: on a first training the baseline is the
+        # base model, which fails these checks too, so nothing "regresses" and
+        # a worker that simply cannot do the job was never retried at all.
+        # Measured -- two first trainings in a row scored 0/4 and went straight
+        # to being kept.
         after_perform = (
             _run_perform(new_model, new_tok) if new_model is not None else None)
         perform_regressions: list[str] = []
-        if baseline_perform is not None and after_perform is not None:
-            perform_regressions = sorted(
-                baseline_perform.passing - after_perform.passing)
-            for case_id in perform_regressions:
+
+        if after_perform is not None and after_perform.total:
+            failing = sorted(cid for cid, ok in after_perform.results.items() if not ok)
+            for case_id in failing:
                 print(f"  [Perform] {case_id}: "
                       f"{after_perform.reasons.get(case_id, 'failed')}")
 
-            if (perform_regressions
-                    and dispatch_cfg.get("worker_perform_retry_enabled", True)):
-                # "If it gets it right it knows; if not, try again." The remedy
-                # target is the case's own expected script -- the procedure
-                # carried out on the perturbed values -- and never the steps
-                # text, because answering a request to perform with the runbook
-                # is the exact failure this battery was built to catch.
+            max_rounds = int(dispatch_cfg.get("worker_perform_retry_max_rounds", 2))
+            retry_on = dispatch_cfg.get("worker_perform_retry_enabled", True)
+            rounds = 0
+            while failing and retry_on and rounds < max_rounds:
+                rounds += 1
                 from symbio.app import skill_perform as _skill_perform
 
-                copies = int(dispatch_cfg.get(
-                    "worker_perform_retry_samples_per_case", 2))
                 added = _skill_perform.remedy_samples(
-                    perform_cases, perform_regressions, new_tok, system_prompt,
-                    role, copies=copies,
+                    perform_cases, failing, new_tok, system_prompt, role,
+                    copies=int(dispatch_cfg.get(
+                        "worker_perform_retry_samples_per_case", 2)),
                     # The cases it still passes go back in as ballast. A remedy
                     # built only from failures makes them the bulk of the delta,
                     # and on a corpus this small whichever behaviour is repeated
@@ -1184,38 +1214,66 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
                     passing=after_perform.passing,
                     passing_copies=int(dispatch_cfg.get(
                         "worker_perform_retry_passing_copies", 1)))
-                if added:
-                    extra = int(dispatch_cfg.get(
-                        "worker_perform_retry_max_extra_iters", 50))
-                    print(f"  [Perform] Injected {added} remedy sample(s); "
-                          f"retraining '{role}' for {extra} iters.")
-                    # Same teardown discipline as the recall remedy above: the
-                    # trainer loads its own full copy of the weights, so ours
-                    # goes first. Everything still needed from it is on disk.
-                    new_model, new_tok = None, None
-                    training.release_model()
-                    retrained = training.run_training(
-                        config, iters=extra, role=role,
-                        model_name=entry["model_name"])
-                    training.release_model()
-                    training.settle_after_trainer_exit(config)
-                    shortfall = training.load_memory_shortfall(
-                        config, entry["model_name"],
-                        purpose=f"reload worker '{role}' after perform remedy")
-                    if retrained and not shortfall:
-                        new_model, new_tok = load(
-                            entry["model_name"], adapter_path=str(adapter_dir))
-                        after_perform = _run_perform(new_model, new_tok)
-                        perform_regressions = sorted(
-                            baseline_perform.passing - after_perform.passing)
-                    elif shortfall:
-                        # Unchecked is treated as failed, so the rollback below
-                        # still fires on the pre-remedy result.
-                        print(f"  [Perform] {shortfall}")
-                else:
+                if not added:
                     print("  [Perform] No remedy samples could be generated "
-                          "(no case carried an expected script).")
+                          "(no case carried its source example).")
+                    break
 
+                extra = int(dispatch_cfg.get(
+                    "worker_perform_retry_max_extra_iters", 50))
+                print(f"  [Perform] Round {rounds}/{max_rounds}: "
+                      f"{len(failing)} check(s) failing; injected {added} "
+                      f"demonstration sample(s), retraining for {extra} iters.")
+                # Same teardown discipline as the recall remedy above: the
+                # trainer loads its own full copy of the weights, so ours goes
+                # first. Everything still needed from it is on disk.
+                new_model, new_tok = None, None
+                training.release_model()
+                retrained = training.run_training(
+                    config, iters=extra, role=role,
+                    model_name=entry["model_name"])
+                training.release_model()
+                training.settle_after_trainer_exit(config)
+                shortfall = training.load_memory_shortfall(
+                    config, entry["model_name"],
+                    purpose=f"reload worker '{role}' after perform remedy")
+                if not retrained or shortfall:
+                    # Unchecked is treated as failed, so the decision below
+                    # still fires on the pre-remedy result.
+                    if shortfall:
+                        print(f"  [Perform] {shortfall}")
+                    break
+                new_model, new_tok = load(
+                    entry["model_name"], adapter_path=str(adapter_dir))
+                after_perform = _run_perform(new_model, new_tok)
+                still = sorted(
+                    cid for cid, ok in after_perform.results.items() if not ok)
+                if not still:
+                    print(f"  [Perform] All {after_perform.total} check(s) pass "
+                          f"after round {rounds}.")
+                    failing = still
+                    break
+                if len(still) >= len(failing):
+                    # No fewer failures than before the round. More of the same
+                    # training is not going to find it, and each round costs a
+                    # full fine-tune plus two model loads on a background
+                    # thread. Stop and report rather than spend the budget
+                    # proving it twice.
+                    print(f"  [Perform] Round {rounds} did not reduce the "
+                          f"failures ({len(still)}); stopping retries. The "
+                          f"corpus, not the iteration count, is the limit.")
+                    failing = still
+                    break
+                failing = still
+
+            if baseline_perform is not None:
+                perform_regressions = sorted(
+                    baseline_perform.passing - after_perform.passing)
+
+        # "Regressed" against a previous adapter; "is worse than the base
+        # model" when this was a first training. They are different claims and
+        # reporting the first for the second would be wrong.
+        against = "the base model" if baseline_is_base else "the previous adapter"
         if perform_regressions and dispatch_cfg.get(
                 "worker_perform_rollback_on_regression", True):
             # Blocks where a derived recall regression only reports. A derived
@@ -1230,10 +1288,10 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
                     f"{len(perform_regressions)} performance check(s) "
                     f"({', '.join(perform_regressions)}); rolled back.")
             return True, (
-                f"Worker '{role}' trained and kept — it lost "
-                f"{len(perform_regressions)} performance check(s) "
-                f"({', '.join(perform_regressions)}) but there is no previous "
-                f"adapter to roll back to.")
+                f"Worker '{role}' trained and kept — it performs worse than "
+                f"{against} on {len(perform_regressions)} check(s) "
+                f"({', '.join(perform_regressions)}), and there is no previous "
+                f"adapter to roll back to. The corpus is what needs fixing.")
 
         if len(regressions) > threshold:
             # Derived cases grade a reply on how much of the steps text it
@@ -1277,6 +1335,12 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
             scores.append(f"{after.pass_count}/{after.total} recall")
         if after_perform is not None:
             scores.append(f"{after_perform.pass_count}/{after_perform.total} performance")
+        if scores and baseline_is_base:
+            # First training: there was no previous adapter, so the reading
+            # above is the absolute score and the comparison was against the
+            # base model. Both are worth saying -- an adapter that merely ties
+            # the base model has not earned its place.
+            scores[-1] += " (first adapter, measured against the base model)"
         return True, (
             f"Worker '{role}' trained ({', '.join(scores)} checks passing)."
             if scores else f"Worker '{role}' trained.")

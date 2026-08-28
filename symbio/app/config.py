@@ -429,6 +429,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "worker_perform_retry_samples_per_case": 2,
         # Passing cases re-injected alongside the failures, as ballast.
         "worker_perform_retry_passing_copies": 1,
+        # Rounds of "train it more, then ask again". Each round is a full
+        # fine-tune plus two model loads, and a round that does not reduce
+        # the failures stops the loop early.
+        "worker_perform_retry_max_rounds": 2,
     },
     # Anonymous telemetry + /feedback. Off by default; requires an explicit
     # Y/N consent (run_setup_wizard or /telemetry) before anything is sent.
