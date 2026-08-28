@@ -266,6 +266,7 @@ class ToolsMixin:
                     tokenizer=self.tokenizer,
                     auto_train_adapter=True,
                     example_generator=self._skill_example_generator(),
+                    history=list(self.history),
                 )
                 self.retriever.invalidate_cache()
                 note_path = result.get("note_path", "")
