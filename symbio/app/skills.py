@@ -271,7 +271,9 @@ Rules:
 - No status summaries, no JSON result objects, no prose explanation. Code only.
 {fixture}{sandbox}{api}{avoid}{feedback}
 Reply in exactly this format:
-REQUEST: <one line: what the user asked for, with a concrete URL or path>
+REQUEST: <one line: what the user asked for. Name the concrete file or URL AND \
+say what to produce from it. "Process a.json and generate b.json" is NOT \
+acceptable -- it names two files and states no task.>
 OUTPUT:
 ```python
 <the complete script>
