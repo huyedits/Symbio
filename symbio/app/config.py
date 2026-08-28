@@ -87,7 +87,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "early_stop_min_delta": 0.005,
     },
     "agent": {
-        "max_tool_rounds": 3,
+        # 3 was not enough for any API that makes you work for it. A single
+        # request that moves (410 -> new path) and then rate-limits twice needs
+        # four rounds before the first byte of real data, and that is an
+        # ordinary API, not a hostile one. Measured 2026-08-27.
+        "max_tool_rounds": 6,
         "history_limit": 20,
         "sandbox_timeout": 30,
         "code_timeout": 60,
@@ -413,6 +417,22 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "worker_golden_retry_enabled": True,
         "worker_golden_retry_max_extra_iters": 50,
         "worker_golden_retry_samples_per_case": 3,
+        # The perform battery: held-out checks minted from the worker's own
+        # verified worked examples with the values swapped, graded by RUNNING
+        # the reply (see symbio/app/skill_perform.py). Unlike the derived
+        # recall checks it can tell specialisation from damage, so it is
+        # allowed to revert a retrain.
+        "worker_perform_set_enabled": True,
+        "worker_perform_rollback_on_regression": True,
+        "worker_perform_retry_enabled": True,
+        "worker_perform_retry_max_extra_iters": 50,
+        "worker_perform_retry_samples_per_case": 2,
+        # Passing cases re-injected alongside the failures, as ballast.
+        "worker_perform_retry_passing_copies": 1,
+        # Rounds of "train it more, then ask again". Each round is a full
+        # fine-tune plus two model loads, and a round that does not reduce
+        # the failures stops the loop early.
+        "worker_perform_retry_max_rounds": 2,
     },
     # Anonymous telemetry + /feedback. Off by default; requires an explicit
     # Y/N consent (run_setup_wizard or /telemetry) before anything is sent.

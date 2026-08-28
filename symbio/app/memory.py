@@ -76,6 +76,23 @@ def ensure_capability_notes():
     return created
 
 
+# Placeholders that mean "no procedure yet", not a procedure. The first is the
+# string /new-skill itself used to write when the steps were omitted.
+_NO_PROCEDURE = (
+    "(no steps provided yet)",
+    "no steps provided yet",
+    "tbd", "todo", "n/a", "none",
+)
+
+
+def _has_procedure(steps: str) -> bool:
+    """True when `steps` is something a worker could actually be taught."""
+    body = (steps or "").strip()
+    if not body:
+        return False
+    return body.casefold().strip(".!") not in _NO_PROCEDURE
+
+
 def save_skill(
     name: str,
     steps: str,
@@ -83,6 +100,7 @@ def save_skill(
     tokenizer: Any | None = None,
     auto_train_adapter: bool = True,
     example_generator: Any = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> Path | dict[str, Any]:
     """Persist a reusable multi-step skill as a 'Skill:' note.
 
@@ -90,6 +108,25 @@ def save_skill(
     LoRA adapter for the skill and return a result dict. Otherwise just save
     the note and return its path (legacy behavior).
     """
+    # A skill with no procedure is refused outright, here rather than at any
+    # one caller, because all four ways in reach this function -- /new-skill,
+    # the `save_skill` tool the model emits itself, `symb skill new`, and
+    # skills.save_skill_adapter.
+    #
+    # It used to be allowed: `/new-skill <name>` with no "| <steps>" saved the
+    # literal string "(no steps provided yet)" as the procedure and started a
+    # background fine-tune on it. That costs a training run to teach a worker
+    # to recite a placeholder, and it is worse than merely wasteful, because
+    # skill_note_body derives the note's Triggers from its body -- so the
+    # placeholder produced a note keyed on "provided, yet", sitting in a
+    # retrieval index that is term-frequency over note text and already prone
+    # to matching skills on incidental words.
+    if not _has_procedure(steps):
+        raise ValueError(
+            f"Skill '{name}' has no steps. Pass them after a pipe: "
+            f"/new-skill {name} | 1. First step. 2. Second step. "
+            f"A skill with no procedure cannot be trained or retrieved.")
+
     # The note carries a derived Triggers block, not just the steps: retrieval
     # is term-frequency over the body, and a bare four-line procedure loses to
     # any longer note that repeats a common word. See skills.skill_note_body.
@@ -101,7 +138,7 @@ def save_skill(
 
         result = skills.save_skill_adapter(
             name, steps, config, tokenizer, auto_train=auto_train_adapter,
-            example_generator=example_generator,
+            example_generator=example_generator, history=history,
         )
         result["note_path"] = str(path)
         return result

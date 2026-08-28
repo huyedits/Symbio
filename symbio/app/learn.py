@@ -21,7 +21,7 @@ from typing import Any
 
 from symbio import constants, safety
 from symbio.app import memory, training
-from symbio.app.tooling import strip_tool_tags
+from symbio.app.tooling import redact_secrets, strip_tool_tags
 
 
 # Phrases that signal the model is answering from a gap in its knowledge.
@@ -90,6 +90,41 @@ _EXPLICIT_REFUSAL_RE = re.compile(
     r"|Tool '[^']+' was not approved"
     r"|\bwas not approved \(risk score\b",
     re.IGNORECASE)
+
+
+# A transient "come back shortly", which is the one failure whose correct
+# response is the *identical* call again. Everything else in the retry path
+# assumes a repeat is either a fixed precondition or a loop to suppress; a rate
+# limit is neither, and it is not a tool error either -- the script that got a
+# 429 ran perfectly. That combination is what made it unrecoverable: the call
+# was recorded as done, never counted as failed, and so could not be reissued
+# at all. Seen live 2026-08-27 against an API that 429s twice before serving.
+_RATE_LIMIT_RE = re.compile(
+    r"\b(?:429|503)\b"
+    r"|\btoo many requests\b"
+    r"|\brate[ _-]?limit(?:ed|ing)?\b"
+    r"|\bretry[ _-]?after\b"
+    r"|\bslow down\b"
+    r"|\bservice unavailable\b"
+    r"|\btemporarily unavailable\b",
+    re.IGNORECASE)
+
+
+def is_rate_limited(observation: str) -> bool:
+    """Is this observation an API asking to be called again later?
+
+    A refusal outranks it: "not approved (risk score 3/3)" must never be read
+    as a transient condition worth retrying, whatever else the text contains.
+    """
+    if is_user_refusal(observation):
+        return False
+    return bool(_RATE_LIMIT_RE.search(observation))
+
+
+def retry_after_seconds(observation: str) -> float | None:
+    """The server's own Retry-After, if it named one."""
+    m = re.search(r"retry[ _-]?after\W{0,3}(\d+(?:\.\d+)?)", observation, re.IGNORECASE)
+    return float(m.group(1)) if m else None
 
 
 def is_user_refusal(observation: str) -> bool:
@@ -758,10 +793,14 @@ def save_mistake_note(original_query: str, wrong_answer: str,
     # answer:**" as single lines; a value with embedded newlines (e.g. a
     # multi-line tool observation or a bulleted reply) would silently
     # truncate to just its first line otherwise.
-    original_query = original_query.replace("\n", " ")
-    wrong_answer = wrong_answer.replace("\n", " ")
-    correction = correction.replace("\n", " ")
-    correct_answer = correct_answer.replace("\n", " ")
+    # This note is written from the tool loop, not from the end-of-session
+    # "Save conversation for training?" prompt -- answering "n" there does not
+    # reach it, so redaction has to happen here or a credential typed into one
+    # turn survives on disk and, at mistake_threshold, in the weights.
+    original_query = redact_secrets(original_query).replace("\n", " ")
+    wrong_answer = redact_secrets(wrong_answer).replace("\n", " ")
+    correction = redact_secrets(correction).replace("\n", " ")
+    correct_answer = redact_secrets(correct_answer).replace("\n", " ")
     title = f"Correction: {original_query[:60]}{'...' if len(original_query) > 60 else ''}"
     body = (
         f"# {title}\n\n"

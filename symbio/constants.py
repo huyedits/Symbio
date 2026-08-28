@@ -112,6 +112,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "worker_golden_retry_enabled": True,
         "worker_golden_retry_max_extra_iters": 50,
         "worker_golden_retry_samples_per_case": 3,
+        "worker_perform_set_enabled": True,
+        "worker_perform_rollback_on_regression": True,
+        "worker_perform_retry_enabled": True,
+        "worker_perform_retry_max_extra_iters": 50,
+        "worker_perform_retry_samples_per_case": 2,
+        "worker_perform_retry_passing_copies": 1,
+        "worker_perform_retry_max_rounds": 2,
     },
     # Empty by default so the first run triggers interactive name setup and
     # every install seeds its own identity and training data.
