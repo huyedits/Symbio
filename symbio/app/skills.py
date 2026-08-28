@@ -15,6 +15,7 @@ import json
 import re
 import shutil
 import threading
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -270,7 +271,9 @@ Rules:
 - No status summaries, no JSON result objects, no prose explanation. Code only.
 {fixture}{sandbox}{api}{avoid}{feedback}
 Reply in exactly this format:
-REQUEST: <one line: what the user asked for, with a concrete URL or path>
+REQUEST: <one line: what the user asked for. Name the concrete file or URL AND \
+say what to produce from it. "Process a.json and generate b.json" is NOT \
+acceptable -- it names two files and states no task.>
 OUTPUT:
 ```python
 <the complete script>
@@ -574,9 +577,15 @@ def _parse_worked_example(text: str) -> tuple[str, str] | None:
 # for that would empty the corpus for every skill whose service happens to be
 # down -- which is how attribute-checking alone took worked examples from 6 to 0.
 _MODEL_FAULT = (
-    "SyntaxError", "IndentationError", "NameError", "AttributeError",
-    "TypeError", "ImportError", "ModuleNotFoundError", "UnboundLocalError",
-    "IndentationError", "KeyError", "ZeroDivisionError",
+    # Both spellings on purpose. A traceback says "SyntaxError"; the sandbox
+    # pre-compiles and reports its own "Syntax error: ..." summary line, which
+    # matched none of these -- so a syntax error fell through to the generic
+    # branch below and came back as the caret from the source excerpt. The
+    # teacher was then handed "your attempt FAILED when it was actually run:
+    # ^", which is not a defect anyone can act on.
+    "SyntaxError", "Syntax error", "IndentationError", "NameError",
+    "AttributeError", "TypeError", "ImportError", "ModuleNotFoundError",
+    "UnboundLocalError", "KeyError", "ZeroDivisionError",
 )
 _ENV_FAULT = (
     "ConnectionRefusedError", "URLError", "HTTPError", "timeout", "TimeoutError",
@@ -617,6 +626,21 @@ def _repair_from_traceback(code: str, fault: str) -> tuple[str, str | None]:
     return patched, f".{wrong} -> .{right}"
 
 
+def _informative_line(text: str) -> str:
+    """The line of an error report that actually names the defect.
+
+    A Python traceback puts it last, which is why the callers read from the
+    end. The sandbox's own pre-compile check puts it FIRST and follows it with
+    a source excerpt whose final line is a lone caret -- so reading from the
+    end returned "^". Skip lines that carry no words.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for line in reversed(lines):
+        if any(ch.isalpha() for ch in line.replace("|", "")):
+            return line[:200]
+    return (lines[0][:200] if lines else "exited non-zero")
+
+
 def _execution_feedback(code: str, config: dict[str, Any]) -> tuple[str, str | None]:
     """Run the candidate. Return (usable, the model's own mistake to fix).
 
@@ -652,13 +676,13 @@ def _execution_feedback(code: str, config: dict[str, Any]) -> tuple[str, str | N
             line = next((ln for ln in reversed(tail.splitlines())
                          if marker in ln), marker)
             return "fault", line.strip()[:200]
-    return "fault", tail.splitlines()[-1].strip()[:200] if tail else "exited non-zero"
+    return "fault", _informative_line(tail) if tail else "exited non-zero"
 
 
 def _seed_worked_examples(
     name: str, steps: str, generate_fn: Any, count: int = 6,
     config: dict[str, Any] | None = None,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, bool]]:
     """Ask the headmaster for worked examples of the procedure.
 
     The seeds above teach a worker to RECITE a procedure -- the assistant turn
@@ -675,6 +699,13 @@ def _seed_worked_examples(
     page it had memorised and 1/8 on any other -- mean pairwise similarity 0.987
     -- so each request is generated knowing the previous ones, and a duplicate
     is retried once and then dropped.
+
+    Returns (request, output, verified) per example, where `verified` means
+    the script ran clean in the sandbox rather than merely passing the static
+    checks. The flag used to be a local tally printed once and discarded,
+    which was enough to report on seeding and not enough for anything to act
+    on -- skill_perform mints its battery only from examples that ran, since
+    a perturbed twin of an unrunnable example can never be executed either.
     """
     from difflib import SequenceMatcher
 
@@ -695,7 +726,23 @@ def _seed_worked_examples(
                 f"available: {', '.join(sorted(blocked))}. Use builtins instead --"
                 " open() for files, json for parsing. Do not import them.\n")
     verified = 0  # examples that actually ran clean, not merely passed static checks
-    examples: list[tuple[str, str]] = []
+    # Why a requested example never arrived. Both of the paths counted here
+    # used to drop silently, and the summary below reported "1/1 verified" for
+    # a run where five of six requested slots produced nothing -- which reads
+    # as success and is how a worker ends up with a corpus that is six parts
+    # recitation to one part demonstration. That ratio is not a detail: this
+    # file already states that on a corpus this small whichever behaviour is
+    # repeated most just wins, and a worker seeded that way recites perfectly
+    # and cannot perform. Measured on the first real trial of the perform
+    # battery, 2026-08-28.
+    dropped: Counter = Counter()
+    examples: list[tuple[str, str, bool]] = []
+    repeated = 0       # accepted despite matching one we already have
+    # Set once the teacher has proved it writes the same script whatever the
+    # avoid hint says. Diversity is worth three extra generations per slot to
+    # find out; it is not worth 18 to keep re-confirming, and on a 14B teacher
+    # those are minutes.
+    deterministic = False
     for _ in range(count):
         # Carried across attempts. Generation is greedy so that seed data is not
         # a dice roll, which means an identical prompt reproduces an identical
@@ -704,10 +751,12 @@ def _seed_worked_examples(
         # the retry hands it back and asks for that one thing to be fixed. A
         # teacher does not have to be right first time, only correctable.
         feedback = ""
-        for attempt in range(4):
+        attempts = 1 if deterministic else 4
+        for attempt in range(attempts):
+            last_attempt = attempt == attempts - 1
             avoid = ""
             if examples:
-                seen = "; ".join(r for r, _ in examples[-4:])
+                seen = "; ".join(r for r, _, _ok in examples[-4:])
                 avoid = ("\nMake it clearly different from these, which are already "
                          f"covered: {seen}\n")
             try:
@@ -726,6 +775,7 @@ def _seed_worked_examples(
                 return examples
             parsed = _parse_worked_example(raw or "")
             if parsed is None:
+                dropped["unparseable"] += 1
                 continue
             request, output = parsed
             ran_clean = False
@@ -769,13 +819,40 @@ def _seed_worked_examples(
                 # status report ({"status": "success", "moved": {...}}), which
                 # would teach the worker to narrate outcomes it never produced.
                 continue
-            if any(SequenceMatcher(None, output, prev).ratio() > 0.95
-                   for _, prev in examples):
-                continue  # too close to one we already have; retry once
-            examples.append((request, output))
+            duplicate = any(SequenceMatcher(None, output, prev).ratio() > 0.95
+                            for _, prev, _ok in examples)
+            if duplicate and not last_attempt:
+                dropped["duplicate"] += 1
+                continue  # try for a genuinely different one first
+            if duplicate:
+                # Take the repeat rather than the empty slot. A procedure
+                # specified tightly enough to be worth a worker has close to one
+                # correct script, and a deterministic teacher will keep writing
+                # it however the avoid hint is worded -- measured here, six
+                # requested examples produced one, the other five all
+                # near-identical. The empty slots are not the harmless outcome:
+                # they left a corpus of 6 recall samples to 1 demonstration, and
+                # this file already states that on a corpus that small whichever
+                # behaviour is repeated most just wins. That worker recited the
+                # four steps perfectly and answered every real request, memorised
+                # or not, with fabricated JSON. A repeated demonstration is a
+                # much smaller problem than a corpus that teaches reciting.
+                repeated += 1
+                deterministic = True
+            examples.append((request, output, ran_clean))
             if ran_clean:
                 verified += 1
             break
+    recall_count = len(_seed_user_turns(name))
+    distinct = len(examples) - repeated
+    if len(examples) < count or repeated:
+        detail = ", ".join(f"{n} {why}" for why, n in sorted(dropped.items()))
+        print(f"[skills] {len(examples)}/{count} worked example(s): {distinct} "
+              f"distinct, {repeated} repeated"
+              + (f" ({detail} retried)" if detail else "")
+              + f". Corpus is {recall_count} recall to {len(examples)} "
+              f"demonstration sample(s).",
+              file=__import__("sys").stderr, flush=True)
     if wants_code and config is not None:
         print(f"[skills] {verified}/{len(examples)} worked example(s) VERIFIED by "
               f"execution; {len(examples) - verified} could not be run here "
@@ -784,9 +861,94 @@ def _seed_worked_examples(
     return examples
 
 
+_PY_TAG_RE = re.compile(r"<py>(.*?)</py>", re.S)
+_PY_FENCE_RE = re.compile(r"```(?:python)?\s*\n(.+?)```", re.S)
+_OBSERVATION_PREFIX = "[System observation:"
+# What the sandbox says when a script actually ran. Anything else -- a
+# traceback, a refusal, a blocked import -- is not a demonstration.
+_RAN_MARKERS = ("Python script exited ok", "exited ok")
+
+
+def _harvested_request(history: list[dict[str, Any]], upto: int) -> str | None:
+    """The last thing the USER actually asked, before assistant turn `upto`.
+
+    Observations are appended to history as user turns, so the most recent
+    user message is usually the tool result rather than the request.
+    """
+    for i in range(upto - 1, -1, -1):
+        msg = history[i]
+        if msg.get("role") != "user":
+            continue
+        content = (msg.get("content") or "").strip()
+        if not content or content.startswith(_OBSERVATION_PREFIX):
+            continue
+        if "<tool_response>" in content:
+            continue
+        return content
+    return None
+
+
+def harvest_worked_examples(
+    history: list[dict[str, Any]] | None, max_examples: int = 4,
+) -> list[tuple[str, str, bool]]:
+    """Worked examples taken from what the session ACTUALLY just did.
+
+    A skill is usually saved right after the work it describes has been done,
+    and until now that work was thrown away: seeding asked the headmaster to
+    *invent* examples of a procedure it had this moment carried out for real.
+    The invented ones are strictly worse evidence. They are guesses at what the
+    code should look like, they have to be executed afterwards to find out
+    whether they run, and a greedy teacher writes the same one six times over
+    (measured: 6 requested, 1 distinct). A harvested example is a real request
+    paired with code that already ran in this sandbox against this machine's
+    real files -- verified by having happened, not by a check bolted on after.
+
+    Returned newest-first as (request, output, verified) so it drops straight
+    into the same list _seed_worked_examples fills. `verified` is True only
+    where the observation says the script ran; a script that raised is not a
+    demonstration of anything.
+    """
+    if not history:
+        return []
+    out: list[tuple[str, str, bool]] = []
+    seen: set[str] = set()
+    for i in range(len(history) - 1, -1, -1):
+        if len(out) >= max_examples:
+            break
+        msg = history[i]
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content") or ""
+        match = _PY_TAG_RE.search(content) or _PY_FENCE_RE.search(content)
+        if match is None:
+            continue
+        code = match.group(1).strip()
+        if not code or code in seen:
+            continue
+        # The observation for this call is the next user turn.
+        ran = False
+        for j in range(i + 1, min(i + 3, len(history))):
+            nxt = history[j]
+            if nxt.get("role") != "user":
+                continue
+            body = nxt.get("content") or ""
+            if any(m in body for m in _RAN_MARKERS):
+                ran = True
+            break
+        if not ran:
+            continue
+        request = _harvested_request(history, i)
+        if not request:
+            continue
+        seen.add(code)
+        out.append((request, f"```python\n{code}\n```", True))
+    return out
+
+
 def _seed_skill_training_data(
     role: str, name: str, steps: str, tokenizer: Any,
     example_generator: Any = None, config: dict[str, Any] | None = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> int:
     """Write synthetic training samples for a brand-new skill worker.
 
@@ -830,10 +992,58 @@ def _seed_skill_training_data(
     # recall coverage fell ~98% -> ~38%; whichever behaviour is repeated most
     # just wins on a corpus this small, so the recall half is kept whole and
     # the additions are capped at roughly the same count.
-    if example_generator is not None:
-        for request, output in _seed_worked_examples(
-                name, steps, example_generator, config=config):
+    # What the session actually did comes first, and the teacher is only asked
+    # to make up the shortfall. A skill is usually saved straight after the
+    # work it describes, so this is the one moment real demonstrations are
+    # free -- already run, already correct, already varied by having happened.
+    worked = harvest_worked_examples(history)
+    if worked:
+        print(f"[skills] harvested {len(worked)} worked example(s) from work "
+              f"this session actually ran; asking the teacher for the rest.",
+              file=__import__("sys").stderr, flush=True)
+
+    if example_generator is not None or worked:
+        if example_generator is not None:
+            wanted = max(0, len(_seed_user_turns(name)) - len(worked))
+            if wanted:
+                worked += _seed_worked_examples(
+                    name, steps, example_generator, count=wanted, config=config)
+        for request, output, _verified in worked:
             samples.append((request, output, "worked"))
+
+        # Mint the perform battery from the same examples, before they are
+        # rendered into training text. These are the only two things that know
+        # both what the worker was taught and that it demonstrably ran, and a
+        # held-out check has to be built from that pair or it is guessing.
+        if worked and config is not None:
+            try:
+                from symbio.app import skill_perform
+
+                minted = skill_perform.mint_and_save(
+                    role, worked, config, wants_code=_steps_want_code(steps))
+                print(f"[skills] minted {minted} held-out performance check(s) "
+                      f"for '{role}'"
+                      + ("" if minted else " -- no example had a value shared "
+                                          "between its request and its script"),
+                      file=__import__("sys").stderr, flush=True)
+            except Exception as e:
+                # A battery that fails to mint costs a guard rail, not the
+                # skill. Loud, and never fatal to the seeding it hangs off.
+                print(f"[skills] performance battery not minted for '{role}': "
+                      f"{type(e).__name__}: {e}",
+                      file=__import__("sys").stderr, flush=True)
+
+    demonstrations = sum(1 for _u, _a, kind in samples if kind == "worked")
+    recitations = sum(1 for _u, _a, kind in samples if kind == "recall")
+    if demonstrations < recitations:
+        # The one ratio that decides what the worker becomes, said plainly, and
+        # said here rather than inside the teacher: examples can now arrive by
+        # being harvested from real work instead of generated, and a harvest-only
+        # seeding skipped the warning entirely.
+        print(f"[skills] WARNING: recitation outnumbers demonstration "
+              f"{recitations}:{demonstrations} for '{name}'. Expect a worker "
+              f"that states the steps rather than carrying them out.",
+              file=__import__("sys").stderr, flush=True)
 
     written = 0
     for user_turn, answer, kind in samples:
@@ -989,6 +1199,7 @@ def save_skill_adapter(
     tokenizer: Any,
     auto_train: bool = True,
     example_generator: Any = None,
+    history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Save a skill note and create a dedicated worker adapter for it.
 
@@ -1055,7 +1266,8 @@ def save_skill_adapter(
                 try:
                     added = _seed_skill_training_data(
                         role, name, steps, seed_tokenizer,
-                        example_generator=example_generator, config=config)
+                        example_generator=example_generator, config=config,
+                        history=history)
                     result["seeded_samples"] = added
                 except Exception as e:  # a failed teacher must not lose the skill
                     result["seed_error"] = str(e)

@@ -2,6 +2,7 @@
 
 import ast
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -237,23 +238,64 @@ _STUB_ALTERNATIVES: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+# An HTTP call whose response was parsed without the status ever being read.
+_HTTP_CALL_RE = re.compile(
+    r"\b(?:requests|httpx)\.(?:get|post|put|patch|delete|head|request)\s*\(")
+_STATUS_CHECK_RE = re.compile(
+    r"\.status_code\b|\.raise_for_status\s*\(|\.is_success\b|\.ok\b")
+
+
+def _http_status_hint(code: str, out: str) -> str:
+    """Guidance for a script that parsed a response body it never validated.
+
+    Driving the CLI against an API that had moved (410) and was rate-limiting
+    (429) on 2026-08-27, the model wrote `requests.get(...).json()['items']`
+    three times running and never once looked at `.status_code`. Both failures
+    were invisible *as failures*: requests returns a response object for 4xx
+    just as it does for 200, so the only symptom was a KeyError on the error
+    document. It read that as "wrong key" and went hunting for another key.
+
+    Nothing else in the stack can catch this. _verify_api_usage checks
+    attributes against imported classes, and `data['items']` is a dict
+    subscript on a value that only exists at runtime.
+    """
+    if not _HTTP_CALL_RE.search(code) or _STATUS_CHECK_RE.search(code):
+        return ""
+    lowered = out.lower()
+    if not any(m in lowered for m in
+               ("keyerror", "typeerror", "indexerror", "jsondecodeerror",
+                "expecting value", "not subscriptable")):
+        return ""
+    return (
+        "\n\n[The script never checked the HTTP status. requests/httpx return a "
+        "response object for 4xx and 5xx exactly as they do for 200, so .json() "
+        "just parsed the *error* document — which is why the key you expected is "
+        "missing. Print response.status_code and response.text before parsing.\n"
+        "  404/410: the body usually names the path that replaced it.\n"
+        "  401/403: the body usually names the header or scheme it wanted.\n"
+        "  429: retry the same call after response.headers.get('Retry-After') "
+        "seconds — loop inside this one script rather than answering without "
+        "the data.]")
+
+
 def _stub_hint_for_failure(code: str, out: str) -> str:
     """Guidance to append when a script failed over something the stub provides."""
+    hints = _http_status_hint(code, out)
     lowered = out.lower()
     if not any(m in lowered for m in
                ("importerror", "modulenotfounderror", "no module named",
                 "has no attribute", "cannot import name")):
-        return ""
+        return hints
     offered = [repl for mods, repl in _STUB_ALTERNATIVES
                if any(m in lowered for m in mods)]
     if not offered:
-        return ""
+        return hints
     already = "symbio_tools" in code
     lead = ("You already import symbio_tools — it also provides:"
             if already else
             "The sandbox provides these instead, via `from symbio_tools import ...`:")
-    return ("\n\n[" + lead + "\n  " + "\n  ".join(offered)
-            + "\nUse them rather than guessing another library's API.]")
+    return hints + ("\n\n[" + lead + "\n  " + "\n  ".join(offered)
+                    + "\nUse them rather than guessing another library's API.]")
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +334,7 @@ def _tools_stub_source() -> str:
 
 
 _STUB_TEMPLATE = '''# Auto-generated for sandboxed scripts. Rewritten every run; do not edit.
+import urllib.error as _ue
 import urllib.request as _u
 from pathlib import Path as _Path
 
@@ -382,12 +425,26 @@ def select_one(html, css):
 
 
 def fetch(url, timeout=15):
-    """Raw body of an http/https URL, as text."""
+    """Raw body of an http/https URL, as text.
+
+    A non-2xx raises, and the message carries the status AND the body: urlopen
+    alone raises "HTTP Error 410: Gone" and drops the response, which is exactly
+    where an API puts "/items was removed in v2. Use /v2/items." Retry-After is
+    surfaced for the same reason -- a 429 is a "same call, later", and the
+    number is useless if it never reaches the caller.
+    """
     if not str(url).startswith(("http://", "https://")):
         raise ValueError("Only http/https URLs can be fetched.")
     req = _u.Request(str(url), headers={"User-Agent": "symbio-sandbox/1.0"})
-    with _u.urlopen(req, timeout=timeout) as resp:
-        return resp.read(1_000_000).decode("utf-8", errors="replace")
+    try:
+        with _u.urlopen(req, timeout=timeout) as resp:
+            return resp.read(1_000_000).decode("utf-8", errors="replace")
+    except _ue.HTTPError as e:
+        body = e.read(20_000).decode("utf-8", errors="replace")
+        retry = e.headers.get("Retry-After") if e.headers else None
+        extra = f" Retry-After: {retry}s." if retry else ""
+        raise RuntimeError(
+            f"HTTP {e.code} from {url}.{extra} Response body: {body}") from None
 '''
 
 

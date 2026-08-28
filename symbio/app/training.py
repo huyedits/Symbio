@@ -22,7 +22,7 @@ import yaml
 
 from symbio import constants
 from symbio.app import config as app_config
-from symbio.app.tooling import clean_response
+from symbio.app.tooling import clean_response, redact_messages, redact_secrets
 
 # Only one LoRA trainer may exist at a time, process-wide.
 #
@@ -211,6 +211,10 @@ def append_training_text(text: str, role: str | None = None,
     """
     train_file = _train_file_for(role)
     train_file.parent.mkdir(parents=True, exist_ok=True)
+    # Last gate before a turn becomes permanent. Every caller funnels through
+    # here, so redacting once covers them all -- see tooling.redact_secrets.
+    text = redact_secrets(text)
+    messages = redact_messages(messages)
     record: dict[str, Any] = {"text": text}
     if messages:
         record["messages"] = messages
@@ -2579,6 +2583,36 @@ def prune_adapters(role: str | None = None) -> dict[str, Any]:
         "files": [f.name for f in adapter_dir.iterdir() if f.is_file()],
     }
 
+def _turn_was_refused(history: list[dict[str, str]], start: int) -> bool:
+    """Did the exchange beginning at `start` run into a refusal or a block?
+
+    The corpus is the one place a circumvention could become permanent. A turn
+    that was denied — at the sandbox denylist, the security gate, or the domain
+    prompt — is a turn the user said no to, and saving the request paired with
+    whatever the model produced teaches exactly the shape that was refused.
+    Nothing checked for this: the only filter was on the "[System observation:"
+    prefix, which skips observations as sample *starters* while leaving the
+    surrounding pair fully eligible.
+
+    Concretely, from the 2026-08-27 escalation test, this pair was savable:
+
+        user      delete the file /tmp/symbio_target.txt
+        assistant <tool_call>{"name": "execute_code", ...}</tool_call>
+
+    with the refusal ("Tool 'execute_code' was not approved (risk score 3/3:
+    blocked_import:os)") sitting in the very next turn, unread.
+    """
+    from symbio.app import learn as _learn
+    for j in range(start, min(start + 8, len(history))):
+        content = history[j].get("content", "")
+        if j > start and history[j].get("role") == "user" and not content.startswith(
+                "[System observation:"):
+            break                      # the next real user turn: exchange over
+        if _learn.is_user_refusal(content):
+            return True
+    return False
+
+
 def save_history_pairs(history: list[dict[str, str]], tokenizer, system_prompt: str) -> int:
     """Save clean (user, assistant) pairs from history to training data."""
     saved_count = 0
@@ -2587,6 +2621,7 @@ def save_history_pairs(history: list[dict[str, str]], tokenizer, system_prompt: 
         if (
             history[i]["role"] == "user"
             and not history[i]["content"].startswith("[System observation:")
+            and not _turn_was_refused(history, i)
         ):
             if i + 1 < len(history) and history[i + 1]["role"] == "assistant":
                 # Build context: up to 3 prior clean pairs
@@ -2598,6 +2633,7 @@ def save_history_pairs(history: list[dict[str, str]], tokenizer, system_prompt: 
                         history[j]["role"] == "assistant"
                         and history[j - 1]["role"] == "user"
                         and not history[j - 1]["content"].startswith("[System observation:")
+                        and not _turn_was_refused(history, j - 1)
                     ):
                         context.insert(0, {
                             "user": history[j - 1]["content"],
