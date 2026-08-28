@@ -1175,7 +1175,15 @@ def _guarded_train_worker(role: str, config: dict[str, Any], iters: int | None =
                     "worker_perform_retry_samples_per_case", 2))
                 added = _skill_perform.remedy_samples(
                     perform_cases, perform_regressions, new_tok, system_prompt,
-                    role, copies=copies)
+                    role, copies=copies,
+                    # The cases it still passes go back in as ballast. A remedy
+                    # built only from failures makes them the bulk of the delta,
+                    # and on a corpus this small whichever behaviour is repeated
+                    # most just wins — which moves the failure instead of
+                    # removing it.
+                    passing=after_perform.passing,
+                    passing_copies=int(dispatch_cfg.get(
+                        "worker_perform_retry_passing_copies", 1)))
                 if added:
                     extra = int(dispatch_cfg.get(
                         "worker_perform_retry_max_extra_iters", 50))

@@ -217,14 +217,36 @@ def _candidate_values(request: str, script: str) -> dict[str, str]:
         # they are used only when nothing better is available.
         for match in _URL_RE.finditer(request):
             url = match.group(0)
-            if url not in script:
+            if url not in script or "?" in url or "#" in url:
                 continue
-            tail = url.rstrip("/").rsplit("/", 1)
-            if len(tail) == 2 and tail[1] and "." not in tail[1]:
-                subs[url] = f"{tail[0]}/{_new_stem(tail[1], used_stems)}"
-                break
+            # Only a PATH segment may be swapped, never the host. Without this
+            # guard `http://localhost:8817` -- which is exactly what the one
+            # real worked corpus in this checkout uses -- has no path to take,
+            # so rsplit("/") hands back the host and the "perturbed" ask
+            # becomes http://tally. That is not the same task against
+            # different input, it is a broken target, and the worker would be
+            # graded on failing to reach a machine that does not exist.
+            parts = re.match(r"(https?://[^/]+)(/[^\s]*)$", url.rstrip("/"))
+            if parts is None:
+                continue
+            host, path = parts.group(1), parts.group(2)
+            segment = path.rsplit("/", 1)[-1]
+            if not segment or "." in segment:
+                continue
+            replacement = _new_stem(segment, used_stems)
+            subs[url] = host + path[:len(path) - len(segment)] + replacement
+            break
     if not subs:
+        # Integers inside a URL are off-limits, which in practice means ports.
+        # The host guard above stops `http://localhost:8817` being perturbed,
+        # and without this the integer fallback immediately did the same damage
+        # by another route -- 8817 -> 8824 points the worker at a port nothing
+        # is listening on, and grades it on the connection refused.
+        url_spans = [m.span() for m in _URL_RE.finditer(request)]
         for match in _INT_RE.finditer(request):
+            start, end = match.span(1)
+            if any(a <= start and end <= b for a, b in url_spans):
+                continue
             value = match.group(1)
             if value in script and int(value) >= 2:
                 subs[value] = str(int(value) + 7)
@@ -487,26 +509,59 @@ def run_perform_set(
 def remedy_samples(
     cases: list[PerformCase], failing: list[str], tokenizer,
     system_prompt: str, role: str, copies: int = 2,
+    passing: set[str] | None = None, passing_copies: int = 1,
 ) -> int:
-    """Write training samples that answer a failed perform case correctly.
+    """Write training samples for a failed perform case -- alongside the ones
+    it still gets right.
 
     The recall battery's remedy target is the steps text, which is right for a
     case that asks the worker to state the procedure and exactly wrong here --
     it would teach the worker to recite in answer to a request to perform, the
     behaviour the whole file exists to detect. The target here is the case's
     own expected script: the procedure carried out on the perturbed values.
+
+    Both outcomes go in, and the reason is the one skills.py already states
+    about corpora this small: "whichever behaviour is repeated most just wins".
+    Injecting several copies of only the failures makes them the bulk of the
+    delta, and a remedy that fixes one case by drowning out the rest has moved
+    the failure rather than removed it. The passing cases go back in at a lower
+    count as ballast, so the retrain is pulled toward the failure without being
+    unanchored from what already worked.
+
+    What deliberately does NOT go in is the negative half in its literal form
+    -- the wrong answer, or a decline paired with the right one. That was tried
+    in this exact corpus and reverted: recall coverage fell from ~98% to ~38%,
+    legitimate requests started being declined, and the decline string became
+    an attractor strong enough to degrade unrelated generation into "That that
+    that". Every sample written here is a correct demonstration; the mixing is
+    between cases the worker failed and cases it passed, not between right
+    answers and wrong ones. Negative signal has one place it has been measured
+    to help -- fed back into the prompt on a retry, as
+    skills._seed_worked_examples does with the real traceback -- and that is
+    generation, not training.
     """
     from symbio.app import training
 
     by_id = {case.id: case for case in cases}
     added = 0
-    for case_id in failing:
-        case = by_id.get(case_id)
-        if case is None or not case.expected_script.strip():
-            continue
+
+    def _write(case: PerformCase, times: int) -> int:
+        if not case.expected_script.strip():
+            return 0
         answer = f"```python\n{case.expected_script.strip()}\n```"
-        for _ in range(max(1, copies)):
+        for _ in range(max(1, times)):
             training.append_chat_pair(
                 case.prompt, answer, tokenizer, system_prompt, role=role)
-            added += 1
+        return max(1, times)
+
+    for case_id in failing:
+        case = by_id.get(case_id)
+        if case is not None:
+            added += _write(case, copies)
+
+    if passing and passing_copies > 0:
+        for case_id in sorted(passing):
+            case = by_id.get(case_id)
+            if case is not None and case_id not in set(failing):
+                added += _write(case, passing_copies)
     return added
