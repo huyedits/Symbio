@@ -267,36 +267,43 @@ class CommandsMixin:
 
         elif cmd.startswith("/new-skill"):
             rest = user_input[len("/new-skill"):].strip()
-            if not rest:
+            name, steps = (rest.split("|", 1) + [""])[:2] if rest else ("", "")
+            name, steps = name.strip(), steps.strip()
+            # The steps are not optional, and omitting them used to be quiet:
+            # the skill was created with the placeholder "(no steps provided
+            # yet)" as its procedure and a background fine-tune started on it.
+            # memory.save_skill refuses that now; this says so before the work
+            # starts, and shows the pipe, which is the part people miss.
+            if not name or not steps:
                 self.output_fn("  Usage: /new-skill <name> | <steps>")
+                self.output_fn(
+                    "  The steps go after the pipe, on the same line:")
+                self.output_fn(
+                    "    /new-skill Rotate Keys | 1. Read the current key. "
+                    "2. Issue a new one. 3. Retire the old one.")
+                if name and not steps:
+                    self.output_fn(
+                        f"  Nothing was created for '{name}' — a skill with no "
+                        f"procedure cannot be trained or retrieved.")
             else:
-                if "|" in rest:
-                    name, steps = rest.split("|", 1)
-                else:
-                    name, steps = rest, ""
-                name = name.strip()
-                steps = steps.strip()
-                if not name:
-                    self.output_fn("  Usage: /new-skill <name> | <steps>")
-                else:
-                    try:
-                        result = memory.save_skill(
-                            name,
-                            steps or "(no steps provided yet)",
-                            config=self.config,
-                            tokenizer=self.tokenizer,
-                            auto_train_adapter=True,
-                            example_generator=self._skill_example_generator(),
+                try:
+                    result = memory.save_skill(
+                        name,
+                        steps,
+                        config=self.config,
+                        tokenizer=self.tokenizer,
+                        auto_train_adapter=True,
+                        example_generator=self._skill_example_generator(),
+                    )
+                    if isinstance(result, dict) and "role" in result:
+                        self.output_fn(
+                            f"  Created skill note and adapter for '{name}'. "
+                            f"Worker role: {result['role']}. Training started in the background."
                         )
-                        if isinstance(result, dict) and "role" in result:
-                            self.output_fn(
-                                f"  Created skill note and adapter for '{name}'. "
-                                f"Worker role: {result['role']}. Training started in the background."
-                            )
-                        else:
-                            self.output_fn(f"  Created skill note for '{name}'.")
-                    except Exception as e:
-                        self.output_fn(f"  Failed to create skill adapter: {e}")
+                    else:
+                        self.output_fn(f"  Created skill note for '{name}'.")
+                except Exception as e:
+                    self.output_fn(f"  Failed to create skill adapter: {e}")
 
         elif cmd == "/skill-adapters":
             adapters = skills.list_skill_adapters()
