@@ -504,7 +504,9 @@ class CommandsMixin:
             self.output_fn(json.dumps(report, indent=2, default=str))
 
         elif cmd == "/selfcheck":
-            report = health.verify_enabled_features(self.config, verbose=True, output_fn=self.output_fn)
+            report = health.verify_enabled_features(
+                self.config, verbose=True, output_fn=self.output_fn,
+                tokenizer=self.tokenizer)
             self._health_report = report
 
         elif cmd == "/setup":
@@ -646,7 +648,8 @@ class CommandsMixin:
                 if not msg.startswith("Unknown") and not msg.startswith("Bad"):
                     self.output_fn("  [Re-checking enabled features...]")
                     report = health.verify_enabled_features(
-                        self.config, verbose=True, output_fn=self.output_fn
+                        self.config, verbose=True, output_fn=self.output_fn,
+                        tokenizer=self.tokenizer,
                     )
                     self._health_report = report
             else:

@@ -631,7 +631,8 @@ class TelegramBot:
         session = self._get_or_create_session(chat_id)
         await update.message.reply_text("Running feature self-check…")
         try:
-            report = health.verify_enabled_features(session.config, verbose=False)
+            report = health.verify_enabled_features(
+                session.config, verbose=False, tokenizer=session.tokenizer)
             lines = ["Self-check:"]
             if report["all_ok"]:
                 lines.append("All enabled features are healthy.")

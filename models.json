@@ -46,5 +46,17 @@
     "description": "Dense 14B Phi-4, 4-bit \u2014 measured 2026-08-23 as a worker base: 4/8 on a deterministic battery vs Qwen3-8B's 6/8 (lost arithmetic, spelling, fraction comparison). Not used as the default worker base for that reason",
     "adapter_compatible": false,
     "memory_note": "~8.3 GB on disk, ~9-10 GB RAM at runtime; one model resident at a time on 16 GB"
+  },
+  "ternary_8b": {
+    "model_name": "prism-ml/Ternary-Bonsai-8B-mlx-2bit",
+    "description": "Ternary 2-bit 8B \u2014 the best tool-calling result measured here, 2026-08-30. BFCL bfcl_simple n=120: 94.17%, against Qwen3-8B-4bit 80.83% and Qwen3-14B-3bit 78.33% \u2014 and it beat both WITHOUT the 0.6B draft model they each had. 285s for the suite against their ~1100s. Loads in 1.6s. The win is reliability of FORM, not smarter arguments: it emitted a call on 120/120 tasks where Qwen3-8B produced none on 19, and on calls actually emitted Qwen3-8B is slightly better on argument values (96.0% vs 94.2%). Its chat template hard-closes <think></think> unconditionally, so it never reasons and never burns the token budget; forcing the block open makes it strictly worse (never terminates, 3.6-9x slower, wrong answers). Serve it no-think, which is the only mode it has.",
+    "adapter_compatible": false,
+    "memory_note": "2.15 GB on disk, 2.4 GB peak \u2014 a third of the 14B. Fits wired memory with room to spare; set gpu.wired_limit_mb or it pages to SSD."
+  },
+  "ternary_27b": {
+    "model_name": "prism-ml/Ternary-Bonsai-27B-mlx-2bit",
+    "description": "Ternary 2-bit 27B, multimodal (Qwen3_5ForConditionalGeneration, vision tower included). Runs fine on 16 GB with wired memory: 3.9s load, 11.5 tok/s, GPU 100%. An earlier 'non-functional' verdict was wrong \u2014 it was measured with pageable memory on a machine already 5.5 GB into swap. BFCL bfcl_simple n=30: 86.67%, which at that sample is statistically indistinguishable from the 8B's 94.17% (95% CI roughly 74-99%). It costs 6.5s/task against the 8B's 2.7s for no measured gain. Needs a tokenizer patch: tokenizer_config.json declares TokenizersBackend, change tokenizer_class to PreTrainedTokenizerFast or it will not load.",
+    "adapter_compatible": false,
+    "memory_note": "7.9 GB on disk, ~8.4 GB in GPU memory. Requires gpu.wired_limit_mb set (11264 works on 16 GB); unwired it pages to SSD and stalls."
   }
 }

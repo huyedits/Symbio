@@ -711,7 +711,8 @@ class ToolsMixin:
             return json.dumps(report, indent=2, default=str)
 
         if name == "verify_features":
-            report = health.verify_enabled_features(self.config, verbose=False)
+            report = health.verify_enabled_features(
+                self.config, verbose=False, tokenizer=self.tokenizer)
             self._health_report = report
             return json.dumps(report, indent=2, default=str)
 
