@@ -196,7 +196,8 @@ class CommandsMixin:
                 self.system_prompt, self.config)
             failed = [t["id"] for t in result.tasks if not t["passed"]]
             entry = _wild.record_run(result.pass_count, result.total, failed,
-                                     note="manual /wildcards run")
+                                     note="manual /wildcards run",
+                                     adapter_loaded=self.adapter_loaded)
             self.output_fn(f"  [Wild] {_wild.format_result(entry)}")
             for task in result.tasks:
                 mark = "PASS" if task["passed"] else "FAIL"

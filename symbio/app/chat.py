@@ -1758,7 +1758,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             failed = [t["id"] for t in result.tasks if not t["passed"]]
             entry = wildcards.record_run(
                 result.pass_count, result.total, failed,
-                note=self._last_train_note or "")
+                note=self._last_train_note or "",
+                adapter_loaded=self.adapter_loaded)
             self.output_fn(f"  [Wild] {wildcards.format_result(entry)}")
             if entry.get("delta") is not None and entry["delta"] > 0:
                 self.output_fn(
