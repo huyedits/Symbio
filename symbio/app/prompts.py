@@ -343,19 +343,26 @@ def build_system_prompt(assistant_name: str, user_name: str,
         prompt_text = DEFAULT_SYSTEM_PROMPT.format(
             assistant_name=assistant_name, user_name=user_name
         )
-    # The user's standing instructions go here: below the security policy,
-    # which still outranks them, and above the tool catalog. Not wrapped as
+    # Append the Hermes-style tool catalog after the user-facing template so
+    # the model sees both the tag examples and the JSON schemas. This is done
+    # after formatting so the JSON braces are not treated as format keys.
+    assembled = prompt_text.rstrip() + "\n\n" + tooling.build_tools_block()
+    # The user's standing instructions go LAST: below the security policy,
+    # which still outranks them, and below the tool catalog. Not wrapped as
     # untrusted, because they are the one thing in the context that is
     # verifiably the user's own — memory.save_standing_instruction only accepts
     # them from a live user turn and only in a scope that cannot do damage.
     # Everything else the assistant persists stays untrusted.
+    #
+    # Last for the KV cache, not for emphasis. This block is the only part of
+    # the system prompt that changes mid-session, and everything after the
+    # change point has to be re-prefilled. Sitting above the catalog, adding one
+    # instruction threw away 2,781 tokens of prefix — 2,662 of them the catalog,
+    # which had not changed by a byte. Below it, the same edit costs the block
+    # itself. Measured with the real tokenizer on Qwen3-14B.
     if include_standing:
-        prompt_text = prompt_text.rstrip() + memory_standing_block(
-            assistant_name, user_name, config)
-    # Append the Hermes-style tool catalog after the user-facing template so
-    # the model sees both the tag examples and the JSON schemas. This is done
-    # after formatting so the JSON braces are not treated as format keys.
-    return prompt_text.rstrip() + "\n\n" + tooling.build_tools_block() + "\n"
+        assembled += memory_standing_block(assistant_name, user_name, config)
+    return assembled + "\n"
 
 
 def memory_standing_block(assistant_name: str, user_name: str,

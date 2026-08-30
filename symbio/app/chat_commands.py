@@ -519,11 +519,9 @@ class CommandsMixin:
                     self.config["assistant_name"], self.config["user_name"],
                     self.config
                 )
-                # Identity changed → the prefilled KV cache holds the old system
-                # prompt's tokens, so drop it. The next turn rebuilds a fresh
-                # cache instead of mismatching the prefix and re-prefilling.
-                self._prompt_cache = None
-                self._cached_prompt_ids = None
+                # Identity changed → the assistant's own name is in the first
+                # line, so there is no common prefix left to salvage.
+                self._drop_prompt_cache("the assistant or user name changed")
                 self.output_fn("  Setup complete. Some changes may need a restart to take full effect.")
             elif not self.config.get("assistant_name") or not self.config.get("user_name"):
                 self.config = setup.run_setup_wizard(
@@ -533,8 +531,7 @@ class CommandsMixin:
                     self.config["assistant_name"], self.config["user_name"],
                     self.config
                 )
-                self._prompt_cache = None
-                self._cached_prompt_ids = None
+                self._drop_prompt_cache("the assistant or user name changed")
             else:
                 self.output_fn("  Run /setup wizard to re-run the full setup, or use /config to change individual settings.")
 
@@ -774,9 +771,9 @@ class CommandsMixin:
             rest = user_input.split(None, 1)
             arg = rest[1].strip().lower() if len(rest) > 1 else ""
             if arg == "clear":
+                # No cache drop: the prefix diff trims to the block, which
+                # is the last thing in the system prompt.
                 self.output_fn(f"  {memory.clear_standing_instructions()}")
-                self._prompt_cache = None
-                self._cached_prompt_ids = None
             else:
                 entries = memory.list_standing_instructions()
                 if not entries:
