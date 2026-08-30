@@ -330,6 +330,45 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             except Exception:
                 pass
 
+    def _drop_prompt_cache(self, reason: str, tell_user: bool = False):
+        """Throw away the warmed KV cache, on the record.
+
+        Dropping it costs a full re-prefill — 7,329 tokens and 64 seconds on
+        the 14B — and until now every one of the ten call sites did it in
+        silence. From the outside that is a turn which sometimes takes a
+        minute for no visible reason, and nothing in the logs to say which
+        site fired. This module already learned that lesson once, on the
+        prefill that was dead in the running app while every switch that
+        controlled it read as enabled; a stall nobody can attribute is the
+        same failure wearing different clothes.
+
+        Prefer trusting the prefix diff in _generate_reply over calling this.
+        It compares tokens exactly and trims the cache to the common prefix,
+        so a system prompt that grew a block, or a store that was rewritten,
+        costs only the tokens after the change. This is for the cases where
+        the cached tensors are genuinely unusable — the weights are gone, the
+        cache was mutated mid-token, or it came from another process.
+        """
+        had_cache = self._prompt_cache is not None
+        self._prompt_cache = None
+        self._cached_prompt_ids = None
+        if not had_cache:
+            return
+        # The cache is already gone by here. Nothing below may raise, or a
+        # logging problem becomes a failed turn — the exact shape of the bug
+        # _log_info was written to fix.
+        try:
+            self._log_info(f"prompt cache dropped: {reason}")
+        except Exception:
+            pass
+        if tell_user:
+            try:
+                self.output_fn(
+                    f"  [Cache] Dropped the warmed prompt cache ({reason}); "
+                    f"the next reply re-reads the prompt and will be slow.")
+            except Exception:
+                pass
+
     def _unload_model(self):
         """Drop the in-process model and release its GPU buffers.
 
@@ -338,8 +377,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         all of which reload from nothing).
         """
         # Whatever the KV cache holds refers to weights we are about to drop.
-        self._prompt_cache = None
-        self._cached_prompt_ids = None
+        self._drop_prompt_cache("the model weights are being unloaded")
         # A prefetch that nobody consumed is a few hundred megabytes with no
         # reader, which is the opposite of what it was added for. Dropping the
         # weights is the point at which it can no longer be claimed.
@@ -799,9 +837,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # reported "cached 0", and nothing anywhere said a word. The
                 # save path next to this one already logs its failures; this one
                 # not doing so hid a broken feature rather than a slow one.
-                self._log_info(f"Prompt cache prefill failed: {e!r}")
-                self._prompt_cache = None
-                self._cached_prompt_ids = None
+                self._drop_prompt_cache(f"boot prefill failed: {e!r}")
             finally:
                 self._indexing_now = False
 
@@ -1295,8 +1331,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # The real MLX cache may already be mutated beyond what our
             # bookkeeping reflects (interrupted mid-token) — never trust a
             # stale cache after this; the next call rebuilds it from zero.
-            self._prompt_cache = None
-            self._cached_prompt_ids = None
+            self._drop_prompt_cache("generation was interrupted mid-token")
             raise
         finally:
             self._indexing_now = False
@@ -1968,8 +2003,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             except Exception as exc:
                 self.output_fn(f"  [Canary] Could not compact {store}: {exc}")
         self.retriever.invalidate_cache()
-        self._prompt_cache = None
-        self._cached_prompt_ids = None
+        self._drop_prompt_cache("the periodic canary check failed", tell_user=True)
         try:
             safety.log_security_event("canary_auto_check_failed",
                                       {"history_len": len(self.history)})
@@ -2027,8 +2061,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # The stores are part of the cached system prefix; a stale cache
             # would keep serving the pre-compaction text.
             self.retriever.invalidate_cache()
-            self._prompt_cache = None
-            self._cached_prompt_ids = None
+            self._drop_prompt_cache("the curated stores were compacted",
+                                    tell_user=True)
         self._turns_since_auto_compact = 0
 
 

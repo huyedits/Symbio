@@ -459,8 +459,8 @@ class AgentTurnMixin:
                     if _had_prompt_cache and _sample_attempt == 0:
                         self.output_fn("  [Cache] Warmed prompt cache unusable "
                                        "here; discarding it and retrying.")
-                        self._prompt_cache = None
-                        self._cached_prompt_ids = None
+                        self._drop_prompt_cache(
+                            "the warmed cache was unusable in this process")
                         try:
                             constants.PROMPT_CACHE_FILE.unlink(missing_ok=True)
                         except OSError:

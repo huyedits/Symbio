@@ -630,15 +630,16 @@ class ToolsMixin:
             # The live user's turn is passed through, not looked up: the store
             # is only writable from a turn the user actually typed, and that is
             # checked in save_standing_instruction rather than trusted here.
-            out = memory.save_standing_instruction(
+            # The cache is deliberately NOT dropped here. Writing a standing
+            # instruction grows the system prompt, and _generate_reply's prefix
+            # diff already trims to the exact common prefix — with the block
+            # last, that is everything before it. Dropping the cache instead
+            # threw away all 7,329 tokens and stalled the SECOND round of the
+            # same turn for 64s, so asking to be a tsundere cost a minute.
+            return memory.save_standing_instruction(
                 params["instruction"], self.config,
                 user_text=getattr(self, "_user_text_this_turn", ""),
                 replace=params.get("replace", False))
-            # A new standing instruction changes the system prompt, so the
-            # warmed KV cache no longer matches its own prefix.
-            self._prompt_cache = None
-            self._cached_prompt_ids = None
-            return out
 
         if name == "compact_memory":
             store = params.get("store", "memory")
