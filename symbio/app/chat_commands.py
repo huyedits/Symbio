@@ -196,7 +196,8 @@ class CommandsMixin:
                 self.system_prompt, self.config)
             failed = [t["id"] for t in result.tasks if not t["passed"]]
             entry = _wild.record_run(result.pass_count, result.total, failed,
-                                     note="manual /wildcards run")
+                                     note="manual /wildcards run",
+                                     adapter_loaded=self.adapter_loaded)
             self.output_fn(f"  [Wild] {_wild.format_result(entry)}")
             for task in result.tasks:
                 mark = "PASS" if task["passed"] else "FAIL"
@@ -245,7 +246,13 @@ class CommandsMixin:
         elif cmd.startswith("/run"):
             self._cmd_run(user_input[4:].strip())
 
-        elif cmd.startswith("/note"):
+        # `/notes` is a prefix match away from `/note`, and this branch is
+        # first, so it used to swallow it: typing /notes opened the note
+        # composer with "s" as the title and consumed the next line as the
+        # body, while the real /notes handler further down was unreachable
+        # code for a command the banner advertises. Found by typing it into
+        # a real session, which is the only place the two are adjacent.
+        elif cmd.startswith("/note") and cmd.rstrip() != "/notes":
             self._cmd_note(user_input[5:].strip())
 
         elif cmd == "/learn":
@@ -497,7 +504,9 @@ class CommandsMixin:
             self.output_fn(json.dumps(report, indent=2, default=str))
 
         elif cmd == "/selfcheck":
-            report = health.verify_enabled_features(self.config, verbose=True, output_fn=self.output_fn)
+            report = health.verify_enabled_features(
+                self.config, verbose=True, output_fn=self.output_fn,
+                tokenizer=self.tokenizer)
             self._health_report = report
 
         elif cmd == "/setup":
@@ -639,7 +648,8 @@ class CommandsMixin:
                 if not msg.startswith("Unknown") and not msg.startswith("Bad"):
                     self.output_fn("  [Re-checking enabled features...]")
                     report = health.verify_enabled_features(
-                        self.config, verbose=True, output_fn=self.output_fn
+                        self.config, verbose=True, output_fn=self.output_fn,
+                        tokenizer=self.tokenizer,
                     )
                     self._health_report = report
             else:
