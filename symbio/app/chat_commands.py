@@ -516,7 +516,8 @@ class CommandsMixin:
                     self.config, input_fn=self.input_fn, output_fn=self.output_fn
                 )
                 self.system_prompt = prompts.build_system_prompt(
-                    self.config["assistant_name"], self.config["user_name"]
+                    self.config["assistant_name"], self.config["user_name"],
+                    self.config
                 )
                 # Identity changed → the prefilled KV cache holds the old system
                 # prompt's tokens, so drop it. The next turn rebuilds a fresh
@@ -529,7 +530,8 @@ class CommandsMixin:
                     self.config, input_fn=self.input_fn, output_fn=self.output_fn
                 )
                 self.system_prompt = prompts.build_system_prompt(
-                    self.config["assistant_name"], self.config["user_name"]
+                    self.config["assistant_name"], self.config["user_name"],
+                    self.config
                 )
                 self._prompt_cache = None
                 self._cached_prompt_ids = None
@@ -764,6 +766,27 @@ class CommandsMixin:
                             self.output_fn("  into a GitHub Discussion. /feedback off to disable.")
                     else:
                         self.output_fn(f"  Could not save feedback: {msg}")
+
+        elif cmd == "/standing" or cmd.startswith("/standing "):
+            # The user's own view of, and veto over, the one store that is
+            # served to the model as trusted. A channel they cannot inspect or
+            # revoke is not one they can reasonably be asked to trust.
+            rest = user_input.split(None, 1)
+            arg = rest[1].strip().lower() if len(rest) > 1 else ""
+            if arg == "clear":
+                self.output_fn(f"  {memory.clear_standing_instructions()}")
+                self._prompt_cache = None
+                self._cached_prompt_ids = None
+            else:
+                entries = memory.list_standing_instructions()
+                if not entries:
+                    self.output_fn("  No standing instructions. Ask for one in chat "
+                                   "(\"from now on, ...\") or /standing clear to reset.")
+                else:
+                    self.output_fn(f"  Standing instructions ({constants.STANDING_FILE.name}):")
+                    for entry in entries:
+                        self.output_fn(f"    - {entry}")
+                    self.output_fn("  /standing clear removes them all.")
 
         elif cmd in ("/help", "/h", "/?"):
             data_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0

@@ -116,7 +116,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "stream_output": True,
         # Surface the model's Qwen3 thinking block to the user as a
         # "[Reasoning] …" block before the answer. Set false to hide it.
+        # Reasoning streams token by token like the answer does, so a long
+        # think shows up as it is written rather than landing in one paste
+        # after the spinner finally stops.
         "show_reasoning": True,
+        # How many tokens of prompt.md's OPTIONAL sections to serve (the core
+        # is always served in full). "auto" sizes it from the loaded model's
+        # parameter count — a 14B gets every section, a 4B worker gets the
+        # core plus what fits — or set an integer to pin it. See
+        # prompts.prompt_budget_tokens.
+        "prompt_budget_tokens": "auto",
         # How hard the model is asked to think before answering: none, low,
         # medium or flurry (see chat.THINKING_LEVELS). Change it live with
         # /think. "none" ends the prompt with an empty closed think block, so

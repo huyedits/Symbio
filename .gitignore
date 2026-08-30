@@ -63,10 +63,15 @@ prompt.md.bak.*
 # user's own file to edit, so publishing either one would overwrite it.
 security.md
 security.md.default
+security.md.bak.*
 cron_jobs.json
 gateway.pid
 agent_memory.md
 user_profile.md
+# Standing instructions: the user's own style preferences, kept across
+# sessions and served to the model as trusted text. Per-user by definition —
+# see symbio.app.memory.save_standing_instruction.
+standing_instructions.md
 sessions/
 notes/
 training_data/
