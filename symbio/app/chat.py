@@ -652,7 +652,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         not interleaved with the load progress."""
         try:
             self._health_report = health.verify_enabled_features(
-                self.config, verbose=True, output_fn=self.output_fn
+                self.config, verbose=True, output_fn=self.output_fn,
+                # This runs after the model finished loading, so hand over the
+                # live tokenizer rather than making the check load its own.
+                tokenizer=self.tokenizer,
             )
         except Exception as e:
             self._health_report = {

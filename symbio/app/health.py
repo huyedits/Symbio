@@ -226,17 +226,27 @@ def _check_config_validity(config: dict[str, Any]) -> _CheckResult:
     return _CheckResult("config_load", True, message="Configuration valid.")
 
 
-def _check_model_load(config: dict[str, Any]) -> _CheckResult:
+def _check_model_load(config: dict[str, Any], tokenizer: Any = None) -> _CheckResult:
     """Check the configured model exists and can be loaded. No auto-fix here:
-    switching models is a human decision."""
+    switching models is a human decision.
+
+    A caller that already holds a live tokenizer passes it in, and no second
+    load happens. Without that this ran its own `load(model_name, lazy=True)`
+    while the session had the very same model open -- so every start resolved
+    the repo twice and printed two "Fetching N files" progress bars, which on a
+    7.9 GB model reads like something has gone wrong. It also asked a question
+    already answered: the startup self-check runs *after* the model loaded, so
+    "can this model load" had been proved a moment earlier.
+    """
     from mlx_lm import load
 
     model_name = config.get("model_name", "")
     if not model_name:
         return _CheckResult("model_load", False, message="No model_name configured.", severity="error")
     try:
-        # Load in lazy mode to keep the check fast; only validate tokenizer access.
-        _, tokenizer = load(model_name, lazy=True)
+        if tokenizer is None:
+            # Load in lazy mode to keep the check fast; only validate tokenizer access.
+            _, tokenizer = load(model_name, lazy=True)
         tokenizer.encode("hello")
         return _CheckResult("model_load", True, message=f"Model '{model_name}' loadable.")
     except Exception as exc:
@@ -540,6 +550,7 @@ def verify_enabled_features(
     verbose: bool = True,
     output_fn = print,
     skip_model_load: bool = False,
+    tokenizer: Any = None,
 ) -> dict[str, Any]:
     """Verify only the features the user has enabled.
 
@@ -550,7 +561,9 @@ def verify_enabled_features(
 
     `skip_model_load` is used during the first-run setup wizard: the model will
     be loaded immediately afterward, so we avoid a duplicate (and possibly slow)
-    load during onboarding.
+    load during onboarding. `tokenizer` is the opposite case -- the caller has
+    already loaded the model, so the check validates that live tokenizer rather
+    than opening a second copy of the same model.
 
     Returns a structured report the agent can consume, surface in `/selfcheck`,
     or relay to the user.
@@ -561,7 +574,7 @@ def verify_enabled_features(
         _check_required_dirs(config),
     ]
     if not skip_model_load:
-        checks.append(_check_model_load(config))
+        checks.append(_check_model_load(config, tokenizer))
     checks.extend([
         _check_training_data(config),
         _check_memory(config),
