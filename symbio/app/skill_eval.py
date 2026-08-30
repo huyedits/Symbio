@@ -255,6 +255,7 @@ def _base_system_prompt(config: dict[str, Any]) -> str:
     return prompts.build_system_prompt(
         config.get("assistant_name", "Symbio"),
         config.get("user_name", "User"),
+        config,
     )
 
 

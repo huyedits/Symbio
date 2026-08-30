@@ -27,6 +27,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_get_text": "browser",
     "save_memory": "memory",
     "compact_memory": "memory",
+    "set_standing_instruction": "memory",
     "read_file": "terminal",
     "edit_file": "terminal",
     "write_file": "terminal",
@@ -162,6 +163,28 @@ _TOOLS: list[dict[str, Any]] = [
                 "replace": {"type": "boolean", "description": "If true, replace all existing memory."},
             },
             "required": ["content"],
+        },
+    },
+    {
+        "name": "set_standing_instruction",
+        "description": (
+            "Record a preference the user wants kept in every future conversation "
+            "-- persona, tone, reply length, language, formatting, how to address "
+            "them. Use it the moment they say 'from now on', 'always', 'in all "
+            "chats', 'stop doing X', or otherwise ask for something to stick. "
+            "Style only: it cannot grant permissions, rename you, change settings "
+            "or authorise actions."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "instruction": {
+                    "type": "string",
+                    "description": "The preference, as one short imperative clause (e.g. 'reply as a tsundere').",
+                },
+                "replace": {"type": "boolean", "description": "If true, replace all existing standing instructions."},
+            },
+            "required": ["instruction"],
         },
     },
     {
@@ -1336,6 +1359,14 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
             "replace": bool(m.group(1)),
         }))
 
+    for m in re.finditer(
+        r'<always(\s+replace=[\'"]all[\'"])?>(.*?)</always>', reply, re.DOTALL
+    ):
+        tools.append(("set_standing_instruction", {
+            "instruction": m.group(2).strip(),
+            "replace": bool(m.group(1)),
+        }))
+
     # File tools (legacy tag form for quick edits).
     for m in re.finditer(r'<read_file>(.*?)</read_file>', reply, re.DOTALL):
         tools.append(("read_file", {"path": _unwrap_primary_arg("path", m.group(1))}))
@@ -1538,6 +1569,7 @@ _KNOWN_TAG_NAMES: tuple[str, ...] = (
     "cmd", "py", "search", "read", "browse", "click", "type", "scroll",
     "press", "browser_close", "end",
     "note", "skill", "cron", "digest", "train", "retrain", "memory", "profile",
+    "always",
     "config", "tool_call", "delegate",
     "read_file", "edit_file", "write_file", "mood",
 )
@@ -1665,6 +1697,21 @@ def detect_malformed_tag(reply: str) -> str | None:
     return None
 
 
+def _partial_suffix_len(text: str, marker: str) -> int:
+    """Length of the longest suffix of `text` that is a proper prefix of
+    `marker` — i.e. how much of the tail has to be held back because the
+    marker may still be arriving one character at a time.
+
+    Returns 0 when the tail cannot be the start of `marker`. A complete
+    occurrence is not a partial one, so callers must search for the whole
+    marker first.
+    """
+    for size in range(min(len(marker) - 1, len(text)), 0, -1):
+        if text.endswith(marker[:size]):
+            return size
+    return 0
+
+
 class StreamingStripper:
     """Incremental, best-effort view of a reply as it streams token-by-
     token: known tool tags are held back and dropped once confirmed closed
@@ -1699,9 +1746,21 @@ class StreamingStripper:
         # re-opened delim the adapter drops) is discarded until the first real
         # answer character is shown, so the reply starts flush on its line.
         self._answer_started = False
+        # True once REASONING_MARKER has been emitted, so the marker is
+        # printed exactly once at the head of a reasoning block that is now
+        # streamed a chunk at a time rather than held whole.
+        self._reasoning_marked = False
+        # Describes the chunk feed()/finish() just returned: reasoning text or
+        # answer text. The caller needs this to decide where the reply prefix
+        # ("Caine   : ") goes. Sniffing REASONING_MARKER off the front of the
+        # chunk was enough while the whole block arrived as one string; now
+        # that reasoning streams, only the first chunk carries the marker and
+        # every chunk after it would have been mistaken for the answer.
+        self.chunk_is_reasoning = False
 
     def feed(self, chunk: str) -> str:
         """Add newly generated text; return the text now safe to display."""
+        self.chunk_is_reasoning = False
         self._buffer += chunk
         if self._think_state == "undecided":
             head = self._buffer.lstrip("\n")
@@ -1720,16 +1779,39 @@ class StreamingStripper:
         if self._think_state == "inside":
             cidx = self._buffer.find(_QWEN_THINK_CLOSE)
             if cidx == -1:
-                # Still inside the reasoning block — show nothing yet.
-                # finish() drops the leftover once generation ends.
-                return ""
-            # The reasoning block is complete. If showing reasoning, emit it as
-            # a distinct "[Reasoning] …" block and hold the answer buffer for
-            # the next feed call (or finish()) so the answer streams
-            # separately after it — the caller can then attach its reply
-            # prefix to the answer, not the reasoning. Otherwise drop the
-            # block as before.
-            reasoning = self._buffer[:cidx].strip()
+                # Still inside the reasoning block. Stream it as it arrives
+                # rather than holding the whole block: reasoning runs to
+                # several hundred tokens on this adapter, and buffering it
+                # meant a spinner for the entire think, then the lot dumped in
+                # one paste — the reply looked frozen for the part of the turn
+                # that takes longest. Only a tail that could still be the
+                # start of the close delimiter is held, so "</think>" never
+                # flashes on screen.
+                if not self._show_reasoning:
+                    return ""
+                hold = _partial_suffix_len(self._buffer, _QWEN_THINK_CLOSE)
+                safe = self._buffer[:len(self._buffer) - hold] if hold else self._buffer
+                self._buffer = self._buffer[len(safe):]
+                if not safe:
+                    return ""
+                if not self._reasoning_marked:
+                    # The marker leads the block once; leading newlines
+                    # between the open delimiter and the first real word
+                    # would otherwise push it onto its own empty line.
+                    safe = safe.lstrip()
+                    if not safe:
+                        return ""
+                    self._reasoning_marked = True
+                    safe = f"{REASONING_MARKER}{safe}"
+                self.chunk_is_reasoning = True
+                return safe
+            # The reasoning block is complete. If showing reasoning, flush
+            # what is left of it and close its line, then hold the answer
+            # buffer for the next feed call (or finish()) so the answer
+            # streams separately after it — the caller can then attach its
+            # reply prefix to the answer, not the reasoning. Otherwise drop
+            # the block as before.
+            reasoning = self._buffer[:cidx]
             self._buffer = self._buffer[cidx + len(_QWEN_THINK_CLOSE):]
             self._think_state = "done"
             # The answer may still carry think-delimiter artifacts (the
@@ -1739,8 +1821,18 @@ class StreamingStripper:
             # remaining one, then strip the leading newlines once at the
             # answer start.
             self._buffer = self._buffer.replace(_QWEN_THINK_OPEN, "").replace(_QWEN_THINK_CLOSE, "").lstrip("\n")
-            if self._show_reasoning and reasoning:
-                return f"{REASONING_MARKER}{reasoning}\n"
+            if self._show_reasoning:
+                if self._reasoning_marked:
+                    # The marker and most of the block already streamed; emit
+                    # the remainder (often empty) and end the reasoning line.
+                    self.chunk_is_reasoning = True
+                    return f"{reasoning}\n"
+                # Nothing streamed yet — the whole block arrived in one chunk.
+                stripped = reasoning.strip()
+                if stripped:
+                    self._reasoning_marked = True
+                    self.chunk_is_reasoning = True
+                    return f"{REASONING_MARKER}{stripped}\n"
             if self._buffer == "":
                 return ""
         else:
@@ -1776,8 +1868,12 @@ class StreamingStripper:
         strip_reasoning_block, and the caller falls back to printing the
         consolidated reply, so dropping it here only affects the live
         display tail)."""
+        self.chunk_is_reasoning = False
         if self._think_state == "inside":
-            # Pure reasoning, no answer yet — never show it.
+            # Pure reasoning, no answer yet. Whatever is still buffered is
+            # the held-back close-delimiter tail (or hidden reasoning when
+            # show_reasoning is off) — never an answer, so drop it. The
+            # caller closes the line it streamed onto.
             self._buffer = ""
             return ""
         # "undecided" here means the whole reply was a short prefix of the

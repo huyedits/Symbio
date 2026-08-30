@@ -172,7 +172,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # and used by front-ends to report latency.
         self.last_turn_timings: dict[str, float | None] = {}
         self.system_prompt = prompts.build_system_prompt(
-            config["assistant_name"], config["user_name"]
+            config["assistant_name"], config["user_name"], config
         )
         self._refresh_sampler()
 
@@ -1210,7 +1210,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         spinner = _Spinner(spinner_label)
         spinner.start()
 
-        def _emit(text: str):
+        def _emit(text: str, is_reasoning: bool = False):
             if self.stream_chunk_fn is None or not text:
                 return
             nonlocal shown, answer_prefix_emitted
@@ -1220,7 +1220,13 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # chunk, otherwise the spinner thread keeps overwriting the
                 # streaming reply.
                 spinner.stop()
-            if not answer_prefix_emitted and not text.startswith(tooling.REASONING_MARKER):
+            # Reasoning now streams chunk by chunk, so only its first chunk
+            # carries REASONING_MARKER — testing for the marker alone would
+            # have read every later reasoning chunk as the start of the answer
+            # and stamped "Caine   : " into the middle of the thought. The
+            # stripper says which kind of text it just handed over.
+            if not answer_prefix_emitted and not is_reasoning and not text.startswith(
+                    tooling.REASONING_MARKER):
                 answer_prefix_emitted = True
                 if chunk_prefix:
                     self.stream_chunk_fn(chunk_prefix)
@@ -1262,7 +1268,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 if stripper is not None:
                     safe = stripper.feed(response.text)
                     if safe:
-                        _emit(safe)
+                        _emit(safe, stripper.chunk_is_reasoning)
                 else:
                     _emit(response.text)
                 # Stop the instant the explicit end-of-turn marker streams out,
@@ -1299,7 +1305,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if stripper is not None:
             tail = stripper.finish()
             if tail:
-                _emit(tail)
+                _emit(tail, stripper.chunk_is_reasoning)
             # Only close the line if something was actually written to it.
             # When nothing streamed (the whole reply was a tool tag, or
             # reasoning that stayed hidden) the spinner's stop() already

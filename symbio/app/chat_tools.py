@@ -186,7 +186,12 @@ class ToolsMixin:
         # Risk-based escalation: the more dangerous an action is, the louder
         # the alert. High-risk actions require explicit approval; medium-risk
         # ones run but annotate the observation so the model sees the warning.
-        risk = safety.assess_tool_risk(name, params, self.config)
+        risk = safety.assess_tool_risk(
+            name, params, self.config,
+            # What the user actually typed this turn. A note that only repeats
+            # their own words is a record of the request, not an injection
+            # laundered into storage — see safety.echoes_live_user.
+            user_text=getattr(self, "_user_text_this_turn", ""))
         # Where did this call come from? A tool that has never run here, on a
         # turn that pulled in retrieved text, is the shape an injected action
         # takes — so ask, rather than assume the model chose it freely.
@@ -214,6 +219,11 @@ class ToolsMixin:
                 user_asked_for_action=getattr(
                     self, "_action_asked_this_turn", True))
         allowed, reason = safety.maybe_confirm(name, params, risk, self.config, self.confirm_fn)
+        # `reason` is non-None only when the gate actually asked; combined with
+        # `allowed` that means the user was shown this call and said yes. The
+        # annotation below needs to carry that, or the model re-litigates an
+        # action its own user already authorised.
+        user_approved = allowed and reason is not None
         if not allowed:
             safety.log_security_event("tool_blocked", {
                 "tool": name, "params": params, "risk": risk, "reason": reason,
@@ -241,7 +251,7 @@ class ToolsMixin:
 
         log_score = self.config.get("safety", {}).get("log_score", 2)
         if risk["risk_score"] >= log_score:
-            annotation = safety.risk_annotation(risk)
+            annotation = safety.risk_annotation(risk, approved=user_approved)
             observation += annotation
             safety.log_security_event("tool_executed", {
                 "tool": name, "params": params, "risk": risk, "annotation": annotation,
@@ -611,8 +621,24 @@ class ToolsMixin:
             return out + _browser_peek(self.browser, self.config)
 
         if name == "save_memory":
-            return memory.save_memory(params["store"], params["content"], self.config,
-                                      replace=params.get("replace", False))
+            return memory.save_memory(
+                params["store"], params["content"], self.config,
+                replace=params.get("replace", False),
+                user_text=getattr(self, "_user_text_this_turn", ""))
+
+        if name == "set_standing_instruction":
+            # The live user's turn is passed through, not looked up: the store
+            # is only writable from a turn the user actually typed, and that is
+            # checked in save_standing_instruction rather than trusted here.
+            out = memory.save_standing_instruction(
+                params["instruction"], self.config,
+                user_text=getattr(self, "_user_text_this_turn", ""),
+                replace=params.get("replace", False))
+            # A new standing instruction changes the system prompt, so the
+            # warmed KV cache no longer matches its own prefix.
+            self._prompt_cache = None
+            self._cached_prompt_ids = None
+            return out
 
         if name == "compact_memory":
             store = params.get("store", "memory")
