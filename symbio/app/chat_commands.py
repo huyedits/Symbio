@@ -245,7 +245,13 @@ class CommandsMixin:
         elif cmd.startswith("/run"):
             self._cmd_run(user_input[4:].strip())
 
-        elif cmd.startswith("/note"):
+        # `/notes` is a prefix match away from `/note`, and this branch is
+        # first, so it used to swallow it: typing /notes opened the note
+        # composer with "s" as the title and consumed the next line as the
+        # body, while the real /notes handler further down was unreachable
+        # code for a command the banner advertises. Found by typing it into
+        # a real session, which is the only place the two are adjacent.
+        elif cmd.startswith("/note") and cmd.rstrip() != "/notes":
             self._cmd_note(user_input[5:].strip())
 
         elif cmd == "/learn":
