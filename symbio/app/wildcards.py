@@ -324,7 +324,8 @@ def load_history() -> list[dict[str, Any]]:
 
 
 def record_run(pass_count: int, total: int, failed: list[str],
-               note: str = "", max_entries: int = 50) -> dict[str, Any]:
+               note: str = "", max_entries: int = 50,
+               adapter_loaded: bool | None = None) -> dict[str, Any]:
     """Append one wildcard result and return it with the delta since last time.
 
     The trend is the point. A single score says little — 4/9 could be good or
@@ -345,6 +346,14 @@ def record_run(pass_count: int, total: int, failed: list[str],
         "failed": failed,
         "delta": delta,
         "note": note,
+        # Whether an adapter was loaded for this run. The trend exists to show
+        # whether a score moves across RETRAINS, and without this it cannot:
+        # a base-model run lands in the same series as adapter-backed ones and
+        # its delta reads as a regression from corpus changes. Measured -- a
+        # manual /wildcards on 2026-08-30 scored 3/9 against four earlier
+        # adapter-backed runs (6, 8, 7, 6) and recorded "delta -3" with nothing
+        # saying the headmaster adapter was absent entirely.
+        "adapter_loaded": adapter_loaded,
     }
     history.append(entry)
     path = history_path()
