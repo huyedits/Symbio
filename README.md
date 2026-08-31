@@ -91,7 +91,7 @@ Symbio can use a live browser to perform tasks such as opening Chrome and intera
 
 ---
 
-# Quick Start
+## Quick Start
 
 ## Requirements
 
@@ -175,7 +175,7 @@ symb setup
 
 ---
 
-# How it learns
+## How it learns
 
 The core learning loop is intentionally simple:
 
@@ -928,7 +928,7 @@ Some important settings:
 
 ---
 
-#Security
+# Security
 
 Symbio is designed to run locally, but **local does not mean automatically safe**.
 
