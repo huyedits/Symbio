@@ -171,6 +171,32 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # Simple timing record for the most recent turn; surfaced in /status
         # and used by front-ends to report latency.
         self.last_turn_timings: dict[str, float | None] = {}
+        # Both of these MUTATE the module-level tool registry, so they have to
+        # run BEFORE the system prompt is built — the prompt embeds the <tools>
+        # catalog, and a prompt built ahead of them is a prompt no turn will
+        # ever use again.
+        #
+        # They used to run ~40 lines below this, after _finish_model_setup had
+        # already prefilled and persisted a KV cache keyed on the stale prefix.
+        # Measured on this install: the prefilled prompt was 5,741 tokens, the
+        # prompt every turn actually builds was 6,164, and they shared only
+        # 5,221 — so 938 tokens were re-prefilled on every single turn for the
+        # life of the session, and the 74s boot prefill was partly spent on a
+        # prefix that was thrown away before the first reply.
+        #
+        # Load any custom MCP tools the user has previously built so they are
+        # available to the model without restarting the process.
+        try:
+            tooling.refresh_mcp_tools(self.config)
+        except Exception:
+            pass
+        # Advertise the workers that actually exist. Without this the model is
+        # shown a made-up example role and cannot reliably delegate to a skill
+        # at all, which is what kept saved skills reachable only through RAG.
+        try:
+            tooling.refresh_delegate_roles()
+        except Exception:
+            pass
         self.system_prompt = prompts.build_system_prompt(
             config["assistant_name"], config["user_name"], config
         )
@@ -206,19 +232,6 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if self._model_loaded and self._health_report.get("_persisted") is None:
             self._run_post_load_self_check()
 
-        # Load any custom MCP tools the user has previously built so they are
-        # available to the model without restarting the process.
-        try:
-            tooling.refresh_mcp_tools(self.config)
-        except Exception:
-            pass
-        # Advertise the workers that actually exist. Without this the model is
-        # shown a made-up example role and cannot reliably delegate to a skill
-        # at all, which is what kept saved skills reachable only through RAG.
-        try:
-            tooling.refresh_delegate_roles()
-        except Exception:
-            pass
         # Skill notes touched this session; used to append health errors and
         # user corrections to the matching sidecar files.
         self._skill_notes_used: set[Path] = set()
@@ -810,11 +823,17 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                     return
                 # A cache saved by an earlier run covers this exact prefix and
                 # these exact weights — load it and skip the prefill entirely.
-                # Not with a draft model: the file holds one model's layers,
-                # while the live cache is two models' concatenated, so the
-                # split in the speculative step would land in the wrong place.
+                # This used to be switched off whenever a draft model was
+                # configured, on the grounds that the file holds one model's
+                # layers while the live cache is two models' concatenated. The
+                # concatenation round-trips fine (measured: save, load, and
+                # speculative generation byte-identical to the live cache); the
+                # only real hazard was the split landing in the wrong place, and
+                # draft_sig in the signature is what rules that out. With a
+                # draft configured — which is the shipped default — the effect
+                # was that no cache was ever written and every single boot
+                # re-prefilled the whole system prompt through the 14B.
                 if (self.config.get("agent", {}).get("persist_prompt_cache", True)
-                        and self._ensure_draft_model() is None
                         and self._load_persisted_prompt_cache(system_ids)):
                     return
                 # max_tokens=0 processes the prompt into the KV cache and
@@ -824,8 +843,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # Persist the cache while it holds exactly the system prefix.
                 # Saving at exit instead would store the whole conversation,
                 # which the next run's prefix diff could not reuse.
-                if (self.config.get("agent", {}).get("persist_prompt_cache", True)
-                        and self._ensure_draft_model() is None):
+                if self.config.get("agent", {}).get("persist_prompt_cache", True):
                     self._save_persisted_prompt_cache(system_ids)
             except Exception as e:
                 # Prefill is an optimization, never a hard requirement. Clear any
@@ -887,6 +905,13 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         prompt.md edits, the tool catalog and the user's names; the model name
         and adapter fingerprint cover the weights — swapping an adapter leaves
         the ids identical while making every cached value wrong.
+
+        The draft model is in here because a speculative cache is the two
+        models' layers concatenated, and the split is recomputed from the
+        target at load time. Loading a draft-less file into a draft session
+        (or the reverse, or after the draft changed) would put the split in
+        the wrong place, which is the failure the persisted cache used to be
+        switched off entirely to avoid.
         """
         adapter_sig = "none"
         if self.adapter_loaded:
@@ -896,10 +921,36 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 adapter_sig = f"{st.st_mtime_ns}:{st.st_size}"
             except OSError:
                 adapter_sig = "missing"
+        # The draft half, keyed on what actually LOADED rather than on what
+        # config asks for: a draft that failed to load leaves a target-only
+        # cache, while a file written by a run where it did load carries extra
+        # layers that would push the split past the end. Config alone cannot
+        # tell those two apart.
+        #
+        # Inline, and reached through getattr, on purpose. Several callers bind
+        # these cache methods onto a duck-typed stand-in instead of building a
+        # ChatSession, so a new helper method here is a method they do not have
+        # — a private note to a future edit: keep this function's dependencies
+        # to attributes, not to methods.
+        draft_sig = getattr(self, "_draft_sig", None)
+        if draft_sig is None:
+            draft_sig = "none"
+            resolve = getattr(self, "_ensure_draft_model", None)
+            if resolve is not None:
+                try:
+                    draft = resolve()
+                except Exception:
+                    draft = None
+                if draft is not None:
+                    draft_sig = (
+                        f"{self.config.get('agent', {}).get('draft_model', '')}"
+                        f":{len(make_prompt_cache(draft))}")
+            self._draft_sig = draft_sig
         ids_bytes = ",".join(map(str, system_ids)).encode()
         return {
             "model_name": str(self.config.get("model_name", "")),
             "adapter_sig": adapter_sig,
+            "draft_sig": draft_sig,
             "ids_sha": hashlib.sha256(ids_bytes).hexdigest(),
             "n_tokens": str(len(system_ids)),
         }
@@ -989,8 +1040,19 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 self._log_info(f"Prompt cache unreadable, discarding: {e}")
                 path.unlink(missing_ok=True)
                 return False
-        if any(meta.get(k) != v for k, v in want.items()):
-            # The model, adapter or prompt changed since it was written.
+        differing = [k for k, v in want.items() if meta.get(k) != v]
+        if differing:
+            # The model, adapter, draft or prompt changed since it was written.
+            # Say WHICH. This branch throws away a 1.7 GB file and buys the next
+            # boot a 74-second prefill, and it used to do that without a word —
+            # so a cache that never once hit was indistinguishable from a cache
+            # that was working fine. `ids_sha` here means the system prompt
+            # moved, which is the one worth naming, because it is usually a
+            # bug in what built the prompt rather than a real change.
+            self._log_info(
+                "Prompt cache signature mismatch, discarding: "
+                + ", ".join(f"{k} {meta.get(k)!r} != {want[k]!r}"
+                            for k in differing))
             path.unlink(missing_ok=True)
             return False
         # Loading a cache is not the same as being able to use one. A file
@@ -1296,6 +1358,15 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 sampler=self.sampler, prompt_cache=self._prompt_cache,
                 **_spec_kw,
             ):
+                if first_token_time is None:
+                    # The moment the model produced its first token, which is
+                    # what "time to first token" means and what the prefill
+                    # work above is spent on. This was declared and never
+                    # assigned, so ttft_ms fell through to gen_ms below and
+                    # /status reported the whole generation as the latency to
+                    # first token — the one number you would use to tell a slow
+                    # prefill from a slow decode, reading as neither.
+                    first_token_time = time.perf_counter()
                 text_parts.append(response.text)
                 raw_acc += response.text
                 gen_ids.append(response.token)
@@ -1354,8 +1425,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
         if timings is not None:
             timings["gen_ms"] = (time.perf_counter() - gen_start) * 1000
-            if timings.get("ttft_ms") is None:
-                timings["ttft_ms"] = timings["gen_ms"]
+            timings["ttft_ms"] = (
+                (first_token_time - gen_start) * 1000
+                if first_token_time is not None else timings["gen_ms"])
 
         self._cached_prompt_ids = ids + gen_ids
         return "".join(text_parts), shown
