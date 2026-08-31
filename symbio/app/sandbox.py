@@ -79,6 +79,17 @@ def _run_subprocess(args: list[str], config: dict[str, Any], cwd: str | None = N
         return False, str(e)
 
 
+# A blocked network binary and the in-sandbox tool that does the same job, so a
+# refusal points somewhere instead of dead-ending. Keyed on the denylist name.
+_NETWORK_TOOL_REDIRECT = {
+    "curl": ("For an HTTP GET, use the read_page / fetch_html tools, or "
+             "`from symbio_tools import fetch` inside <py> — fetch(url) returns "
+             "the body and raises with the status code and body on a non-2xx."),
+    "wget": ("To fetch a URL, use the read_page / fetch_html tools, or "
+             "`from symbio_tools import fetch` inside <py>."),
+}
+
+
 # Programs that run another program named in their own arguments. Without
 # stepping through these, `env rm x` and `xargs rm` present argv[0] as something
 # harmless while executing something on the denylist.
@@ -141,7 +152,16 @@ def run_sandboxed(command: str, config: dict[str, Any], interactive: bool = True
         # Blocked commands are not refused outright: the user can approve a
         # one-off run. Non-interactive callers (cron thread) never prompt.
         if not interactive or not _ask_command_permission(command, hit, ask_fn=confirm_fn):
-            return False, f"'{hit}' is blocked in sandbox (user did not approve it)."
+            # A dead-end block is how the model gets stranded: it reaches for
+            # the obvious tool (curl), is told only "no", finds no way to make
+            # an HTTP call, and falls back to inventing the response. So when
+            # the blocked binary HAS a working in-sandbox equivalent, name it.
+            # curl/wget stay blocked for real reasons (any protocol, file://,
+            # writing files, redirect-driven SSRF); fetch() is http/https-only,
+            # read-only, size-capped, and surfaces the status code + body.
+            redirect = _NETWORK_TOOL_REDIRECT.get(hit)
+            hint = f" {redirect}" if redirect else ""
+            return False, f"'{hit}' is blocked in sandbox (user did not approve it).{hint}"
 
     return _run_subprocess(args, config, cwd=constants.SANDBOX_DIR)
 

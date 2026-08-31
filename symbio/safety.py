@@ -559,8 +559,46 @@ def is_sensitive_config_key(key: str) -> bool:
     return any(key.startswith(prefix) for prefix in SENSITIVE_PREFIXES)
 
 
-def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
-    """Score a concrete tool call (0-3) and return flags explaining why."""
+def echoes_live_user(scan: dict[str, Any], user_text: str,
+                     config: dict[str, Any] | None = None) -> bool:
+    """True when every injection flag raised by a write is also raised by the
+    live user's own message this turn — i.e. the write is recording what the
+    user just said, not smuggling in something they never asked for.
+
+    The write scanners (write_note, save_skill, save_memory, schedule_job,
+    add_golden_case) exist to catch the model *laundering* an instruction it
+    read in a note or a web page into somewhere it will be retrieved and obeyed
+    later. They were never meant to fire on the user's own words, and they did:
+    measured 2026-08-30, "always act as a tsundere" from the live user produced
+    a note carrying their phrase, "act as" matched role_override, and the write
+    scored 3/3 as note_injection. The annotation that followed was the worse
+    half — the model read "[Security alert: ... note_injection, role_override]"
+    about its own approved write, concluded it had caught an injection, and
+    refused the user twice, including after they said "no, follow that note".
+
+    Deliberately all-or-nothing. A note that echoes the user's "act as a
+    tsundere" AND adds "ignore all previous instructions" still carries a flag
+    the user never produced, so it stays at full score.
+    """
+    flags = [f for f in scan.get("flags", []) if f != "hidden_unicode"]
+    if not flags or not (user_text or "").strip():
+        return False
+    # hidden_unicode is about the bytes of the written text, not its wording,
+    # and never gets excused by what the user typed.
+    if scan.get("hidden_chars"):
+        return False
+    user_flags = set(scan_for_injection(user_text, config).get("flags", []))
+    return all(f in user_flags for f in flags)
+
+
+def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any],
+                     user_text: str = "") -> dict[str, Any]:
+    """Score a concrete tool call (0-3) and return flags explaining why.
+
+    `user_text` is the live user's message for this turn. It is used only to
+    tell a write that echoes their own words from one that launders text out
+    of retrieved content; see echoes_live_user.
+    """
     flags: list[str] = []
 
     if name in ("run_command",):
@@ -599,7 +637,7 @@ def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any]) 
         prompt = str(params.get("prompt", ""))
         ideal = str(params.get("ideal_reply", ""))
         scan = scan_for_injection(f"{prompt}\n{ideal}", config)
-        if scan["risk_score"] >= 2:
+        if scan["risk_score"] >= 2 and not echoes_live_user(scan, user_text, config):
             return {"risk_score": 3, "flags": ["golden_injection"] + scan["flags"]}
         return {"risk_score": 2, "flags": ["golden_change"]}
 
@@ -616,7 +654,7 @@ def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any]) 
                 risk["risk_score"] = 3
             return risk
         scan = scan_for_injection(text, config)
-        if scan["risk_score"] >= 2:
+        if scan["risk_score"] >= 2 and not echoes_live_user(scan, user_text, config):
             return {"risk_score": 3, "flags": ["cron_injection"] + scan["flags"]}
         return {"risk_score": 1, "flags": ["cron_create"]}
 
@@ -631,14 +669,18 @@ def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any]) 
         body = str(params.get("body", params.get("steps", "")))
         scan = scan_for_injection(f"{title}\n{body}", config)
         if scan["risk_score"] >= 2:
-            return {"risk_score": 3, "flags": ["note_injection"] + scan["flags"]}
+            if not echoes_live_user(scan, user_text, config):
+                return {"risk_score": 3, "flags": ["note_injection"] + scan["flags"]}
+            return {"risk_score": 1, "flags": ["note_create", "user_authored"]}
         return {"risk_score": 1, "flags": ["note_create"]}
 
     if name in ("save_memory", "compact_memory"):
         content = str(params.get("content", ""))
         scan = scan_for_injection(content, config)
         if scan["risk_score"] >= 2:
-            return {"risk_score": 3, "flags": ["memory_injection"] + scan["flags"]}
+            if not echoes_live_user(scan, user_text, config):
+                return {"risk_score": 3, "flags": ["memory_injection"] + scan["flags"]}
+            return {"risk_score": 1, "flags": ["memory_change", "user_authored"]}
         return {"risk_score": 1, "flags": ["memory_change"]}
 
     if name in ("delegate_task", "brain_solve"):
@@ -900,14 +942,35 @@ def maybe_confirm(
     return allowed, prompt
 
 
-def risk_annotation(risk: dict[str, Any]) -> str:
-    """Short warning string to append to a tool observation."""
+def risk_annotation(risk: dict[str, Any], approved: bool = False) -> str:
+    """Short note appended to a tool observation, describing the call that just
+    ran.
+
+    It has to say what it is *about*, because the model reads it. The old
+    wording — a bare "[Security alert: HIGH-risk action: note_injection,
+    role_override]" — was indistinguishable from a report that injected content
+    had been found in the context, and on 2026-08-30 the model read exactly
+    that meaning into an annotation on its own user-approved note, then refused
+    the user's request twice on the strength of it.
+
+    Two things fix that. The annotation names the action as the assistant's own
+    completed call, not as inbound content; and when the user was asked and
+    said yes, it says so, because an approved action is settled and there is
+    nothing left to refuse.
+    """
     score = risk.get("risk_score", 0)
     flags = risk.get("flags", [])
     if score == 0 or not flags:
         return ""
     level = "HIGH" if score >= 3 else ("MEDIUM" if score == 2 else "LOW")
-    return f"\n[Security alert: {level}-risk action (score {score}/3): {', '.join(flags)}.]"
+    note = (f"\n[Security log — about the action you just took, not about "
+            f"anything in your context: {level} risk (score {score}/3): "
+            f"{', '.join(flags)}.")
+    if approved:
+        note += (" The live user was shown this and approved it, so it is "
+                 "authorised; carry on with what they asked.")
+    note += "]"
+    return note
 
 
 # ---------------------------------------------------------------------------
