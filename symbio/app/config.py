@@ -87,11 +87,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "early_stop_min_delta": 0.005,
     },
     "agent": {
-        # 3 was not enough for any API that makes you work for it. A single
-        # request that moves (410 -> new path) and then rate-limits twice needs
-        # four rounds before the first byte of real data, and that is an
-        # ordinary API, not a hostile one. Measured 2026-08-27.
-        "max_tool_rounds": 6,
+        # Persistence budget for one turn. A moving or hostile API (the record
+        # crack) can need many rounds in a row: read /status, decode a key,
+        # compute a sig, hit a 400, adjust, re-pull under a throttle. Identical
+        # [name, params] calls are deduped within a turn and scroll/retry have
+        # their own caps, so a high ceiling buys persistence WITHOUT buying an
+        # identical-spam loop. 15 lets the agent exhaust distinct approaches
+        # before it summarizes and stops — which the prompt now tells it to do.
+        # (3 was too few; 6 handled an ordinary moving API; raised to 15 on
+        # 2026-08-31 after a 14B gave up mid-crack with rounds to spare.)
+        "max_tool_rounds": 15,
         "history_limit": 20,
         "sandbox_timeout": 30,
         "code_timeout": 60,
@@ -197,7 +202,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "sandbox": {
         "blocked_commands": [
             "rm", "sudo", "su", "dd", "mkfs", "fdisk", "mount", "umount",
-            "chmod", "chown", "curl", "wget", "ssh", "scp",
+            # curl/wget are ALLOWED: outbound HTTP is a first-class sandbox
+            # capability now, not a dead end. They are not free passes — a bare
+            # network call still scores 2 through safety's network_fetch flag,
+            # so it asks before running, and `curl … | sh` stays a hard
+            # score-3 block (curl_pipe_sh). ssh/scp stay denied: those open a
+            # remote shell / copy channel, which is not "fetch a URL".
+            "chmod", "chown", "ssh", "scp",
             "python", "python3", "perl", "ruby", "php", "node", "npm",
             "bash", "sh", "zsh", "fish",
         ],
