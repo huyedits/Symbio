@@ -150,29 +150,47 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # joins it before any generation (so the model is never used by two
         # threads at once).
         self._prefill_thread: threading.Thread | None = None
-        # A persisted prompt cache is a few hundred MB of safetensors, and
+        # A persisted prompt cache is over a gigabyte of safetensors, and
         # reading it used to start only once load() had finished — so the two
         # slowest parts of boot ran back to back when they have nothing to say
-        # to each other. The read is pure file I/O and the weight load is
-        # mostly decompress-and-place, so the read is started *before* load()
-        # and overlaps it; by the time the model is resident the bytes are
-        # already in the page cache. See _start_prompt_cache_prefetch.
+        # to each other. This thread pulls the file's bytes into the OS page
+        # cache underneath the weight load, so the real read on the prefill
+        # thread finds them in memory. See _start_prompt_cache_prefetch.
         self._prefetch_thread: threading.Thread | None = None
-        # (cache, metadata) once the prefetch has read the file, or None. The
-        # cache is deliberately left unevaluated here: materializing it would
-        # allocate GPU buffers on a second thread while load() is allocating
-        # its own, and this codebase has a standing kernel-panic problem with
-        # concurrent Metal clients. mx.eval stays on the prefill thread, which
-        # only runs after load() has returned.
-        self._prefetched_cache: tuple[list, dict] | None = None
         self.enabled_groups: set[str] = set(
             config.get("tools", {}).get("enabled_groups", [])
         )
         # Simple timing record for the most recent turn; surfaced in /status
         # and used by front-ends to report latency.
         self.last_turn_timings: dict[str, float | None] = {}
+        # Both of these MUTATE the module-level tool registry, so they have to
+        # run BEFORE the system prompt is built — the prompt embeds the <tools>
+        # catalog, and a prompt built ahead of them is a prompt no turn will
+        # ever use again.
+        #
+        # They used to run ~40 lines below this, after _finish_model_setup had
+        # already prefilled and persisted a KV cache keyed on the stale prefix.
+        # Measured on this install: the prefilled prompt was 5,741 tokens, the
+        # prompt every turn actually builds was 6,164, and they shared only
+        # 5,221 — so 938 tokens were re-prefilled on every single turn for the
+        # life of the session, and the 74s boot prefill was partly spent on a
+        # prefix that was thrown away before the first reply.
+        #
+        # Load any custom MCP tools the user has previously built so they are
+        # available to the model without restarting the process.
+        try:
+            tooling.refresh_mcp_tools(self.config)
+        except Exception:
+            pass
+        # Advertise the workers that actually exist. Without this the model is
+        # shown a made-up example role and cannot reliably delegate to a skill
+        # at all, which is what kept saved skills reachable only through RAG.
+        try:
+            tooling.refresh_delegate_roles()
+        except Exception:
+            pass
         self.system_prompt = prompts.build_system_prompt(
-            config["assistant_name"], config["user_name"]
+            config["assistant_name"], config["user_name"], config
         )
         self._refresh_sampler()
 
@@ -206,19 +224,6 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if self._model_loaded and self._health_report.get("_persisted") is None:
             self._run_post_load_self_check()
 
-        # Load any custom MCP tools the user has previously built so they are
-        # available to the model without restarting the process.
-        try:
-            tooling.refresh_mcp_tools(self.config)
-        except Exception:
-            pass
-        # Advertise the workers that actually exist. Without this the model is
-        # shown a made-up example role and cannot reliably delegate to a skill
-        # at all, which is what kept saved skills reachable only through RAG.
-        try:
-            tooling.refresh_delegate_roles()
-        except Exception:
-            pass
         # Skill notes touched this session; used to append health errors and
         # user corrections to the matching sidecar files.
         self._skill_notes_used: set[Path] = set()
@@ -330,6 +335,45 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             except Exception:
                 pass
 
+    def _drop_prompt_cache(self, reason: str, tell_user: bool = False):
+        """Throw away the warmed KV cache, on the record.
+
+        Dropping it costs a full re-prefill — 7,329 tokens and 64 seconds on
+        the 14B — and until now every one of the ten call sites did it in
+        silence. From the outside that is a turn which sometimes takes a
+        minute for no visible reason, and nothing in the logs to say which
+        site fired. This module already learned that lesson once, on the
+        prefill that was dead in the running app while every switch that
+        controlled it read as enabled; a stall nobody can attribute is the
+        same failure wearing different clothes.
+
+        Prefer trusting the prefix diff in _generate_reply over calling this.
+        It compares tokens exactly and trims the cache to the common prefix,
+        so a system prompt that grew a block, or a store that was rewritten,
+        costs only the tokens after the change. This is for the cases where
+        the cached tensors are genuinely unusable — the weights are gone, the
+        cache was mutated mid-token, or it came from another process.
+        """
+        had_cache = self._prompt_cache is not None
+        self._prompt_cache = None
+        self._cached_prompt_ids = None
+        if not had_cache:
+            return
+        # The cache is already gone by here. Nothing below may raise, or a
+        # logging problem becomes a failed turn — the exact shape of the bug
+        # _log_info was written to fix.
+        try:
+            self._log_info(f"prompt cache dropped: {reason}")
+        except Exception:
+            pass
+        if tell_user:
+            try:
+                self.output_fn(
+                    f"  [Cache] Dropped the warmed prompt cache ({reason}); "
+                    f"the next reply re-reads the prompt and will be slow.")
+            except Exception:
+                pass
+
     def _unload_model(self):
         """Drop the in-process model and release its GPU buffers.
 
@@ -338,12 +382,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         all of which reload from nothing).
         """
         # Whatever the KV cache holds refers to weights we are about to drop.
-        self._prompt_cache = None
-        self._cached_prompt_ids = None
-        # A prefetch that nobody consumed is a few hundred megabytes with no
-        # reader, which is the opposite of what it was added for. Dropping the
-        # weights is the point at which it can no longer be claimed.
-        self._take_prefetched_cache()
+        self._drop_prompt_cache("the model weights are being unloaded")
+        # Don't leave a reader running into a reload: the prefetch is only
+        # ever useful to the load it was started under.
+        self._await_prompt_cache_prefetch()
         if getattr(self, "model", None) is not None:
             del self.model
         self.model = None
@@ -409,10 +451,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         RAM and spent that saving on latency the user paid at the worst moment:
         immediately after waiting for a worker.
 
-        So the wake mirrors the boot path. The cache read starts before load()
-        and overlaps it, and the prefill runs afterwards — which, since the
-        model, adapter and prompt are all unchanged since boot, is a signature
-        hit on the persisted file rather than a real prefill.
+        So the wake mirrors the boot path. The cache file is warmed into the
+        page cache before load() and overlaps it, and the prefill runs after
+        — which, since the model, adapter and prompt are all unchanged since
+        boot, is a signature hit on the persisted file rather than a real
+        prefill.
         """
         if getattr(self, "model", None) is not None:
             return
@@ -772,11 +815,17 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                     return
                 # A cache saved by an earlier run covers this exact prefix and
                 # these exact weights — load it and skip the prefill entirely.
-                # Not with a draft model: the file holds one model's layers,
-                # while the live cache is two models' concatenated, so the
-                # split in the speculative step would land in the wrong place.
+                # This used to be switched off whenever a draft model was
+                # configured, on the grounds that the file holds one model's
+                # layers while the live cache is two models' concatenated. The
+                # concatenation round-trips fine (measured: save, load, and
+                # speculative generation byte-identical to the live cache); the
+                # only real hazard was the split landing in the wrong place, and
+                # draft_sig in the signature is what rules that out. With a
+                # draft configured — which is the shipped default — the effect
+                # was that no cache was ever written and every single boot
+                # re-prefilled the whole system prompt through the 14B.
                 if (self.config.get("agent", {}).get("persist_prompt_cache", True)
-                        and self._ensure_draft_model() is None
                         and self._load_persisted_prompt_cache(system_ids)):
                     return
                 # max_tokens=0 processes the prompt into the KV cache and
@@ -786,8 +835,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # Persist the cache while it holds exactly the system prefix.
                 # Saving at exit instead would store the whole conversation,
                 # which the next run's prefix diff could not reuse.
-                if (self.config.get("agent", {}).get("persist_prompt_cache", True)
-                        and self._ensure_draft_model() is None):
+                if self.config.get("agent", {}).get("persist_prompt_cache", True):
                     self._save_persisted_prompt_cache(system_ids)
             except Exception as e:
                 # Prefill is an optimization, never a hard requirement. Clear any
@@ -799,9 +847,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # reported "cached 0", and nothing anywhere said a word. The
                 # save path next to this one already logs its failures; this one
                 # not doing so hid a broken feature rather than a slow one.
-                self._log_info(f"Prompt cache prefill failed: {e!r}")
-                self._prompt_cache = None
-                self._cached_prompt_ids = None
+                self._drop_prompt_cache(f"boot prefill failed: {e!r}")
             finally:
                 self._indexing_now = False
 
@@ -822,11 +868,12 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # tried, still raises — because the failing stream is a cpu one owned by
         # the arrays, not the device stream the worker enters.
         #
-        # So this now blocks. It costs ~24s on a first boot, once: the whole
-        # point of persisting the cache is that every later boot loads the file
-        # instead of prefilling, and _start_prompt_cache_prefetch overlaps even
-        # that read with the model load. Paying 24s once to make the feature
-        # real beats an unblocking optimization that never produced a cache.
+        # So this now blocks. It costs a full prefill on a first boot, once —
+        # measured at 65s on the 14B: the whole point of persisting the cache
+        # is that every later boot loads the file instead of prefilling, and
+        # _start_prompt_cache_prefetch warms that file underneath the model
+        # load. Paying it once to make the feature real beats an unblocking
+        # optimization that never produced a cache.
         _prefill()
         self._prefill_thread = None
 
@@ -851,6 +898,13 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         prompt.md edits, the tool catalog and the user's names; the model name
         and adapter fingerprint cover the weights — swapping an adapter leaves
         the ids identical while making every cached value wrong.
+
+        The draft model is in here because a speculative cache is the two
+        models' layers concatenated, and the split is recomputed from the
+        target at load time. Loading a draft-less file into a draft session
+        (or the reverse, or after the draft changed) would put the split in
+        the wrong place, which is the failure the persisted cache used to be
+        switched off entirely to avoid.
         """
         adapter_sig = "none"
         if self.adapter_loaded:
@@ -860,10 +914,36 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 adapter_sig = f"{st.st_mtime_ns}:{st.st_size}"
             except OSError:
                 adapter_sig = "missing"
+        # The draft half, keyed on what actually LOADED rather than on what
+        # config asks for: a draft that failed to load leaves a target-only
+        # cache, while a file written by a run where it did load carries extra
+        # layers that would push the split past the end. Config alone cannot
+        # tell those two apart.
+        #
+        # Inline, and reached through getattr, on purpose. Several callers bind
+        # these cache methods onto a duck-typed stand-in instead of building a
+        # ChatSession, so a new helper method here is a method they do not have
+        # — a private note to a future edit: keep this function's dependencies
+        # to attributes, not to methods.
+        draft_sig = getattr(self, "_draft_sig", None)
+        if draft_sig is None:
+            draft_sig = "none"
+            resolve = getattr(self, "_ensure_draft_model", None)
+            if resolve is not None:
+                try:
+                    draft = resolve()
+                except Exception:
+                    draft = None
+                if draft is not None:
+                    draft_sig = (
+                        f"{self.config.get('agent', {}).get('draft_model', '')}"
+                        f":{len(make_prompt_cache(draft))}")
+            self._draft_sig = draft_sig
         ids_bytes = ",".join(map(str, system_ids)).encode()
         return {
             "model_name": str(self.config.get("model_name", "")),
             "adapter_sig": adapter_sig,
+            "draft_sig": draft_sig,
             "ids_sha": hashlib.sha256(ids_bytes).hexdigest(),
             "n_tokens": str(len(system_ids)),
         }
@@ -878,14 +958,25 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         CPU placing tensors — so running the read underneath the load hides it
         almost entirely, and the first turn is warm the moment the model is.
 
-        What this thread must NOT do is touch the GPU. Materializing the cache
-        here would put a second Metal client in the same window as the weight
-        load, which is the shape that panics IOGPUFamily on this hardware. So
-        it stops at the read: load_prompt_cache leaves the arrays lazy, and the
-        mx.eval that actually allocates stays on the prefill thread, after the
-        load has finished. The signature check needs a tokenizer that does not
-        exist yet, so it also waits — a mismatched file costs one wasted read,
-        which is exactly what it cost before.
+        What this thread must NOT do is touch MLX at all. It used to call
+        load_prompt_cache here, on the theory that the arrays come back lazy
+        and so no GPU buffer is allocated until the prefill thread evaluates
+        them. Lazy is not the same as thread-free: the arrays still capture the
+        stream of the thread that made them, and the mx.eval in
+        _load_persisted_prompt_cache then died on the main thread with
+
+            There is no Stream(cpu, 0) in current thread.
+
+        — the same thread-local stream registry that keeps the prefill itself
+        on the calling thread (see _prefill_system_prompt_cache). That handler
+        deleted the file and re-prefilled, so the persisted cache was rebuilt
+        and thrown away on every single boot: measured at 76s to the prompt on
+        a warm cache that should have cost about ten.
+
+        So this reads bytes and nothing else. Warming the page cache is the
+        part that actually overlaps the load — the array construction was
+        never the expensive half — and it cannot produce an object bound to
+        the wrong thread because it produces no objects at all.
         """
         if not self.config.get("agent", {}).get("prompt_cache_enabled", True):
             return
@@ -900,76 +991,96 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
         def _prefetch():
             try:
-                cache, meta = load_prompt_cache(str(path), return_metadata=True)
-                self._prefetched_cache = (cache, meta)
+                with open(path, "rb", buffering=0) as f:
+                    buf = bytearray(8 << 20)
+                    while f.readinto(buf):
+                        pass
             except Exception:
-                # Nothing is owed here. A failure leaves _prefetched_cache None
-                # and _load_persisted_prompt_cache reads the file itself, which
-                # is what it did before this existed — including the unlink of
-                # a truncated file, so the error is still handled, just later.
-                self._prefetched_cache = None
+                # Nothing is owed here. A failed warm just means the real read
+                # on the prefill thread goes to disk, which is what it did
+                # before this existed. A bad file is still diagnosed there.
+                pass
 
         self._prefetch_thread = threading.Thread(target=_prefetch, daemon=True)
         self._prefetch_thread.start()
 
-    def _take_prefetched_cache(self) -> tuple[list, dict] | None:
-        """Hand over the prefetched (cache, metadata), waiting for it if needed.
+    def _await_prompt_cache_prefetch(self):
+        """Block until the page-cache warm has finished.
 
-        Consumed exactly once: a KV cache is mutated in place by generation, so
-        handing the same object to a second caller would give two readers one
-        buffer. After this returns the prefetch is spent and a later miss falls
-        back to reading the file.
+        Nothing is handed back — the prefetch's only product is bytes in the
+        OS page cache. Waiting still matters: letting the real read start while
+        the warm is mid-file has the two of them queueing on the same device
+        for the same blocks, which is slower than either alone.
         """
         thread = self._prefetch_thread
         if thread is not None:
             thread.join()
             self._prefetch_thread = None
-        taken = self._prefetched_cache
-        self._prefetched_cache = None
-        return taken
 
     def _load_persisted_prompt_cache(self, system_ids: list[int]) -> bool:
         """Restore the warmed system-prefix cache from disk.
 
-        Returns True if the cache was loaded and is safe to use. Reading a few
-        hundred MB off an SSD is roughly an order of magnitude cheaper than
+        Returns True if the cache was loaded and is safe to use. Reading a
+        gigabyte off an SSD is roughly an order of magnitude cheaper than
         re-running the prefill through the model, which is the whole point —
-        and cheaper still when _start_prompt_cache_prefetch already read it
-        underneath the weight load, in which case there is nothing left to wait
-        for here.
+        and cheaper still when _start_prompt_cache_prefetch has already pulled
+        those bytes into the page cache underneath the weight load.
+
+        The read happens HERE, on the calling thread, and not on the prefetch
+        thread: MLX arrays belong to the stream of the thread that built them,
+        so a cache read anywhere else cannot be evaluated by the prefill. See
+        _start_prompt_cache_prefetch for what that cost.
         """
         path = constants.PROMPT_CACHE_FILE
         if not path.exists():
             return False
         want = self._prompt_cache_signature(system_ids)
-        prefetched = self._take_prefetched_cache()
-        if prefetched is not None:
-            cache, meta = prefetched
-        else:
-            try:
-                cache, meta = load_prompt_cache(str(path), return_metadata=True)
-            except Exception as e:
-                # A truncated or version-mismatched file is not worth keeping.
-                self._log_info(f"Prompt cache unreadable, discarding: {e}")
-                path.unlink(missing_ok=True)
-                return False
-        if any(meta.get(k) != v for k, v in want.items()):
-            # The model, adapter or prompt changed since it was written.
+        self._await_prompt_cache_prefetch()
+        try:
+            cache, meta = load_prompt_cache(str(path), return_metadata=True)
+        except Exception as e:
+            # A truncated or version-mismatched file is not worth keeping.
+            self._log_info(f"Prompt cache unreadable, discarding: {e}")
             path.unlink(missing_ok=True)
             return False
-        # Loading a cache is not the same as being able to use one. A file
-        # written by an earlier process can carry arrays bound to an MLX stream
-        # that does not exist here, and nothing notices until generation, which
-        # then dies mid-turn. Touching the state now moves that failure to the
-        # one place equipped to handle it: prefill just runs normally instead.
+        differing = [k for k, v in want.items() if meta.get(k) != v]
+        if differing:
+            # The model, adapter, draft or prompt changed since it was written.
+            # Say WHICH. This branch throws away a 1.7 GB file and buys the next
+            # boot a 74-second prefill, and it used to do that without a word —
+            # so a cache that never once hit was indistinguishable from a cache
+            # that was working fine. `ids_sha` here means the system prompt
+            # moved, which is the one worth naming, because it is usually a
+            # bug in what built the prompt rather than a real change.
+            self._log_info(
+                "Prompt cache signature mismatch, discarding: "
+                + ", ".join(f"{k} {meta.get(k)!r} != {want[k]!r}"
+                            for k in differing))
+            path.unlink(missing_ok=True)
+            return False
+        # Loading a cache is not the same as being able to use one: nothing
+        # would notice a cache that cannot be materialized until generation,
+        # which would then die mid-turn. Touching the state now moves that
+        # failure to the one place equipped to handle it — prefill just runs
+        # normally instead.
+        #
+        # The file is NOT deleted on this path. Whatever went wrong here is a
+        # property of this process, not of the bytes on disk; deleting them
+        # buys the next boot a full prefill for a condition it may not even
+        # share. Only an unreadable file or a stale signature is worth a
+        # discard, and both are handled above.
         try:
             mx.eval([c.state for c in cache])
         except Exception as e:
-            self._log_info(f"Prompt cache unusable in this process, discarding: {e}")
-            path.unlink(missing_ok=True)
+            self._log_info(f"Prompt cache unusable in this process, keeping "
+                           f"the file and prefilling instead: {e}")
             return False
         self._prompt_cache = cache
         self._cached_prompt_ids = list(system_ids)
+        # A hit used to be the only outcome that said nothing, which is how a
+        # cache that never once loaded looked exactly like one that always did.
+        self._log_info(f"Prompt cache hit: {len(system_ids)} tokens, "
+                       f"{path.stat().st_size / 1e6:.0f} MB")
         return True
 
     def _save_persisted_prompt_cache(self, system_ids: list[int]):
@@ -1210,7 +1321,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         spinner = _Spinner(spinner_label)
         spinner.start()
 
-        def _emit(text: str):
+        def _emit(text: str, is_reasoning: bool = False):
             if self.stream_chunk_fn is None or not text:
                 return
             nonlocal shown, answer_prefix_emitted
@@ -1220,7 +1331,13 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # chunk, otherwise the spinner thread keeps overwriting the
                 # streaming reply.
                 spinner.stop()
-            if not answer_prefix_emitted and not text.startswith(tooling.REASONING_MARKER):
+            # Reasoning now streams chunk by chunk, so only its first chunk
+            # carries REASONING_MARKER — testing for the marker alone would
+            # have read every later reasoning chunk as the start of the answer
+            # and stamped "Caine   : " into the middle of the thought. The
+            # stripper says which kind of text it just handed over.
+            if not answer_prefix_emitted and not is_reasoning and not text.startswith(
+                    tooling.REASONING_MARKER):
                 answer_prefix_emitted = True
                 if chunk_prefix:
                     self.stream_chunk_fn(chunk_prefix)
@@ -1254,6 +1371,15 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 sampler=self.sampler, prompt_cache=self._prompt_cache,
                 **_spec_kw,
             ):
+                if first_token_time is None:
+                    # The moment the model produced its first token, which is
+                    # what "time to first token" means and what the prefill
+                    # work above is spent on. This was declared and never
+                    # assigned, so ttft_ms fell through to gen_ms below and
+                    # /status reported the whole generation as the latency to
+                    # first token — the one number you would use to tell a slow
+                    # prefill from a slow decode, reading as neither.
+                    first_token_time = time.perf_counter()
                 text_parts.append(response.text)
                 raw_acc += response.text
                 gen_ids.append(response.token)
@@ -1262,7 +1388,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 if stripper is not None:
                     safe = stripper.feed(response.text)
                     if safe:
-                        _emit(safe)
+                        _emit(safe, stripper.chunk_is_reasoning)
                 else:
                     _emit(response.text)
                 # Stop the instant the explicit end-of-turn marker streams out,
@@ -1289,8 +1415,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # The real MLX cache may already be mutated beyond what our
             # bookkeeping reflects (interrupted mid-token) — never trust a
             # stale cache after this; the next call rebuilds it from zero.
-            self._prompt_cache = None
-            self._cached_prompt_ids = None
+            self._drop_prompt_cache("generation was interrupted mid-token")
             raise
         finally:
             self._indexing_now = False
@@ -1299,7 +1424,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if stripper is not None:
             tail = stripper.finish()
             if tail:
-                _emit(tail)
+                _emit(tail, stripper.chunk_is_reasoning)
             # Only close the line if something was actually written to it.
             # When nothing streamed (the whole reply was a tool tag, or
             # reasoning that stayed hidden) the spinner's stop() already
@@ -1313,8 +1438,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
         if timings is not None:
             timings["gen_ms"] = (time.perf_counter() - gen_start) * 1000
-            if timings.get("ttft_ms") is None:
-                timings["ttft_ms"] = timings["gen_ms"]
+            timings["ttft_ms"] = (
+                (first_token_time - gen_start) * 1000
+                if first_token_time is not None else timings["gen_ms"])
 
         self._cached_prompt_ids = ids + gen_ids
         return "".join(text_parts), shown
@@ -1962,8 +2088,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             except Exception as exc:
                 self.output_fn(f"  [Canary] Could not compact {store}: {exc}")
         self.retriever.invalidate_cache()
-        self._prompt_cache = None
-        self._cached_prompt_ids = None
+        self._drop_prompt_cache("the periodic canary check failed", tell_user=True)
         try:
             safety.log_security_event("canary_auto_check_failed",
                                       {"history_len": len(self.history)})
@@ -2021,8 +2146,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # The stores are part of the cached system prefix; a stale cache
             # would keep serving the pre-compaction text.
             self.retriever.invalidate_cache()
-            self._prompt_cache = None
-            self._cached_prompt_ids = None
+            self._drop_prompt_cache("the curated stores were compacted",
+                                    tell_user=True)
         self._turns_since_auto_compact = 0
 
 

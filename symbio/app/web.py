@@ -3,6 +3,7 @@
 import html as html_lib
 import json
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
@@ -13,8 +14,24 @@ _USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.3
 
 def _http_get(url: str, timeout: int = 15) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read(1_000_000).decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read(1_000_000).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        # A non-2xx is where an API puts the thing the caller most needs — the
+        # 400 that says "pages 0..2", the 401 that names the auth scheme, the
+        # 410 that gives the new path. urlopen raises "HTTP Error 400: Bad
+        # Request" and drops the body, so read_page/fetch_html used to hand the
+        # model a bare "Bad Request" while the fix sat unread in the response.
+        # Measured 2026-08-31: the agent gave up an API crack because the 0..2
+        # range hint never reached it. Re-raise WITH the status, body, and any
+        # Retry-After, matching the sandbox fetch() stub so both HTTP paths
+        # tell the model the same truth about a failure.
+        body = e.read(20_000).decode("utf-8", errors="replace") if e.fp else ""
+        retry = e.headers.get("Retry-After") if e.headers else None
+        extra = f" Retry-After: {retry}s." if retry else ""
+        raise RuntimeError(
+            f"HTTP {e.code} from {url}.{extra} Response body: {body}") from None
 
 
 class _TextExtractor(HTMLParser):

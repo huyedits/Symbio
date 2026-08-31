@@ -36,6 +36,16 @@ PROMPT_FILE = PROJECT_DIR / "prompt.md"
 CRON_FILE = PROJECT_DIR / "cron_jobs.json"
 MEMORY_FILE = PROJECT_DIR / "agent_memory.md"
 PROFILE_FILE = PROJECT_DIR / "user_profile.md"
+# Standing instructions: preferences the user set in their own turn and meant
+# to outlive the session ("stay a tsundere in all chats", "always answer in
+# Vietnamese", "keep replies to two lines"). Every other persistence channel —
+# notes via RAG, agent_memory.md, user_profile.md — is wrapped as untrusted
+# data before it reaches the model, which is correct for anything that could
+# have come from a web page but leaves no way at all for a preference to
+# survive a restart. This file is the one channel that is served as the user's
+# own words; see symbio.app.memory.save_standing_instruction for the narrow
+# rules that keep it safe.
+STANDING_FILE = PROJECT_DIR / "standing_instructions.md"
 SESSIONS_DIR = PROJECT_DIR / "sessions"
 # Snapshot of the last shipped default prompt; used to auto-update prompt.md
 # when the user has not customized it.

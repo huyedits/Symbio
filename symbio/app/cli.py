@@ -793,7 +793,7 @@ def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
         return 1
 
     system_prompt = prompts.build_system_prompt(
-        config.get("assistant_name", ""), config.get("user_name", "")
+        config.get("assistant_name", ""), config.get("user_name", ""), config
     )
 
     def _llm_fn(prompt: str) -> str:

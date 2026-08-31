@@ -272,6 +272,10 @@ class AgentTurnMixin:
         # Whether the user asked for anything to be done this turn; read by the
         # intent gate in _execute_tool.
         self._action_asked_this_turn = _asks_for_action(user_input)
+        # The user's own words this turn. The write-scanner reads it to tell a
+        # note that records what they just said from one that carries an
+        # instruction out of retrieved text.
+        self._user_text_this_turn = user_input
 
         if self.retriever.rag_cfg.get("enabled", True):
             if rag_results:
@@ -287,7 +291,7 @@ class AgentTurnMixin:
         # Live-reload: config changes and prompt.md edits apply on the next turn.
         self._refresh_sampler()
         self.system_prompt = prompts.build_system_prompt(
-            self.config["assistant_name"], self.config["user_name"]
+            self.config["assistant_name"], self.config["user_name"], self.config
         )
         timings["prompt_ms"] = (time.perf_counter() - turn_start) * 1000
 
@@ -455,8 +459,8 @@ class AgentTurnMixin:
                     if _had_prompt_cache and _sample_attempt == 0:
                         self.output_fn("  [Cache] Warmed prompt cache unusable "
                                        "here; discarding it and retrying.")
-                        self._prompt_cache = None
-                        self._cached_prompt_ids = None
+                        self._drop_prompt_cache(
+                            "the warmed cache was unusable in this process")
                         try:
                             constants.PROMPT_CACHE_FILE.unlink(missing_ok=True)
                         except OSError:
