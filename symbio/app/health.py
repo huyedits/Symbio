@@ -526,7 +526,9 @@ def _check_python_env(config: dict[str, Any]) -> _CheckResult:
     """Verify required third-party packages are importable."""
     required = {
         "mlx_lm": "mlx-lm",
-        "rag": "rag (local)",
+        # `rag` lives at symbio/rag.py, not the repository root — probing the
+        # bare name reported it missing on every boot after the move.
+        "symbio.rag": "rag (local)",
     }
     missing = []
     for module, package in required.items():
