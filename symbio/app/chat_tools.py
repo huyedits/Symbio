@@ -264,17 +264,13 @@ class ToolsMixin:
             # and say what to do about it. params["body"] raised a bare
             # KeyError, so a call that simply forgot the body came back as
             # "Failed to save note: 'body'" — a key name, with nothing to act
-            # on. There is also no delete-note tool, and write_note is what the
-            # model reaches for when asked to remove one; say so, or it retries
-            # the same impossible call.
+            # on. write_note only creates; delete_note removes.
             missing = [k for k in ("title", "body") if not params.get(k)]
             if missing:
                 return (
                     f"Save failed: missing {', '.join(repr(m) for m in missing)}. "
-                    "write_note only creates a note — it cannot edit or delete "
-                    "one. To save, retry with both a title and a body. To remove "
-                    "a note, tell the user it has to be deleted from notes/ "
-                    "directly; do not retry this call."
+                    "write_note only creates a note — retry with both a title and "
+                    "a body. To remove a note, use delete_note with its title."
                 )
             try:
                 p = memory.save_note(params["title"], params["body"])
@@ -282,6 +278,22 @@ class ToolsMixin:
                 return f"Saved note: {p.name}"
             except Exception as e:
                 return f"Failed to save note: {e}"
+
+        if name == "delete_note":
+            title = params.get("title") or params.get("query") or params.get("name")
+            if not title:
+                return (
+                    "Delete failed: missing 'title'. Retry with the note's title "
+                    "or a distinctive phrase from it, e.g. "
+                    '<tool_call>{"name": "delete_note", "arguments": {"title": "Proxy Info"}}</tool_call>.'
+                )
+            try:
+                deleted, message = memory.delete_note(str(title))
+                if deleted:
+                    self.retriever.invalidate_cache()
+                return message
+            except Exception as e:
+                return f"Failed to delete note: {e}"
 
         if name == "save_skill":
             try:

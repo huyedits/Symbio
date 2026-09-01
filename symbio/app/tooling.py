@@ -125,6 +125,27 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "browser_click",
+        "description": "Click an element in the open browser, identified by its visible text (e.g. the button or link label). Use after browser_open to interact with the page.",
+        "parameters": {
+            "type": "object",
+            "properties": {"target": {"type": "string", "description": "The visible text of the element to click, e.g. 'Sign in'."}},
+            "required": ["target"],
+        },
+    },
+    {
+        "name": "browser_type",
+        "description": "Type text into the focused field in the open browser. Set enter=true to submit with Return after typing.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "The text to type."},
+                "enter": {"type": "boolean", "description": "Press Enter after typing. Default false."},
+            },
+            "required": ["text"],
+        },
+    },
+    {
         "name": "browser_close",
         "description": "Close the controllable browser session.",
         "parameters": {
@@ -143,7 +164,7 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "write_note",
-        "description": "Save a markdown note in notes/.",
+        "description": "Save a markdown note in notes/. Creates a new note; it cannot edit or delete one — use delete_note to remove a note.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -151,6 +172,17 @@ _TOOLS: list[dict[str, Any]] = [
                 "body": {"type": "string", "description": "Markdown content."},
             },
             "required": ["title", "body"],
+        },
+    },
+    {
+        "name": "delete_note",
+        "description": "Delete a saved markdown note from notes/. Give the note's title or a distinctive phrase from it; if more than one note matches, none are deleted and the matches are listed so you can be more specific.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "The note's title, or a distinctive phrase that identifies exactly one note."},
+            },
+            "required": ["title"],
         },
     },
     {
@@ -270,6 +302,30 @@ _TOOLS: list[dict[str, Any]] = [
         "name": "config_show",
         "description": "Show the current configuration.",
         "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "config_set",
+        "description": "Set one configuration value. Give a dotted key (e.g. 'agent.temperature') and the new value; it is coerced to the key's current type. Use config_show first if you are unsure of the exact key.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "Dotted config key, e.g. 'agent.temperature'."},
+                "value": {"type": "string", "description": "New value, coerced to the key's current type."},
+            },
+            "required": ["key", "value"],
+        },
+    },
+    {
+        "name": "save_skill",
+        "description": "Save a reusable skill (a named, ordered procedure) so it can be trained into a worker adapter and reused later. Give the skill a name and its steps.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Short skill name."},
+                "steps": {"type": "string", "description": "The ordered steps / instructions for the skill."},
+            },
+            "required": ["name", "steps"],
+        },
     },
     {
         "name": "schedule_job",
