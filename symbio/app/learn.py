@@ -17,7 +17,7 @@ agent (app paths, tag stripping, and iters-override training).
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from symbio import constants, safety
 from symbio.app import memory, training
@@ -785,10 +785,74 @@ def _safe_mistake_filename(query: str) -> str:
     return f"{ts}_{slug}.md"
 
 
+# The mistake category is decided by the MODEL, not hard-coded at the call
+# site — the classifier below asks the headmaster to name it (see
+# classify_mistake_category). These are only the seed suggestions handed to
+# that prompt so the vocabulary converges instead of every mistake inventing a
+# new near-synonym; the model may reuse one or coin its own. "general" is the
+# fallback when there is no model to ask or its answer is empty.
+SUGGESTED_MISTAKE_CATEGORIES = (
+    "tool_error",       # a tool call failed / errored
+    "wrong_tool",       # the wrong tool or the right tool used the wrong way
+    "hallucination",    # asserted something untrue or unverified
+    "format_error",     # malformed tool call / broken output format
+    "refusal",          # declined something it should have done
+    "user_correction",  # the user said "no, it's X"
+)
+
+
+def _slug_category(raw: str) -> str:
+    """Normalise a model-named category to a short snake_case slug so trivially
+    different spellings ('Tool Error', 'tool-error') land in one bucket."""
+    slug = re.sub(r"[^a-z0-9]+", "_", (raw or "").strip().lower()).strip("_")
+    # Keep it to the first two words: the model sometimes returns a short phrase.
+    slug = "_".join(slug.split("_")[:2])
+    return slug[:32] or "general"
+
+
+def classify_mistake_category(
+    original_query: str, wrong_answer: str, correct_answer: str,
+    classify_fn: Callable[[str], str] | None,
+    known_categories: tuple[str, ...] | list[str] = (),
+) -> str:
+    """Ask the model which category a mistake falls into.
+
+    `classify_fn` runs one short greedy generation on the resident model and
+    returns its text; when it is None (no model, or a failure) this returns
+    "general" rather than guessing, so a classification never blocks or breaks
+    the capture. Categories already in use are offered first so the model
+    reuses them; it may still name a new one."""
+    if classify_fn is None:
+        return "general"
+    offered = list(dict.fromkeys([*known_categories, *SUGGESTED_MISTAKE_CATEGORIES]))
+    prompt = (
+        "You are labelling a mistake you made so it can be grouped with similar "
+        "ones. Reply with ONE short snake_case category and nothing else.\n"
+        f"Reuse one of these if it fits: {', '.join(offered)}.\n"
+        "Otherwise name a new one.\n\n"
+        f"Asked: {original_query}\n"
+        f"Wrong: {wrong_answer}\n"
+        f"Correct: {correct_answer}\n\n"
+        "Category:"
+    )
+    try:
+        answer = classify_fn(prompt) or ""
+    except Exception:
+        return "general"
+    # Take the first token-ish word of the reply; models sometimes add a
+    # sentence after the label despite the instruction.
+    first = answer.strip().splitlines()[0] if answer.strip() else ""
+    return _slug_category(first)
+
+
 def save_mistake_note(original_query: str, wrong_answer: str,
                       correction: str, correct_answer: str,
-                      severity: int = 1) -> Path:
-    """Persist a correction as a markdown note in notes/mistakes/."""
+                      severity: int = 1, category: str = "general") -> Path:
+    """Persist a correction as a markdown note in notes/mistakes/.
+
+    `category` is the model's own label (see classify_mistake_category),
+    normalised to a slug; it falls back to "general"."""
+    category = _slug_category(category)
     # digest_mistakes_to_training parses "**Original question:**"/"**Correct
     # answer:**" as single lines; a value with embedded newlines (e.g. a
     # multi-line tool observation or a bulleted reply) would silently
@@ -804,6 +868,7 @@ def save_mistake_note(original_query: str, wrong_answer: str,
     title = f"Correction: {original_query[:60]}{'...' if len(original_query) > 60 else ''}"
     body = (
         f"# {title}\n\n"
+        f"**Category:** {category}\n\n"
         f"**Severity:** {max(1, int(severity))}\n\n"
         f"**Original question:** {original_query}\n\n"
         f"**Wrong answer:** {wrong_answer}\n\n"
@@ -824,6 +889,30 @@ def mistake_note_count() -> int:
     if not constants.MISTAKES_DIR.exists():
         return 0
     return len([f for f in constants.MISTAKES_DIR.glob("*.md") if f.is_file()])
+
+
+def mistake_category_counts() -> dict[str, int]:
+    """How many pending (un-archived) mistake notes fall in each category.
+
+    Reads the "**Category:**" line each note now carries; a note written before
+    the field existed has none and counts as "general". Ordered by descending
+    count so the caller can show the dominant kind first."""
+    counts: dict[str, int] = {}
+    if not constants.MISTAKES_DIR.exists():
+        return counts
+    for f in constants.MISTAKES_DIR.glob("*.md"):
+        if not f.is_file():
+            continue
+        category = "general"
+        try:
+            for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("**Category:**"):
+                    category = line.split("**Category:**", 1)[1].strip() or "general"
+                    break
+        except OSError:
+            continue
+        counts[category] = counts.get(category, 0) + 1
+    return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 def archive_mistake_notes() -> int:

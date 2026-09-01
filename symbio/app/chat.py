@@ -2036,7 +2036,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                       "\"No, the answer is ...\" first, then run /learn.")
             return
         severity = learn.correction_severity(sample[0], sample[2], self.config)
-        path = learn.save_mistake_note(*sample, severity=severity)
+        category = self._classify_mistake(sample[0], sample[1], sample[3])
+        path = learn.save_mistake_note(*sample, severity=severity,
+                                       category=category)
         self.output_fn(f"  [Learn] Correction captured (severity {severity}): {path.name}")
 
         correction_text = (
@@ -2065,6 +2067,39 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
         learn.maybe_train_on_mistakes(
             self.config, self.tokenizer, self.system_prompt, train_fn=self._guarded_train)
+
+    def _classify_mistake(self, original_query: str, wrong_answer: str,
+                          correct_answer: str) -> str:
+        """The model's own one-word category for a mistake it just made.
+
+        A short greedy generation on the resident model (like _teach, and like
+        it deliberately NOT sharing self._prompt_cache — this is a throwaway
+        prompt that must not disturb the conversation's KV cache). Any failure,
+        or no resident model, yields "general" rather than blocking the capture
+        it annotates. Categories already in use are offered so the vocabulary
+        converges instead of every mistake coining a synonym."""
+        def _classify_fn(prompt: str) -> str:
+            from mlx_lm import generate
+            from symbio.app import eval as eval_mod, tooling
+            if self.model is None or self.tokenizer is None:
+                raise RuntimeError("no model resident to classify a mistake")
+            rendered = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False, add_generation_prompt=True, enable_thinking=False)
+            raw = generate(
+                self.model, self.tokenizer, prompt=rendered,
+                sampler=eval_mod._make_sampler(
+                    {**self.config,
+                     "agent": {**self.config.get("agent", {}), "temperature": 0.0}}),
+                max_tokens=12, verbose=False)
+            return tooling.strip_tool_tags(tooling.strip_reasoning_block(raw)).strip()
+
+        known = tuple(learn.mistake_category_counts().keys())
+        try:
+            return learn.classify_mistake_category(
+                original_query, wrong_answer, correct_answer, _classify_fn, known)
+        except Exception:
+            return "general"
 
     def _decay_stale_notes(self) -> list[str]:
         """Archive expired 'Learned:' research notes and purge their training
