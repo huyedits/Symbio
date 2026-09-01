@@ -392,6 +392,10 @@ class ToolsMixin:
                                     f"GUI apps have no CLI name; launch them "
                                     f"with open -a."),
                                 correct_answer=f"<cmd>{retry}</cmd>",
+                                category=self._classify_mistake(
+                                    f"launch the {app} app",
+                                    f"<cmd>{params['cmd'].strip()}</cmd>",
+                                    f"<cmd>{retry}</cmd>"),
                             )
                         except Exception:
                             # Never let bookkeeping fail a turn that worked.

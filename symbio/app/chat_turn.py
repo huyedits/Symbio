@@ -989,6 +989,10 @@ class AgentTurnMixin:
                     wrong_answer="(a prior tool call failed; see the observation above)",
                     correction="(automatic: the next tool call succeeded)",
                     correct_answer=reply,
+                    category=self._classify_mistake(
+                        pending_tool_error,
+                        "(a prior tool call failed; see the observation above)",
+                        reply),
                 )
                 self.output_fn(f"  [Learn] Tool mistake captured: {path.name}")
                 learn.maybe_train_on_mistakes(
