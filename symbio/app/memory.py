@@ -23,6 +23,66 @@ def save_note(title: str, body: str) -> Path:
     return path
 
 
+def find_notes(query: str) -> list[Path]:
+    """Notes matching `query` in their title/filename, or failing that their body.
+
+    The counterpart to save_note's lookup: a note is stored as
+    `<timestamp>_<sanitized-title>.md` with the real title on the first line, so
+    match against the visible title first (filename and `# ` heading), and only
+    fall back to a body substring when nothing matched — a title match is what
+    the user means by "the note about X", a body match is a wider net for when
+    they quote a phrase from inside it.
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    notes = sorted(p for p in constants.NOTES_DIR.glob("*.md") if p.is_file())
+    by_title: list[Path] = []
+    by_body: list[Path] = []
+    for p in notes:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        heading = text.splitlines()[0].lstrip("# ").strip().lower() if text else ""
+        # Filename minus the leading timestamp, underscores back to spaces.
+        stem = re.sub(r"^\d{8}_\d{6}_", "", p.stem).replace("_", " ").lower()
+        if q in heading or q in stem:
+            by_title.append(p)
+        elif q in text.lower():
+            by_body.append(p)
+    return by_title or by_body
+
+
+def delete_note(query: str) -> tuple[bool, str]:
+    """Delete the single note identified by `query`.
+
+    Returns (deleted, message). Refuses to guess between multiple matches: a
+    delete that removes the wrong note is worse than one that asks the user to
+    be specific, so an ambiguous query deletes nothing and lists the candidates.
+    """
+    matches = find_notes(query)
+    if not matches:
+        return False, f"No note matches '{query}'. Nothing was deleted."
+    if len(matches) > 1:
+        titles = ", ".join(
+            (p.read_text(encoding="utf-8", errors="replace").splitlines() or [p.stem])[0]
+            .lstrip("# ").strip()
+            for p in matches[:6]
+        )
+        return False, (
+            f"{len(matches)} notes match '{query}', so nothing was deleted. "
+            f"Be more specific. Matches: {titles}"
+        )
+    path = matches[0]
+    title = (path.read_text(encoding="utf-8", errors="replace").splitlines() or [path.stem])[0].lstrip("# ").strip()
+    try:
+        path.unlink()
+    except OSError as exc:
+        return False, f"Could not delete note '{title}': {exc}"
+    return True, f"Deleted note: {title}"
+
+
 def ensure_seed_notes(config: dict[str, Any]):
     """If notes/ is empty, seed the two identity facts as markdown notes."""
     if any(constants.NOTES_DIR.glob("*.md")):
