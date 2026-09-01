@@ -839,8 +839,21 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # system+tools prefix, then prefill those ids. The empty user's
                 # closing [/INST] becomes a few stale tokens on the first real
                 # turn and is trimmed by the cache-diff logic in _generate_reply.
+                #
+                # The tool_few_shots go in here too, in the exact slot the live
+                # turn puts them (right after the system message, before any
+                # history — see chat_turn.py). They are ~660 constant tokens;
+                # left out of this prefill they fell outside the cached prefix
+                # and were re-processed on the first turn of every session,
+                # which measured as ~8.5s of that turn's time-to-first-token on
+                # the 14B. Prefilling them here moves the first-turn common
+                # prefix past them, so only the volatile per-turn context and
+                # the user's message are new. They are also what the comment in
+                # chat_turn.py already assumed was "folded into the cached
+                # prefix at no cost" — this is what makes that true.
                 templated = self.tokenizer.apply_chat_template(
                     [{"role": "system", "content": self.system_prompt},
+                     *tool_few_shots(self.config),
                      {"role": "user", "content": ""}],
                     tokenize=False, add_generation_prompt=False, enable_thinking=False,
                 )
