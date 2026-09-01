@@ -260,6 +260,22 @@ class ToolsMixin:
 
     def _dispatch_tool(self, name: str, params: dict[str, Any]) -> str:
         if name == "write_note":
+            # Same idiom as the browser actions below: name the missing field
+            # and say what to do about it. params["body"] raised a bare
+            # KeyError, so a call that simply forgot the body came back as
+            # "Failed to save note: 'body'" — a key name, with nothing to act
+            # on. There is also no delete-note tool, and write_note is what the
+            # model reaches for when asked to remove one; say so, or it retries
+            # the same impossible call.
+            missing = [k for k in ("title", "body") if not params.get(k)]
+            if missing:
+                return (
+                    f"Save failed: missing {', '.join(repr(m) for m in missing)}. "
+                    "write_note only creates a note — it cannot edit or delete "
+                    "one. To save, retry with both a title and a body. To remove "
+                    "a note, tell the user it has to be deleted from notes/ "
+                    "directly; do not retry this call."
+                )
             try:
                 p = memory.save_note(params["title"], params["body"])
                 self.retriever.invalidate_cache()
