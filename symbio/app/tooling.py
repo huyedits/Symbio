@@ -1300,6 +1300,66 @@ def _extract_gemma_tool_calls(reply: str) -> list[tuple[str, dict[str, Any]]]:
     return out
 
 
+_TOOL_CALL_ENVELOPE_RE = re.compile(r'<tool_call>\s*(.*?)\s*</tool_call>', re.DOTALL)
+
+
+def _shield_tool_call_data(reply: str) -> str:
+    """Blank out the argument DATA of well-formed <tool_call> envelopes.
+
+    Every legacy tag scanner below runs over the raw reply, and it used to see
+    inside a JSON envelope too. So a call whose arguments merely quoted a tag
+    dispatched that tag as a second, unasked-for tool:
+
+        <tool_call>{"name": "write_note", "arguments": {"title": "Snippets",
+          "body": "Run <py>import os; os.remove('x')</py> for that."}}</tool_call>
+
+    ran the code — the note was saved AND execute_code fired on its body. The
+    JSON already said which tool to run and with what arguments; its argument
+    strings are data, so they get blanked here before the tag scanners look.
+
+    Only text the parse actually captured as a string value is blanked, which
+    is what keeps a SPLICE — JSON opened, legacy tag closed, arguments lost —
+    readable by the fallback scanner that is its only chance of running:
+
+        <tool_call>{"name": "web_search", "arguments": <search>pricing</search>
+
+    Nothing there survives into a parsed value, so nothing there is blanked.
+    Blanking preserves length so every offset into the reply still lines up.
+    """
+    out = reply
+    for m in _TOOL_CALL_ENVELOPE_RE.finditer(reply):
+        body = m.group(1).strip()
+        try:
+            call = json.loads(body)
+        except json.JSONDecodeError:
+            call = _repair_tool_call_json(body)
+        if not isinstance(call, dict):
+            continue
+        for value in _string_leaves(call):
+            if "<" not in value:
+                continue  # nothing a tag scanner could match
+            # The raw spelling first, then the escaped one, because the value
+            # comes back unescaped from the parse and the body holds whichever
+            # form the model wrote.
+            for needle in (value, json.dumps(value)[1:-1]):
+                start = out.find(needle, m.start(1), m.end(1))
+                if start != -1:
+                    out = out[:start] + (" " * len(needle)) + out[start + len(needle):]
+                    break
+    return out
+
+
+def _string_leaves(value: Any) -> list[str]:
+    """Every string in a parsed tool call, at any depth."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _string_leaves(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _string_leaves(v)]
+    return []
+
+
 def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
     """Extract tool calls from the model reply.
 
@@ -1307,8 +1367,14 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     """
     tools: list[tuple[str, dict[str, Any]]] = []
 
+    # The legacy tag scanners below read `scan`, not `reply`: a tag
+    # quoted inside a well-formed <tool_call>'s arguments is that call's
+    # data, not a second call. The JSON branches further down still read
+    # the raw reply.
+    scan = _shield_tool_call_data(reply)
+
     for m in re.finditer(
-        r'<note\s+title=(["\'])(.*?)\1>(.*?)</note>', reply, re.DOTALL
+        r'<note\s+title=(["\'])(.*?)\1>(.*?)</note>', scan, re.DOTALL
     ):
         tools.append(("write_note", {
             "title": m.group(2).strip(),
@@ -1321,7 +1387,7 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     # written AND the raw tag was printed to the user as the reply — observed
     # verbatim in a session where a correction was being taught, which also
     # meant nothing was learned from that turn.
-    for m in re.finditer(r'<(?:note|write_note)\b([^>]*?)/>', reply, re.DOTALL):
+    for m in re.finditer(r'<(?:note|write_note)\b([^>]*?)/>', scan, re.DOTALL):
         attrs = {k.lower(): v for k, _q, v in
                  re.findall(r'(\w+)\s*=\s*(["\'])(.*?)\2', m.group(1), re.DOTALL)}
         body = next((attrs[k] for k in
@@ -1332,36 +1398,36 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
                 "body": body.strip(),
             }))
 
-    for m in re.finditer(r'<cmd>(.*?)</cmd>', reply, re.DOTALL):
+    for m in re.finditer(r'<cmd>(.*?)</cmd>', scan, re.DOTALL):
         tools.append(("run_command", {"cmd": m.group(1).strip()}))
 
-    for m in re.finditer(r'<py>(.*?)</py>', reply, re.DOTALL):
+    for m in re.finditer(r'<py>(.*?)</py>', scan, re.DOTALL):
         tools.append(("execute_code", {"code": m.group(1).strip()}))
 
-    for m in re.finditer(r'<search>(.*?)</search>', reply, re.DOTALL):
+    for m in re.finditer(r'<search>(.*?)</search>', scan, re.DOTALL):
         tools.append(("web_search", {"query": m.group(1).strip()}))
 
-    for m in re.finditer(r'<read>(.*?)</read>', reply, re.DOTALL):
+    for m in re.finditer(r'<read>(.*?)</read>', scan, re.DOTALL):
         tools.append(("read_page", {"url": m.group(1).strip()}))
 
-    for m in re.finditer(r'<browse>(.*?)</browse>', reply, re.DOTALL):
+    for m in re.finditer(r'<browse>(.*?)</browse>', scan, re.DOTALL):
         tools.append(("browser_open", {"url": m.group(1).strip()}))
 
-    for m in re.finditer(r'<click>(.*?)</click>', reply, re.DOTALL):
+    for m in re.finditer(r'<click>(.*?)</click>', scan, re.DOTALL):
         tools.append(("browser_click", {"target": m.group(1).strip()}))
 
     for m in re.finditer(
-        r'<type(\s+enter=[\'"](?:true|yes|1)[\'"])?>(.*?)</type>', reply, re.DOTALL
+        r'<type(\s+enter=[\'"](?:true|yes|1)[\'"])?>(.*?)</type>', scan, re.DOTALL
     ):
         tools.append(("browser_type", {
             "text": m.group(2).strip(),
             "enter": bool(m.group(1)),
         }))
 
-    for m in re.finditer(r'<scroll(?:\s+dir=[\'"](up|down)[\'"])?\s*/>', reply):
+    for m in re.finditer(r'<scroll(?:\s+dir=[\'"](up|down)[\'"])?\s*/>', scan):
         tools.append(("browser_scroll", {"direction": m.group(1) or "down"}))
 
-    for m in re.finditer(r'<press>(.*?)</press>', reply, re.DOTALL):
+    for m in re.finditer(r'<press>(.*?)</press>', scan, re.DOTALL):
         tools.append(("browser_press", {"key": m.group(1).strip()}))
 
     # A tag named after the tool itself: <browser_open>url</browser_open>.
@@ -1370,27 +1436,27 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     # system observation), and it used to parse as nothing at all — the tag
     # was left in the visible reply and the turn quietly did nothing. The
     # intent is unambiguous, so honour it.
-    for m in _ALIAS_TAG_RE.finditer(reply):
+    for m in _ALIAS_TAG_RE.finditer(scan):
         tool = _ALIAS_TO_TOOL[m.group(1)]
         arg = _PRIMARY_ARG[tool]
         tools.append((tool, {arg: _unwrap_primary_arg(arg, m.group(2))}))
 
-    if re.search(r'<browser_close\s*/>', reply) or re.search(r'<browser_close></browser_close>', reply):
+    if re.search(r'<browser_close\s*/>', scan) or re.search(r'<browser_close></browser_close>', scan):
         tools.append(("browser_close", {}))
 
     for m in re.finditer(
-        r'<skill\s+name=[\'"]([^\'"]*?)[\'"]>(.*?)</skill>', reply, re.DOTALL
+        r'<skill\s+name=[\'"]([^\'"]*?)[\'"]>(.*?)</skill>', scan, re.DOTALL
     ):
         tools.append(("save_skill", {
             "name": m.group(1).strip(),
             "steps": m.group(2).strip(),
         }))
 
-    if re.search(r'<config\s+show\s*/>', reply):
+    if re.search(r'<config\s+show\s*/>', scan):
         tools.append(("config_show", {}))
 
     for m in re.finditer(
-        r'<config\s+set=[\'"]([^\'"]+)[\'"]>(.*?)</config>', reply, re.DOTALL
+        r'<config\s+set=[\'"]([^\'"]+)[\'"]>(.*?)</config>', scan, re.DOTALL
     ):
         tools.append(("config_set", {
             "key": m.group(1).strip(),
@@ -1398,7 +1464,7 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
         }))
 
     for m in re.finditer(
-        r'<memory(\s+replace=[\'"]all[\'"])?>(.*?)</memory>', reply, re.DOTALL
+        r'<memory(\s+replace=[\'"]all[\'"])?>(.*?)</memory>', scan, re.DOTALL
     ):
         tools.append(("save_memory", {
             "store": "memory",
@@ -1407,7 +1473,7 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
         }))
 
     for m in re.finditer(
-        r'<profile(\s+replace=[\'"]all[\'"])?>(.*?)</profile>', reply, re.DOTALL
+        r'<profile(\s+replace=[\'"]all[\'"])?>(.*?)</profile>', scan, re.DOTALL
     ):
         tools.append(("save_memory", {
             "store": "profile",
@@ -1416,7 +1482,7 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
         }))
 
     for m in re.finditer(
-        r'<always(\s+replace=[\'"]all[\'"])?>(.*?)</always>', reply, re.DOTALL
+        r'<always(\s+replace=[\'"]all[\'"])?>(.*?)</always>', scan, re.DOTALL
     ):
         tools.append(("set_standing_instruction", {
             "instruction": m.group(2).strip(),
@@ -1424,12 +1490,12 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
         }))
 
     # File tools (legacy tag form for quick edits).
-    for m in re.finditer(r'<read_file>(.*?)</read_file>', reply, re.DOTALL):
+    for m in re.finditer(r'<read_file>(.*?)</read_file>', scan, re.DOTALL):
         tools.append(("read_file", {"path": _unwrap_primary_arg("path", m.group(1))}))
 
     for m in re.finditer(
         r'<edit_file\s+path=[\'"]([^\'"]*?)[\'"]\s+old_string=[\'"]([^\'"]*?)[\'"]\s+new_string=[\'"]([^\'"]*?)[\'"](?:\s+backup=[\'"]([^\'"]*?)[\'"])?\s*/?>',
-        reply,
+        scan,
         re.DOTALL,
     ):
         backup_override = m.group(4)
@@ -1444,7 +1510,7 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
 
     for m in re.finditer(
         r'<write_file\s+path=[\'"]([^\'"]*?)[\'"](?:\s+backup=[\'"]([^\'"]*?)[\'"])?\s*>(.*?)</write_file>',
-        reply,
+        scan,
         re.DOTALL,
     ):
         backup_override = m.group(2)
@@ -1453,29 +1519,29 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
             params["backup"] = backup_override.lower() in ("true", "yes", "1", "on")
         tools.append(("write_file", params))
 
-    if re.search(r'<digest\s*/>', reply) or re.search(r'<digest></digest>', reply):
+    if re.search(r'<digest\s*/>', scan) or re.search(r'<digest></digest>', scan):
         tools.append(("digest_notes", {}))
 
-    if re.search(r'<train\s*/>', reply) or re.search(r'<train></train>', reply):
+    if re.search(r'<train\s*/>', scan) or re.search(r'<train></train>', scan):
         tools.append(("train_adapter", {}))
 
-    if re.search(r'<retrain\s*/>', reply) or re.search(r'<retrain></retrain>', reply):
+    if re.search(r'<retrain\s*/>', scan) or re.search(r'<retrain></retrain>', scan):
         tools.append(("retrain_adapter", {}))
 
-    for m in re.finditer(r'<cron\s+expr=[\'"]([^\'"]*?)[\'"]>(.*?)</cron>', reply, re.DOTALL):
+    for m in re.finditer(r'<cron\s+expr=[\'"]([^\'"]*?)[\'"]>(.*?)</cron>', scan, re.DOTALL):
         tools.append(("schedule_job", {
             "schedule": m.group(1).strip(),
             "text": m.group(2).strip(),
         }))
 
-    for m in re.finditer(r'<cron\s+at=[\'"]([^\'"]*?)[\'"]>(.*?)</cron>', reply, re.DOTALL):
+    for m in re.finditer(r'<cron\s+at=[\'"]([^\'"]*?)[\'"]>(.*?)</cron>', scan, re.DOTALL):
         tools.append(("schedule_job", {
             "schedule": "at " + m.group(1).strip(),
             "text": m.group(2).strip(),
         }))
 
     for m in re.finditer(
-        r'<delegate\s+role=[\'"]([^\'"]*?)[\'"]>(.*?)</delegate>', reply, re.DOTALL
+        r'<delegate\s+role=[\'"]([^\'"]*?)[\'"]>(.*?)</delegate>', scan, re.DOTALL
     ):
         tools.append(("delegate_task", {
             "role": m.group(1).strip(),
