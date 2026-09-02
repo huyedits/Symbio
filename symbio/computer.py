@@ -418,11 +418,49 @@ class BrowserSession:
                 target.fill(text, timeout=self._TIMEOUT_MS)
             else:
                 page.keyboard.type(text, delay=10)
+                # Keystrokes go wherever focus happens to be, which on a page
+                # nothing has been clicked on is the body — they land nowhere
+                # and vanish. Reporting "Typed 'x'." regardless is how the
+                # agent came to tell the user it had posted a tweet while the
+                # composer still showed its placeholder: the tool asserted
+                # success, so nothing downstream could tell it had failed.
+                # Verify against the focused element instead of trusting it.
+                if not self._text_landed(page, text):
+                    return (
+                        f"Type failed: '{text}' did not reach any editable "
+                        f"field — nothing is focused, so the keystrokes went "
+                        f"to the page and were discarded. Click the field "
+                        f"first, then type."
+                    )
             if press_enter:
                 page.keyboard.press("Enter")
             return f"Typed '{text}'" + (" and pressed Enter." if press_enter else ".")
         except Exception as e:
             return self._fail("type", e)
+
+    @staticmethod
+    def _text_landed(page: Any, text: str) -> bool:
+        """Did `text` actually reach the focused editable element?
+
+        Best-effort: a page that will not evaluate script, or a field that
+        normalises what it stores, must not turn a working type into a
+        reported failure — so anything unexpected counts as landed. This is
+        here to catch the unambiguous case, keystrokes sent at document.body.
+        """
+        try:
+            return bool(page.evaluate(
+                """(t) => {
+                    const el = document.activeElement;
+                    if (!el || el === document.body) return false;
+                    const editable = el.isContentEditable
+                        || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
+                    if (!editable) return false;
+                    const v = el.value !== undefined ? el.value : el.innerText;
+                    return (v || '').includes(t);
+                }""",
+                text))
+        except Exception:
+            return True
 
     def press(self, key: str) -> str:
         try:
