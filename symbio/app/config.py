@@ -523,9 +523,22 @@ def load_config() -> dict[str, Any]:
         try:
             user_config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
             config.update(user_config)
-            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn", "telegram", "tools", "dispatch", "archive", "prune", "gpu"):
-                if section in user_config:
-                    config[section] = {**DEFAULT_CONFIG.get(section, {}), **user_config[section]}
+            # Re-merge EVERY dict section, derived from DEFAULT_CONFIG rather
+            # than a hand-maintained list. config.update above replaces a
+            # section wholesale, so any default the user's file does not
+            # mention is dropped -- and a list that has to be edited whenever a
+            # section is added silently forgets the ones nobody remembered.
+            #
+            # Measured 2026-09-02: browser, eval, remote, safety and telemetry
+            # were all missing from the list. A user with {"browser":
+            # {"enabled": true}} could not see browser.persistent_profile at
+            # all -- `config set` reported "Unknown config key". The same hole
+            # meant a new safety default would never reach anyone who had ever
+            # touched that section.
+            for section, default in DEFAULT_CONFIG.items():
+                if isinstance(default, dict) and isinstance(
+                        user_config.get(section), dict):
+                    config[section] = {**default, **user_config[section]}
         except Exception as e:
             print(f"[Config warning] Could not read {constants.CONFIG_FILE}: {e}")
     _apply_env_overrides(config)
