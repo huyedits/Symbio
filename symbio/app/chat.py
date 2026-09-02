@@ -746,6 +746,37 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             caches = caches + make_prompt_cache(draft)
         return caches
 
+    def _kv_quant_kwargs(self) -> dict:
+        """KV-cache quantization options, or {} when it is switched off.
+
+        A KV cache is stored at the model's activation precision — BF16 — so
+        the persisted system-prompt cache is 1.8 GB for a 6.6k-token prefix on
+        the 14B plus its draft. Quantizing it trades a little accuracy per
+        cached value for roughly a quarter of the bytes, which on a 16 GB box
+        is the difference between the model fitting beside a browser and
+        jetsam picking a winner.
+
+        This is a memory knob, not a speed one: quantizing adds arithmetic to
+        every prefill step, so a machine with headroom to spare will measure it
+        as a small loss. It pays only where the pressure itself is what is
+        slowing generation down.
+
+        Off unless agent.kv_bits is set, and only ever passed to the real MLX
+        generator — front-ends and tests inject stream_fns that never took
+        these arguments.
+        """
+        if self.stream_fn is not stream_generate:
+            return {}
+        agent_cfg = self.config.get("agent", {})
+        bits = agent_cfg.get("kv_bits")
+        if not bits:
+            return {}
+        return {
+            "kv_bits": int(bits),
+            "kv_group_size": int(agent_cfg.get("kv_group_size", 64)),
+            "quantized_kv_start": int(agent_cfg.get("quantized_kv_start", 0)),
+        }
+
     def _prefill_new_cache(self, ids):
         """A fresh cache with `ids` already processed into it.
 
@@ -754,16 +785,19 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         a different context than the target verifies against, and every draft
         would be rejected.
         """
+        kv_kw = self._kv_quant_kwargs()
         model_cache = make_prompt_cache(self.model)
         for _ in generate_step(mx.array(ids), self.model, max_tokens=0,
-                               sampler=self.sampler, prompt_cache=model_cache):
+                               sampler=self.sampler, prompt_cache=model_cache,
+                               **kv_kw):
             pass
         draft = self._ensure_draft_model()
         if draft is None:
             return model_cache
         draft_cache = make_prompt_cache(draft)
         for _ in generate_step(mx.array(ids), draft, max_tokens=0,
-                               sampler=self.sampler, prompt_cache=draft_cache):
+                               sampler=self.sampler, prompt_cache=draft_cache,
+                               **kv_kw):
             pass
         return model_cache + draft_cache
 
@@ -805,8 +839,21 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # system+tools prefix, then prefill those ids. The empty user's
                 # closing [/INST] becomes a few stale tokens on the first real
                 # turn and is trimmed by the cache-diff logic in _generate_reply.
+                #
+                # The tool_few_shots go in here too, in the exact slot the live
+                # turn puts them (right after the system message, before any
+                # history — see chat_turn.py). They are ~660 constant tokens;
+                # left out of this prefill they fell outside the cached prefix
+                # and were re-processed on the first turn of every session,
+                # which measured as ~8.5s of that turn's time-to-first-token on
+                # the 14B. Prefilling them here moves the first-turn common
+                # prefix past them, so only the volatile per-turn context and
+                # the user's message are new. They are also what the comment in
+                # chat_turn.py already assumed was "folded into the cached
+                # prefix at no cost" — this is what makes that true.
                 templated = self.tokenizer.apply_chat_template(
                     [{"role": "system", "content": self.system_prompt},
+                     *tool_few_shots(self.config),
                      {"role": "user", "content": ""}],
                     tokenize=False, add_generation_prompt=False, enable_thinking=False,
                 )
@@ -939,11 +986,24 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                         f"{self.config.get('agent', {}).get('draft_model', '')}"
                         f":{len(make_prompt_cache(draft))}")
             self._draft_sig = draft_sig
+        # A cache written at BF16 and one written at 4 bits hold the same
+        # tokens and the same weights but different tensors, and load_prompt_cache
+        # will happily hand back the wrong one. Toggling agent.kv_bits has to
+        # discard the file, not reuse it.
+        # Inline, not via _kv_quant_kwargs, for the reason given above the
+        # draft_sig block: callers bind these cache methods onto duck-typed
+        # stand-ins, so this function may only reach for attributes.
+        _agent = self.config.get("agent", {})
+        _bits = _agent.get("kv_bits")
+        kv_sig = "none" if not _bits else (
+            f"{int(_bits)}:{int(_agent.get('kv_group_size', 64))}"
+            f":{int(_agent.get('quantized_kv_start', 0))}")
         ids_bytes = ",".join(map(str, system_ids)).encode()
         return {
             "model_name": str(self.config.get("model_name", "")),
             "adapter_sig": adapter_sig,
             "draft_sig": draft_sig,
+            "kv_sig": kv_sig,
             "ids_sha": hashlib.sha256(ids_bytes).hexdigest(),
             "n_tokens": str(len(system_ids)),
         }
@@ -1366,6 +1426,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             if self.stream_fn is stream_generate and getattr(
                     self, "logits_processors", None):
                 _spec_kw["logits_processors"] = self.logits_processors
+            # Same quantization the cache was prefilled under. Passing it here
+            # too keeps the live cache and the persisted one the same shape;
+            # speculative_generate_step takes these as well, so the draft path
+            # is covered.
+            _spec_kw.update(self._kv_quant_kwargs())
             for response in self.stream_fn(
                 self.model, self.tokenizer, feed, max_tokens=max_tokens,
                 sampler=self.sampler, prompt_cache=self._prompt_cache,
@@ -1971,7 +2036,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                       "\"No, the answer is ...\" first, then run /learn.")
             return
         severity = learn.correction_severity(sample[0], sample[2], self.config)
-        path = learn.save_mistake_note(*sample, severity=severity)
+        category = self._classify_mistake(sample[0], sample[1], sample[3])
+        path = learn.save_mistake_note(*sample, severity=severity,
+                                       category=category)
         self.output_fn(f"  [Learn] Correction captured (severity {severity}): {path.name}")
 
         correction_text = (
@@ -2000,6 +2067,39 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
         learn.maybe_train_on_mistakes(
             self.config, self.tokenizer, self.system_prompt, train_fn=self._guarded_train)
+
+    def _classify_mistake(self, original_query: str, wrong_answer: str,
+                          correct_answer: str) -> str:
+        """The model's own one-word category for a mistake it just made.
+
+        A short greedy generation on the resident model (like _teach, and like
+        it deliberately NOT sharing self._prompt_cache — this is a throwaway
+        prompt that must not disturb the conversation's KV cache). Any failure,
+        or no resident model, yields "general" rather than blocking the capture
+        it annotates. Categories already in use are offered so the vocabulary
+        converges instead of every mistake coining a synonym."""
+        def _classify_fn(prompt: str) -> str:
+            from mlx_lm import generate
+            from symbio.app import eval as eval_mod, tooling
+            if self.model is None or self.tokenizer is None:
+                raise RuntimeError("no model resident to classify a mistake")
+            rendered = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False, add_generation_prompt=True, enable_thinking=False)
+            raw = generate(
+                self.model, self.tokenizer, prompt=rendered,
+                sampler=eval_mod._make_sampler(
+                    {**self.config,
+                     "agent": {**self.config.get("agent", {}), "temperature": 0.0}}),
+                max_tokens=12, verbose=False)
+            return tooling.strip_tool_tags(tooling.strip_reasoning_block(raw)).strip()
+
+        known = tuple(learn.mistake_category_counts().keys())
+        try:
+            return learn.classify_mistake_category(
+                original_query, wrong_answer, correct_answer, _classify_fn, known)
+        except Exception:
+            return "general"
 
     def _decay_stale_notes(self) -> list[str]:
         """Archive expired 'Learned:' research notes and purge their training

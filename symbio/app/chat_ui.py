@@ -193,9 +193,16 @@ def learn_progress_line(config: dict[str, Any]) -> str:
     threshold = max(1, int(learn_cfg.get("mistake_threshold", 5)))
     count = learn.mistake_note_count()
     suffix = "" if learn_cfg.get("auto_train", True) else " (auto-train off)"
+    # Name which kinds of mistake are stacking up, so the counter says what the
+    # next tune will actually be trained to fix, not just how many. e.g.
+    # '3/5 mistakes to next tune (2 tool_error, 1 wrong_tool)'.
+    counts = learn.mistake_category_counts()
+    breakdown = ""
+    if counts:
+        breakdown = " (" + ", ".join(f"{n} {cat}" for cat, n in counts.items()) + ")"
     if count >= threshold:
-        return f"{count}/{threshold} mistakes — tuning due{suffix}"
-    return f"{count}/{threshold} mistakes to next tune{suffix}"
+        return f"{count}/{threshold} mistakes — tuning due{suffix}{breakdown}"
+    return f"{count}/{threshold} mistakes to next tune{suffix}{breakdown}"
 
 
 def adapter_status_value(config: dict[str, Any], adapter_loaded: bool) -> str:
