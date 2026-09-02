@@ -21,7 +21,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from mlx_lm import generate, load
+from mlx_lm import generate
+from symbio.app.modelload import load
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 from symbio import constants

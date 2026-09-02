@@ -17,7 +17,7 @@ from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
-from mlx_lm import load
+from symbio.app.modelload import load
 from mlx_lm.generate import generate, generate_step, stream_generate
 from mlx_lm.models.cache import (
     can_trim_prompt_cache, load_prompt_cache, make_prompt_cache,
