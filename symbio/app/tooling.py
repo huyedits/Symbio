@@ -1025,6 +1025,22 @@ _COLON_PAIR_RE = re.compile(r'(\w+)\s*:\s*(["\'])(.*?)\2', re.DOTALL)
 _FUNC_POSITIONAL_RE = re.compile(
     r'[.<]?\b(' + _NAME_ALT + r')\s*\(\s*(["\'])(.*?)\2\s*\)', re.DOTALL)
 
+# The name, a colon, and the arguments as a bare JSON object. Observed live
+# 2026-09-02 when the headmaster was asked outright to delegate:
+#
+#   _delegate_task: {"role": "summarize", "task": "The cat sat on the mat."}
+#
+# Neither the dotted form (no `=` pairs) nor the bare-JSON scan (the object
+# carries no "name" key) matched it, so the call vanished and the raw line was
+# printed to the user as the reply. The leading underscore is optional because
+# the model writes it about as often as not -- it is copying the internal
+# function name it has seen in observations.
+# The lookbehind, not \b, is what allows the optional underscore: there is no
+# word boundary between `_` and `delegate_task`, so `_?\b` can never match the
+# very spelling this was written for.
+_FUNC_JSON_RE = re.compile(
+    r'(?<![\w.])_?(' + _NAME_ALT + r')\b\s*:\s*(\{.*?\})', re.DOTALL)
+
 
 def unparsed_tool_tags(reply: str) -> list[str]:
     """Tool names the reply used as a tag that this module does not parse.
@@ -1134,6 +1150,28 @@ def _find_function_attr_calls(
         seen.add((m.start(), m.end()))
         out.append((m.start(), m.end(), name,
                     _normalize_args(name, {_PRIMARY_ARG[name]: m.group(3)})))
+
+
+    for m in _FUNC_JSON_RE.finditer(scan):
+        if _in_code_fence(reply, m.start()):
+            continue
+        if any(s <= m.start() < e for s, e in seen):
+            continue
+        name = _HERMES_NAME_MAP.get(m.group(1), m.group(1))
+        if name not in _TOOL_GROUPS:
+            continue
+        try:
+            params = json.loads(m.group(2))
+        except json.JSONDecodeError:
+            # Same escaping failure the wrapped form hits; the repair reads a
+            # {"name":..., "arguments":...} envelope, so hand it one.
+            repaired = _repair_tool_call_json(
+                '{"name": "%s", "arguments": %s}' % (name, m.group(2)))
+            params = (repaired or {}).get("arguments") or {}
+        if not isinstance(params, dict) or not params:
+            continue
+        seen.add((m.start(), m.end()))
+        out.append((m.start(), m.end(), name, _normalize_args(name, params)))
 
     for m in _FUNC_NOARG_RE.finditer(scan):
         if _in_code_fence(reply, m.start()):
