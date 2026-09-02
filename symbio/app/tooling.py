@@ -155,10 +155,10 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "browser_press",
-        "description": "Press a keyboard key in the open browser (e.g. 'down', 'up', 'enter', 'esc', 'space'). Use for keyboard navigation; do not invent shell commands for key presses.",
+        "description": "Press a keyboard key in the open browser (e.g. 'down', 'up', 'enter', 'esc', 'space'). Modifier combinations work too, written with '+': 'cmd+enter', 'ctrl+enter', 'shift+tab'. Many web apps submit a text box with cmd+enter rather than enter — plain enter inserts a newline and posts nothing. Use for keyboard navigation; do not invent shell commands for key presses.",
         "parameters": {
             "type": "object",
-            "properties": {"key": {"type": "string", "description": "Key name such as 'down', 'up', 'enter', 'esc', 'space', 'tab', 'home', 'end'."}},
+            "properties": {"key": {"type": "string", "description": "Key name such as 'down', 'up', 'enter', 'esc', 'space', 'tab', 'home', 'end', or a combination like 'cmd+enter'."}},
             "required": ["key"],
         },
     },
@@ -1150,7 +1150,6 @@ def _find_function_attr_calls(
         seen.add((m.start(), m.end()))
         out.append((m.start(), m.end(), name,
                     _normalize_args(name, {_PRIMARY_ARG[name]: m.group(3)})))
-
 
     for m in _FUNC_JSON_RE.finditer(scan):
         if _in_code_fence(reply, m.start()):
