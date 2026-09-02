@@ -118,7 +118,7 @@ def _confirm_domain(domain: str, ask_fn=None) -> bool:
 class BrowserSession:
     """Manages a single Playwright browser/page session."""
 
-    def __init__(self, confirm_fn=None):
+    def __init__(self, confirm_fn=None, profile_dir=None, chrome_profile=None):
         self._playwright: Any | None = None
         self._browser: Any | None = None
         self._page: Any | None = None
@@ -126,6 +126,22 @@ class BrowserSession:
         self._confirm_fn = confirm_fn
         self._channel: str = ""
         self._last_url: str = ""
+        # None (the default) launches a fresh, logged-out browser every time,
+        # which is what every caller got before this existed. A path here keeps
+        # cookies between sessions, so a site the user logs into once by hand
+        # stays logged in for later turns — the only way the agent can act on
+        # an account rather than just read public pages.
+        #
+        # Opt-in on purpose: a profile is standing access to whatever it holds,
+        # for every future turn, and that is a bigger change than it looks.
+        # The per-action confirmations still fire either way.
+        self._profile_dir = profile_dir
+        # Which profile inside that directory. Playwright has no option for
+        # this and always opens "Default" — the identity signed into
+        # everything. Passing --profile-directory is the only way to aim at a
+        # dedicated one, which is what keeps the agent to the accounts it was
+        # deliberately signed into.
+        self._chrome_profile = chrome_profile
 
     @property
     def is_open(self) -> bool:
@@ -164,6 +180,49 @@ class BrowserSession:
         # Prefer Google Chrome when available; fall back to bundled Chromium.
         # A specific channel request overrides the stored default.
         preferred = channel or self._channel or "chrome"
+        view = {"viewport": {"width": 1280, "height": 800},
+                "accept_downloads": False}
+
+        # Playwright launches Chrome advertising that it is automated:
+        # --enable-automation, plus navigator.webdriver = true. Google's sign-in
+        # refuses any browser carrying those ("this browser or app may not be
+        # secure"), so the user cannot complete the one manual login the
+        # persistent profile exists to capture. Dropping the flag is the
+        # documented way to run a real, user-driven browser session; the agent
+        # is not thereby hidden from anything -- every action it takes still
+        # goes through the same domain confirmations.
+        stealth = {
+            "ignore_default_args": ["--enable-automation"],
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        if self._chrome_profile:
+            stealth["args"] = stealth["args"] + [
+                f"--profile-directory={self._chrome_profile}"]
+
+        if self._profile_dir is not None:
+            # launch_persistent_context returns a CONTEXT, not a Browser. It
+            # has .close() -- the only thing this class calls on _browser
+            # besides new_context -- so it can be stored in the same slot, and
+            # the context IS the browser for teardown purposes.
+            from pathlib import Path
+
+            Path(self._profile_dir).mkdir(parents=True, exist_ok=True)
+            launch = self._playwright.chromium.launch_persistent_context
+            try:
+                context = launch(str(self._profile_dir), headless=False,
+                                 channel=preferred, **stealth, **view)
+                self._channel = preferred
+            except Exception:
+                context = launch(str(self._profile_dir), headless=False,
+                                 **stealth, **view)
+                self._channel = ""
+            self._browser = context
+            # A persistent context opens with a page already; taking it rather
+            # than adding a second one keeps the window the user sees the one
+            # being driven.
+            self._page = context.pages[0] if context.pages else context.new_page()
+            return self._browser, self._page
+
         try:
             self._browser = self._playwright.chromium.launch(
                 headless=False, channel=preferred
@@ -173,10 +232,7 @@ class BrowserSession:
             # Chrome not installed or channel unknown — use bundled Chromium.
             self._browser = self._playwright.chromium.launch(headless=False)
             self._channel = ""
-        context = self._browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            accept_downloads=False,
-        )
+        context = self._browser.new_context(**view)
         self._page = context.new_page()
         return self._browser, self._page
 

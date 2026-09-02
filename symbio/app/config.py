@@ -192,6 +192,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # user's personal browser profile. It must still ask for confirmation
         # the first time it visits a new domain.
         "enabled": False,
+        # Keep cookies between sessions in constants.BROWSER_PROFILE_DIR, so a
+        # site logged into once by hand stays logged in for later turns. Off by
+        # default: a profile is standing access to whatever it holds, on every
+        # future turn, not just the one that asked for it. The per-action
+        # domain confirmations still apply either way, and the directory is
+        # gitignored because it holds session cookies.
+        "persistent_profile": False,
+        # Where that profile lives. null uses constants.BROWSER_PROFILE_DIR
+        # (isolated, inside the project). Point it at Chrome's own user-data
+        # dir -- "~/Library/Application Support/Google/Chrome" on macOS -- to
+        # use real Chrome instead, and set chrome_profile to pick WHICH profile
+        # inside it. Playwright always opens "Default" otherwise, which is the
+        # identity logged into everything; a dedicated profile keeps the agent
+        # to the accounts you deliberately signed it into.
+        #
+        # Chrome locks its user-data dir: it must be fully quit before the
+        # agent launches, or the launch fails.
+        "profile_dir": None,
+        "chrome_profile": None,
     },
     "web": {
         "search_results": 5,
