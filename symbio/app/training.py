@@ -22,6 +22,9 @@ import yaml
 
 from symbio import constants
 from symbio.app import config as app_config
+# chat_constants is documented as the bottom of the chat import graph,
+# so taking the thinking table from it here cannot form a cycle.
+from symbio.app.chat_constants import THINKING_LEVELS
 from symbio.app.tooling import clean_response, redact_messages, redact_secrets
 
 # Only one LoRA trainer may exist at a time, process-wide.
@@ -1684,6 +1687,26 @@ def run_training(config: dict[str, Any], iters: int | None = None,
     if not train_file.exists() or train_file.stat().st_size == 0:
         print("  [System] No training data available.")
         return False
+
+    # An adapter is only worth what the pairing between corpus and serving is
+    # worth. The corpus is rendered at THINKING_ENABLED; the live turn renders
+    # at agent.thinking_level. Let those disagree and the adapter is trained
+    # against a prompt shape the model is never served, which shows up as an
+    # adapter that quietly does nothing rather than as an error.
+    #
+    # Warn, do not block: the pairing is the user's to decide, and refusing to
+    # train would be worse than training something they can still roll back
+    # with the golden battery. Measured 2026-09-02, when thinking_level was
+    # set to "none" for a 5x speed win against a corpus rendered with it on.
+    served_level = str((config.get("agent") or {}).get("thinking_level", "none")).lower()
+    served_thinking = THINKING_LEVELS.get(served_level, (False, 0))[0]
+    if served_thinking != THINKING_ENABLED:
+        print(f"  [Train] WARNING: the corpus is rendered with thinking "
+              f"{'on' if THINKING_ENABLED else 'off'}, but agent.thinking_level "
+              f"is '{served_level}' (thinking {'on' if served_thinking else 'off'}). "
+              f"The adapter will be trained against a prompt shape this agent "
+              f"is not served. Match them, or regenerate the corpus, before "
+              f"trusting the result.")
 
     # One tokenizer for the pre-flight checks below. Best-effort: the length
     # diagnostic degrades without it, and the degenerate-sample guard falls
