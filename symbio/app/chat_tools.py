@@ -260,12 +260,40 @@ class ToolsMixin:
 
     def _dispatch_tool(self, name: str, params: dict[str, Any]) -> str:
         if name == "write_note":
+            # Same idiom as the browser actions below: name the missing field
+            # and say what to do about it. params["body"] raised a bare
+            # KeyError, so a call that simply forgot the body came back as
+            # "Failed to save note: 'body'" — a key name, with nothing to act
+            # on. write_note only creates; delete_note removes.
+            missing = [k for k in ("title", "body") if not params.get(k)]
+            if missing:
+                return (
+                    f"Save failed: missing {', '.join(repr(m) for m in missing)}. "
+                    "write_note only creates a note — retry with both a title and "
+                    "a body. To remove a note, use delete_note with its title."
+                )
             try:
                 p = memory.save_note(params["title"], params["body"])
                 self.retriever.invalidate_cache()
                 return f"Saved note: {p.name}"
             except Exception as e:
                 return f"Failed to save note: {e}"
+
+        if name == "delete_note":
+            title = params.get("title") or params.get("query") or params.get("name")
+            if not title:
+                return (
+                    "Delete failed: missing 'title'. Retry with the note's title "
+                    "or a distinctive phrase from it, e.g. "
+                    '<tool_call>{"name": "delete_note", "arguments": {"title": "Proxy Info"}}</tool_call>.'
+                )
+            try:
+                deleted, message = memory.delete_note(str(title))
+                if deleted:
+                    self.retriever.invalidate_cache()
+                return message
+            except Exception as e:
+                return f"Failed to delete note: {e}"
 
         if name == "save_skill":
             try:
@@ -364,6 +392,10 @@ class ToolsMixin:
                                     f"GUI apps have no CLI name; launch them "
                                     f"with open -a."),
                                 correct_answer=f"<cmd>{retry}</cmd>",
+                                category=self._classify_mistake(
+                                    f"launch the {app} app",
+                                    f"<cmd>{params['cmd'].strip()}</cmd>",
+                                    f"<cmd>{retry}</cmd>"),
                             )
                         except Exception:
                             # Never let bookkeeping fail a turn that worked.

@@ -26,7 +26,10 @@
     "max_output_len": 4000,
     "temperature": 0.1,
     "top_p": 0.9,
-    "repetition_penalty": 1.15
+    "repetition_penalty": 1.15,
+    "kv_bits": null,
+    "kv_group_size": 64,
+    "quantized_kv_start": 0
   },
   "model": {
     "allow_lora": true,
