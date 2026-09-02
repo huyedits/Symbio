@@ -143,3 +143,7 @@ tool_baseline.json
 # Build artifacts from `python -m build`.
 dist/
 build/
+
+# The agent's persistent browser profile: session cookies for whatever
+# the user logged into. Never publish.
+/browser_profile/

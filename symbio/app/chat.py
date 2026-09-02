@@ -234,7 +234,27 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                                    exclude_session_id=self.session_id,
                                    llm_fn=self._generate_tag_metadata)
         self.tag_index: TagIndex | None = None
-        self.browser = BrowserSession(confirm_fn=self.confirm_fn)
+        # Only pass profile_dir when the feature is on, so the default call is
+        # byte-identical to what it was. Tests (and anything else) substitute a
+        # BrowserSession stub built for the old signature, and an unconditional
+        # keyword breaks every one of them for a feature they never enabled.
+        _bcfg = self.config.get("browser") or {}
+        _profile = None
+        if _bcfg.get("persistent_profile"):
+            _profile = (Path(_bcfg["profile_dir"]).expanduser()
+                        if _bcfg.get("profile_dir")
+                        else constants.BROWSER_PROFILE_DIR)
+        # Grow the call only as far as the config actually asks. Tests and
+        # other front-ends substitute a BrowserSession stub built for the old
+        # signature, and an unconditional keyword breaks every one of them —
+        # which is exactly what happened once persistent_profile was switched
+        # on in a real config.json and the suite started taking this branch.
+        _kw = {"confirm_fn": self.confirm_fn}
+        if _profile is not None:
+            _kw["profile_dir"] = _profile
+            if _bcfg.get("chrome_profile"):
+                _kw["chrome_profile"] = _bcfg["chrome_profile"]
+        self.browser = BrowserSession(**_kw)
         # Worker models are loaded lazily on first delegated task — this
         # just holds the (empty) pool, no extra RAM until dispatch.enabled
         # and something actually delegates. Status messages go through the

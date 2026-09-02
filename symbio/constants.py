@@ -36,6 +36,9 @@ PROMPT_FILE = PROJECT_DIR / "prompt.md"
 CRON_FILE = PROJECT_DIR / "cron_jobs.json"
 MEMORY_FILE = PROJECT_DIR / "agent_memory.md"
 PROFILE_FILE = PROJECT_DIR / "user_profile.md"
+# A persistent Chrome profile for the agent's browser. Holds session
+# cookies, so it is gitignored and never leaves the machine.
+BROWSER_PROFILE_DIR = PROJECT_DIR / "browser_profile"
 # Standing instructions: preferences the user set in their own turn and meant
 # to outlive the session ("stay a tsundere in all chats", "always answer in
 # Vietnamese", "keep replies to two lines"). Every other persistence channel —
