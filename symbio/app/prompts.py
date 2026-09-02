@@ -368,22 +368,74 @@ def build_system_prompt(assistant_name: str, user_name: str,
     # the model sees both the tag examples and the JSON schemas. This is done
     # after formatting so the JSON braces are not treated as format keys.
     assembled = prompt_text.rstrip() + "\n\n" + tooling.build_tools_block()
+    # Then the two blocks that change mid-session, in order of how often they
+    # do, because everything after a change point has to be re-prefilled: the
+    # roster moves only when a skill is saved, the standing block whenever the
+    # user says so. Both sit below the catalog for that reason — measured with
+    # the real tokenizer on Qwen3-14B, one standing instruction added above it
+    # threw away 2,781 tokens of prefix, 2,662 of them the catalog, which had
+    # not changed by a byte.
+    assembled += worker_roster_block()
     # The user's standing instructions go LAST: below the security policy,
     # which still outranks them, and below the tool catalog. Not wrapped as
     # untrusted, because they are the one thing in the context that is
     # verifiably the user's own — memory.save_standing_instruction only accepts
     # them from a live user turn and only in a scope that cannot do damage.
     # Everything else the assistant persists stays untrusted.
-    #
-    # Last for the KV cache, not for emphasis. This block is the only part of
-    # the system prompt that changes mid-session, and everything after the
-    # change point has to be re-prefilled. Sitting above the catalog, adding one
-    # instruction threw away 2,781 tokens of prefix — 2,662 of them the catalog,
-    # which had not changed by a byte. Below it, the same edit costs the block
-    # itself. Measured with the real tokenizer on Qwen3-14B.
     if include_standing:
         assembled += memory_standing_block(assistant_name, user_name, config)
     return assembled + "\n"
+
+
+def worker_roster_block() -> str:
+    """The roles <delegate> can actually reach, or "" when there are none.
+
+    Without this the prompt named 2 of 24 routable roles — 'summarize', inside
+    the syntax example, and 'browser' as part of the browser tool names — and
+    the model was asked to produce a valid slug having never been shown the
+    menu. Every trained skill adapter sat behind a routing decision it could
+    not make.
+
+    eval_routing.py scored the headmaster 94% on exactly this task, but its
+    build_user() pastes the whole catalog into every prompt, so it measured a
+    model CHOOSING FROM A LIST against a deployment that had no list. Same
+    shape as grounding an API call: the knowledge has to be in the prompt, not
+    assumed in the weights.
+
+    Rendered from the live catalog rather than written into prompt.md so a
+    skill saved today is routable today, and so a user's customized prompt.md
+    cannot leave the roster stale.
+    """
+    from symbio.app import dispatch
+
+    try:
+        catalog = dispatch.load_catalog()
+    except Exception:
+        # A malformed worker_models.json must cost the roster, not the session.
+        return ""
+    seen: dict[str, str] = {}
+    for entry in catalog.values():
+        role = entry.get("role")
+        if not isinstance(role, str) or not role.strip():
+            continue
+        desc = str(entry.get("description") or "").strip()
+        # "Skill: Fix wifi" is the title again, not a description of when to
+        # use it. The slug already says that much, so drop the echo rather
+        # than spend prompt on it.
+        if desc.lower() == f"skill: {role.replace('_', ' ')}".lower():
+            desc = ""
+        seen.setdefault(role.strip(), desc)
+    if not seen:
+        return ""
+    lines = "\n".join(
+        f"  {role} — {desc}" if desc else f"  {role}"
+        for role, desc in sorted(seen.items()))
+    return (
+        "\n\nWorkers you can <delegate> to (these role names, exactly):\n"
+        f"{lines}\n"
+        "Delegate only when a role clearly fits the request; otherwise do it "
+        "yourself. A role not on this list does not exist.\n"
+    )
 
 
 def memory_standing_block(assistant_name: str, user_name: str,
