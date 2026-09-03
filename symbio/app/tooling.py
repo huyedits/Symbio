@@ -91,7 +91,7 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "read_page",
-        "description": "Fetch a URL's text content.",
+        "description": "Fetch a URL's text content over plain HTTP, without opening the browser. Use only for a one-off read of a page that needs no login, no JavaScript and no follow-up action. For a real website the user names — anything you may then need to click, scroll, type in or press a key on, or that depends on being signed in — use browser_open instead.",
         "parameters": {
             "type": "object",
             "properties": {"url": {"type": "string", "description": "The URL to read."}},
@@ -109,7 +109,7 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "browser_open",
-        "description": "Open a URL in the live browser and return the page text.",
+        "description": "Open a URL in the live browser and return the page text. Prefer this over read_page whenever the user names a real site to read or act on: it keeps their logged-in session and leaves the page open, so you can click, scroll, type or press keys on it afterwards.",
         "parameters": {
             "type": "object",
             "properties": {"url": {"type": "string", "description": "The URL to open."}},
@@ -143,6 +143,15 @@ _TOOLS: list[dict[str, Any]] = [
                 "enter": {"type": "boolean", "description": "Press Enter after typing. Default false."},
             },
             "required": ["text"],
+        },
+    },
+    {
+        "name": "browser_scroll",
+        "description": "Scroll the open browser page up or down.",
+        "parameters": {
+            "type": "object",
+            "properties": {"direction": {"type": "string", "description": "'up' or 'down'. Default 'down'."}},
+            "required": ["direction"],
         },
     },
     {
