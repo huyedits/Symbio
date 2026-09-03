@@ -12,6 +12,7 @@ from typing import Any
 # Map each parsed tool name to the user-facing group used for enable/disable menus.
 _TOOL_GROUPS: dict[str, str] = {
     "write_note": "notes",
+    "delete_note": "notes",
     "save_skill": "notes",
     "run_command": "terminal",
     "execute_code": "code",

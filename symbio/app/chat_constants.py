@@ -66,6 +66,7 @@ _MAX_RATE_LIMIT_WAIT = 5.0
 _TELEGRAM_CONFIRM_TOOLS = frozenset({
     "execute_code", "run_command", "edit_file", "write_file", "digest_notes", "train_adapter",
     "schedule_job", "config_set", "delete_cron_job", "update_cron_job",
+    "delete_note",
 })
 
 # Map internal tool names back to Hermes-style names for <tool_response> labels.
