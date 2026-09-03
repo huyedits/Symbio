@@ -987,7 +987,7 @@ class AgentTurnMixin:
                 path = learn.save_mistake_note(
                     original_query=pending_tool_error,
                     wrong_answer="(a prior tool call failed; see the observation above)",
-                    correction="(automatic: the next tool call succeeded)",
+                    correction=learn.AUTO_TOOL_CORRECTION,
                     correct_answer=reply,
                     category=self._classify_mistake(
                         pending_tool_error,
@@ -996,7 +996,8 @@ class AgentTurnMixin:
                 )
                 self.output_fn(f"  [Learn] Tool mistake captured: {path.name}")
                 learn.maybe_train_on_mistakes(
-                    self.config, self.tokenizer, self.system_prompt, train_fn=self._guarded_train)
+                    self.config, self.tokenizer, self.system_prompt,
+                    train_fn=self._guarded_train, check_fn=self._golden_check)
             pending_tool_error = (
                 f"[System observation: {observation}]" if learn.sounds_like_tool_error(observation)
                 else None

@@ -849,6 +849,13 @@ def classify_mistake_category(
     return _slug_category(first)
 
 
+# The `correction` text a tool-error note carries when nobody typed it: the
+# capture in chat_turn.py writes it when a failed call is followed by one that
+# works. pending_mistakes_are_all_automatic() reads it back to tell an
+# environment failure ("nothing was focused") from a real user correction.
+AUTO_TOOL_CORRECTION = "(automatic: the next tool call succeeded)"
+
+
 def save_mistake_note(original_query: str, wrong_answer: str,
                       correction: str, correct_answer: str,
                       severity: int = 1, category: str = "general") -> Path:
@@ -929,6 +936,40 @@ def mistake_category_counts() -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
+def pending_mistakes_are_all_automatic() -> bool:
+    """True when every pending mistake note was captured by the tool loop
+    rather than typed by the user.
+
+    An automatic note records that a tool call failed and the next one worked
+    — usually because the page had not settled, nothing was focused, or a
+    button was not on screen yet. The model's answer was not wrong; the
+    environment moved. A batch made only of those is the case where a retrain
+    costs an unload/train/reload cycle to teach the weights nothing, so
+    maybe_train_on_mistakes checks the model instead of training it.
+
+    False when there are no notes at all: "nothing pending" is not "all
+    automatic", and the caller must not read it as a reason to skip."""
+    files = [f for f in constants.MISTAKES_DIR.glob("*.md") if f.is_file()] \
+        if constants.MISTAKES_DIR.exists() else []
+    if not files:
+        return False
+    for f in files:
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            # Unreadable: assume it is a real correction, so an I/O error can
+            # never be the thing that silently cancels a retrain.
+            return False
+        correction = ""
+        for line in content.splitlines():
+            if line.startswith("**Correction:**"):
+                correction = line.split("**Correction:**", 1)[1].strip()
+                break
+        if correction != AUTO_TOOL_CORRECTION:
+            return False
+    return True
+
+
 def archive_mistake_notes() -> int:
     """Move all unarchived mistake notes into notes/mistakes/archive/."""
     archived = 0
@@ -985,12 +1026,21 @@ def digest_mistakes_to_training(tokenizer, system_prompt: str, boost: int = 1) -
 
 
 def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: str,
-                            train_fn=None) -> bool:
+                            train_fn=None, check_fn=None) -> bool:
     """If enough mistake notes have accumulated, digest them and run a short
     LoRA pass. Returns True when training completed (caller reloads model).
     `train_fn(config, iters=...)` defaults to training.run_training; pass a
     wrapper (e.g. one that golden-checks and rolls back a regression) to
-    guard this path the same way as manual /train."""
+    guard this path the same way as manual /train.
+
+    `check_fn()` returns (passing, total) from the golden battery run against
+    the live model, or None when it could not run. It gates the retrain: at
+    the threshold, a batch made entirely of automatic tool-error captures asks
+    the model a fixed set of questions BEFORE spending an unload/train/reload
+    cycle on it, and a model that answers all of them is left alone. Without
+    it a run of browser failures — a page that had not settled, nothing
+    focused — fires a full LoRA pass mid-conversation, which is how a 16 GB
+    machine ends up with two model copies resident and dies."""
     train_fn = train_fn or training.run_training
     learn_cfg = config.get("learn", {})
     if not learn_cfg.get("enabled", True):
@@ -1002,6 +1052,32 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
         print(f"  [Learn] {count}/{threshold} mistake note(s) collected; "
               f"training after {threshold - count} more.")
         return False
+
+    if (check_fn is not None
+            and learn_cfg.get("mistake_pretrain_check", True)
+            and pending_mistakes_are_all_automatic()):
+        print(f"\n  [Learn] {count} mistake note(s) reached, all captured "
+              f"automatically from failed tool calls. Checking the model "
+              f"before retraining on them...")
+        checked = None
+        try:
+            checked = check_fn()
+        except Exception as e:
+            # A check that cannot run must not cancel the retrain: fall
+            # through to the normal path rather than deciding on nothing.
+            print(f"  [Learn] Check could not run ({e}); training as usual.")
+        if checked is not None:
+            passing, total = checked
+            print(f"  [Learn] Golden checks: {passing}/{total} passing.")
+            if total and passing >= total:
+                archived = archive_mistake_notes()
+                print(f"  [Learn] The model answers every golden case, and none "
+                      f"of these {count} note(s) is a correction you typed — "
+                      f"they are environment failures, not wrong answers. "
+                      f"Archived {archived} note(s) without retraining.")
+                return False
+            print(f"  [Learn] {total - passing} golden case(s) failing; "
+                  f"the retrain is worth running.")
 
     print(f"\n  [Learn] {count} mistake note(s) reached. Digesting into training data...")
     boost = max(1, int(learn_cfg.get("boost_factor", 3)))

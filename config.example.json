@@ -54,6 +54,7 @@
     "auto": true,
     "auto_train": true,
     "mistake_threshold": 5,
+    "mistake_pretrain_check": true,
     "batch_train_iters": 25,
     "boost_factor": 3,
     "short_train_iters": 10,
