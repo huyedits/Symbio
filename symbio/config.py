@@ -104,6 +104,26 @@ def detect_model_type(model: Any) -> str:
     return "dense"
 
 
+def adapter_weights_present() -> bool:
+    """True only when the adapter directory holds trained weights.
+
+    A killed or OOM'd training run leaves adapter_config.json behind with no
+    safetensors beside it. mlx_lm's load(adapter_path=...) raises on that, so
+    every caller that gated on the config file alone either paid a second full
+    model load to recover or — in the headmaster wake path, where the load sits
+    under one broad except — failed to wake at all.
+    """
+    # Resolved through the module, not the name imported above: tests (and the
+    # worker harnesses) redirect constants.ADAPTER_DIR at runtime, and a
+    # from-import would have frozen the real one at import time.
+    from symbio import constants
+
+    adapter_dir = constants.ADAPTER_DIR
+    if not (adapter_dir / "adapter_config.json").exists():
+        return False
+    return any(adapter_dir.glob("*.safetensors"))
+
+
 def _adapter_matches_model(config: dict[str, Any]) -> bool:
     """Check whether the saved adapter was trained for the current model_name."""
     adapter_config = ADAPTER_DIR / "adapter_config.json"

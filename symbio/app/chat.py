@@ -27,7 +27,7 @@ from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 from symbio.rag import Retriever
 from symbio import constants
-from symbio.config import _adapter_matches_model
+from symbio.config import _adapter_matches_model, adapter_weights_present
 from symbio.computer import BrowserSession
 from symbio import safety
 from symbio.tools import tool_few_shots
@@ -198,7 +198,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # adapter_loaded state is "unknown" when no model is supplied. We infer
         # presence cheaply from disk without loading weights, so the banner can
         # still show something useful before the model wakes up.
-        self.adapter_loaded = adapter_loaded if adapter_loaded is not None else self.adapter_config.exists()
+        self.adapter_loaded = adapter_loaded if adapter_loaded is not None else adapter_weights_present()
         # model/tokenizer may be None until _ensure_model_loaded() runs.
         self.model: Any | None = model if model is not None else None
         self.tokenizer: Any | None = tokenizer if tokenizer is not None else None
@@ -212,7 +212,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # setup immediately (same behavior as before lazy loading).
         if self._model_loaded:
             if adapter_loaded is None:
-                self.adapter_loaded = self.adapter_config.exists()
+                self.adapter_loaded = adapter_weights_present()
             self._finish_model_setup()
             self._run_post_load_self_check()
 
@@ -493,10 +493,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # 5120 is the served model's width, 4096 the adapter's. A session
             # that boots fine and breaks the first time a worker runs is worse
             # than one that never loads the adapter at all.
-            if self.adapter_config.exists() and not _adapter_matches_model(self.config):
+            if adapter_weights_present() and not _adapter_matches_model(self.config):
                 self.model, self.tokenizer = load(self.config["model_name"])
                 self.adapter_loaded = False
-            elif self.adapter_config.exists():
+            elif adapter_weights_present():
                 self.model, self.tokenizer = load(
                     self.config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
                 )
@@ -551,14 +551,14 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # while the download bar shows progress.
             self.output_fn(" Waking model...")
             try:
-                if self.adapter_config.exists() and not _adapter_matches_model(self.config):
+                if adapter_weights_present() and not _adapter_matches_model(self.config):
                     self.output_fn(
                         " [Warning] Existing adapter was trained for a different model."
                         " Loading base model only."
                     )
                     self.model, self.tokenizer = load(self.config["model_name"])
                     self.adapter_loaded = False
-                elif self.adapter_config.exists():
+                elif adapter_weights_present():
                     self.output_fn(" Loading adapter...")
                     try:
                         self.model, self.tokenizer = load(
@@ -1667,7 +1667,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         remove it. Declining or asking to keep it both just reset the grace
         period so the reminder does not repeat every session — nothing is
         ever deleted unless the user explicitly agrees to remove it."""
-        if not self.adapter_config.exists():
+        if not adapter_weights_present():
             return
         if self.adapter_loaded:
             # Actively in use this session; that alone counts as "used".
@@ -1806,7 +1806,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         try:
             trained = self._train_unloaded(iters=iters)
             local_telemetry.log_event("train", iters=iters, ok=bool(trained))
-            if not trained or not self.adapter_config.exists():
+            if not trained or not adapter_weights_present():
                 # Covers the "trained but no adapter on disk" case, which
                 # _train_unloaded treats as success and so leaves unloaded.
                 self._restore_model()

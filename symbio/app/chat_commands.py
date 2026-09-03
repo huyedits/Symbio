@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from symbio import constants
+from symbio.config import adapter_weights_present
 from symbio.app import (
     cron, dispatch, golden, health, local_telemetry, memory, pending, prompts,
     sandbox, security, setup, skills, tooling, training,
@@ -814,7 +815,7 @@ class CommandsMixin:
         finally:
             self._wake_headmaster()
         if ok:
-            self.adapter_loaded = (constants.ADAPTER_DIR / "adapter_config.json").exists()
+            self.adapter_loaded = adapter_weights_present()
             self.output_fn("  [Retrain] Done. Reloaded headmaster.")
         else:
             self.output_fn("  [Retrain] Failed — see output above.")
