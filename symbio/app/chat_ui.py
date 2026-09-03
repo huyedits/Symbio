@@ -198,7 +198,10 @@ def learn_progress_line(config: dict[str, Any]) -> str:
     # '3/5 mistakes to next tune (2 tool_error, 1 wrong_tool)'.
     counts = learn.mistake_category_counts()
     breakdown = ""
-    if counts:
+    # A lone "general" bucket is every note saying "unclassified" — the state
+    # before any classification has run, and the state on every note written
+    # before the field existed. It names nothing, so it earns no parentheses.
+    if counts and set(counts) != {"general"}:
         breakdown = " (" + ", ".join(f"{n} {cat}" for cat, n in counts.items()) + ")"
     if count >= threshold:
         return f"{count}/{threshold} mistakes — tuning due{suffix}{breakdown}"

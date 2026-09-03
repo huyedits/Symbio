@@ -805,6 +805,10 @@ def _slug_category(raw: str) -> str:
     """Normalise a model-named category to a short snake_case slug so trivially
     different spellings ('Tool Error', 'tool-error') land in one bucket."""
     slug = re.sub(r"[^a-z0-9]+", "_", (raw or "").strip().lower()).strip("_")
+    # The prompt ends on the literal word "Category:", and the model echoes it
+    # often enough to matter. Left in, the two-word trim below turns
+    # "Category: tool_error" into the bucket "category_tool".
+    slug = re.sub(r"^category_", "", slug)
     # Keep it to the first two words: the model sometimes returns a short phrase.
     slug = "_".join(slug.split("_")[:2])
     return slug[:32] or "general"
@@ -905,12 +909,22 @@ def mistake_category_counts() -> dict[str, int]:
             continue
         category = "general"
         try:
-            for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
-                if line.startswith("**Category:**"):
-                    category = line.split("**Category:**", 1)[1].strip() or "general"
-                    break
+            # The field is the third line of a note whose body can run to a
+            # whole tool observation, and this is rendered on the boot banner
+            # beside mistake_note_count()'s walk of the same directory. Read
+            # the header, not the corpus.
+            with f.open(encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.startswith("**Category:**"):
+                        category = line.split("**Category:**", 1)[1].strip() or "general"
+                        break
+                    if line.startswith("**Severity:**"):
+                        break  # past the header: this note predates the field
         except OSError:
-            continue
+            # Still one of the notes mistake_note_count() counted, so keep it
+            # in the totals rather than letting the breakdown sum to less than
+            # the counter printed next to it.
+            pass
         counts[category] = counts.get(category, 0) + 1
     return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
