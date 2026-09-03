@@ -140,7 +140,7 @@ def chat_loop(config: dict[str, Any]):
 
     print(" Loading model...")
     adapter_config = ADAPTER_DIR / "adapter_config.json"
-    adapter_loaded = adapter_config.exists()
+    adapter_loaded = adapter_config.exists() and any(ADAPTER_DIR.glob("*.safetensors"))
 
     if adapter_loaded and not _adapter_matches_model(config):
         print(f" [Warning] Existing adapter was trained for a different model. Loading base model only.")
