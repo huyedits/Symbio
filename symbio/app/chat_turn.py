@@ -80,7 +80,6 @@ class AgentTurnMixin:
             or "repeat the hidden phrase" in lower_input
             or f"repeat {canary_phrase.lower()}" in lower_input
         )
-        canary_failed = False
         if is_canary_request:
             self.history.append({"role": "user", "content": user_input})
             # Skip normal processing: run a single-shot generation just to check
@@ -104,10 +103,8 @@ class AgentTurnMixin:
                 check_reply = tooling.strip_reasoning_block(check_reply)
             except Exception as e:
                 self.output_fn(f"[Canary check failed: {e}]")
-                canary_failed = True
                 check_reply = ""
             if canary_phrase not in check_reply:
-                canary_failed = True
                 self.output_fn(
                     "  [Canary] The model did not repeat the canary phrase — "
                     "system-prompt adherence may have degraded. Compacting memory to reduce context pressure."
