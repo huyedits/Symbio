@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from symbio import constants, safety
-from symbio.app import skills
+from symbio.app import prune, skills
 
 
 def save_note(title: str, body: str) -> Path:
@@ -44,7 +44,9 @@ def find_notes(query: str) -> list[Path]:
             text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        heading = text.splitlines()[0].lstrip("# ").strip().lower() if text else ""
+        # prune.note_title owns the `# ` heading shape; lstrip("# ") strips any
+        # run of '#'/' ' characters, not the markdown prefix.
+        heading = prune.note_title(text).lower()
         # Filename minus the leading timestamp, underscores back to spaces.
         stem = re.sub(r"^\d{8}_\d{6}_", "", p.stem).replace("_", " ").lower()
         if q in heading or q in stem:
@@ -66,8 +68,7 @@ def delete_note(query: str) -> tuple[bool, str]:
         return False, f"No note matches '{query}'. Nothing was deleted."
     if len(matches) > 1:
         titles = ", ".join(
-            (p.read_text(encoding="utf-8", errors="replace").splitlines() or [p.stem])[0]
-            .lstrip("# ").strip()
+            prune.note_title(p.read_text(encoding="utf-8", errors="replace")) or p.stem
             for p in matches[:6]
         )
         return False, (
@@ -75,7 +76,18 @@ def delete_note(query: str) -> tuple[bool, str]:
             f"Be more specific. Matches: {titles}"
         )
     path = matches[0]
-    title = (path.read_text(encoding="utf-8", errors="replace").splitlines() or [path.stem])[0].lstrip("# ").strip()
+    text = path.read_text(encoding="utf-8", errors="replace")
+    title = prune.note_title(text) or path.stem
+    # A skill note is the readable half of a trained worker adapter, and the
+    # two identity notes are what the assistant knows about itself and its
+    # user. prune already refuses to touch either; a model-issued delete has
+    # no more right to. Deleting a skill note orphans an adapter that still
+    # loads and still routes, with nothing left on disk to say what it is for.
+    if prune.is_protected_note(text):
+        return False, (
+            f"'{title}' is a protected note and was not deleted. Skills and "
+            f"identity notes are removed deliberately, not by tool call."
+        )
     try:
         path.unlink()
     except OSError as exc:
