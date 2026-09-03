@@ -367,7 +367,14 @@ def build_system_prompt(assistant_name: str, user_name: str,
     # Append the Hermes-style tool catalog after the user-facing template so
     # the model sees both the tag examples and the JSON schemas. This is done
     # after formatting so the JSON braces are not treated as format keys.
-    assembled = prompt_text.rstrip() + "\n\n" + tooling.build_tools_block()
+    # Filter the catalog to the groups this install actually has on. Without
+    # the argument build_tools_block() emits all of them, so the model was
+    # advertised tools parse_tools would then silently refuse — and disabling
+    # a group bought nothing, though the catalog is ~78% of the whole prompt.
+    _groups = (config or {}).get("tools", {}).get("enabled_groups")
+    assembled = prompt_text.rstrip() + "\n\n" + tooling.build_tools_block(
+        set(_groups) if _groups else None
+    )
     # Then the two blocks that change mid-session, in order of how often they
     # do, because everything after a change point has to be re-prefilled: the
     # roster moves only when a skill is saved, the standing block whenever the
