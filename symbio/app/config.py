@@ -330,6 +330,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "remember_research": True,
         "note_decay_days": 90,
         "mistake_threshold": 5,
+        # At mistake_threshold, when every pending note was captured
+        # automatically from a failed tool call, ask the golden battery
+        # whether the model is actually broken before spending a retrain on
+        # it. A model that passes keeps its weights and the notes are
+        # archived. Set False to go straight to training as before.
+        "mistake_pretrain_check": True,
         "batch_train_iters": 25,
         "iters_per_severity": 5,
         "max_batch_train_iters": 100,

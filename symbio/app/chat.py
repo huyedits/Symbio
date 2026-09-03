@@ -2086,7 +2086,28 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 pass
 
         learn.maybe_train_on_mistakes(
-            self.config, self.tokenizer, self.system_prompt, train_fn=self._guarded_train)
+            self.config, self.tokenizer, self.system_prompt,
+            train_fn=self._guarded_train, check_fn=self._golden_check)
+
+    def _golden_check(self) -> tuple[int, int] | None:
+        """Run the golden battery against the live model and return
+        (passing, total), without training or touching the adapter.
+
+        This is _guarded_train's pre-train baseline on its own, for the caller
+        that wants to know whether the model is healthy BEFORE deciding to
+        spend a training run. Returns None when the battery is switched off or
+        could not run, which every caller must read as "no answer" rather than
+        as a failing score."""
+        if not self.config.get("learn", {}).get("golden_set_enabled", True):
+            return None
+        try:
+            result = golden.run_golden_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config, self.enabled_groups)
+        except Exception as e:
+            self.output_fn(f"  [Learn] Golden check failed to run: {e}")
+            return None
+        return result.pass_count, result.total
 
     def _classify_mistake(self, original_query: str, wrong_answer: str,
                           correct_answer: str) -> str:
