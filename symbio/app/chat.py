@@ -2135,12 +2135,26 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 max_tokens=12, verbose=False)
             return tooling.strip_tool_tags(tooling.strip_reasoning_block(raw)).strip()
 
-        known = tuple(learn.mistake_category_counts().keys())
+        # Every other model call in this file marks the session busy first
+        # (the boot prefill, _generate_reply, the tag indexer's own path). The
+        # background note-indexer only waits on this flag, and it drives the
+        # same model through _generate_tag_metadata -- so without it this
+        # throwaway classification can run a second forward pass concurrently
+        # with an indexing pass, which on a 16 GB box means two live KV caches
+        # for one model rather than one.
+        was_busy = self._indexing_now
+        self._indexing_now = True
         try:
+            # Inside the try with the generation: this reads every pending
+            # mistake note off disk, and a failure there must not cost the
+            # capture it only annotates.
+            known = tuple(learn.mistake_category_counts().keys())
             return learn.classify_mistake_category(
                 original_query, wrong_answer, correct_answer, _classify_fn, known)
         except Exception:
             return "general"
+        finally:
+            self._indexing_now = was_busy
 
     def _decay_stale_notes(self) -> list[str]:
         """Archive expired 'Learned:' research notes and purge their training
