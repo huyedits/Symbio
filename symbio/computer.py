@@ -360,13 +360,44 @@ class BrowserSession:
         except Exception as e:
             return self._fail("click", e)
 
+    # A modal dialog makes everything it covers inert: while X's composer is
+    # open the "Post" in the sidebar cannot be clicked at all. It is still the
+    # first thing a page-wide search for that word finds, though, which is how
+    # a click aimed at the submit button landed on the navigation item that
+    # had opened the composer in the first place.
+    _MODAL_SELECTOR = '[role="dialog"][aria-modal="true"], dialog[open]'
+
+    def _click_scopes(self, page) -> list[tuple[Any, str]]:
+        """Where to look for a click target, most likely first."""
+        try:
+            modal, _ = _first_visible(page.locator(self._MODAL_SELECTOR))
+        except Exception:
+            modal = None
+        if modal is None:
+            return [(page, "")]
+        return [(modal, " in the open dialog"), (page, "")]
+
+    @staticmethod
+    def _click_candidates(scope: Any, text: str):
+        """(locator, description) pairs for `text`, best match first.
+
+        Controls before prose, exact labels before substrings. One word names
+        both the button that submits a form and the link that opened it, and
+        only one of the two does the job; a bare text search finds whichever
+        happens to come first in the document.
+        """
+        for exact in (True, False):
+            for role in ("button", "link"):
+                yield scope.get_by_role(role, name=text, exact=exact), f"{role} '{text}'"
+            yield (
+                scope.get_by_text(text, exact=exact),
+                f"element containing text '{text}'",
+            )
+
     def _try_click(self, page, selector: str = "", text: str = "", attempt: int = 1) -> str:
         """Single click attempt. On the first failure due to a timeout or
         missing visible element, wait a moment and try once more — small
         models often issue a click before the page has fully settled."""
-        def _result(msg: str) -> str:
-            return msg
-
         if selector:
             # Generic selectors often match dozens of elements, many
             # hidden; click the first *visible* match instead of the
@@ -384,17 +415,20 @@ class BrowserSession:
                     "Use a more specific selector or click by visible text."
                 )
         if text:
-            # Try substring match first, then exact, then role-based.
-            for exact in (False, True):
-                target, count = _first_visible(page.get_by_text(text, exact=exact))
-                if target is not None:
-                    target.click(timeout=self._TIMEOUT_MS)
-                    return f"Clicked element containing text '{text}'" + (" (exact match)." if exact else ".")
-                for role in ("button", "link"):
-                    target, count = _first_visible(page.get_by_role(role, name=text, exact=exact))
-                    if target is not None:
+            for scope, where in self._click_scopes(page):
+                for locator, described in self._click_candidates(scope, text):
+                    target, count = _first_visible(locator)
+                    if target is None:
+                        continue
+                    try:
                         target.click(timeout=self._TIMEOUT_MS)
-                        return f"Clicked {role} '{text}'" + (" (exact match)." if exact else ".")
+                    except Exception:
+                        # Matched but unclickable — covered by an overlay,
+                        # inert under a modal, detached mid-click. Another
+                        # candidate may still be the one that works.
+                        continue
+                    ambiguous = f" (first visible of {count} matches)" if count > 1 else ""
+                    return f"Clicked {described}{where}{ambiguous}."
             if attempt == 1:
                 # Page may still be settling; one automatic retry.
                 time.sleep(0.5)
@@ -434,6 +468,21 @@ class BrowserSession:
                     )
             if press_enter:
                 page.keyboard.press("Enter")
+                # Same false success press() now catches, reachable through
+                # the other tool: browser_type with enter:true is how the
+                # agent "submitted" a composer that only took a newline. The
+                # text did land, so this is not a type failure -- say what
+                # happened and what to do about it.
+                if not self._enter_submitted(page):
+                    # Worded to read as a failure to sounds_like_tool_error:
+                    # the text landed, but the call the model asked for was
+                    # type-and-submit, and the submit half did not happen.
+                    return (
+                        f"Typed '{text}' but the submit failed: the field "
+                        f"still contains the text, so Enter inserted a "
+                        f"newline rather than submitting. Click the submit "
+                        f"button, or press cmd+enter, to submit."
+                    )
             return f"Typed '{text}'" + (" and pressed Enter." if press_enter else ".")
         except Exception as e:
             return self._fail("type", e)
@@ -462,11 +511,42 @@ class BrowserSession:
         except Exception:
             return True
 
+    @staticmethod
+    def _enter_submitted(page: Any) -> bool:
+        """Did pressing Enter actually submit the focused form?
+
+        Enter in a text field submits on some sites (a search box) and
+        inserts a newline on others (X.com's composer). The difference is
+        observable: a submit clears the field or moves focus, while a newline
+        leaves the field focused and still holding its text. Best-effort like
+        _text_landed: anything unexpected counts as submitted, so a working
+        submit is never reported as a failure.
+        """
+        try:
+            return bool(page.evaluate(
+                """() => {
+                    const el = document.activeElement;
+                    if (!el || el === document.body) return true;
+                    const editable = el.isContentEditable
+                        || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
+                    if (!editable) return true;
+                    const v = el.value !== undefined ? el.value : el.innerText;
+                    return !(v || '').trim();
+                }"""))
+        except Exception:
+            return True
+
     def press(self, key: str) -> str:
         try:
             page = self._ensure_open()
             normalized = _normalize_key(key)
             page.keyboard.press(normalized)
+            if normalized == "Enter" and not self._enter_submitted(page):
+                return (
+                    f"Press failed: Enter did not submit the form — the "
+                    f"focused field still contains text, so it likely "
+                    f"inserted a newline. Click the submit button to submit."
+                )
             return f"Pressed '{normalized}'."
         except Exception as e:
             return self._fail("press", e)
