@@ -806,7 +806,13 @@ def build_tools_block(groups: set[str] | None = None) -> str:
     """
     tools = _TOOLS
     if groups is not None:
-        tools = [t for t in _TOOLS if _TOOL_GROUPS.get(t["name"]) in groups]
+        # Through the Hermes map, not the catalog name directly: the shell
+        # tool is advertised as "terminal" and grouped under its internal
+        # name, "run_command". A raw lookup missed it, so an install that had
+        # the terminal group ON was shown a prompt with no shell tool in it.
+        tools = [t for t in _TOOLS
+                 if _TOOL_GROUPS.get(
+                     _HERMES_NAME_MAP.get(t["name"], t["name"])) in groups]
     return "<tools>" + json.dumps(tools, ensure_ascii=False, separators=(",", ":")) + "</tools>"
 
 
