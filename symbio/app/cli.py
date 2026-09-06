@@ -52,7 +52,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("chat", help="Start the interactive chat CLI (default)")
+    chat_parser = sub.add_parser("chat", help="Start the interactive chat CLI (default)")
+    chat_parser.add_argument(
+        "--no-attach", action="store_true",
+        help="Load the model locally even when a resident daemon is running",
+    )
 
     setup_parser = sub.add_parser("setup", help="Run the interactive setup wizard")
     setup_parser.add_argument(
@@ -78,6 +82,15 @@ def _build_parser() -> argparse.ArgumentParser:
     gateway_sub.add_parser("status", help="Show gateway status")
     gateway_sub.add_parser("stop", help="Stop the running gateway")
     gateway_parser.set_defaults(gateway_command="status")
+
+    daemon_parser = sub.add_parser(
+        "daemon", help="Manage the resident-model daemon (keeps the model loaded)")
+    daemon_sub = daemon_parser.add_subparsers(dest="daemon_command")
+    daemon_sub.add_parser("start", help="Start the daemon in the background")
+    daemon_sub.add_parser("stop", help="Stop the running daemon")
+    daemon_sub.add_parser("status", help="Show daemon status")
+    daemon_sub.add_parser("run", help=argparse.SUPPRESS)  # internal: the daemon process
+    daemon_parser.set_defaults(daemon_command="status")
 
     train_parser = sub.add_parser("train", help="Run LoRA training")
     train_parser.add_argument(
@@ -946,6 +959,14 @@ def main(argv: list[str] | None = None) -> int:
         tcfg = config.get("telemetry", {}) or {}
         if tcfg.get("enabled") and not tcfg.get("consented"):
             tcfg["enabled"] = False
+        # Attach to a resident daemon when one is ready, so the 30s weight load
+        # is paid once and every session after the first starts warm. --no-attach
+        # forces the local load path (and a daemon that is still loading, with
+        # no socket yet, falls through to it too).
+        if not getattr(args, "no_attach", False):
+            from symbio.app import daemon
+            if daemon.daemon_ready():
+                return daemon.DaemonClient(config).run()
         chat_loop(config)
         return 0
     if command == "setup":
@@ -1046,6 +1067,27 @@ def main(argv: list[str] | None = None) -> int:
         if sub == "status":
             return _cmd_gateway_status(config)
         print("Usage: symb gateway [start | status | stop]")
+        return 1
+    if command == "daemon":
+        from symbio.app import daemon
+
+        sub = getattr(args, "daemon_command", None) or "status"
+        if sub == "start":
+            return daemon.start_daemon(config)
+        if sub == "stop":
+            return daemon.stop_daemon()
+        if sub == "run":
+            return daemon.daemon_main(config)
+        if sub == "status":
+            running, pid = daemon.daemon_running()
+            ready = daemon.daemon_ready()
+            print(f"Daemon running: {'yes' if running else 'no'}")
+            if pid is not None:
+                print(f"PID: {pid}")
+            print(f"Model loaded (socket ready): {'yes' if ready else 'no'}")
+            print(f"Model: {config['model_name']}")
+            return 0
+        print("Usage: symb daemon [start | stop | status]")
         return 1
 
     parser.print_help()

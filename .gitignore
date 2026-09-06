@@ -44,8 +44,12 @@ training_data/tmp*.yaml
 adapters.premask.*
 demo_skills/*
 demo_finetune_loop.py
-benchmark_*
-bench/*
+# Benchmark measurement results (bench/*.json and root benchmark_*.json) are
+# tracked: they are the model-score records the memory notes and models.json
+# descriptions cite, and a disk purge already ate nine of them. The datasets
+# they were measured against (bench/data/) are large and re-downloadable, so
+# those stay ignored.
+bench/data/
 Adapter_skills/*
 adapters.9b-scrape/*
 # Per-user data: every install generates its own config, notes,
@@ -66,6 +70,8 @@ security.md.default
 security.md.bak.*
 cron_jobs.json
 gateway.pid
+daemon.pid
+daemon.sock
 agent_memory.md
 user_profile.md
 # Standing instructions: the user's own style preferences, kept across
