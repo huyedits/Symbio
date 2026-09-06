@@ -1,5 +1,6 @@
 """Training-data accumulation, note/memory digestion, and LoRA fine-tuning."""
 
+import contextlib
 import gc
 import hashlib
 import json
@@ -1781,9 +1782,75 @@ def resume_source(adapter_dir: Path, model_name: str, num_layers: int,
                       + "; ".join(mismatches) + ")")
     return weights, "recipe matches"
 
+@contextlib.contextmanager
+def weighted_corpus(train_file: Path, weights: list[float] | None):
+    """Materialise a per-sample weight vector for the duration of a run.
+
+    mlx_lm's trainer is a SUBPROCESS reading train.jsonl, so there is no loss
+    function in this process to scale — the weights have to exist in the data.
+    Writing sample i `round(w_i)` times is an integer-weighted loss in
+    expectation, and it is the only weighting an external trainer accepts
+    without forking it.
+
+    The original file is restored on the way out however the run ends. A
+    corpus left expanded would be expanded again by the next run, and the
+    weighting would compound silently until one sample was most of the data.
+
+    `weights is None` yields without touching the file at all.
+    """
+    if weights is None:
+        yield train_file
+        return
+    original = train_file.read_text(encoding="utf-8")
+    lines = [l for l in original.splitlines() if l.strip()]
+    if len(weights) != len(lines):
+        raise ValueError(
+            f"sample_weights has {len(weights)} entries for {len(lines)} corpus "
+            f"lines; a misaligned vector would weight the wrong samples")
+    backup = train_file.with_suffix(train_file.suffix + ".preweight")
+    backup.write_text(original, encoding="utf-8")
+    try:
+        expanded: list[str] = []
+        for line, weight in zip(lines, weights):
+            # Floored at one. A weight of zero would drop a sample from the run
+            # entirely, and weighting must never be able to delete a lesson --
+            # curriculum.plan holds the same rule upstream.
+            expanded.extend([line] * max(1, int(round(float(weight)))))
+        train_file.write_text("\n".join(expanded) + "\n", encoding="utf-8")
+        print(f"  [Train] Weighted corpus: {len(lines)} sample(s) -> "
+              f"{len(expanded)} line(s) for this run.")
+        yield train_file
+    finally:
+        train_file.write_text(original, encoding="utf-8")
+        backup.unlink(missing_ok=True)
+
+
 def run_training(config: dict[str, Any], iters: int | None = None,
                  role: str | None = None, model_name: str | None = None,
-                 resume: bool = False) -> bool:
+                 resume: bool = False,
+                 sample_weights: list[float] | None = None) -> bool:
+    """Run a LoRA fine-tune, optionally weighting the corpus for this run.
+
+    `sample_weights` is one weight per corpus line, in file order. Omitted,
+    nothing is opened, rewritten or restored and the run is exactly what it
+    was — the unweighted path does not change shape to accommodate the
+    weighted one.
+
+    The validation split is taken BEFORE expanding, so a heavily weighted
+    sample cannot end up duplicated into valid.jsonl and be validated against
+    itself. ensure_validation_split returns early when valid.jsonl already
+    exists, so the inner call below is a no-op.
+    """
+    if sample_weights is None:
+        return _run_training(config, iters, role, model_name, resume)
+    ensure_validation_split(role=role)
+    with weighted_corpus(_train_file_for(role), sample_weights):
+        return _run_training(config, iters, role, model_name, resume)
+
+
+def _run_training(config: dict[str, Any], iters: int | None = None,
+                  role: str | None = None, model_name: str | None = None,
+                  resume: bool = False) -> bool:
     """Run a LoRA fine-tune. `iters` overrides lora.iters for short passes
     (e.g. the correction-learning batches). `role`/`model_name` train a
     worker's own adapter against its own data directory instead of the

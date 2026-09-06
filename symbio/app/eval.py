@@ -316,6 +316,44 @@ def _make_sampler(config: dict[str, Any]):
     )
 
 
+def _integrity_report(config: dict[str, Any], cases: list) -> dict[str, Any]:
+    """Did this eval stay held out, and was the judge someone else?
+
+    Reported rather than enforced here: run_lora_benchmark's job is to measure
+    and say what it measured. curriculum.assert_held_out is the one that
+    refuses to weight a run, and it is deliberately the strict one — the point
+    of writing it down here is that a contaminated report can be recognised
+    later, when the run it justified is being argued about.
+    """
+    from symbio.app import curriculum
+
+    out: dict[str, Any] = {}
+    try:
+        curriculum.assert_held_out(cases, config)
+        out["held_out"] = True
+        out["held_out_detail"] = "no eval prompt found in the training corpus"
+    except curriculum.HeldOutViolation as e:
+        out["held_out"] = False
+        out["held_out_detail"] = str(e)
+    except Exception as e:  # a check that cannot run is not a pass
+        out["held_out"] = None
+        out["held_out_detail"] = f"check could not run: {e}"
+
+    judge = (config.get("eval", {}) or {}).get("judge_model") or ""
+    under_test = config.get("model_name") or ""
+    out["judge_model"] = judge or None
+    out["judge_is_independent"] = bool(judge) and judge != under_test
+    if not judge:
+        out["judge_detail"] = ("no judge configured; grading is deterministic "
+                               "only, which cannot be circular")
+    elif judge == under_test:
+        out["judge_detail"] = (f"judge and model under test are both {judge!r} "
+                               f"— these scores are self-graded")
+    else:
+        out["judge_detail"] = f"graded by {judge}, separate from {under_test}"
+    return out
+
+
 def run_lora_benchmark(
     config: dict[str, Any] | None = None,
     output_path: str | Path | None = None,
@@ -353,6 +391,7 @@ def run_lora_benchmark(
     _unload_model(model)
 
     adapter_exists = (constants.ADAPTER_DIR / "adapter_config.json").exists()
+    cases_used = list(cases if cases is not None else EVAL_CASES)
     delta = adapter_result.pass_count - base_result.pass_count
 
     report = {
@@ -375,6 +414,13 @@ def run_lora_benchmark(
             "tasks": adapter_result.tasks,
         },
         "delta": delta,
+        # The two conditions that decide whether any of the numbers above mean
+        # anything, recorded in the report rather than assumed. An adaptive
+        # curriculum reads this eval to choose what to train on, so a leaked
+        # eval set makes the whole loop self-confirming, and a judge that is
+        # the model under test grades its own homework. Both are cheap to
+        # check and impossible to notice after the fact.
+        "integrity": _integrity_report(config, cases_used),
     }
 
     report["improved"] = [
