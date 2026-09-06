@@ -1356,6 +1356,37 @@ def _extract_gemma_tool_calls(reply: str) -> list[tuple[str, dict[str, Any]]]:
 _TOOL_CALL_ENVELOPE_RE = re.compile(r'<tool_call>\s*(.*?)\s*</tool_call>', re.DOTALL)
 
 
+_TOOL_RESPONSE_RE = re.compile(r'<tool_response>.*?</tool_response>', re.DOTALL)
+
+
+def _blank_tool_responses(reply: str) -> str:
+    """Blank out any <tool_response> the MODEL wrote.
+
+    That tag is the runtime's channel, not the model's: it is how an executed
+    tool's real output is fed back in. A model that writes one is imitating
+    the transcript format and inventing an observation it never received.
+
+    Seen live 2026-09-06 on Falcon3-10B, asked for 13 * 17:
+
+        <tool_call>{"name": "terminal", "arguments": {"cmd": "echo ... | bc"}}</tool_call>
+        <tool_response>{"name": "terminal", "content": "221\n"}</tool_response>
+        The answer is 221
+
+    Nothing ran. The number was right by luck, and on a real command the same
+    shape reports success for something that never happened. Worse, the JSON
+    scanners then found `{"name": "terminal", ...}` inside the fabricated
+    response and parsed it as a SECOND call — `run_command` with no arguments
+    at all — so an invented observation became an executable one.
+
+    Blanked rather than removed so every offset into the reply still lines up,
+    exactly as _shield_tool_call_data does.
+    """
+    out = reply
+    for m in _TOOL_RESPONSE_RE.finditer(reply):
+        out = out[:m.start()] + (" " * (m.end() - m.start())) + out[m.end():]
+    return out
+
+
 def _shield_tool_call_data(reply: str) -> str:
     """Blank out the argument DATA of well-formed <tool_call> envelopes.
 
@@ -1419,6 +1450,11 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     If `enabled_groups` is provided, drop tools whose group is disabled.
     """
     tools: list[tuple[str, dict[str, Any]]] = []
+
+    # Before anything else: a <tool_response> the model wrote is fabricated,
+    # and both scanner families were fooled by it -- the legacy ones through
+    # `scan`, the JSON ones through `reply`. Rebinding here covers both.
+    reply = _blank_tool_responses(reply)
 
     # The legacy tag scanners below read `scan`, not `reply`: a tag
     # quoted inside a well-formed <tool_call>'s arguments is that call's
@@ -1695,6 +1731,9 @@ def enabled_tool_names(enabled_groups: set[str] | None) -> list[str]:
 # strip_tool_tags (full replies) and StreamingStripper (incremental chunks),
 # so both agree on what "safe to remove" means.
 _COMPLETE_TAG_PATTERNS: list[str] = [
+    # A fabricated observation is not the model's answer and must never be
+    # shown as one; parse_tools already refuses to dispatch it.
+    r'<tool_response>.*?</tool_response>',
     r'<note\s+title=(["\'])(.*?)\1>(.*?)</note>',
     # Executed above, so it must be stripped here too or the raw tag is what
     # the user sees as the reply.
