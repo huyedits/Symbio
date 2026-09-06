@@ -1025,6 +1025,68 @@ def digest_mistakes_to_training(tokenizer, system_prompt: str, boost: int = 1) -
     return added, total_severity
 
 
+# ---- the prediction path ------------------------------------------------
+#
+# Everything above this line is REACTIVE: it fires after the model was wrong,
+# turns the correction into a sample, and retrains. That loop is correct and
+# stays, but by construction it can only ever teach "do not do what you did".
+# It cannot produce a sample that teaches anticipating a moment, and it cannot
+# produce one that teaches waiting — a turn where the right move was to do
+# nothing generates no mistake, so it generates no training data at all.
+#
+# These two functions are the other direction: record what was expected before
+# the outcome, score it when reality lands, and digest the well-timed ones.
+
+
+def record_prediction(hypothesis: str, evidence, *, timescale_s: float | None = None,
+                      dynamics: str | None = None, soft_rank: float = 0.5,
+                      store=None) -> str:
+    """Write down what is expected, before it is known. Returns the belief id.
+
+    Called at the point a prediction is made rather than when it is graded,
+    because a prediction reconstructed after the fact is not a prediction —
+    it is a memory of one, and it always turns out to have been right.
+    """
+    store = store or belief.BeliefStore()
+    return store.add_belief(hypothesis, evidence, timescale_s=timescale_s,
+                            dynamics=dynamics, soft_rank=soft_rank)
+
+
+def resolve_prediction(belief_id: str, outcome: bool, when=None, store=None):
+    """Reality arrived: score the prediction on accuracy AND timing."""
+    store = store or belief.BeliefStore()
+    return store.update_confidence(belief_id, outcome, when)
+
+
+def digest_predictions_to_training(tokenizer, system_prompt: str, boost: int = 1,
+                                   min_score: float = 0.6, store=None) -> int:
+    """Add well-timed predictions and correct restraint to the corpus.
+
+    Mirrors digest_mistakes_to_training deliberately — same tokenizer, same
+    append_chat_pair, same corpus — so a prediction sample is indistinguishable
+    from any other once written and needs no new training path. Returns the
+    number of samples added.
+
+    Unlike the mistake digest, nothing is archived on the way out: a belief's
+    score keeps moving as more observations arrive, and consuming it once would
+    freeze a two-observation judgement forever. Re-digesting is prevented by
+    the corpus itself, which drops duplicate samples.
+    """
+    store = store or belief.BeliefStore()
+    added = 0
+    for sample in store.training_samples(min_score=min_score):
+        # Weight by how well-timed it was, not just that it happened: a
+        # prediction that landed on the moment is worth repeating more than one
+        # that was right but a day early, and boosting them equally would teach
+        # the corpus that timing does not matter.
+        repeats = max(1, int(round(boost * sample["score"])))
+        for _ in range(repeats):
+            training.append_chat_pair(sample["prompt"], sample["reply"],
+                                      tokenizer, system_prompt)
+        added += 1
+    return added
+
+
 def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: str,
                             train_fn=None, check_fn=None) -> bool:
     """If enough mistake notes have accumulated, digest them and run a short
