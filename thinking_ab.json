@@ -1,0 +1,93 @@
+{
+ "model": "mlx-community/Hermes-4-14B-4bit",
+ "draft": "models/Qwen3-0.6B-4bit",
+ "n": 3,
+ "arms": {
+  "low": {
+   "correct": 2,
+   "accuracy": 0.6667,
+   "median_tokens": 3,
+   "total_tokens": 11,
+   "median_secs": 2.73,
+   "total_secs": 9.3,
+   "hit_ceiling": 0
+  },
+  "none": {
+   "correct": 2,
+   "accuracy": 0.6667,
+   "median_tokens": 3,
+   "total_tokens": 11,
+   "median_secs": 2.71,
+   "total_secs": 8.1,
+   "hit_ceiling": 0
+  }
+ },
+ "records": [
+  {
+   "arm": "low",
+   "intent": "my connection keeps cutting out",
+   "expected": "fix_wifi",
+   "got": "fix_wifi",
+   "ok": true,
+   "tokens": 3,
+   "secs": 3.81,
+   "reasoning_chars": 0,
+   "hit_ceiling": false
+  },
+  {
+   "arm": "low",
+   "intent": "nothing loads on my phone anymore",
+   "expected": "fix_wifi",
+   "got": "device_awareness",
+   "ok": false,
+   "tokens": 5,
+   "secs": 2.73,
+   "reasoning_chars": 0,
+   "hit_ceiling": false
+  },
+  {
+   "arm": "low",
+   "intent": "I need the specs of the new MacBook Pro",
+   "expected": "researcher",
+   "got": "researcher",
+   "ok": true,
+   "tokens": 3,
+   "secs": 2.73,
+   "reasoning_chars": 0,
+   "hit_ceiling": false
+  },
+  {
+   "arm": "none",
+   "intent": "my connection keeps cutting out",
+   "expected": "fix_wifi",
+   "got": "fix_wifi",
+   "ok": true,
+   "tokens": 3,
+   "secs": 2.71,
+   "reasoning_chars": 0,
+   "hit_ceiling": false
+  },
+  {
+   "arm": "none",
+   "intent": "nothing loads on my phone anymore",
+   "expected": "fix_wifi",
+   "got": "device_awareness",
+   "ok": false,
+   "tokens": 5,
+   "secs": 2.7,
+   "reasoning_chars": 0,
+   "hit_ceiling": false
+  },
+  {
+   "arm": "none",
+   "intent": "I need the specs of the new MacBook Pro",
+   "expected": "researcher",
+   "got": "researcher",
+   "ok": true,
+   "tokens": 3,
+   "secs": 2.71,
+   "reasoning_chars": 0,
+   "hit_ceiling": false
+  }
+ ]
+}

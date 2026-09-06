@@ -1,0 +1,161 @@
+{
+  "prompt": "Scrape the listing page at /listing?page=1 into rows of sku, title and price. The container has data-testid \"listing-container\" and each row has data-testid \"listing-row\". Reply with only the Python script.",
+  "arms": {
+    "4b+v2-degenerate": {
+      "skill_prompt": "Scrape Script",
+      "seen": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": true,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: \u001b[1;35mSyntaxError\u001b[0m: \u001b[35mclosing parenthesis ']' does not match opening parenthesis '('\u001b[0m",
+          "origin_hits": 0
+        },
+        "passed": 1,
+        "script": "import json, shutil, urllib.request\nfrom pathlib import Path\nfrom selectolax.parser import HTMLParser\n\nPROXY = \"http://127.0.0.1:8817\"   # step 1: through the cache proxy, never origin\nTARGET = \"/listing?page=1\"               # step 2: the listing page to scrape\nPENDING, CLEAN, QUAR = (Path(\"scraped\") / d for d in (\"pending\", \"clean\", \"quarantine\"))\n\nhtml = urllib.request.urlopen(PROXY + TARGET, timeout=5).read().decode()\ncontainer = HTMLParser(html).css_first('[data-testid=\"listing-container']')  # step 3\nrows = container.css('[data-testid=\"listing-row\"]')  # step 4\n\npending_file = PENDING / \"rows.json\"          # step 5\npending_file.write_text(json.dumps([row.text() for row in rows], indent=2))\nshutil.move(str(pending_file), (CLEAN if len(rows) else QUAR) / \"rows.json\")\n\nstate = json.loads(Path(\"state.json\").read_text())  # step 6\nstate[\"cursor\"] = state.get(\"cursor\", 0) + len(rows)\nPath(\"state.json\").write_text(json.dumps(state, indent=2))"
+      },
+      "held_out": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": true,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: \u001b[1;35mSyntaxError\u001b[0m: \u001b[35minvalid syntax\u001b[0m",
+          "origin_hits": 0
+        },
+        "passed": 1,
+        "script": "import json, shutil, urllib.request\nfrom pathlib import Path\nfrom selectolax.parser import HTMLParser\n\nPROXY = \"http://127.0.0.1:8817\"   # step 1: through the cache proxy, never origin\nTARGET = \"/catalogue?page=2\"               # step 2: the page to scrape\nPENDING, CLEAN, QUAR = (Path(\"scraped\") / d for d in (\"pending\", \"clean\", \"quarantine\"))\n\nhtml = urllib.request.urlopen(PROXY + TARGET, timeout=5).read().decode()\ncontainer = HTMLParser(html).css_first('[data-testid=\"item-grid\"]')  # step 3\nrows = [{\n    \"sku\": li.attributes.get(\"data-testid\", \"\").split()[-1],\n    \"title\": li.css_first('[data-testid=\"item-card\"]')?.text().strip() or \"\",\n    \"price\": li.css_first('[data-testid=\"sku\"]')?.text().strip() or \"\",\n} for li in container.css('[data-testid=\"item-card\"]')]\n\npending_file = PENDING / \"rows.json\"          # step 4\npending_file.write_text(json.dumps(rows, indent=2))\nshutil.move(str(pending_file), (CLEAN if rows else QUAR) / \"rows.json\")\n\nstate = json.loads(Path(\"state.json\").read_text())  # step 5: cursor from state\nstate[\"cursor\"] = state.get(\"cursor\", 0) + len(rows)\nPath(\"state.json\").write_text(json.dumps(state, indent=2))"
+      }
+    },
+    "4b-base": {
+      "skill_prompt": "Scrape A Listing Page",
+      "seen": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: \u001b[1;35mModuleNotFoundError\u001b[0m: \u001b[35mNo module named 'bs4'\u001b[0m",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import requests\nfrom bs4 import BeautifulSoup\n\nurl = \"https://example.com/listing?page=1\"\nheaders = {\n    \"User-Agent\": \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36\"\n}\n\nresponse = requests.get(url, headers=headers)\nsoup = BeautifulSoup(response.content, \"html.parser\")\n\nlisting_container = soup.find(\"div\", {\"data-testid\": \"listing-container\"})\nrows = listing_container.find_all(\"div\", {\"data-testid\": \"listing-row\"})\n\nskus = []\ntitles = []\nprices = []\n\nfor row in rows:\n    sku = row.find(\"div\", {\"data-testid\": \"sku\"}).text.strip()\n    title = row.find(\"div\", {\"data-testid\": \"title\"}).text.strip()\n    price = row.find(\"div\", {\"data-testid\": \"price\"}).text.strip()\n    \n    skus.append(sku)\n    titles.append(title)\n    prices.append(price)\n\nprint(skus)\nprint(titles)\nprint(prices)"
+      },
+      "held_out": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: \u001b[1;35mModuleNotFoundError\u001b[0m: \u001b[35mNo module named 'bs4'\u001b[0m",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import requests\nfrom bs4 import BeautifulSoup\n\nurl = 'https://example.com/catalogue?page=2'\nheaders = {\n    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'\n}\n\nresponse = requests.get(url, headers=headers)\nsoup = BeautifulSoup(response.content, 'html.parser')\n\nitems = soup.find_all('div', {'data-testid': 'item-card'})\n\nskus = []\ntitles = []\nprices = []\n\nfor item in items:\n    sku = item.find('div', {'data-testid': 'item-sku'})\n    title = item.find('h3', {'data-testid': 'item-title'})\n    price = item.find('div', {'data-testid': 'item-price'})\n    \n    if sku and title and price:\n        skus.append(sku.text)\n        titles.append(title.text)\n        prices.append(price.text)\n\nprint(skus)\nprint(titles)\nprint(prices)"
+      }
+    },
+    "4b+v4": {
+      "skill_prompt": "Scrape A Listing Page",
+      "seen": {
+        "checks": {
+          "runs": true,
+          "via_proxy": true,
+          "uses_selectolax": true,
+          "spares_origin": true,
+          "quarantines_bad": true,
+          "gets_good_rows": true,
+          "cursor_last": true,
+          "survives_reskin": true
+        },
+        "notes": {
+          "exit": "rc=0",
+          "origin_hits": 1
+        },
+        "passed": 8,
+        "script": "import json, urllib.request\nfrom pathlib import Path\nfrom selectolax.parser import HTMLParser\n\nPROXY = \"http://127.0.0.1:8817\"          # step 1: always the proxy, never the origin\nTARGET = \"/listing?page=1\"\nSCRAPED = Path(\"scraped\")\nPENDING, CLEAN, QUAR = SCRAPED / \"pending\", SCRAPED / \"clean\", SCRAPED / \"quarantine\"\nfor d in (PENDING, CLEAN, QUAR):\n    d.mkdir(parents=True, exist_ok=True)\n\nREQUIRED = (\"title\",)               # must be non-empty\nNUMERIC = (\"price\",)                 # must parse as a number\n\ndef ok(row):\n    if any(not row.get(k) for k in REQUIRED):\n        return False\n    for k in NUMERIC:\n        try:\n            float(row[k])\n        except (TypeError, ValueError):\n            return False\n    return True\n\nhtml = urllib.request.urlopen(PROXY + TARGET, timeout=10).read().decode()\n\ncontainer = HTMLParser(html).css_first('[data-testid=\"listing-container\"]')   # step 2: testid, not class\nif container is None:\n    raise SystemExit(\"container listing-container not found\")\n\nrows = []\nfor row in container.css('[data-testid=\"listing-row\"]'):\n    cells = [c.text().strip() for c in row.css(\"span\")]\n    rows.append({\n        \"sku\": row.attributes.get(\"data-sku\", \"\"),\n        \"title\": cells[0] if len(cells) > 0 else \"\",\n        \"price\": cells[1] if len(cells) > 1 else \"\",\n    })\n\nstaged = PENDING / \"listing.json\"           # step 3: stage first, then move each row\nstaged.write_text(json.dumps(rows, indent=2))\n(CLEAN / \"listing.json\").write_text(json.dumps([r for r in rows if ok(r)], indent=2))\n(QUAR / \"listing.json\").write_text(json.dumps([r for r in rows if not ok(r)], indent=2))\nstaged.unlink()\n\nstate = Path(\"state.json\")               # step 4: cursor last, after the move\ns = json.loads(state.read_text()) if state.exists() else {}\ns[\"cursor\"] = s.get(\"cursor\", 0) + len(rows)\nstate.write_text(json.dumps(s, indent=2))"
+      },
+      "held_out": {
+        "checks": {
+          "runs": true,
+          "via_proxy": true,
+          "uses_selectolax": true,
+          "spares_origin": true,
+          "quarantines_bad": true,
+          "gets_good_rows": true,
+          "cursor_last": true,
+          "survives_reskin": true
+        },
+        "notes": {
+          "exit": "rc=0",
+          "origin_hits": 1
+        },
+        "passed": 8,
+        "script": "import json, urllib.request\nfrom pathlib import Path\nfrom selectolax.parser import HTMLParser\n\nPROXY = \"http://127.0.0.1:8817\"          # step 1: always the proxy, never the origin\nTARGET = \"/catalogue?page=2\"\nSCRAPED = Path(\"scraped\")\nPENDING, CLEAN, QUAR = SCRAPED / \"pending\", SCRAPED / \"clean\", SCRAPED / \"quarantine\"\nfor d in (PENDING, CLEAN, QUAR):\n    d.mkdir(parents=True, exist_ok=True)\n\nREQUIRED = (\"title\",)               # must be non-empty\nNUMERIC = (\"price\",)                 # must parse as a number\n\ndef ok(row):\n    if any(not row.get(k) for k in REQUIRED):\n        return False\n    for k in NUMERIC:\n        try:\n            float(row[k])\n        except (TypeError, ValueError):\n            return False\n    return True\n\nhtml = urllib.request.urlopen(PROXY + TARGET, timeout=10).read().decode()\n\ncontainer = HTMLParser(html).css_first('[data-testid=\"item-grid\"]')   # step 2: testid, not class\nif container is None:\n    raise SystemExit(\"container item-grid not found\")\n\nrows = []\nfor row in container.css('[data-testid=\"item-card\"]'):\n    cells = [c.text().strip() for c in row.css(\"span\")]\n    rows.append({\n        \"sku\": row.attributes.get(\"data-sku\", \"\"),\n        \"title\": cells[0] if len(cells) > 0 else \"\",\n        \"price\": cells[1] if len(cells) > 1 else \"\",\n    })\n\nstaged = PENDING / \"items.json\"           # step 3: stage first, then move each row\nstaged.write_text(json.dumps(rows, indent=2))\n(CLEAN / \"items.json\").write_text(json.dumps([r for r in rows if ok(r)], indent=2))\n(QUAR / \"items.json\").write_text(json.dumps([r for r in rows if not ok(r)], indent=2))\nstaged.unlink()\n\nstate = Path(\"state.json\")               # step 4: cursor last, after the move\ns = json.loads(state.read_text()) if state.exists() else {}\ns[\"cursor\"] = s.get(\"cursor\", 0) + len(rows)\nstate.write_text(json.dumps(s, indent=2))"
+      }
+    },
+    "14b+v4": {
+      "skill_prompt": "Scrape A Listing Page",
+      "seen": {
+        "checks": {
+          "runs": true,
+          "via_proxy": true,
+          "uses_selectolax": true,
+          "spares_origin": true,
+          "quarantines_bad": true,
+          "gets_good_rows": true,
+          "cursor_last": true,
+          "survives_reskin": true
+        },
+        "notes": {
+          "exit": "rc=0",
+          "origin_hits": 1
+        },
+        "passed": 8,
+        "script": "import json, urllib.request\nfrom pathlib import Path\nfrom selectolax.parser import HTMLParser\n\nPROXY = \"http://127.0.0.1:8817\"          # step 1: always the proxy, never the origin\nTARGET = \"/listing?page=1\"\nSCRAPED = Path(\"scraped\")\nPENDING, CLEAN, QUAR = SCRAPED / \"pending\", SCRAPED / \"clean\", SCRAPED / \"quarantine\"\nfor d in (PENDING, CLEAN, QUAR):\n    d.mkdir(parents=True, exist_ok=True)\n\nREQUIRED = (\"title\",)               # must be non-empty\nNUMERIC = (\"price\",)                 # must parse as a number\n\ndef ok(row):\n    if any(not row.get(k) for k in REQUIRED):\n        return False\n    for k in NUMERIC:\n        try:\n            float(row[k])\n        except (TypeError, ValueError):\n            return False\n    return True\n\nhtml = urllib.request.urlopen(PROXY + TARGET, timeout=10).read().decode()\n\ncontainer = HTMLParser(html).css_first('[data-testid=\"listing-container\"]')   # step 2: testid, not class\nif container is None:\n    raise SystemExit(\"container listing-container not found\")\n\nrows = []\nfor row in container.css('[data-testid=\"listing-row\"]'):\n    cells = [c.text().strip() for c in row.css(\"span\")]\n    rows.append({\n        \"sku\": row.attributes.get(\"data-sku\", \"\"),\n        \"title\": cells[0] if len(cells) > 0 else \"\",\n        \"price\": cells[1] if len(cells) > 1 else \"\",\n    })\n\nstaged = PENDING / \"listing.json\"           # step 3: stage first, then move each row\nstaged.write_text(json.dumps(rows, indent=2))\n(CLEAN / \"listing.json\").write_text(json.dumps([r for r in rows if ok(r)], indent=2))\n(QUAR / \"listing.json\").write_text(json.dumps([r for r in rows if not ok(r)], indent=2))\nstaged.unlink()\n\nstate = Path(\"state.json\")               # step 4: cursor last, after the move\ns = json.loads(state.read_text()) if state.exists() else {}\ns[\"cursor\"] = s.get(\"cursor\", 0) + len(rows)\nstate.write_text(json.dumps(s, indent=2))"
+      },
+      "held_out": {
+        "checks": {
+          "runs": true,
+          "via_proxy": true,
+          "uses_selectolax": true,
+          "spares_origin": true,
+          "quarantines_bad": true,
+          "gets_good_rows": true,
+          "cursor_last": true,
+          "survives_reskin": true
+        },
+        "notes": {
+          "exit": "rc=0",
+          "origin_hits": 1
+        },
+        "passed": 8,
+        "script": "import json, urllib.request\nfrom pathlib import Path\nfrom selectolax.parser import HTMLParser\n\nPROXY = \"http://127.0.0.1:8817\"          # step 1: always the proxy, never the origin\nTARGET = \"/catalogue?page=2\"\nSCRAPED = Path(\"scraped\")\nPENDING, CLEAN, QUAR = SCRAPED / \"pending\", SCRAPED / \"clean\", SCRAPED / \"quarantine\"\nfor d in (PENDING, CLEAN, QUAR):\n    d.mkdir(parents=True, exist_ok=True)\n\nREQUIRED = (\"title\",)               # must be non-empty\nNUMERIC = (\"price\",)                 # must parse as a number\n\ndef ok(row):\n    if any(not row.get(k) for k in REQUIRED):\n        return False\n    for k in NUMERIC:\n        try:\n            float(row[k])\n        except (TypeError, ValueError):\n            return False\n    return True\n\nhtml = urllib.request.urlopen(PROXY + TARGET, timeout=10).read().decode()\n\ncontainer = HTMLParser(html).css_first('[data-testid=\"item-grid\"]')   # step 2: testid, not class\nif container is None:\n    raise SystemExit(\"container item-grid not found\")\n\nrows = []\nfor row in container.css('[data-testid=\"item-card\"]'):\n    cells = [c.text().strip() for c in row.css(\"span\")]\n    rows.append({\n        \"sku\": row.attributes.get(\"data-sku\", \"\"),\n        \"title\": cells[0] if len(cells) > 0 else \"\",\n        \"price\": cells[1] if len(cells) > 1 else \"\",\n    })\n\nstaged = PENDING / \"items.json\"           # step 3: stage first, then move each row\nstaged.write_text(json.dumps(rows, indent=2))\n(CLEAN / \"items.json\").write_text(json.dumps([r for r in rows if ok(r)], indent=2))\n(QUAR / \"items.json\").write_text(json.dumps([r for r in rows if not ok(r)], indent=2))\nstaged.unlink()\n\nstate = Path(\"state.json\")               # step 4: cursor last, after the move\ns = json.loads(state.read_text()) if state.exists() else {}\ns[\"cursor\"] = s.get(\"cursor\", 0) + len(rows)\nstate.write_text(json.dumps(s, indent=2))"
+      }
+    }
+  }
+}
