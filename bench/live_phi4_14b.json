@@ -1,0 +1,610 @@
+{
+ "suite": "bfcl_live",
+ "model": "/Users/huygpt/.cache/huggingface/hub/models--mlx-community--phi-4-4bit/snapshots/fc0f8f23d369dc29b55cad1d65cb5bf0dcbee910/",
+ "draft": null,
+ "n": 120,
+ "accuracy": 85.83333333333333,
+ "elapsed_s": 908.1588154170022,
+ "records": [
+  {
+   "index": 1,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_user_info\",\n  \"arguments\": {\n    \"user_id\": 7890,\n    \"special\": \"black\"\n  }\n}\n```"
+  },
+  {
+   "index": 2,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"github_star\",\n  \"arguments\": {\n    \"repos\": \"ShishirPatil/gorilla,gorilla-llm/gorilla-cli\",\n    \"aligned\": true\n  }\n}\n```"
+  },
+  {
+   "index": 3,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"uber.ride\",\n  \"arguments\": {\n    \"loc\": \"2020 Addison Street, Berkeley, CA, USA\",\n    \"type\": \"comfort\",\n    \"time\": 600\n  }\n}\n```"
+  },
+  {
+   "index": 4,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"uber.ride\",\n  \"arguments\": {\n    \"loc\": \"221B Baker Street, Berkeley, CA, USA\",\n    \"type\": \"plus\",\n    \"time\": 600\n  }\n}\n```"
+  },
+  {
+   "index": 5,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Tel Aviv, Israel\",\n    \"unit\": \"fahrenheit\"\n  }\n}\n```"
+  },
+  {
+   "index": 6,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Divin\u00f3polis, MG\",\n    \"unit\": \"fahrenheit\"\n  }\n}\n```"
+  },
+  {
+   "index": 7,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"San Francisco, CA\",\n    \"unit\": \"fahrenheit\"\n  }\n}\n```"
+  },
+  {
+   "index": 8,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Riga, Latvia\",\n    \"unit\": \"celsius\"\n  }\n}\n```"
+  },
+  {
+   "index": 9,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"London, UK\",\n    \"unit\": \"fahrenheit\"\n  }\n}\n```"
+  },
+  {
+   "index": 10,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Hyderabad, India\",\n    \"unit\": \"fahrenheit\"\n  }\n}\n```"
+  },
+  {
+   "index": 11,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Mariposa, CA\",\n    \"unit\": \"celsius\"\n  }\n}\n```"
+  },
+  {
+   "index": 12,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Naples, FL\",\n    \"unit\": \"fahrenheit\"\n  }\n}\n```"
+  },
+  {
+   "index": 13,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"New York, NY\",\n    \"unit\": \"celsius\"\n  }\n}\n```"
+  },
+  {
+   "index": 14,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Shanghai, China\",\n    \"unit\": \"celsius\"\n  }\n}\n```"
+  },
+  {
+   "index": 15,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Bangkok, Thailand\",\n    \"unit\": \"fahrenheit\"\n  }\n}\n```"
+  },
+  {
+   "index": 16,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Chennai, Tamil Nadu\",\n    \"unit\": \"fahrenheit\"\n  }\n}\n```"
+  },
+  {
+   "index": 17,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Lang Son, VN\",\n    \"unit\": \"fahrenheit\"\n  }\n}\n```"
+  },
+  {
+   "index": 18,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Boston, MA\",\n    \"unit\": \"fahrenheit\"\n  }\n}\n```"
+  },
+  {
+   "index": 19,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Moscow, Russia\",\n    \"unit\": \"celsius\"\n  }\n}\n```"
+  },
+  {
+   "index": 20,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Quintana Roo, Mexico\",\n    \"unit\": \"celsius\"\n  }\n}\n```"
+  },
+  {
+   "index": 21,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"change_food\",\n  \"arguments\": {\n    \"food_item\": \"burger\",\n    \"modification_request\": \"no onions,extra cheese\"\n  }\n}\n```"
+  },
+  {
+   "index": 22,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"change_food\",\n  \"arguments\": {\n    \"food_item\": \"chicken dish\",\n    \"modification_request\": \"extra spicy\"\n  }\n}\n```"
+  },
+  {
+   "index": 23,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"ChaFod\",\n  \"arguments\": {\n    \"TheFod\": \"BURGER\"\n  }\n}\n```"
+  },
+  {
+   "index": 24,
+   "passed": true,
+   "response": "```json\n{\"name\": \"ChaFod\", \"arguments\": {\"TheFod\": \"PIZZA\"}}\n```"
+  },
+  {
+   "index": 25,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"ChaFod\",\n  \"arguments\": {\n    \"TheFod\": \"BURGER\"\n  }\n}\n```"
+  },
+  {
+   "index": 26,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"ChaFod\",\n  \"arguments\": {\n    \"TheFod\": \"SALAD\"\n  }\n}\n```"
+  },
+  {
+   "index": 27,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"uber.ride\",\n  \"arguments\": {\n    \"loc\": \"123 \u0110\u01b0\u1eddng \u0110\u1ea1i h\u1ecdc, Berkeley, CA 94704\",\n    \"type\": \"plus\",\n    \"time\": 10\n  }\n}\n```"
+  },
+  {
+   "index": 28,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"uber.eat.order\",\n  \"arguments\": {\n    \"restaurant\": \"uber pitada\",\n    \"items\": [\"burgers\", \"chicken wings\"],\n    \"quantities\": [5, 6]\n  }\n}\n```"
+  },
+  {
+   "index": 29,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"uber.eat.order\",\n  \"arguments\": {\n    \"restaurant\": \"\u80af\u5fb7\u57fa\",\n    \"items\": [\"\u9ea6\u8fa3\u9e21\u817f\u5821\", \"\u53ef\u53e3\u53ef\u4e50\", \"\u6cb9\u70b8\u9e21\u7fc5\", \"\u85af\u6761\"],\n    \"quantities\": [10, 50, 30, 90]\n  }\n}\n```"
+  },
+  {
+   "index": 30,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"uber.eat.order\",\n  \"arguments\": {\n    \"restaurant\": \"McDonald's\",\n    \"items\": [\"pizza\"],\n    \"quantities\": [1]\n  }\n}\n```"
+  },
+  {
+   "index": 31,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"aws.lexv2_models.list_exports\",\n  \"arguments\": {\n    \"botId\": \"my-bot-id\",\n    \"botVersion\": \"v2\",\n    \"sortBy\": \"ASC\",\n    \"maxResults\": 50\n  }\n}\n```"
+  },
+  {
+   "index": 32,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"aws.lexv2_models.list_exports\",\n  \"arguments\": {\n    \"botId\": \"B12345\",\n    \"botVersion\": \"v1\",\n    \"sortBy\": \"DESC\"\n  }\n}\n```"
+  },
+  {
+   "index": 33,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"answer.string\",\n  \"arguments\": {\n    \"answer\": \"Logistic regression is not present in the text, therefore I cannot answer this question.\"\n  }\n}\n```"
+  },
+  {
+   "index": 34,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"answer.string\",\n  \"arguments\": {\n    \"answer\": \"Logistic regression is not present in the text, therefore I cannot answer this question.\"\n  }\n}\n```"
+  },
+  {
+   "index": 35,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"answer.string\",\n  \"arguments\": {\n    \"answer\": \"Logistic regression is not present in the text, therefore I cannot answer this question.\"\n  }\n}\n```"
+  },
+  {
+   "index": 36,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"answer.string\",\n  \"arguments\": {\n    \"answer\": \"Logistic regression is not present in the text, therefore I cannot answer this question.\"\n  }\n}\n```"
+  },
+  {
+   "index": 37,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"parseAnswer\",\n  \"arguments\": {\n    \"answer\": \"The text does not define logistic regression, therefore I cannot answer this question.\"\n  }\n}\n```"
+  },
+  {
+   "index": 38,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"parseAnswer\",\n  \"arguments\": {\n    \"answer\": \"The text does not define logistic regression, therefore I cannot answer this question.\"\n  }\n}\n```"
+  },
+  {
+   "index": 39,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Mariposa, CA\",\n    \"unit\": \"fahrenheit\"\n  }\n}\n```"
+  },
+  {
+   "index": 40,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"fetch_weather_data\",\n  \"arguments\": {\n    \"latitude\": 37.8651,\n    \"longitude\": -119.5383,\n    \"units\": \"metric\",\n    \"language\": \"en\"\n  }\n}\n```"
+  },
+  {
+   "index": 41,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"ThinQ_Connect\",\n  \"arguments\": {\n    \"body\": {\n      \"airConJobMode\": \"AIR_CLEAN\",\n      \"windStrength\": \"HIGH\",\n      \"monitoringEnabled\": true\n    }\n  }\n}\n```"
+  },
+  {
+   "index": 42,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"ThinQ_Connect\",\n  \"arguments\": {\n    \"body\": {\n      \"airConJobMode\": \"AIR_DRY\",\n      \"windStrength\": \"MID\"\n    }\n  }\n}\n```"
+  },
+  {
+   "index": 43,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"ThinQ_Connect\",\n  \"arguments\": {\n    \"body\": {\n      \"airConJobMode\": \"AIR_DRY\",\n      \"windStrength\": \"MID\",\n      \"targetTemperature\": 22\n    }\n  }\n}\n```"
+  },
+  {
+   "index": 44,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"ThinQ_Connect\",\n  \"arguments\": {\n    \"body\": {\n      \"airConJobMode\": \"COOL\",\n      \"windStrength\": \"HIGH\",\n      \"coolTargetTemperature\": 24\n    }\n  }\n}\n```"
+  },
+  {
+   "index": 45,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"ThinQ_Connect\",\n  \"arguments\": {\n    \"body\": {\n      \"currentJobMode\": \"COOL\",\n      \"airConOperationMode\": \"POWER_ON\"\n    }\n  }\n}\n```"
+  },
+  {
+   "index": 46,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"ThinQ_Connect\",\n  \"arguments\": {\n    \"body\": {\n      \"currentJobMode\": \"COOL\",\n      \"coolTargetTemperature\": 20,\n      \"airCleanOperationMode\": \"START\"\n    }\n  }\n}\n```"
+  },
+  {
+   "index": 47,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"ThinQ_Connect\",\n  \"arguments\": {\n    \"airConJobMode\": \"COOL\",\n    \"windStrength\": \"MID\",\n    \"monitoringEnabled\": true,\n    \"airCleanOperationMode\": \"START\",\n    \"airConOperationMode\": \"POWER_ON\",\n    \"powerSaveEnabled\": false,\n    \"targetTemperature\": 24\n  }\n}\n```"
+  },
+  {
+   "index": 48,
+   "passed": true,
+   "response": "```json\n{\"name\": \"multiply\", \"arguments\": {\"a\": 3, \"b\": 2}}\n```"
+  },
+  {
+   "index": 49,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"find_beer\",\n  \"arguments\": {\n    \"brewery\": \"Sierra Nevada\",\n    \"taste\": \"bitter\",\n    \"aroma\": \"hoppy\",\n    \"color\": \"pale\",\n    \"style\": \"lager\"\n  }\n}\n```"
+  },
+  {
+   "index": 50,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"find_beer\",\n  \"arguments\": {\n    \"brewery\": \"Creek\",\n    \"taste\": \"bitter\",\n    \"aroma\": \"chocolatey\",\n    \"color\": \"dark\",\n    \"style\": \"porter\"\n  }\n}\n```"
+  },
+  {
+   "index": 51,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_latest_carbon_intensity\",\n  \"arguments\": {\n    \"zone\": \"Great Britain\"\n  }\n}\n```"
+  },
+  {
+   "index": 52,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"ThinQ_Connect\",\n  \"arguments\": {\n    \"body\": {\n      \"airConJobMode\": \"COOL\",\n      \"targetTemperature\": 22,\n      \"powerSaveEnabled\": true,\n      \"windStrength\": \"HIGH\",\n      \"relativeHourToStart\": 1,\n      \"relativeMinuteToStart\": 30\n    }\n  }\n}\n```"
+  },
+  {
+   "index": 53,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"ThinQ_Connect\",\n  \"arguments\": {\n    \"body\": {\n      \"airConJobMode\": \"COOL\",\n      \"windStrength\": \"MID\",\n      \"airConOperationMode\": \"POWER_ON\",\n      \"targetTemperature\": 20,\n      \"relativeHourToStart\": 0,\n      \"relativeMinuteToStart\": 0,\n      \"relativeHourToStop\": 1,\n      \"relativeMinuteToStop\": 0\n    }\n  }\n}\n```"
+  },
+  {
+   "index": 54,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"todo_add\",\n  \"arguments\": {\n    \"content\": \"go for shopping at 9 pm\"\n  }\n}\n```"
+  },
+  {
+   "index": 55,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"todo\",\n  \"arguments\": {\n    \"type\": \"delete\",\n    \"content\": \"todo random\"\n  }\n}\n```"
+  },
+  {
+   "index": 56,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"todo\",\n  \"arguments\": {\n    \"type\": \"add\",\n    \"content\": \"go for shopping at 9 pm\"\n  }\n}\n```"
+  },
+  {
+   "index": 57,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"todo_manager.handle_action\",\n  \"arguments\": {\n    \"type\": \"delete\",\n    \"content\": \"go to gym\"\n  }\n}\n```"
+  },
+  {
+   "index": 58,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"todo_manager.handle_action\",\n  \"arguments\": {\n    \"type\": \"add\",\n    \"content\": \"go to sleep at 9 pm\"\n  }\n}\n```"
+  },
+  {
+   "index": 59,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"get_movies\",\n  \"arguments\": {\n    \"city\": \"Noida\",\n    \"cinema_hall\": \"All\",\n    \"movie_date\": null,\n    \"movie_language\": \"All\",\n    \"movie_format\": \"2D\"\n  }\n}\n```"
+  },
+  {
+   "index": 60,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"get_movies\",\n  \"arguments\": {\n    \"city\": \"India\",\n    \"movie_date\": \"2023-10-05\"\n  }\n}\n``` \n\n(Note: The date \"2023-10-05\" is used as an example for the current date. You should replace it with the actual current date when implementing this.)"
+  },
+  {
+   "index": 61,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"todo\",\n  \"arguments\": {\n    \"type\": \"complete\",\n    \"content\": \"Submit monthly financial report\"\n  }\n}\n```"
+  },
+  {
+   "index": 62,
+   "passed": true,
+   "response": "```json\n{\"name\": \"todo\", \"arguments\": {\"type\": \"add\", \"content\": \"go to gym tomorrow.\"}}\n```"
+  },
+  {
+   "index": 63,
+   "passed": true,
+   "response": "```json\n{\"name\": \"todo\", \"arguments\": {\"type\": \"delete\", \"content\": \"ravi\"}}\n```"
+  },
+  {
+   "index": 64,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"todo\",\n  \"arguments\": {\n    \"type\": \"add\",\n    \"content\": \"go to sleep at 9 pm\"\n  }\n}\n```"
+  },
+  {
+   "index": 65,
+   "passed": true,
+   "response": "```json\n{\"name\": \"todo\", \"arguments\": {\"type\": \"add\", \"content\": \"go to Goa\"}}\n```"
+  },
+  {
+   "index": 66,
+   "passed": true,
+   "response": "```json\n{\"name\": \"todo\", \"arguments\": {\"type\": \"add\", \"content\": \"Hi charlie\"}}\n```"
+  },
+  {
+   "index": 67,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"inventory.restock_check\",\n  \"arguments\": {\n    \"item_ids\": [],\n    \"threshold\": 0\n  }\n}\n```"
+  },
+  {
+   "index": 68,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"obtener_cotizacion_de_creditos\",\n  \"arguments\": {\n    \"monto_del_credito\": 1000000,\n    \"plazo_del_credito_mensual\": 12,\n    \"producto\": \"auto\",\n    \"a\u00f1o_vehiculo\": 2024,\n    \"enganche\": 0.2\n  }\n}\n```"
+  },
+  {
+   "index": 69,
+   "passed": true,
+   "response": "```json\n{\"name\": \"sum\", \"arguments\": {\"a\": 5.0, \"b\": 3.0}}\n```"
+  },
+  {
+   "index": 70,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"analysis_api.AnalysisApi.retrieve_analysis\",\n  \"arguments\": {\n    \"project\": \"SUPERFANCY\",\n    \"component\": \"AB1010CD\",\n    \"vulnerability\": \"ef903ac-893-f00\"\n  }\n}\n```"
+  },
+  {
+   "index": 71,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"get_sensor_alerts\",\n  \"arguments\": {\n    \"perPage\": 10,\n    \"t0\": \"2023-10-10\",\n    \"sensorSerial\": \"Q3CC-CRT3-SZ2G\"\n  }\n}\n``` \n\n(Note: The date \"2023-10-10\" is used as a placeholder for \"today's date\" and should be replaced with the actual current date when executing the function.)"
+  },
+  {
+   "index": 72,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"extract_parameters_v1\",\n  \"arguments\": {\n    \"demographics\": [\"millennials\"],\n    \"targets\": [\"brand:Apple\"],\n    \"metrics\": [\"view\"],\n    \"min_date\": \"2022-07-01\",\n    \"max_date\": null\n  }\n}\n```"
+  },
+  {
+   "index": 73,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"detect_beats_and_filter\",\n  \"arguments\": {\n    \"capture_percentage\": 50,\n    \"confidence_window_size\": 0.5\n  }\n}\n```"
+  },
+  {
+   "index": 74,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"detect_beats_and_filter\",\n  \"arguments\": {\n    \"capture_percentage\": 90,\n    \"confidence_window_size\": 0.25\n  }\n}\n```"
+  },
+  {
+   "index": 75,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"detect_beats_and_filter\",\n  \"arguments\": {\n    \"capture_percentage\": 70,\n    \"confidence_window_size\": 0.8\n  }\n}\n```"
+  },
+  {
+   "index": 76,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"detect_beats_and_filter\",\n  \"arguments\": {\n    \"capture_percentage\": 93,\n    \"confidence_window_size\": 0.5\n  }\n}\n```"
+  },
+  {
+   "index": 77,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"language_translator.translate\",\n  \"arguments\": {\n    \"source_language\": \"en\",\n    \"target_language\": \"fr\",\n    \"text\": \"What is your name?\"\n  }\n}\n```"
+  },
+  {
+   "index": 78,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"weather.get\",\n  \"arguments\": {\n    \"city\": \"London\",\n    \"country\": \"GB\"\n  }\n}\n```"
+  },
+  {
+   "index": 79,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"send_email\",\n  \"arguments\": {\n    \"to_address\": \"andy@gorilla.com\",\n    \"subject\": \"Request for Sales Forecast Spreadsheet\"\n  }\n}\n```"
+  },
+  {
+   "index": 80,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"search_hotels\",\n  \"arguments\": {\n    \"location\": \"San Diego, CA\"\n  }\n}\n```"
+  },
+  {
+   "index": 81,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"sitefinity_create_contentitem\",\n  \"arguments\": {\n    \"Title\": \"Breakthrough in Artificial Intelligence\",\n    \"Content\": \"The content must cover the recent breakthroughs in machine learning algorithms.\",\n    \"MetaTitle\": \"AI Breakthrough Latest Developments in Machine Learning\",\n    \"MetaDescription\": \"An overview of the recent significant advancements in artificial intelligence and machine learning technology\",\n    \"UrlName\": \"ai-breakthrough-latest-developments\"\n  }\n}\n```"
+  },
+  {
+   "index": 82,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"sitefinity_create_contentitem\",\n  \"arguments\": {\n    \"ContentItem\": \"NewsItem\",\n    \"Title\": \"Julian is testing12\"\n  }\n}\n```"
+  },
+  {
+   "index": 83,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"sitefinity_create_contentitem\",\n  \"arguments\": {\n    \"ContentItem\": \"News\",\n    \"Title\": \"Julian is testing\"\n  }\n}\n```"
+  },
+  {
+   "index": 84,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"sitefinity_create_contentitem\",\n  \"arguments\": {\n    \"ContentItem\": \"news\",\n    \"Title\": \"Julian is Testing\",\n    \"Content\": \"a detailed analysis on the impact of sleep patterns on productivity\",\n    \"MetaTitle\": \"Productivity and Sleep Patterns\",\n    \"MetaDescription\": \"Exploring how sleep affects work efficiency\",\n    \"UrlName\": \"julian-testing-productivity\"\n  }\n}\n```"
+  },
+  {
+   "index": 85,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_coordinates_from_city\",\n  \"arguments\": {\n    \"city_name\": \"Seattle\"\n  }\n}\n```"
+  },
+  {
+   "index": 86,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"open_meteo_api.fetch_weather_data\",\n  \"arguments\": {\n    \"coordinates\": [37.8715, -122.2730]\n  }\n}\n```"
+  },
+  {
+   "index": 87,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"sort_array\",\n  \"arguments\": {\n    \"array\": [1, 54, 3, 1, 76, 2343, 21]\n  }\n}\n```"
+  },
+  {
+   "index": 88,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_loc\",\n  \"arguments\": {\n    \"coordinate_format\": \"DMS\",\n    \"include_altitude\": true\n  }\n}\n```"
+  },
+  {
+   "index": 89,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"log_food\",\n  \"arguments\": {\n    \"food_name\": \"chai tea\",\n    \"portion_amount\": 16.0,\n    \"portion_unit\": \"ounces\",\n    \"meal_name\": \"snack\"\n  }\n}\n```"
+  },
+  {
+   "index": 90,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"interior_design_analysis.generate_report\",\n  \"arguments\": {\n    \"user_preferences\": \"{\\\"style\\\": \\\"modern\\\", \\\"color_scheme\\\": \\\"warm\\\", \\\"budget\\\": \\\"mid-range\\\"}\",\n    \"data_source\": \"internal_database\",\n    \"output_format\": \"DOCX\",\n    \"include_visuals\": true\n  }\n}\n```"
+  },
+  {
+   "index": 91,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"temperature\",\n  \"arguments\": {\n    \"location\": \"Paris, France\"\n  }\n}\n```"
+  },
+  {
+   "index": 92,
+   "passed": true,
+   "response": "```json\n{\"name\": \"fetchPerson\", \"arguments\": {\"id\": 4}}\n```"
+  },
+  {
+   "index": 93,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"play_artist\",\n  \"arguments\": {\n    \"artist_name\": \"K\u00e4\u00e4rij\u00e4\"\n  }\n}\n```"
+  },
+  {
+   "index": 94,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"play_artist\",\n  \"arguments\": {\n    \"artist_name\": \"K\u00e4\u00e4rij\u00e4\"\n  }\n}\n```"
+  },
+  {
+   "index": 95,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"play_song\",\n  \"arguments\": {\n    \"artist_name\": \"K\u00e4\u00e4rij\u00e4\",\n    \"song_name\": \"Cha Cha Cha\"\n  }\n}\n```"
+  },
+  {
+   "index": 96,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"process_data\",\n  \"arguments\": {\n    \"data\": [2.5, 3.6, 4.1, 5.2],\n    \"normalize\": true,\n    \"categories\": [\"red\", \"blue\", \"green\"],\n    \"encoding_type\": \"one-hot\"\n  }\n}\n```"
+  },
+  {
+   "index": 97,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"Boston, MA\"\n  }\n}\n```"
+  },
+  {
+   "index": 98,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_current_weather\",\n  \"arguments\": {\n    \"location\": \"El Gastor, Andalusia\"\n  }\n}\n```"
+  },
+  {
+   "index": 99,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_weather_by_coordinates\",\n  \"arguments\": {\n    \"city\": \"Chennai\",\n    \"lat\": 13.0827,\n    \"lon\": 80.2707\n  }\n}\n```"
+  },
+  {
+   "index": 100,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"connectBluetooth\",\n  \"arguments\": {\n    \"device_name\": \"ue boom\"\n  }\n}\n```"
+  },
+  {
+   "index": 101,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"connectBluetooth\",\n  \"arguments\": {\n    \"device_name\": \"JBL Flip 4\"\n  }\n}\n```"
+  },
+  {
+   "index": 102,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"askForSSID\",\n  \"arguments\": {\n    \"prompt_message\": \"Please enter the Wi-Fi network name you wish to connect to:\"\n  }\n}\n```"
+  },
+  {
+   "index": 103,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_tax\",\n  \"arguments\": {\n    \"purchase_amount\": 59.99,\n    \"state\": \"CA\",\n    \"county\": \"San Francisco\",\n    \"city\": \"San Francisco\"\n  }\n}\n```"
+  },
+  {
+   "index": 104,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_tax\",\n  \"arguments\": {\n    \"purchase_amount\": 999.0,\n    \"state\": \"CA\"\n  }\n}\n```"
+  },
+  {
+   "index": 105,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_tax\",\n  \"arguments\": {\n    \"purchase_amount\": 250.0,\n    \"state\": \"NY\"\n  }\n}\n```"
+  },
+  {
+   "index": 106,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"classify\",\n  \"arguments\": {\n    \"clean_hello\": [\n      \"hello\"\n    ],\n    \"faq_link_accounts_start\": [\n      \"link my account\",\n      \"connect my accounts\"\n    ]\n  }\n}\n```"
+  },
+  {
+   "index": 107,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"record\",\n  \"arguments\": {\n    \"acc_routing_start\": [\n      \"Please provide the routing number for my account.\",\n      \"Which account number should I use for setting up eStatements?\",\n      \"Please give me the account number for my business checking account.\"\n    ],\n    \"activate_card_start\": [\n      \"Activate my new card for loyalty program enrollment\",\n      \"Can you walk me through the activation process for my new bank card?\"\n    ],\n    \"atm_finder_start\": [\n      \"Looking for the closest ATM for cash withdrawal, can you assist me in finding one?\",\n      \"Locate ATM for immediate cash needs\",\n      \"I urgently need to find an ATM for cash withdrawal, can you help me locate the nearest one?\",\n      \"Searching for ATM for money withdrawal\",\n      \"Find ATM for urgent cash needs\",\n      \"Need to find ATM for quick cash emergency\"\n    ],\n    \"card_rewards_start\": [\n      \"What rewards are offered for my card?\",\n      \"What rewards are available on my card?\",\n      \"What are the benefits of using my rewards points for entertainment?\"\n    ],\n    \"cancel_card_start\": [\n      \"I want to cancel my card and ensure the safety of my account.\"\n    ],\n    \"cashier_check_start\": [\n      \"Can I purchase a cashier's check through this chat service?\",\n      \"I need a cashier's check, how can I get one?\"\n    ],\n    \"clean_goodbye_start\": [\n      \"I'm done here. Goodbye!\",\n      \"Thanks for your assistance. Goodbye!\",\n      \"You're amazing. Goodbye!\"\n    ]\n  }\n}\n```"
+  },
+  {
+   "index": 108,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"record\",\n  \"arguments\": {\n    \"faq_describe_telephone_banking_start\": [\n      \"How do I sign up for tele-banking services through the mobile app?\",\n      \"Can I sign up for telephone banking services?\",\n      \"Where can I find the application for telephone banking services?\"\n    ],\n    \"bank_hours_start\": [\n      \"Are any banks open in Sri Lanka right now?\"\n    ],\n    \"faq_describe_accounts_start\": [\n      \"I'm interested in opening a long term savings account. What options do you have?\",\n      \"Do you offer any special accounts for children or minors?\",\n      \"Do you offer any special accounts for individuals looking to save for a home purchase or renovation?\"\n    ]\n  }\n}\n```"
+  },
+  {
+   "index": 109,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"record\",\n  \"arguments\": {\n    \"money_movement_start\": [\n      \"Can you show me all outgoing wire transfers?\",\n      \"Can you assist me in getting a higher credit card limit?\",\n      \"Can you assist me in getting a higher credit card limit?\",\n      \"Can you show me my recent Google Pay transactions?\",\n      \"Can you give me a summary of my recent debit card transactions?\"\n    ],\n    \"get_transactions_start\": [\n      \"I need to view all transactions labeled as \\\"checks\\\" on my account.\",\n      \"I would like to see the details of my most recent ATM withdrawal.\"\n    ],\n    \"credit_limit_increase_start\": [\n      \"I need my credit card limit raised.\"\n    ],\n    \"faq_link_accounts_start\": [\n      \"Can you assist me in combining my personal and savings accounts?\",\n      \"Please assist me in combining my accounts for a streamlined experience.\",\n      \"How can I link my auto loan and savings accounts?\"\n    ]\n  }\n}\n```"
+  },
+  {
+   "index": 110,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"record\",\n  \"arguments\": {\n    \"faq_auto_withdraw_start\": [\n      \"Can I schedule automatic withdrawals for different dates?\"\n    ],\n    \"payment_information_start\": [\n      \"How much do I owe on my home equity loan?\"\n    ],\n    \"pma_income_requirements_start\": [\n      \"Can I use bonuses or commissions as part of my income for a loan application?\",\n      \"Will my income be verified during the loan application process?\",\n      \"Is there a minimum income threshold for loan approval?\"\n    ],\n    \"outofscope\": []\n  }\n}\n```"
+  },
+  {
+   "index": 111,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"record\",\n  \"arguments\": {\n    \"atm_finder_start\": [\n      \"Need ATM location\"\n    ]\n  }\n}\n```"
+  },
+  {
+   "index": 112,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"record\",\n  \"arguments\": {\n    \"get_balance_start\": [\n      \"What is my balance?\",\n      \"Tell me my available balance, please\",\n      \"What is my current available balance?\",\n      \"Please provide my current account balance\",\n      \"Show me my balance information.\",\n      \"What is the balance in my account at this moment?\",\n      \"How much money is in my account?\",\n      \"Tell me my available balance\"\n    ],\n    \"atm_finder_start\": [\n      \"Where is the closest ATM to my current location?\",\n      \"Find ATM for immediate cash needs\"\n    ]\n  }\n}\n```"
+  },
+  {
+   "index": 113,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"record\",\n  \"arguments\": {\n    \"outofscope\": [\n      \"what is the weather like\"\n    ]\n  }\n}\n```"
+  },
+  {
+   "index": 114,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_dynamic_pricing\",\n  \"arguments\": {\n    \"geolocation\": \"34.0522, -118.2437\",\n    \"base_price\": 100.0,\n    \"minimum_price\": 90.0\n  }\n}\n```"
+  },
+  {
+   "index": 115,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"update_user_profile\",\n  \"arguments\": {\n    \"user_id\": 12345,\n    \"profile_data\": {\n      \"email\": \"john.doe@example.com\",\n      \"age\": 30\n    }\n  }\n}\n```"
+  },
+  {
+   "index": 116,
+   "passed": true,
+   "response": "```json\n{\"name\": \"calculate_sum\", \"arguments\": {\"number1\": 133.0, \"number2\": 34.0}}\n```"
+  },
+  {
+   "index": 117,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"sum_numbers\",\n  \"arguments\": {\n    \"numbers_list\": [133.0, 34.0]\n  }\n}\n```"
+  },
+  {
+   "index": 118,
+   "passed": true,
+   "response": "```json\n{\"name\": \"reverse_input\", \"arguments\": {\"input_value\": \"say hi\"}}\n```"
+  },
+  {
+   "index": 119,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_temperature\",\n  \"arguments\": {\n    \"units\": \"Celsius\",\n    \"location\": \"Hyderabad, India\"\n  }\n}\n```"
+  },
+  {
+   "index": 120,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"GetPrimeMinisters\",\n  \"arguments\": {\n    \"countries\": [\"Australia\", \"Canada\", \"India\"]\n  }\n}\n```"
+  }
+ ]
+}

@@ -1,0 +1,611 @@
+{
+ "suite": "bfcl_simple",
+ "model": "mlx-community/Ministral-3-8B-Reasoning-2512-4bit",
+ "draft": null,
+ "adapter": null,
+ "n": 120,
+ "accuracy": 94.16666666666667,
+ "elapsed_s": 2765.919745375053,
+ "records": [
+  {
+   "index": 1,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_triangle_area\",\n  \"arguments\": {\n    \"base\": 10,\n    \"height\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 2,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"math.factorial\",\n  \"arguments\": {\n    \"number\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 3,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"math.hypot\",\n  \"arguments\": {\n    \"x\": 4,\n    \"y\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 4,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"algebra.quadratic_roots\",\n  \"arguments\": {\n    \"a\": 1,\n    \"b\": -3,\n    \"c\": 2\n  }\n}\n```"
+  },
+  {
+   "index": 5,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"solve_quadratic_equation\",\n  \"arguments\": {\n    \"a\": 2,\n    \"b\": 6,\n    \"c\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 6,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"solve_quadratic\",\n  \"arguments\": {\n    \"a\": 3,\n    \"b\": -11,\n    \"c\": -4,\n    \"root_type\": \"all\"\n  }\n}\n```"
+  },
+  {
+   "index": 7,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"solve_quadratic\",\n  \"arguments\": {\n    \"a\": 2,\n    \"b\": 5,\n    \"c\": 3\n  }\n}\n```"
+  },
+  {
+   "index": 8,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_circumference\",\n  \"arguments\": {\n    \"radius\": 4,\n    \"unit\": \"inches\"\n  }\n}\n```"
+  },
+  {
+   "index": 9,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"geometry.area_circle\",\n  \"arguments\": {\n    \"radius\": 10\n  }\n}\n```"
+  },
+  {
+   "index": 10,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"geometry.calculate_area_circle\",\n  \"arguments\": {\n    \"radius\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 11,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_area\",\n  \"arguments\": {\n    \"base\": 6,\n    \"height\": 10\n  }\n}\n```"
+  },
+  {
+   "index": 12,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_triangle_area\",\n  \"arguments\": {\n    \"base\": 10,\n    \"height\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 13,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"geometry.circumference\",\n  \"arguments\": {\n    \"radius\": 3\n  }\n}\n```"
+  },
+  {
+   "index": 14,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_area_under_curve\",\n  \"arguments\": {\n    \"function\": \"x**2\",\n    \"interval\": [1, 3]\n  }\n}\n```"
+  },
+  {
+   "index": 15,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"calculate_derivative\",\n  \"arguments\": {\n    \"function\": \"3x^2 + 2x - 1\"\n  }\n}\n```"
+  },
+  {
+   "index": 16,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"integrate\",\n  \"arguments\": {\n    \"function\": \"x^3\",\n    \"start_x\": -2,\n    \"end_x\": 3,\n    \"method\": \"simpson\"\n  }\n}\n```"
+  },
+  {
+   "index": 17,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"calculus.derivative\",\n  \"arguments\": {\n    \"function\": \"2x^2\",\n    \"value\": 1\n  }\n}\n```"
+  },
+  {
+   "index": 18,
+   "passed": false,
+   "response": ""
+  },
+  {
+   "index": 19,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"number_analysis.prime_factors\",\n  \"arguments\": {\n    \"number\": 123456\n  }\n}\n```"
+  },
+  {
+   "index": 20,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"math.gcd\",\n  \"arguments\": {\n    \"num1\": 40,\n    \"num2\": 50\n  }\n}\n```"
+  },
+  {
+   "index": 21,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"math.hcf\",\n  \"arguments\": {\n    \"number1\": 36,\n    \"number2\": 24\n  }\n}\n```"
+  },
+  {
+   "index": 22,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"number_theory.gcd\",\n  \"arguments\": {\n    \"number1\": 36,\n    \"number2\": 48\n  }\n}\n```"
+  },
+  {
+   "index": 23,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"math.gcd\",\n  \"arguments\": {\n    \"num1\": 12,\n    \"num2\": 15\n  }\n}\n```"
+  },
+  {
+   "index": 24,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"prime_factorize\",\n  \"arguments\": {\n    \"number\": 60,\n    \"return_type\": \"dictionary\"\n  }\n}\n```"
+  },
+  {
+   "index": 25,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"math.gcd\",\n  \"arguments\": {\n    \"num1\": 12,\n    \"num2\": 18\n  }\n}\n```"
+  },
+  {
+   "index": 26,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_final_velocity\",\n  \"arguments\": {\n    \"height\": 150,\n    \"initial_velocity\": 0\n  }\n}\n```"
+  },
+  {
+   "index": 27,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_velocity\",\n  \"arguments\": {\n    \"distance\": 50,\n    \"duration\": 2\n  }\n}\n```"
+  },
+  {
+   "index": 28,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"final_velocity\",\n  \"arguments\": {\n    \"initial_velocity\": 10,\n    \"acceleration\": 2,\n    \"time\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 29,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_displacement\",\n  \"arguments\": {\n    \"initial_velocity\": 10,\n    \"time\": 5,\n    \"acceleration\": 9.8\n  }\n}\n```"
+  },
+  {
+   "index": 30,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_final_speed\",\n  \"arguments\": {\n    \"time\": 5,\n    \"initial_speed\": 0\n  }\n}\n```"
+  },
+  {
+   "index": 31,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"kinematics.final_velocity_from_distance\",\n  \"arguments\": {\n    \"acceleration\": 4,\n    \"distance\": 300\n  }\n}\n```"
+  },
+  {
+   "index": 32,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_final_velocity\",\n  \"arguments\": {\n    \"initial_velocity\": 0,\n    \"acceleration\": 9.8,\n    \"time\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 33,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_final_speed\",\n  \"arguments\": {\n    \"initial_velocity\": 0,\n    \"height\": 100\n  }\n}\n```"
+  },
+  {
+   "index": 34,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_directions\",\n  \"arguments\": {\n    \"start_location\": \"Sydney\",\n    \"end_location\": \"Melbourne\",\n    \"route_type\": \"fastest\"\n  }\n}\n```"
+  },
+  {
+   "index": 35,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"travel_itinerary_generator\",\n  \"arguments\": {\n    \"destination\": \"Tokyo\",\n    \"days\": 7,\n    \"daily_budget\": 100,\n    \"exploration_type\": \"nature\"\n  }\n}\n```"
+  },
+  {
+   "index": 36,
+   "passed": true,
+   "response": "```json\n{\"name\": \"vegan_restaurant.find_nearby\", \"arguments\": {\"location\": \"New York, NY\", \"operating_hours\": 23}}\n```"
+  },
+  {
+   "index": 37,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_shortest_driving_distance\",\n  \"arguments\": {\n    \"origin\": \"New York City\",\n    \"destination\": \"Washington D.C.\"\n  }\n}\n```"
+  },
+  {
+   "index": 38,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"route.estimate_time\",\n  \"arguments\": {\n    \"start_location\": \"San Francisco\",\n    \"end_location\": \"Los Angeles\",\n    \"stops\": [\"Santa Barbara\", \"Monterey\"]\n  }\n}\n```"
+  },
+  {
+   "index": 39,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_electrostatic_potential\",\n  \"arguments\": {\n    \"charge1\": 1e-9,\n    \"charge2\": 2e-9,\n    \"distance\": 0.05\n  }\n}\n```"
+  },
+  {
+   "index": 40,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_electric_field\",\n  \"arguments\": {\n    \"charge\": 2,\n    \"distance\": 3\n  }\n}\n```"
+  },
+  {
+   "index": 41,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_magnetic_field\",\n  \"arguments\": {\n    \"current\": 5,\n    \"radius\": 4\n  }\n}\n```"
+  },
+  {
+   "index": 42,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"electromagnetic_force\",\n  \"arguments\": {\n    \"charge1\": 5,\n    \"charge2\": 7,\n    \"distance\": 3\n  }\n}\n```"
+  },
+  {
+   "index": 43,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_resonant_frequency\",\n  \"arguments\": {\n    \"inductance\": 50e-3,\n    \"capacitance\": 100e-6\n  }\n}\n```"
+  },
+  {
+   "index": 44,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_magnetic_field_strength\",\n  \"arguments\": {\n    \"current\": 20,\n    \"distance\": 10\n  }\n}\n```"
+  },
+  {
+   "index": 45,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_electric_field_strength\",\n  \"arguments\": {\n    \"charge\": 0.01,\n    \"distance\": 4\n  }\n}\n```"
+  },
+  {
+   "index": 46,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"thermo.calculate_energy\",\n  \"arguments\": {\n    \"mass\": 100,\n    \"phase_transition\": \"vaporization\"\n  }\n}\n```"
+  },
+  {
+   "index": 47,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_final_temperature\",\n  \"arguments\": {\n    \"mass1\": 20,\n    \"temperature1\": 30,\n    \"mass2\": 15,\n    \"temperature2\": 60\n  }\n}\n```"
+  },
+  {
+   "index": 48,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_boiling_melting_points\",\n  \"arguments\": {\n    \"substance\": \"water\",\n    \"sea_level\": 5000\n  }\n}\n```"
+  },
+  {
+   "index": 49,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_density\",\n  \"arguments\": {\n    \"mass\": 45,\n    \"volume\": 15\n  }\n}\n```"
+  },
+  {
+   "index": 50,
+   "passed": false,
+   "response": ""
+  },
+  {
+   "index": 51,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"entropy_change.calculate\",\n  \"arguments\": {\n    \"substance\": \"ice\",\n    \"mass\": 1,\n    \"initial_temperature\": 0,\n    \"final_temperature\": 100,\n    \"pressure\": 1\n  }\n}\n```"
+  },
+  {
+   "index": 52,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"calculate_entropy_change\",\n  \"arguments\": {\n    \"initial_temp\": 300,\n    \"final_temp\": 400,\n    \"heat_capacity\": 5,\n    \"isothermal\": false\n  }\n}\n```"
+  },
+  {
+   "index": 53,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calc_heat_capacity\",\n  \"arguments\": {\n    \"temp\": 298,\n    \"volume\": 10\n  }\n}\n```"
+  },
+  {
+   "index": 54,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"fetch_DNA_sequence\",\n  \"arguments\": {\n    \"DNA_id\": \"DNA123\"\n  }\n}\n```"
+  },
+  {
+   "index": 55,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_protein_sequence\",\n  \"arguments\": {\n    \"gene\": \"BRCA1\"\n  }\n}\n```"
+  },
+  {
+   "index": 56,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"biology.get_cell_info\",\n  \"arguments\": {\n    \"cell_type\": \"human cell\",\n    \"detailed\": true\n  }\n}\n```"
+  },
+  {
+   "index": 57,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"cellbio.get_proteins\",\n  \"arguments\": {\n    \"cell_compartment\": \"plasma membrane\"\n  }\n}\n```"
+  },
+  {
+   "index": 58,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_cell_density\",\n  \"arguments\": {\n    \"optical_density\": 0.6,\n    \"dilution\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 59,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"cell_biology.function_lookup\",\n  \"arguments\": {\n    \"molecule\": \"ATP synthase\",\n    \"organelle\": \"mitochondria\",\n    \"specific_function\": true\n  }\n}\n```"
+  },
+  {
+   "index": 60,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_molecular_weight\",\n  \"arguments\": {\n    \"compound\": \"C6H12O6\",\n    \"to_unit\": \"grams/mole\"\n  }\n}\n```"
+  },
+  {
+   "index": 61,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"mutation_type.find\",\n  \"arguments\": {\n    \"snp_id\": \"rs6034464\"\n  }\n}\n```"
+  },
+  {
+   "index": 62,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"diabetes_prediction\",\n  \"arguments\": {\n    \"weight\": 150,\n    \"height\": 70,\n    \"activity_level\": \"lightly active\"\n  }\n}\n```"
+  },
+  {
+   "index": 63,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"analyze_dna_sequence\",\n  \"arguments\": {\n    \"sequence\": \"AGTCGATCGAACGTACGTACG\",\n    \"reference_sequence\": \"AGTCCATCGAACGTACGTACG\",\n    \"mutation_type\": \"substitution\"\n  }\n}\n```"
+  },
+  {
+   "index": 64,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"genetics.calculate_similarity\",\n  \"arguments\": {\n    \"species1\": \"human\",\n    \"species2\": \"chimp\"\n  }\n}\n```"
+  },
+  {
+   "index": 65,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_genotype_frequency\",\n  \"arguments\": {\n    \"allele_frequency\": 0.3,\n    \"genotype\": \"AA\"\n  }\n}\n```"
+  },
+  {
+   "index": 66,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_density\",\n  \"arguments\": {\n    \"country\": \"Brazil\",\n    \"year\": \"2022\",\n    \"population\": 213000000,\n    \"land_area\": 8500000\n  }\n}\n```"
+  },
+  {
+   "index": 67,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"ecology_data.precipitation_stats\",\n  \"arguments\": {\n    \"location\": \"Amazon rainforest\",\n    \"time_frame\": \"six_months\"\n  }\n}\n```"
+  },
+  {
+   "index": 68,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"identify_bird\",\n  \"arguments\": {\n    \"color\": \"green\",\n    \"habitat\": \"forest\",\n    \"size\": \"small\"\n  }\n}\n```"
+  },
+  {
+   "index": 69,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"forest_growth_forecast\",\n  \"arguments\": {\n    \"location\": \"Yellowstone National Park\",\n    \"years\": 5,\n    \"include_human_impact\": true\n  }\n}\n```"
+  },
+  {
+   "index": 70,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"ecology.get_turtle_population\",\n  \"arguments\": {\n    \"location\": \"Mississippi river\",\n    \"year\": 2020,\n    \"species\": true\n  }\n}\n```"
+  },
+  {
+   "index": 71,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_vehicle_emission\",\n  \"arguments\": {\n    \"vehicle_type\": \"gas\",\n    \"miles_driven\": 1500\n  }\n}\n```"
+  },
+  {
+   "index": 72,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"generate_DNA_sequence\",\n  \"arguments\": {\n    \"length\": 100,\n    \"preferences\": [\"G\", \"C\"]\n  }\n}\n```"
+  },
+  {
+   "index": 73,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_fitness\",\n  \"arguments\": {\n    \"trait_values\": [0.8, 0.7],\n    \"trait_contributions\": [0.4, 0.6]\n  }\n}\n```"
+  },
+  {
+   "index": 74,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"population_projections\",\n  \"arguments\": {\n    \"country\": \"United States\",\n    \"years\": 20\n  }\n}\n```"
+  },
+  {
+   "index": 75,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_bacteria_evolution_rate\",\n  \"arguments\": {\n    \"start_population\": 5000,\n    \"duplication_frequency\": 1,\n    \"duration\": 6\n  }\n}\n```"
+  },
+  {
+   "index": 76,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"elephant_population_estimate\",\n  \"arguments\": {\n    \"current_population\": 35000,\n    \"growth_rate\": 0.015,\n    \"years\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 77,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"prediction.evolution\",\n  \"arguments\": {\n    \"species\": \"Homo Sapiens\",\n    \"years\": 50,\n    \"model\": \"Darwin\"\n  }\n}\n```"
+  },
+  {
+   "index": 78,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"restaurant.find_nearby\",\n  \"arguments\": {\n    \"location\": \"Los Angeles, CA\",\n    \"dietary_preference\": [\"Vegan\"]\n  }\n}\n```"
+  },
+  {
+   "index": 79,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"average_temperature\",\n  \"arguments\": {\n    \"location\": \"Austin\",\n    \"days\": 3,\n    \"temp_unit\": \"Celsius\"\n  }\n}\n```"
+  },
+  {
+   "index": 80,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"create_histogram\",\n  \"arguments\": {\n    \"data\": [85, 90, 88, 92, 86, 89, 91],\n    \"bins\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 81,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"find_restaurants\",\n  \"arguments\": {\n    \"location\": \"Manhattan, New York\",\n    \"food_type\": \"Thai\",\n    \"number\": 5,\n    \"dietary_requirements\": [\"vegan\"]\n  }\n}\n```"
+  },
+  {
+   "index": 82,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"map_routing.fastest_route\",\n  \"arguments\": {\n    \"start_location\": \"San Francisco\",\n    \"end_location\": \"Los Angeles\",\n    \"avoid_tolls\": true\n  }\n}\n```"
+  },
+  {
+   "index": 83,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_average\",\n  \"arguments\": {\n    \"numbers\": [12, 15, 18, 20, 21, 26, 30]\n  }\n}\n```"
+  },
+  {
+   "index": 84,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_distance\",\n  \"arguments\": {\n    \"coord1\": [33.4484, -112.0740],\n    \"coord2\": [34.0522, -118.2437],\n    \"unit\": \"miles\"\n  }\n}\n```"
+  },
+  {
+   "index": 85,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_bmi\",\n  \"arguments\": {\n    \"weight\": 85,\n    \"height\": 180\n  }\n}\n```"
+  },
+  {
+   "index": 86,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"geo_distance.calculate\",\n  \"arguments\": {\n    \"start_location\": \"Boston, MA\",\n    \"end_location\": \"Washington, D.C.\",\n    \"units\": \"miles\"\n  }\n}\n```"
+  },
+  {
+   "index": 87,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"city_distance.find_shortest\",\n  \"arguments\": {\n    \"start_city\": \"New York\",\n    \"end_city\": \"Los Angeles\",\n    \"transportation\": \"train\",\n    \"allow_transfer\": true\n  }\n}\n```"
+  },
+  {
+   "index": 88,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"array_sort\",\n  \"arguments\": {\n    \"list\": [5, 3, 4, 1, 2],\n    \"order\": \"ascending\"\n  }\n}\n```"
+  },
+  {
+   "index": 89,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_BMI\",\n  \"arguments\": {\n    \"weight_kg\": 70,\n    \"height_m\": 1.75\n  }\n}\n```"
+  },
+  {
+   "index": 90,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"db_fetch_records\",\n  \"arguments\": {\n    \"database_name\": \"StudentDB\",\n    \"table_name\": \"Students\",\n    \"conditions\": {\n      \"department\": \"Science\",\n      \"school\": \"Bluebird High School\"\n    }\n  }\n}\n```"
+  },
+  {
+   "index": 91,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"employee.fetch_data\",\n  \"arguments\": {\n    \"company_name\": \"ABC Ltd.\",\n    \"employee_id\": 345,\n    \"data_field\": [\"Personal Info\", \"Job History\"]\n  }\n}\n```"
+  },
+  {
+   "index": 92,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_restaurant\",\n  \"arguments\": {\n    \"cuisine\": \"sushi\",\n    \"location\": \"Boston\",\n    \"condition\": \"opens on Sundays\"\n  }\n}\n```"
+  },
+  {
+   "index": 93,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"imdb.find_movies_by_actor\",\n  \"arguments\": {\n    \"actor_name\": \"Leonardo DiCaprio\",\n    \"year\": 2010\n  }\n}\n```"
+  },
+  {
+   "index": 94,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"get_theater_movie_releases\",\n  \"arguments\": {\n    \"location\": \"LA\",\n    \"timeframe\": 7,\n    \"format\": \"IMAX\"\n  }\n}\n```"
+  },
+  {
+   "index": 95,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"update_user_info\",\n  \"arguments\": {\n    \"user_id\": 43523,\n    \"update_info\": {\n      \"name\": \"John Doe\",\n      \"email\": \"johndoe@email.com\"\n    }\n  }\n}\n```"
+  },
+  {
+   "index": 96,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calc_area_triangle\",\n  \"arguments\": {\n    \"base\": 5,\n    \"height\": 3\n  }\n}\n```"
+  },
+  {
+   "index": 97,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"database.query\",\n  \"arguments\": {\n    \"table\": \"user\",\n    \"conditions\": [\n      {\n        \"field\": \"age\",\n        \"operation\": \">\",\n        \"value\": \"25\"\n      },\n      {\n        \"field\": \"job\",\n        \"operation\": \"=\",\n        \"value\": \"engineer\"\n      }\n    ]\n  }\n}\n```"
+  },
+  {
+   "index": 98,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"math.factorial\",\n  \"arguments\": {\n    \"number\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 99,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_clock_angle\",\n  \"arguments\": {\n    \"hours\": 6,\n    \"minutes\": 30\n  }\n}\n```"
+  },
+  {
+   "index": 100,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"plot_sine_wave\",\n  \"arguments\": {\n    \"start_range\": 0.0000,\n    \"end_range\": 6.2832,\n    \"frequency\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 101,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"light_travel_time\",\n  \"arguments\": {\n    \"distance_in_light_years\": 4\n  }\n}\n```"
+  },
+  {
+   "index": 102,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_speed\",\n  \"arguments\": {\n    \"distance\": 450,\n    \"time\": 20,\n    \"to_unit\": \"km/h\"\n  }\n}\n```"
+  },
+  {
+   "index": 103,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_distance\",\n  \"arguments\": {\n    \"body1\": \"Earth\",\n    \"body2\": \"Moon\",\n    \"unit\": \"miles\"\n  }\n}\n```"
+  },
+  {
+   "index": 104,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"mathematics.calculate_area_under_curve\",\n  \"arguments\": {\n    \"polynomial\": [3, 2, -4],\n    \"limits\": [-1, 2]\n  }\n}\n```"
+  },
+  {
+   "index": 105,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"geometry.area_triangle\",\n  \"arguments\": {\n    \"base\": 6,\n    \"height\": 10\n  }\n}\n```"
+  },
+  {
+   "index": 106,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"math.power\",\n  \"arguments\": {\n    \"base\": 3,\n    \"exponent\": 4\n  }\n}\n```"
+  },
+  {
+   "index": 107,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"train_random_forest_classifier\",\n  \"arguments\": {\n    \"dataset\": \"your_dataset_name\",\n    \"max_depth\": 5,\n    \"n_estimators\": 100\n  }\n}\n```"
+  },
+  {
+   "index": 108,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_bmi\",\n  \"arguments\": {\n    \"weight\": 70,\n    \"height\": 175\n  }\n}\n```"
+  },
+  {
+   "index": 109,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"run_linear_regression\",\n  \"arguments\": {\n    \"predictors\": [\"Age\", \"Income\", \"Education\"],\n    \"target\": \"Purchase_Amount\",\n    \"standardize\": true\n  }\n}\n```"
+  },
+  {
+   "index": 110,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"random_forest.train\",\n  \"arguments\": {\n    \"n_estimators\": 100,\n    \"max_depth\": 5,\n    \"data\": \"my_data\"\n  }\n}\n```"
+  },
+  {
+   "index": 111,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"predict_house_price\",\n  \"arguments\": {\n    \"bedrooms\": 3,\n    \"bathrooms\": 2,\n    \"area\": 1800,\n    \"location\": \"San Francisco\"\n  }\n}\n```"
+  },
+  {
+   "index": 112,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"random.normalvariate\",\n  \"arguments\": {\n    \"mu\": 0,\n    \"sigma\": 1\n  }\n}\n```"
+  },
+  {
+   "index": 113,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_probability\",\n  \"arguments\": {\n    \"total_outcomes\": 52,\n    \"favorable_outcomes\": 4\n  }\n}\n```"
+  },
+  {
+   "index": 114,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"probability.dice_roll\",\n  \"arguments\": {\n    \"desired_number\": 6,\n    \"number_of_rolls\": 2\n  }\n}\n```"
+  },
+  {
+   "index": 115,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"prob_dist.binomial\",\n  \"arguments\": {\n    \"trials\": 10,\n    \"successes\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 116,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"calculate_binomial_probability\",\n  \"arguments\": {\n    \"number_of_trials\": 8,\n    \"number_of_successes\": 5\n  }\n}\n```"
+  },
+  {
+   "index": 117,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"probabilities.calculate_single\",\n  \"arguments\": {\n    \"total_outcomes\": 52,\n    \"event_outcomes\": 4\n  }\n}\n```"
+  },
+  {
+   "index": 118,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"probability_of_event\",\n  \"arguments\": {\n    \"success_outcomes\": 13,\n    \"total_outcomes\": 52,\n    \"format_as_ratio\": true\n  }\n}\n```"
+  },
+  {
+   "index": 119,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"stats.t_test\",\n  \"arguments\": {\n    \"array_1\": [10, 15, 12, 14, 11],\n    \"array_2\": [18, 16, 17, 20, 22],\n    \"alpha\": 0.05\n  }\n}\n```"
+  },
+  {
+   "index": 120,
+   "passed": true,
+   "response": "```json\n{\n  \"name\": \"hypothesis_testing.ttest_ind\",\n  \"arguments\": {\n    \"sample1\": [22, 33, 42, 12, 34],\n    \"sample2\": [23, 45, 44, 14, 38],\n    \"significance_level\": 0.05\n  }\n}\n```"
+  }
+ ]
+}

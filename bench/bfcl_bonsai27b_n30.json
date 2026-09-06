@@ -1,0 +1,161 @@
+{
+ "suite": "bfcl_simple",
+ "model": "/Users/huygpt/.cache/huggingface/hub/models--prism-ml--Ternary-Bonsai-27B-mlx-2bit/snapshots/70f75f3ad081ab840a42f3304c02c27e7f89bfb7/",
+ "draft": null,
+ "adapter": null,
+ "n": 30,
+ "accuracy": 86.66666666666667,
+ "elapsed_s": 194.46460808301345,
+ "records": [
+  {
+   "index": 1,
+   "passed": true,
+   "response": "{\"name\": \"calculate_triangle_area\", \"arguments\": {\"base\": 10, \"height\": 5, \"unit\": \"units\"}}"
+  },
+  {
+   "index": 2,
+   "passed": true,
+   "response": "{\"name\": \"math.factorial\", \"arguments\": {\"number\": 5}}"
+  },
+  {
+   "index": 3,
+   "passed": true,
+   "response": "{\"name\": \"math.hypot\", \"arguments\": {\"x\": 4, \"y\": 5}}"
+  },
+  {
+   "index": 4,
+   "passed": true,
+   "response": "{\"name\": \"algebra.quadratic_roots\", \"arguments\": {\"a\": 1, \"b\": -3, \"c\": 2}}"
+  },
+  {
+   "index": 5,
+   "passed": true,
+   "response": "{\"name\": \"solve_quadratic_equation\", \"arguments\": {\"a\": 2, \"b\": 6, \"c\": 5}}"
+  },
+  {
+   "index": 6,
+   "passed": true,
+   "response": "{\"name\": \"solve_quadratic\", \"arguments\": {\"a\": 3, \"b\": -11, \"c\": -4, \"root_type\": \"all\"}}"
+  },
+  {
+   "index": 7,
+   "passed": true,
+   "response": "{\"name\": \"solve_quadratic\", \"arguments\": {\"a\": 2, \"b\": 5, \"c\": 3}}"
+  },
+  {
+   "index": 8,
+   "passed": true,
+   "response": "{\"name\": \"calculate_circumference\", \"arguments\": {\"radius\": 4, \"unit\": \"inches\"}}"
+  },
+  {
+   "index": 9,
+   "passed": true,
+   "response": "{\"name\": \"geometry.area_circle\", \"arguments\": {\"radius\": 10}}"
+  },
+  {
+   "index": 10,
+   "passed": true,
+   "response": "{\"name\": \"geometry.calculate_area_circle\", \"arguments\": {\"radius\": 5, \"unit\": \"units\"}}"
+  },
+  {
+   "index": 11,
+   "passed": true,
+   "response": "{\"name\": \"calculate_area\", \"arguments\": {\"base\": 6, \"height\": 10, \"unit\": \"cm\"}}"
+  },
+  {
+   "index": 12,
+   "passed": true,
+   "response": "{\"name\": \"calculate_triangle_area\", \"arguments\": {\"base\": 10, \"height\": 5}}"
+  },
+  {
+   "index": 13,
+   "passed": true,
+   "response": "{\"name\": \"geometry.circumference\", \"arguments\": {\"radius\": 3}}"
+  },
+  {
+   "index": 14,
+   "passed": false,
+   "response": "{\"name\": \"calculate_area_under_curve\", \"arguments\": {\"function\": \"x^2\", \"interval\": [1, 3]}}"
+  },
+  {
+   "index": 15,
+   "passed": false,
+   "response": "{\"name\": \"calculate_derivative\", \"arguments\": {\"function\": \"3x^2 + 2x - 1\"}}"
+  },
+  {
+   "index": 16,
+   "passed": false,
+   "response": "{\n  \"name\": \"integrate\",\n  \"arguments\": {\n    \"function\": \"x^3\",\n    \"start_x\": -2,\n    \"end_x\": 3,\n    \"method\": \"simpson\"\n  }\n}"
+  },
+  {
+   "index": 17,
+   "passed": false,
+   "response": "{\"name\": \"calculus.derivative\", \"arguments\": {\"function\": \"2x^2\", \"value\": 1}}"
+  },
+  {
+   "index": 18,
+   "passed": true,
+   "response": "{\"name\": \"get_prime_factors\", \"arguments\": {\"number\": 450, \"formatted\": true}}"
+  },
+  {
+   "index": 19,
+   "passed": true,
+   "response": "{\"name\": \"number_analysis.prime_factors\", \"arguments\": {\"number\": 123456}}"
+  },
+  {
+   "index": 20,
+   "passed": true,
+   "response": "{\"name\": \"math.gcd\", \"arguments\": {\"num1\": 40, \"num2\": 50}}"
+  },
+  {
+   "index": 21,
+   "passed": true,
+   "response": "{\"name\": \"math.hcf\", \"arguments\": {\"number1\": 36, \"number2\": 24}}"
+  },
+  {
+   "index": 22,
+   "passed": true,
+   "response": "{\"name\": \"number_theory.gcd\", \"arguments\": {\"number1\": 36, \"number2\": 48}}"
+  },
+  {
+   "index": 23,
+   "passed": true,
+   "response": "{\"name\": \"math.gcd\", \"arguments\": {\"num1\": 12, \"num2\": 15}}"
+  },
+  {
+   "index": 24,
+   "passed": true,
+   "response": "{\"name\": \"prime_factorize\", \"arguments\": {\"number\": 60, \"return_type\": \"dictionary\"}}"
+  },
+  {
+   "index": 25,
+   "passed": true,
+   "response": "{\"name\": \"math.gcd\", \"arguments\": {\"num1\": 12, \"num2\": 18}}"
+  },
+  {
+   "index": 26,
+   "passed": true,
+   "response": "{\"name\": \"calculate_final_velocity\", \"arguments\": {\"height\": 150, \"initial_velocity\": 0}}"
+  },
+  {
+   "index": 27,
+   "passed": true,
+   "response": "{\"name\": \"calculate_velocity\", \"arguments\": {\"distance\": 50, \"duration\": 2}}"
+  },
+  {
+   "index": 28,
+   "passed": true,
+   "response": "{\"name\": \"final_velocity\", \"arguments\": {\"initial_velocity\": 10, \"acceleration\": 2, \"time\": 5}}"
+  },
+  {
+   "index": 29,
+   "passed": true,
+   "response": "{\"name\": \"calculate_displacement\", \"arguments\": {\"initial_velocity\": 10, \"time\": 5, \"acceleration\": 9.8}}"
+  },
+  {
+   "index": 30,
+   "passed": true,
+   "response": "{\"name\": \"calculate_final_speed\", \"arguments\": {\"time\": 5}}"
+  }
+ ]
+}
