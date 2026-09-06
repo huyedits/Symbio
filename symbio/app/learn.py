@@ -15,12 +15,12 @@ agent (app paths, tag stripping, and iters-override training).
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from symbio import constants, safety
-from symbio.app import memory, training
+from symbio.app import belief, curriculum, memory, training
 from symbio.app.tooling import redact_secrets, strip_tool_tags
 
 
@@ -1085,6 +1085,102 @@ def digest_predictions_to_training(tokenizer, system_prompt: str, boost: int = 1
                                       tokenizer, system_prompt)
         added += 1
     return added
+
+
+def digest_divergences_to_training(tokenizer, system_prompt: str, boost: int = 1,
+                                   threshold: float = 0.35, store=None) -> int:
+    """Teach the predictions the model was sure about and reality refused.
+
+    The third source, and the one neither existing loop can see: the mistake
+    loop needs a user correction or a failed tool, and the prediction digest
+    only rewards what went well. A confident belief that quietly did not hold
+    produces neither, so it was invisible — which is the failure mode that
+    lets a model stay confidently wrong about the same thing indefinitely.
+    """
+    store = store or belief.BeliefStore()
+    added = 0
+    for sample in curriculum.divergence_samples(store, threshold=threshold):
+        # Repeat proportionally to how badly it diverged: being sure of
+        # something that did not happen at all is a bigger lesson than being
+        # slightly overconfident, and boosting them equally teaches neither.
+        repeats = max(1, int(round(boost * (1.0 + sample["divergence"]))))
+        for _ in range(repeats):
+            training.append_chat_pair(sample["prompt"], sample["reply"],
+                                      tokenizer, system_prompt)
+        added += 1
+    return added
+
+
+def adaptive_training_plan(eval_result, config: dict[str, Any], *,
+                           cases=None, half_life_days=None, boost: int = 1,
+                           corpus_path=None) -> list[dict[str, Any]]:
+    """Weight the pending mistake notes by what the model currently fails.
+
+    The mistake loop decides WHEN to train; this decides what that run should
+    spend itself on. Notes about cases the held-out eval says are broken get
+    repeated harder, notes about cases it passes get repeated less, and notes
+    whose lesson is both absorbed and cold drop to a single mention.
+
+    Raises HeldOutViolation if the eval set has leaked into the corpus, rather
+    than falling back to unweighted training: a silent fallback hides the leak,
+    and the leak is what makes the whole signal circular.
+    """
+    from symbio.app import eval as eval_mod
+
+    cases = list(cases if cases is not None else eval_mod.EVAL_CASES)
+    curriculum.assert_held_out(cases, config, corpus_path)
+    half_life = (half_life_days if half_life_days is not None
+                 else float(config.get("learn", {}).get(
+                     "sample_half_life_days", curriculum.DEFAULT_HALF_LIFE_DAYS)))
+
+    samples = []
+    for path in sorted(constants.MISTAKES_DIR.glob("*.md")) \
+            if constants.MISTAKES_DIR.exists() else []:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        query = answer = ""
+        for line in text.splitlines():
+            if line.startswith("**Original question:**"):
+                query = line.split("**Original question:**", 1)[1].strip()
+            elif line.startswith("**Correct answer:**"):
+                answer = line.split("**Correct answer:**", 1)[1].strip()
+        if not query or not answer:
+            continue
+        samples.append({
+            "path": str(path), "text": f"{query} {answer}",
+            "query": query, "answer": answer,
+            # The note's own mtime, not the filename stamp: a note that was
+            # re-saved is newer evidence than the day it was first written.
+            "created_at": datetime.fromtimestamp(
+                path.stat().st_mtime, tz=timezone.utc).isoformat(),
+        })
+    return curriculum.plan(eval_result, cases, config, samples,
+                           half_life_days=half_life, base_boost=boost)
+
+
+def digest_mistakes_adaptively(tokenizer, system_prompt: str, eval_result,
+                               config: dict[str, Any], boost: int = 1,
+                               cases=None) -> tuple[int, int]:
+    """digest_mistakes_to_training, but weighted by measured weakness.
+
+    Same notes, same corpus, same archival — only the repeat count differs, so
+    this is a strict refinement of the reactive path rather than a replacement
+    for it. Every note still reaches the corpus at least once; see
+    curriculum.plan for why a weight of zero is not allowed to exist.
+    Returns (notes digested, total samples written).
+    """
+    planned = adaptive_training_plan(eval_result, config, cases=cases, boost=boost)
+    written = 0
+    for item in planned:
+        for _ in range(item["repeats"]):
+            training.append_chat_pair(item["query"], item["answer"],
+                                      tokenizer, system_prompt)
+            written += 1
+    print(curriculum.summarise(planned))
+    archive_mistake_notes()
+    return len(planned), written
 
 
 def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: str,
