@@ -1160,6 +1160,23 @@ def build_seed_pairs(assistant: str, user: str) -> list[tuple[str, str]]:
             "Give me the JSON array [\"hello\", \"world\"].",
             "[\"hello\", \"world\"]",
         ),
+        # Reasoned answers: multi-step problems get a [THINK] block (stripped
+        # before the user sees it), then a self-contained reply. Simple facts
+        # above stay direct — the block is for real work, not for everything.
+        (
+            "A train leaves Station A at 3:00 PM traveling 60 mph. Another "
+            "train leaves Station B, 180 miles away, at 3:30 PM traveling "
+            "90 mph toward the first train. At what time do they meet?",
+            "[THINK]Train 1 covers 30 miles in the first 30 minutes (60 mph × "
+            "0.5 h), so at 3:30 PM they are 150 miles apart. Closing speed is "
+            "60 + 90 = 150 mph, so they meet in 1 hour, at 4:30 PM.[/THINK]"
+            "They meet at 4:30 PM.",
+        ),
+        (
+            "A shirt is $40 with 25% off. What do I pay?",
+            "[THINK]25% of $40 is $10, so the price is $40 − $10 = $30.[/THINK]"
+            "You pay $30.",
+        ),
         # File editing: read before edit, backup by default
         (
             "Show me the contents of config.json.",

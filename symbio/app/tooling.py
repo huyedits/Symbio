@@ -594,6 +594,7 @@ _THINKING_PATTERNS = [
     r" thinking\s+.*?/thinking",
     r"\bthinking\s*:?\s*\n.*?\n/?thinking",
     r"\breasoning\s*:?\s*\n.*?\n/?reasoning",
+    r"\[THINK\].*?\[/THINK\]",
 ]
 
 
@@ -652,11 +653,12 @@ def clean_response(text: str) -> str:
     text = CANARY_MARK_RE.sub("", text)
     text = re.sub(r"^Assistant:\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^user:\s*", "", text, flags=re.IGNORECASE)
-    # Strip stray Qwen3 think delimiters that strip_reasoning_block missed —
-    # it only unwraps blocks anchored at the start of the reply, so a lone
-    # delimiter the adapter emits mid-answer survives it.
-    text = text.replace(_QWEN_THINK_CLOSE, "")
-    text = text.replace(_QWEN_THINK_OPEN, "")
+    # Strip stray think delimiters that strip_reasoning_block missed — it only
+    # unwraps blocks anchored at the start of the reply, so a lone delimiter
+    # the model emits mid-answer survives it. Both Qwen's and Mistral's forms.
+    for _open, _close in _THINK_PAIRS:
+        text = text.replace(_close, "")
+        text = text.replace(_open, "")
     # Collapse multiple blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
     # Detect and truncate repetition loops: the small quantized model at low
@@ -671,6 +673,19 @@ def clean_response(text: str) -> str:
 # contain the literal tag characters (which confuse some tooling/parsers).
 _QWEN_THINK_OPEN = "".join(chr(c) for c in [0x3c, 0x74, 0x68, 0x69, 0x6e, 0x6b, 0x3e])
 _QWEN_THINK_CLOSE = "".join(chr(c) for c in [0x3c, 0x2f, 0x74, 0x68, 0x69, 0x6e, 0x6b, 0x3e])
+
+# Mistral reasoning models (Ministral-3-8B-Reasoning) emit [THINK]...[/THINK]
+# with dedicated vocab tokens instead of Qwen's angle-bracket form. Both are
+# fixed markers that never appear in prose, so both are stripped the same way.
+_MISTRAL_THINK_OPEN = "[THINK]"
+_MISTRAL_THINK_CLOSE = "[/THINK]"
+
+# (open, close) delimiter pairs, tried in order. A reply uses one format, so
+# the pair that matches the leading open is the one whose close ends the block.
+_THINK_PAIRS = (
+    (_QWEN_THINK_OPEN, _QWEN_THINK_CLOSE),
+    (_MISTRAL_THINK_OPEN, _MISTRAL_THINK_CLOSE),
+)
 
 # Prefix used to surface a Qwen3 thinking block to the user (StreamingStripper
 # during streaming, chat.py's final print when not streaming). Plain ASCII so
@@ -717,8 +732,10 @@ def strip_canary_mark(text: str) -> str:
 
 
 def strip_reasoning_block(text: str) -> str:
-    """Strip Qwen3 reasoning (think) blocks from a *generated* reply to
+    """Strip a leading reasoning (think) block from a *generated* reply to
     recover the answer.
+
+    Handles both Qwen3's angle-bracket delimiters and Mistral's [THINK] form.
 
     A well-formed turn is one open...close block (the reasoning) followed by
     the answer. The small/quantized model with the LoRA adapter sometimes
@@ -737,16 +754,18 @@ def strip_reasoning_block(text: str) -> str:
     stripped_a_block = False
     while True:
         s = text.lstrip("\n")
-        if not s.startswith(_QWEN_THINK_OPEN):
+        pair = next(((o, c) for o, c in _THINK_PAIRS if s.startswith(o)), None)
+        if pair is None:
             break
+        o, c = pair
         stripped_a_block = True
-        cidx = s.find(_QWEN_THINK_CLOSE, len(_QWEN_THINK_OPEN))
+        cidx = s.find(c, len(o))
         if cidx == -1:
             # Lone unclosed open delimiter: the model dropped the close, so
             # everything after this open is the answer.
-            return s[len(_QWEN_THINK_OPEN):].lstrip("\n")
+            return s[len(o):].lstrip("\n")
         # Drop this complete think block and look at what remains.
-        text = s[cidx + len(_QWEN_THINK_CLOSE):]
+        text = s[cidx + len(c):]
 
     # A close with no open before it. Not malformed output — it is what the
     # template produces whenever thinking is on: enable_thinking=True ends the
@@ -761,14 +780,15 @@ def strip_reasoning_block(text: str) -> str:
     # there discards real content, which a test caught it doing.
     s = text.lstrip("\n")
     if not stripped_a_block:
-        cidx = s.find(_QWEN_THINK_CLOSE)
-        if cidx != -1 and _QWEN_THINK_OPEN not in s[:cidx]:
-            return s[cidx + len(_QWEN_THINK_CLOSE):].lstrip("\n")
+        for o, c in _THINK_PAIRS:
+            cidx = s.find(c)
+            if cidx != -1 and not any(o2 in s[:cidx] for o2, _ in _THINK_PAIRS):
+                return s[cidx + len(c):].lstrip("\n")
     return s
 
 
 def extract_reasoning(text: str) -> str:
-    """Return the Qwen3 thinking block content from a generated reply, or "".
+    """Return the reasoning (think) block content from a generated reply, or "".
 
     Mirrors strip_reasoning_block's detection: only a block anchored at the
     start of the reply counts. The content is the text between the open and
@@ -777,18 +797,33 @@ def extract_reasoning(text: str) -> str:
     history never see it).
     """
     s = text.lstrip("\n")
-    if not s.startswith(_QWEN_THINK_OPEN):
+    pair = next(((o, c) for o, c in _THINK_PAIRS if s.startswith(o)), None)
+    if pair is None:
         # Mirror strip_reasoning_block's prompt-opened case: with thinking on,
         # the open delimiter is in the prompt and never in the reply, so the
         # reasoning is simply everything before the first close.
-        cidx = s.find(_QWEN_THINK_CLOSE)
-        if cidx != -1 and _QWEN_THINK_OPEN not in s[:cidx]:
-            return s[:cidx].strip()
+        for o, c in _THINK_PAIRS:
+            cidx = s.find(c)
+            if cidx != -1 and not any(o2 in s[:cidx] for o2, _ in _THINK_PAIRS):
+                return s[:cidx].strip()
         return ""
-    cidx = s.find(_QWEN_THINK_CLOSE, len(_QWEN_THINK_OPEN))
+    o, c = pair
+    cidx = s.find(c, len(o))
     if cidx == -1:
         return ""
-    return s[len(_QWEN_THINK_OPEN):cidx].strip()
+    return s[len(o):cidx].strip()
+
+
+def think_block_closed(text: str) -> bool:
+    """True when every opened reasoning block in text is closed.
+
+    Used to decide whether an end-of-turn marker is a real stop or is sitting
+    inside an unclosed reasoning block (which would leave a partial answer).
+    """
+    for o, c in _THINK_PAIRS:
+        if text.count(o) > text.count(c):
+            return False
+    return True
 
 
 def tool_group(name: str) -> str | None:
@@ -1926,6 +1961,13 @@ def _partial_suffix_len(text: str, marker: str) -> int:
     return 0
 
 
+def _strip_think_delims(text: str) -> str:
+    """Drop every reasoning delimiter (both Qwen's and Mistral's forms)."""
+    for o, c in _THINK_PAIRS:
+        text = text.replace(o, "").replace(c, "")
+    return text
+
+
 class StreamingStripper:
     """Incremental, best-effort view of a reply as it streams token-by-
     token: known tool tags are held back and dropped once confirmed closed
@@ -1952,6 +1994,11 @@ class StreamingStripper:
         # already de-thought — streams normally instead of being swallowed
         # whole while waiting for a close delimiter that never comes.
         self._think_state = "undecided"  # -> "inside" -> "done"
+        # The (open, close) delimiter pair the stream actually opened with,
+        # once detected. None while undecided. A reply uses one format, so the
+        # pair that matched the leading open is the one whose close ends the
+        # block (Qwen's angle-bracket form vs Mistral's [THINK] form).
+        self._think_pair = None
         # When True, a completed thinking block is surfaced to the user as a
         # "[Reasoning] …" block (the answer still streams separately after
         # it). When False, the block is hidden exactly as before.
@@ -1978,20 +2025,22 @@ class StreamingStripper:
         self._buffer += chunk
         if self._think_state == "undecided":
             head = self._buffer.lstrip("\n")
-            if head.startswith(_QWEN_THINK_OPEN):
+            pair = next(((o, c) for o, c in _THINK_PAIRS if head.startswith(o)), None)
+            if pair is not None:
                 # A real reasoning block is starting — hide it from here.
                 self._think_state = "inside"
-                self._buffer = head[len(_QWEN_THINK_OPEN):]
-            elif _QWEN_THINK_OPEN.startswith(head):
-                # Still an unresolved prefix of the open delimiter ("<thi"),
-                # which streams a character at a time — wait before showing
-                # anything, so the delimiter never flashes on screen.
+                self._think_pair = pair
+                self._buffer = head[len(pair[0]):]
+            elif any(o.startswith(head) for o, _ in _THINK_PAIRS):
+                # Still an unresolved prefix of an open delimiter ("<thi" or
+                # "[THI"), which streams a character at a time — wait before
+                # showing anything, so the delimiter never flashes on screen.
                 return ""
             else:
                 # This reply has no reasoning block; it is answer text.
                 self._think_state = "done"
         if self._think_state == "inside":
-            cidx = self._buffer.find(_QWEN_THINK_CLOSE)
+            cidx = self._buffer.find(self._think_pair[1])
             if cidx == -1:
                 # Still inside the reasoning block. Stream it as it arrives
                 # rather than holding the whole block: reasoning runs to
@@ -2003,7 +2052,7 @@ class StreamingStripper:
                 # flashes on screen.
                 if not self._show_reasoning:
                     return ""
-                hold = _partial_suffix_len(self._buffer, _QWEN_THINK_CLOSE)
+                hold = _partial_suffix_len(self._buffer, self._think_pair[1])
                 safe = self._buffer[:len(self._buffer) - hold] if hold else self._buffer
                 self._buffer = self._buffer[len(safe):]
                 if not safe:
@@ -2026,7 +2075,7 @@ class StreamingStripper:
             # reply prefix to the answer, not the reasoning. Otherwise drop
             # the block as before.
             reasoning = self._buffer[:cidx]
-            self._buffer = self._buffer[cidx + len(_QWEN_THINK_CLOSE):]
+            self._buffer = self._buffer[cidx + len(self._think_pair[1]):]
             self._think_state = "done"
             # The answer may still carry think-delimiter artifacts (the
             # adapter sometimes emits an empty think block, then re-opens an
@@ -2034,7 +2083,7 @@ class StreamingStripper:
             # 7-char markers that never appear in normal prose, so drop every
             # remaining one, then strip the leading newlines once at the
             # answer start.
-            self._buffer = self._buffer.replace(_QWEN_THINK_OPEN, "").replace(_QWEN_THINK_CLOSE, "").lstrip("\n")
+            self._buffer = _strip_think_delims(self._buffer).lstrip("\n")
             if self._show_reasoning:
                 if self._reasoning_marked:
                     # The marker and most of the block already streamed; emit
@@ -2052,12 +2101,12 @@ class StreamingStripper:
         else:
             # Drop stray think delimiters emitted mid-answer (re-opened or
             # empty blocks the adapter appends after the answer started).
-            self._buffer = self._buffer.replace(_QWEN_THINK_OPEN, "").replace(_QWEN_THINK_CLOSE, "")
+            self._buffer = _strip_think_delims(self._buffer)
         self._buffer = _strip_complete_tag_pairs(self._buffer)
         # Drop complete bare-JSON tool calls so their raw JSON never flashes.
         for _start, _end, _c in sorted(_extract_bare_tool_calls(self._buffer), key=lambda s: s[0], reverse=True):
             self._buffer = self._buffer[:_start] + self._buffer[_end:]
-        candidates = [c for c in (self._first_ambiguous_lt(), self._first_ambiguous_bare_json()) if c != -1]
+        candidates = [c for c in (self._first_ambiguous_lt(), self._first_ambiguous_bare_json(), self._first_ambiguous_think_open()) if c != -1]
         cut = min(candidates) if candidates else -1
         if cut == -1:
             safe, self._buffer = self._buffer, ""
@@ -2094,8 +2143,7 @@ class StreamingStripper:
         # open delimiter ("<th") that never resolved — that is prose, not
         # reasoning, so fall through and flush it.
         self._think_state = "done"
-        self._buffer = self._buffer.replace(_QWEN_THINK_OPEN, "").replace(
-            _QWEN_THINK_CLOSE, "")
+        self._buffer = _strip_think_delims(self._buffer)
         # Whatever _first_ambiguous_lt is still holding never completed:
         # generation ended mid-tag, or the reply was nothing but tool tags and
         # this is the leftover '<'. That is truncated syntax, not prose.
@@ -2132,6 +2180,19 @@ class StreamingStripper:
                 name.startswith(tail) or tail.startswith(name)
                 for name in _KNOWN_TAG_NAMES
             ) or "think".startswith(tail) or tail.startswith("think"):
+                return m.start()
+        return -1
+
+    def _first_ambiguous_think_open(self) -> int:
+        """Index of a '[' that might still be starting Mistral's [THINK] or
+        [/THINK] delimiter, or -1. Unlike '<' (ambiguous the instant it
+        appears), '[' is common in prose, so only a '[' whose tail is a
+        prefix of "THINK]" or "/THINK]" (or vice versa) is held — that is the
+        specific marker, not every bracket."""
+        for m in re.finditer(r'\[', self._buffer):
+            tail = self._buffer[m.start() + 1:]
+            if ("THINK]".startswith(tail) or tail.startswith("THINK]")
+                    or "/THINK]".startswith(tail) or tail.startswith("/THINK]")):
                 return m.start()
         return -1
 

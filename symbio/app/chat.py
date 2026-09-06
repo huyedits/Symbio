@@ -84,6 +84,21 @@ from symbio.app.chat_tools import ToolsMixin
 from symbio.app.chat_turn import AgentTurnMixin
 
 
+def _cfg_path(value: Any) -> str | None:
+    """A config path, or None when the value is unset or the literal "null".
+
+    A config.json that says "profile_dir": "null" (the string, not JSON null)
+    has actually happened: the string is truthy, so the old code passed
+    Path("null") to Chromium, which wrote a full profile into a directory
+    named null/. Treat the string as unset so it can never recur.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() == "null":
+        return None
+    return value
+
+
 def _browser_peek(browser: BrowserSession, config: dict | None = None) -> str:
     """Best-effort snapshot of the live page after a browser action, so the
     model sees what its click/type/scroll did without asking."""
@@ -241,8 +256,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         _bcfg = self.config.get("browser") or {}
         _profile = None
         if _bcfg.get("persistent_profile"):
-            _profile = (Path(_bcfg["profile_dir"]).expanduser()
-                        if _bcfg.get("profile_dir")
+            _profile_dir = _cfg_path(_bcfg.get("profile_dir"))
+            _profile = (Path(_profile_dir).expanduser()
+                        if _profile_dir
                         else constants.BROWSER_PROFILE_DIR)
         # Grow the call only as far as the config actually asks. Tests and
         # other front-ends substitute a BrowserSession stub built for the old
@@ -252,8 +268,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         _kw = {"confirm_fn": self.confirm_fn}
         if _profile is not None:
             _kw["profile_dir"] = _profile
-            if _bcfg.get("chrome_profile"):
-                _kw["chrome_profile"] = _bcfg["chrome_profile"]
+            _chrome_profile = _cfg_path(_bcfg.get("chrome_profile"))
+            if _chrome_profile:
+                _kw["chrome_profile"] = _chrome_profile
         self.browser = BrowserSession(**_kw)
         # Worker models are loaded lazily on first delegated task — this
         # just holds the (empty) pool, no extra RAM until dispatch.enabled
@@ -1331,10 +1348,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                     # unclosed think block is mid-reasoning, not the real end.
                     m = tooling.END_TURN_RE.search(text)
                     if m:
-                        think_open = tooling._QWEN_THINK_OPEN
-                        think_close = tooling._QWEN_THINK_CLOSE
                         prefix = text[:m.start()]
-                        if prefix.count(think_open) <= prefix.count(think_close):
+                        if tooling.think_block_closed(prefix):
                             text = prefix
                 finally:
                     self._indexing_now = False
@@ -1486,15 +1501,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # that strip_reasoning_block treats as the answer, causing
                 # spurious "malformed tool call" errors on every turn.
                 if tooling.END_TURN_RE.search(raw_acc):
-                    # Count think open/close delimiters in raw_acc. If there
-                    # are more opens than closes, the think block is unclosed
-                    # and <end> is inside reasoning — ignore it.
-                    think_open = tooling._QWEN_THINK_OPEN
-                    think_close = tooling._QWEN_THINK_CLOSE
-                    opens = raw_acc.count(think_open)
-                    closes = raw_acc.count(think_close)
+                    # If the think block is unclosed, <end> is inside reasoning
+                    # — ignore it. think_block_closed covers both Qwen's and
+                    # Mistral's delimiter forms.
                     m = tooling.END_TURN_RE.search(raw_acc)
-                    if opens <= closes and not raw_acc[m.end():].strip():
+                    if tooling.think_block_closed(raw_acc) and not raw_acc[m.end():].strip():
                         break
         except BaseException:
             # The real MLX cache may already be mutated beyond what our
