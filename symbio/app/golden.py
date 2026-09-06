@@ -65,6 +65,12 @@ class GoldenCase(NamedTuple):
     prompt_fn: Callable[[dict[str, Any]], str]
     check: Callable[[str, list[tuple[str, dict[str, Any]]], dict[str, Any]], bool]
     ideal_reply: str | None = None
+    # Cases a substring check cannot grade: was the reasoning sound, was the
+    # move right AT THAT MOMENT, was holding still correct. The deterministic
+    # check still runs first and still decides pass/fail — this only adds a
+    # score and a rationale from an independent model. See judge_case().
+    subjective: bool = False
+    rubric: str = ""
 
 
 def _check_greeting(display: str, tools: list, config: dict) -> bool:
@@ -573,6 +579,9 @@ def load_user_golden_cases() -> list[GoldenCase]:
             description=description,
             prompt_fn=prompt_fn,
             check=_make_dynamic_check(requirements),
+            ideal_reply=spec.get("ideal_reply"),
+            subjective=bool(spec.get("subjective", False)),
+            rubric=str(spec.get("rubric", "")),
         ))
     return cases
 
@@ -586,6 +595,137 @@ def all_golden_cases() -> list[GoldenCase]:
     seen = {case.id for case in GOLDEN_CASES}
     extras = [c for c in user_cases if c.id not in seen]
     return list(GOLDEN_CASES) + extras
+
+
+# ---- the second tier: an independent judge ---------------------------------
+#
+# The deterministic checks above are the fast first gate and they stay exactly
+# as they are: free, repeatable, and incapable of scoring a lucky substring as
+# good reasoning. What they cannot do is grade the two things the reactor case
+# turns on -- was this the right move AT THIS MOMENT, and was holding still
+# correct -- because neither leaves a token behind for `contains` to find.
+#
+# So a case flagged "subjective": true gets a second opinion with a SCORE and a
+# written rationale. Two rules make it trustworthy:
+#   * the judge must be a different model from the one under test. A model
+#     grading its own reply agrees with itself, and the number it produces
+#     measures nothing.
+#   * every verdict is written down with its reasoning, so a score can be
+#     argued with later instead of taken on faith.
+
+JUDGE_RUBRIC = """Grade the assistant's reply on four axes, 0-10 each:
+
+1. CORRECTNESS  - is what it says true, given the question?
+2. REASONING    - does the reasoning actually support the conclusion, or is a
+                  right answer arrived at by luck?
+3. TIMING       - is the move right AT THIS MOMENT? A correct action taken too
+                  early is not correct. If the question involves waiting for a
+                  condition, acting before that condition holds scores low even
+                  when the eventual claim is true.
+4. RESTRAINT    - if the right move was to do nothing yet, did it hold? Doing
+                  nothing when nothing should be done scores HIGH here. Taking
+                  an unnecessary action scores low, even a harmless one."""
+
+
+@dataclass
+class JudgeVerdict:
+    """One graded reply, with the reasoning that produced the number."""
+
+    case_id: str
+    score: float                 # 0..1, the rubric mean
+    axes: dict[str, float]       # per-axis 0..10, as parsed
+    rationale: str
+    judge_model: str
+
+    @property
+    def passed(self) -> bool:
+        return self.score >= 0.6
+
+
+def _parse_verdict(case_id: str, raw: str, judge_model: str) -> JudgeVerdict | None:
+    """Pull the scores out of a judge reply, tolerating its prose.
+
+    A judge that will not produce parseable scores returns None rather than a
+    zero: "the grader broke" and "the model was bad" are different facts, and
+    scoring the second when the first happened is how a working adapter gets
+    rolled back for no reason.
+    """
+    axes: dict[str, float] = {}
+    for axis in ("correctness", "reasoning", "timing", "restraint"):
+        m = re.search(rf"{axis}\s*[:=-]\s*(\d+(?:\.\d+)?)", raw, re.IGNORECASE)
+        if m:
+            axes[axis] = max(0.0, min(10.0, float(m.group(1))))
+    if not axes:
+        return None
+    rationale = raw.strip()
+    return JudgeVerdict(case_id=case_id, score=sum(axes.values()) / (10.0 * len(axes)),
+                        axes=axes, rationale=rationale[:2000], judge_model=judge_model)
+
+
+def judge_case(case: GoldenCase, prompt: str, reply: str, judge_fn,
+               judge_model: str, model_under_test: str = "") -> JudgeVerdict | None:
+    """Grade one reply with an independent model. None if it could not run.
+
+    `judge_fn(prompt) -> str` is supplied by the caller, which owns model
+    loading; this module never loads one. Refuses outright when the judge is
+    the model under test — a self-graded score is worse than no score, because
+    it looks like evidence.
+    """
+    if judge_model and model_under_test and judge_model == model_under_test:
+        raise ValueError(
+            f"judge and model under test are both {judge_model!r}; "
+            f"a self-graded score measures nothing")
+    ask = (
+        f"{JUDGE_RUBRIC}\n\n"
+        f"{case.rubric}\n\n" if case.rubric else f"{JUDGE_RUBRIC}\n\n")
+    ask += (
+        f"QUESTION PUT TO THE ASSISTANT:\n{prompt}\n\n"
+        f"THE ASSISTANT'S REPLY:\n{reply}\n\n"
+        f"Reply with one line per axis in the form `correctness: N`, then a "
+        f"short paragraph explaining the lowest score you gave.")
+    try:
+        raw = judge_fn(ask)
+    except Exception:
+        return None
+    return _parse_verdict(case.id, raw or "", judge_model)
+
+
+def judge_results(result: "GoldenResult", cases, config, judge_fn,
+                  judge_model: str, model_under_test: str = "",
+                  save: bool = True) -> dict[str, JudgeVerdict]:
+    """Grade every subjective case in a finished run. Deterministic results
+    are left untouched — this only adds a second opinion beside them."""
+    verdicts: dict[str, JudgeVerdict] = {}
+    for case in cases:
+        if not getattr(case, "subjective", False):
+            continue
+        reply = result.replies.get(case.id)
+        if not reply:
+            continue
+        v = judge_case(case, case.prompt_fn(config), reply, judge_fn,
+                       judge_model, model_under_test)
+        if v is not None:
+            verdicts[case.id] = v
+    if save and verdicts:
+        save_verdicts(verdicts)
+    return verdicts
+
+
+def save_verdicts(verdicts: dict[str, JudgeVerdict]) -> Path:
+    """Append verdicts to logs/judge_verdicts.jsonl so a score can be audited.
+
+    A number nobody can go back and argue with is not evidence, and these are
+    used to decide whether a fine-tune is kept.
+    """
+    path = constants.LOG_DIR / "judge_verdicts.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().isoformat()
+    with path.open("a", encoding="utf-8") as f:
+        for v in verdicts.values():
+            f.write(json.dumps({"at": stamp, "case_id": v.case_id, "score": v.score,
+                                "axes": v.axes, "judge_model": v.judge_model,
+                                "rationale": v.rationale}) + "\n")
+    return path
 
 
 def run_golden_set(
