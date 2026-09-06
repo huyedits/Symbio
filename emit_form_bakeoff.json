@@ -1,0 +1,285 @@
+{
+ "model": "Qwen/Qwen3-14B-MLX-4bit",
+ "n": 12,
+ "elapsed_s": 205.9,
+ "arms": {
+  "json": {
+   "called": 12,
+   "valid": 11,
+   "valid_rate": 0.9167,
+   "median_lines": 11
+  },
+  "tag": {
+   "called": 12,
+   "valid": 12,
+   "valid_rate": 1.0,
+   "median_lines": 12
+  }
+ },
+ "records": [
+  {
+   "arm": "json",
+   "task": "Parse the HTML in a variable called `html` with selectolax and print every <a> href.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 6,
+   "elapsed_s": 9.0,
+   "code": "from selectolax.parser import HTMLParser\n\nhtml = \"<html><body><a href='https://example.com'>Example</a><a href='https://anotherexample.com'>Another Example</a></body></html>\"\nparser = HTMLParser(html)\nfor a in parser.css('a'):\n    print(a.attrs['href'])",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"from selectolax.parser import HTMLParser\\n\\nhtml = \\\"<html><body><a href='https://example.com'>Example</a><a href='https://anotherexample.com'>Another Example</a></body></html>\\\"\\nparser = HTMLParser(html)\\nfor a in parser.css('a'):\\n    print(a.attrs['href'])\"}}\n</tool_call>"
+  },
+  {
+   "arm": "json",
+   "task": "Read sandbox/data.json, sum the 'amount' field of every row, and print the total.",
+   "called": true,
+   "valid": false,
+   "why": "SyntaxError: unindent does not match any outer indentation level (line 6)",
+   "lines": 7,
+   "elapsed_s": 6.3,
+   "code": "import json\n\nwith open('sandbox/data.json', 'r') as file:\n    data = json.load(file)\n\n total = sum(item['amount'] for item in data)\nprint(f\"Total amount: {total}\")",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"import json\\n\\nwith open('sandbox/data.json', 'r') as file:\\n    data = json.load(file)\\n\\n total = sum(item['amount'] for item in data)\\nprint(f\\\"Total amount: {total}\\\")\"}}\n</tool_call>"
+  },
+  {
+   "arm": "json",
+   "task": "Print each line of sandbox/log.txt that matches the regex for an IPv4 address.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 6,
+   "elapsed_s": 7.2,
+   "code": "import re\n\nwith open('sandbox/log.txt', 'r') as file:\n    for line in file:\n        if re.search(r'\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b', line):\n            print(line.strip())",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"import re\\n\\nwith open('sandbox/log.txt', 'r') as file:\\n    for line in file:\\n        if re.search(r'\\\\b(?:[0-9]{1,3}\\\\.){3}[0-9]{1,3}\\\\b', line):\\n            print(line.strip())\"}}\n</tool_call>"
+  },
+  {
+   "arm": "json",
+   "task": "Build a dict of {filename: size in bytes} for every .py file in the current directory and print it as JSON.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 17,
+   "elapsed_s": 11.7,
+   "code": "import os\nimport json\n\n# Initialize an empty dictionary to store filename-size pairs\nfile_sizes = {}\n\n# Iterate over all files in the current directory\nfor filename in os.listdir():\n    # Check if the file has a .py extension\n    if filename.endswith('.py'):\n        # Get the file size in bytes\n        file_size = os.path.getsize(filename)\n        # Add the filename and size to the dictionary\n        file_sizes[filename] = file_size\n\n# Print the dictionary as JSON\nprint(json.dumps(file_sizes, indent=4))",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"import os\\nimport json\\n\\n# Initialize an empty dictionary to store filename-size pairs\\nfile_sizes = {}\\n\\n# Iterate over all files in the current directory\\nfor filename in os.listdir():\\n    # Check if the file has a .py extension\\n    if filename.endswith('.py'):\\n        # Get the file size in bytes\\n        file_size = os.path.getsize(filename)\\n        # Add the filename and size to the dictionary\\n        file_sizes[filename] = file_size\\n\\n# Print the dictionary as JSON\\nprint(json.dumps(file_sizes, indent=4))\"}}\n</tool_call>"
+  },
+  {
+   "arm": "json",
+   "task": "Compute an HMAC-SHA256 of the string 'order-42' with the key 's3cret' and print the hex digest.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 8,
+   "elapsed_s": 6.0,
+   "code": "import hmac\nimport hashlib\n\nkey = b's3cret'\nmessage = b'order-42'\n\nsignature = hmac.new(key, message, hashlib.sha256).hexdigest()\nprint(signature)",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"import hmac\\nimport hashlib\\n\\nkey = b's3cret'\\nmessage = b'order-42'\\n\\nsignature = hmac.new(key, message, hashlib.sha256).hexdigest()\\nprint(signature)\"}}\n</tool_call>"
+  },
+  {
+   "arm": "json",
+   "task": "Write a CSV to sandbox/out.csv with headers name,score and three example rows.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 8,
+   "elapsed_s": 7.9,
+   "code": "import csv\n\nwith open('sandbox/out.csv', mode='w', newline='') as file:\n    writer = csv.writer(file)\n    writer.writerow(['name', 'score'])\n    writer.writerow(['Alice', '90'])\n    writer.writerow(['Bob', '85'])\n    writer.writerow(['Charlie', '95'])",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"import csv\\n\\nwith open('sandbox/out.csv', mode='w', newline='') as file:\\n    writer = csv.writer(file)\\n    writer.writerow(['name', 'score'])\\n    writer.writerow(['Alice', '90'])\\n    writer.writerow(['Bob', '85'])\\n    writer.writerow(['Charlie', '95'])\"}}\n</tool_call>"
+  },
+  {
+   "arm": "json",
+   "task": "Fetch http://localhost:8817/health with urllib and print the status code and body.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 12,
+   "elapsed_s": 10.1,
+   "code": "import urllib.request\n\nurl = 'http://localhost:8817/health'\n\ntry:\n    with urllib.request.urlopen(url) as response:\n        status_code = response.getcode()\n        body = response.read().decode('utf-8')\n        print(f'Status Code: {status_code}')\n        print(f'Body: {body}')\nexcept urllib.error.URLError as e:\n    print(f'Error: {e.reason}')",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"import urllib.request\\n\\nurl = 'http://localhost:8817/health'\\n\\ntry:\\n    with urllib.request.urlopen(url) as response:\\n        status_code = response.getcode()\\n        body = response.read().decode('utf-8')\\n        print(f'Status Code: {status_code}')\\n        print(f'Body: {body}')\\nexcept urllib.error.URLError as e:\\n    print(f'Error: {e.reason}')\"}}\n</tool_call>"
+  },
+  {
+   "arm": "json",
+   "task": "Print the 10 most common words in sandbox/notes.txt, ignoring case and punctuation.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 11,
+   "elapsed_s": 7.7,
+   "code": "import string\nfrom collections import Counter\n\nwith open('sandbox/notes.txt', 'r') as file:\n    text = file.read().lower()\n    \nwords = text.translate(str.maketrans('', '', string.punctuation)).split()\n\ncounter = Counter(words)\n\nprint(counter.most_common(10))",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"import string\\nfrom collections import Counter\\n\\nwith open('sandbox/notes.txt', 'r') as file:\\n    text = file.read().lower()\\n    \\nwords = text.translate(str.maketrans('', '', string.punctuation)).split()\\n\\ncounter = Counter(words)\\n\\nprint(counter.most_common(10))\"}}\n</tool_call>"
+  },
+  {
+   "arm": "json",
+   "task": "Generate a random 16-byte nonce, base64-encode it, and print both the raw hex and the base64.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 14,
+   "elapsed_s": 10.2,
+   "code": "import os\nimport base64\n\n# Generate a random 16-byte nonce\nnonce = os.urandom(16)\n\n# Convert to hex\nhex_nonce = nonce.hex()\n\n# Base64-encode\nbase64_nonce = base64.b64encode(nonce).decode('utf-8')\n\nprint(f\"Raw Hex: {hex_nonce}\")\nprint(f\"Base64: {base64_nonce}\")",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"import os\\nimport base64\\n\\n# Generate a random 16-byte nonce\\nnonce = os.urandom(16)\\n\\n# Convert to hex\\nhex_nonce = nonce.hex()\\n\\n# Base64-encode\\nbase64_nonce = base64.b64encode(nonce).decode('utf-8')\\n\\nprint(f\\\"Raw Hex: {hex_nonce}\\\")\\nprint(f\\\"Base64: {base64_nonce}\\\")\"}}\n</tool_call>"
+  },
+  {
+   "arm": "json",
+   "task": "Open sandbox/report.md and print every markdown heading with its nesting level.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 12,
+   "elapsed_s": 9.8,
+   "code": "import re\n\n# Read the content of the markdown file\nwith open('sandbox/report.md', 'r') as file:\n    content = file.read()\n\n# Use regular expression to find all markdown headings\nheadings = re.findall(r'^(#+)\\s+(.+)$', content, re.MULTILINE)\n\n# Print each heading with its nesting level\nfor level, text in headings:\n    print(f\"Level {len(level)}: {text}\")",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"import re\\n\\n# Read the content of the markdown file\\nwith open('sandbox/report.md', 'r') as file:\\n    content = file.read()\\n\\n# Use regular expression to find all markdown headings\\nheadings = re.findall(r'^(#+)\\\\s+(.+)$', content, re.MULTILINE)\\n\\n# Print each heading with its nesting level\\nfor level, text in headings:\\n    print(f\\\"Level {len(level)}: {text}\\\")\"}}\n</tool_call>"
+  },
+  {
+   "arm": "json",
+   "task": "Given a list of dicts in `rows`, sort by the 'date' key parsed as ISO-8601 and print the newest three.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 16,
+   "elapsed_s": 18.7,
+   "code": "from datetime import datetime\n\nrows = [\n    {'date': '2023-04-01T12:00:00Z'},\n    {'date': '2023-04-02T12:00:00Z'},\n    {'date': '2023-04-03T12:00:00Z'},\n    {'date': '2023-04-04T12:00:00Z'},\n    {'date': '2023-04-05T12:00:00Z'},\n]\n\n# Sort the rows by the 'date' key parsed as ISO-8601\nsorted_rows = sorted(rows, key=lambda x: datetime.fromisoformat(x['date']), reverse=True)\n\n# Print the newest three\nfor row in sorted_rows[:3]:\n    print(row)",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"from datetime import datetime\\n\\nrows = [\\n    {'date': '2023-04-01T12:00:00Z'},\\n    {'date': '2023-04-02T12:00:00Z'},\\n    {'date': '2023-04-03T12:00:00Z'},\\n    {'date': '2023-04-04T12:00:00Z'},\\n    {'date': '2023-04-05T12:00:00Z'},\\n]\\n\\n# Sort the rows by the 'date' key parsed as ISO-8601\\nsorted_rows = sorted(rows, key=lambda x: datetime.fromisoformat(x['date']), reverse=True)\\n\\n# Print the newest three\\nfor row in sorted_rows[:3]:\\n    print(row)\"}}\n</tool_call>"
+  },
+  {
+   "arm": "json",
+   "task": "Print a table of the first 15 Fibonacci numbers with an f-string, right-aligned in a width-10 column.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 3,
+   "elapsed_s": 5.9,
+   "code": "for i in range(15):\n    fib = (1 + 5**0.5)**i / (2**i)\n    print(f\"{fib:10.2f}\")",
+   "raw": "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"for i in range(15):\\n    fib = (1 + 5**0.5)**i / (2**i)\\n    print(f\\\"{fib:10.2f}\\\")\"}}\n</tool_call>"
+  },
+  {
+   "arm": "tag",
+   "task": "Parse the HTML in a variable called `html` with selectolax and print every <a> href.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 16,
+   "elapsed_s": 7.6,
+   "code": "from selectolax.parser import HTMLParser\n\nhtml = \"\"\"\n<html>\n  <body>\n    <a href=\"https://example.com\">Example</a>\n    <a href=\"https://anotherexample.com\">Another Example</a>\n  </body>\n</html>\n\"\"\"\n\nparser = HTMLParser(html)\nlinks = parser.css(\"a\").attrs(\"href\")\n\nfor link in links:\n    print(link)",
+   "raw": "<py>\nfrom selectolax.parser import HTMLParser\n\nhtml = \"\"\"\n<html>\n  <body>\n    <a href=\"https://example.com\">Example</a>\n    <a href=\"https://anotherexample.com\">Another Example</a>\n  </body>\n</html>\n\"\"\"\n\nparser = HTMLParser(html)\nlinks = parser.css(\"a\").attrs(\"href\")\n\nfor link in links:\n    print(link)\n</py>"
+  },
+  {
+   "arm": "tag",
+   "task": "Read sandbox/data.json, sum the 'amount' field of every row, and print the total.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 11,
+   "elapsed_s": 6.2,
+   "code": "import json\n\n# Read the JSON file\nwith open('sandbox/data.json', 'r') as file:\n    data = json.load(file)\n\n# Sum the 'amount' field of every row\ntotal = sum(item['amount'] for item in data)\n\n# Print the total\nprint(\"Total amount:\", total)",
+   "raw": "<py>\nimport json\n\n# Read the JSON file\nwith open('sandbox/data.json', 'r') as file:\n    data = json.load(file)\n\n# Sum the 'amount' field of every row\ntotal = sum(item['amount'] for item in data)\n\n# Print the total\nprint(\"Total amount:\", total)\n</py>"
+  },
+  {
+   "arm": "tag",
+   "task": "Print each line of sandbox/log.txt that matches the regex for an IPv4 address.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 13,
+   "elapsed_s": 9.2,
+   "code": "import re\n\n# Read the log file\nwith open('sandbox/log.txt', 'r') as file:\n    log_lines = file.readlines()\n\n# Define the regex pattern for an IPv4 address\nipv4_pattern = re.compile(r'\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b')\n\n# Filter and print lines that match the IPv4 pattern\nfor line in log_lines:\n    if ipv4_pattern.search(line):\n        print(line.strip())",
+   "raw": "<py>\nimport re\n\n# Read the log file\nwith open('sandbox/log.txt', 'r') as file:\n    log_lines = file.readlines()\n\n# Define the regex pattern for an IPv4 address\nipv4_pattern = re.compile(r'\\b(?:[0-9]{1,3}\\.){3}[0-9]{1,3}\\b')\n\n# Filter and print lines that match the IPv4 pattern\nfor line in log_lines:\n    if ipv4_pattern.search(line):\n        print(line.strip())\n</py>"
+  },
+  {
+   "arm": "tag",
+   "task": "Build a dict of {filename: size in bytes} for every .py file in the current directory and print it as JSON.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 10,
+   "elapsed_s": 5.4,
+   "code": "import os\nimport json\n\npy_files = {}\nfor filename in os.listdir():\n    if filename.endswith('.py'):\n        file_size = os.path.getsize(filename)\n        py_files[filename] = file_size\n\nprint(json.dumps(py_files, indent=4))",
+   "raw": "<py>\nimport os\nimport json\n\npy_files = {}\nfor filename in os.listdir():\n    if filename.endswith('.py'):\n        file_size = os.path.getsize(filename)\n        py_files[filename] = file_size\n\nprint(json.dumps(py_files, indent=4))\n</py>"
+  },
+  {
+   "arm": "tag",
+   "task": "Compute an HMAC-SHA256 of the string 'order-42' with the key 's3cret' and print the hex digest.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 9,
+   "elapsed_s": 5.2,
+   "code": "import hmac\nimport hashlib\n\nkey = b's3cret'\nmessage = b'order-42'\nhash_algorithm = hashlib.sha256\n\nhmac_obj = hmac.new(key, message, hash_algorithm)\nprint(hmac_obj.hexdigest())",
+   "raw": "<py>\nimport hmac\nimport hashlib\n\nkey = b's3cret'\nmessage = b'order-42'\nhash_algorithm = hashlib.sha256\n\nhmac_obj = hmac.new(key, message, hash_algorithm)\nprint(hmac_obj.hexdigest())\n</py>"
+  },
+  {
+   "arm": "tag",
+   "task": "Write a CSV to sandbox/out.csv with headers name,score and three example rows.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 17,
+   "elapsed_s": 8.3,
+   "code": "import csv\n\n# Define the data to be written\ndata = [\n    [\"Alice\", 95],\n    [\"Bob\", 88],\n    [\"Charlie\", 92]\n]\n\n# Define the headers\nheaders = [\"name\", \"score\"]\n\n# Write the CSV file\nwith open(\"sandbox/out.csv\", mode='w', newline='') as file:\n    writer = csv.writer(file)\n    writer.writerow(headers)\n    writer.writerows(data)",
+   "raw": "<py>\nimport csv\n\n# Define the data to be written\ndata = [\n    [\"Alice\", 95],\n    [\"Bob\", 88],\n    [\"Charlie\", 92]\n]\n\n# Define the headers\nheaders = [\"name\", \"score\"]\n\n# Write the CSV file\nwith open(\"sandbox/out.csv\", mode='w', newline='') as file:\n    writer = csv.writer(file)\n    writer.writerow(headers)\n    writer.writerows(data)\n</py>"
+  },
+  {
+   "arm": "tag",
+   "task": "Fetch http://localhost:8817/health with urllib and print the status code and body.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 11,
+   "elapsed_s": 8.0,
+   "code": "import urllib.request\n\nurl = \"http://localhost:8817/health\"\ntry:\n    with urllib.request.urlopen(url) as response:\n        status_code = response.getcode()\n        body = response.read().decode(\"utf-8\")\n        print(f\"Status Code: {status_code}\")\n        print(f\"Body: {body}\")\nexcept urllib.error.URLError as e:\n    print(f\"Error: {e.reason}\")",
+   "raw": "<py>\nimport urllib.request\n\nurl = \"http://localhost:8817/health\"\ntry:\n    with urllib.request.urlopen(url) as response:\n        status_code = response.getcode()\n        body = response.read().decode(\"utf-8\")\n        print(f\"Status Code: {status_code}\")\n        print(f\"Body: {body}\")\nexcept urllib.error.URLError as e:\n    print(f\"Error: {e.reason}\")\n</py>"
+  },
+  {
+   "arm": "tag",
+   "task": "Print the 10 most common words in sandbox/notes.txt, ignoring case and punctuation.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 18,
+   "elapsed_s": 9.6,
+   "code": "import string\nfrom collections import Counter\n\n# Read the file\nwith open('sandbox/notes.txt', 'r') as file:\n    text = file.read()\n\n# Convert to lowercase and remove punctuation\ntext = text.lower()\ntext = text.translate(str.maketrans('', '', string.punctuation))\n\n# Split into words and count\nwords = text.split()\ncounter = Counter(words)\n\n# Print the 10 most common words\nfor word, count in counter.most_common(10):\n    print(f\"{word}: {count}\")",
+   "raw": "<py>\nimport string\nfrom collections import Counter\n\n# Read the file\nwith open('sandbox/notes.txt', 'r') as file:\n    text = file.read()\n\n# Convert to lowercase and remove punctuation\ntext = text.lower()\ntext = text.translate(str.maketrans('', '', string.punctuation))\n\n# Split into words and count\nwords = text.split()\ncounter = Counter(words)\n\n# Print the 10 most common words\nfor word, count in counter.most_common(10):\n    print(f\"{word}: {count}\")\n</py>"
+  },
+  {
+   "arm": "tag",
+   "task": "Generate a random 16-byte nonce, base64-encode it, and print both the raw hex and the base64.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 12,
+   "elapsed_s": 7.8,
+   "code": "import os\nimport base64\n\n# Generate a random 16-byte nonce\nnonce = os.urandom(16)\n\n# Convert to hex and base64\nhex_nonce = nonce.hex()\nbase64_nonce = base64.b64encode(nonce).decode('utf-8')\n\nprint(\"Raw Hex:\", hex_nonce)\nprint(\"Base64:\", base64_nonce)",
+   "raw": "<py>\nimport os\nimport base64\n\n# Generate a random 16-byte nonce\nnonce = os.urandom(16)\n\n# Convert to hex and base64\nhex_nonce = nonce.hex()\nbase64_nonce = base64.b64encode(nonce).decode('utf-8')\n\nprint(\"Raw Hex:\", hex_nonce)\nprint(\"Base64:\", base64_nonce)\n</py>"
+  },
+  {
+   "arm": "tag",
+   "task": "Open sandbox/report.md and print every markdown heading with its nesting level.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 12,
+   "elapsed_s": 8.5,
+   "code": "import re\n\n# Read the content of the file\nwith open('sandbox/report.md', 'r') as file:\n    content = file.read()\n\n# Use regular expression to find all markdown headings\nheadings = re.findall(r'^(#+)\\s+(.+)$', content, re.MULTILINE)\n\n# Print each heading with its nesting level\nfor level, text in headings:\n    print(f\"Level {len(level)}: {text}\")",
+   "raw": "<py>\nimport re\n\n# Read the content of the file\nwith open('sandbox/report.md', 'r') as file:\n    content = file.read()\n\n# Use regular expression to find all markdown headings\nheadings = re.findall(r'^(#+)\\s+(.+)$', content, re.MULTILINE)\n\n# Print each heading with its nesting level\nfor level, text in headings:\n    print(f\"Level {len(level)}: {text}\")\n</py>"
+  },
+  {
+   "arm": "tag",
+   "task": "Given a list of dicts in `rows`, sort by the 'date' key parsed as ISO-8601 and print the newest three.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 17,
+   "elapsed_s": 15.1,
+   "code": "import json\nfrom datetime import datetime\n\n# Example data\nrows = [\n    {\"date\": \"2023-01-01T12:00:00Z\"},\n    {\"date\": \"2022-12-31T23:59:59Z\"},\n    {\"date\": \"2023-03-15T08:30:00Z\"},\n    {\"date\": \"2023-02-28T14:45:00Z\"},\n]\n\n# Sort the rows by the 'date' key parsed as ISO-8601\nsorted_rows = sorted(rows, key=lambda x: datetime.fromisoformat(x['date']), reverse=True)\n\n# Print the newest three\nfor row in sorted_rows[:3]:\n    print(json.dumps(row, indent=2))",
+   "raw": "<py>\nimport json\nfrom datetime import datetime\n\n# Example data\nrows = [\n    {\"date\": \"2023-01-01T12:00:00Z\"},\n    {\"date\": \"2022-12-31T23:59:59Z\"},\n    {\"date\": \"2023-03-15T08:30:00Z\"},\n    {\"date\": \"2023-02-28T14:45:00Z\"},\n]\n\n# Sort the rows by the 'date' key parsed as ISO-8601\nsorted_rows = sorted(rows, key=lambda x: datetime.fromisoformat(x['date']), reverse=True)\n\n# Print the newest three\nfor row in sorted_rows[:3]:\n    print(json.dumps(row, indent=2))\n</py>"
+  },
+  {
+   "arm": "tag",
+   "task": "Print a table of the first 15 Fibonacci numbers with an f-string, right-aligned in a width-10 column.",
+   "called": true,
+   "valid": true,
+   "why": "",
+   "lines": 3,
+   "elapsed_s": 4.5,
+   "code": "for i in range(15):\n    fib = (1 + 5**0.5)**i / (2**i)\n    print(f\"{fib:10.2f}\")",
+   "raw": "<py>\nfor i in range(15):\n    fib = (1 + 5**0.5)**i / (2**i)\n    print(f\"{fib:10.2f}\")\n</py>"
+  }
+ ]
+}
