@@ -1,5 +1,6 @@
 """Training-data accumulation, note/memory digestion, and LoRA fine-tuning."""
 
+import contextlib
 import gc
 import hashlib
 import json
@@ -25,7 +26,9 @@ from symbio.app import config as app_config
 # chat_constants is documented as the bottom of the chat import graph,
 # so taking the thinking table from it here cannot form a cycle.
 from symbio.app.chat_constants import THINKING_LEVELS
-from symbio.app.tooling import clean_response, redact_messages, redact_secrets
+from symbio.app.tooling import (
+    _repair_tool_call_json, clean_response, redact_messages, redact_secrets,
+)
 
 # Only one LoRA trainer may exist at a time, process-wide.
 #
@@ -804,6 +807,117 @@ def drop_degenerate_samples(tokenizer=None, role: str | None = None,
                 continue
             if _is_degenerate(text, tokenizer, min_tokens):
                 dropped.append((lineno, (text or "").strip()[:60]))
+                continue
+            kept.append(line)
+        if dropped:
+            path.write_text(
+                ("\n".join(kept) + "\n") if kept else "", encoding="utf-8")
+            removed[str(path)] = dropped
+    return removed
+
+_TOOL_CALL_SPAN_RE = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+_TOOL_CALL_OPEN_RE = re.compile(r"<tool_call>")
+_TOOL_CALL_CLOSE_RE = re.compile(r"</tool_call>")
+# Tags that are complete tool invocations in the legacy format. Finding one
+# inside a <tool_call> envelope means the model spliced the two formats — it
+# started the JSON form the <tools> catalog advertises and finished in the
+# form the corpus taught. Observed live:
+#   <tool_call>{"name": "web_search", "arguments": <search>cost of...</search>
+# That string is neither valid JSON nor a working tag, so the runtime executes
+# nothing — and training on it teaches splicing as normal.
+_LEGACY_TAG_RE = re.compile(
+    r"</?(?:cmd|py|search|read|browse|click|type|scroll|press|browser_close|"
+    r"note|skill|profile|config|digest|train|cron|memory|always|delegate)\b",
+    re.IGNORECASE,
+)
+
+def broken_tool_call_reasons(text: str) -> list[str]:
+    """Why this rendered sample's <tool_call> usage is unteachable, if it is.
+
+    The parser accepts both tool formats at runtime, so a sample that uses one
+    or the other is fine. What is never fine is a broken <tool_call> envelope:
+    unbalanced tags, or a body that is not a complete JSON object. Both are
+    emitted-output garbage — the runtime ignored them, so whatever the rest of
+    the reply says happened did not happen. Returns an empty list for a clean
+    sample, one human-readable reason per defect otherwise.
+    """
+    reasons: list[str] = []
+    # The system turn DEMONSTRATES the format ("Preferred Hermes format:
+    # <tool_call>...") and mentions the tags in prose, so judging the whole
+    # rendered sample would flag every clean sample. Only the assistant's own
+    # output is teachable output; everything before its marker is conditioning.
+    segments = text.split("<|im_start|>assistant\n")
+    replies = [seg.split("<|im_end|>")[0] for seg in segments[1:]]
+    if not replies:
+        # No assistant marker at all means this sample is rendered in a
+        # different template — drop_foreign_template_samples owns it, and
+        # scanning its whole text would flag the demonstrated format in the
+        # system turn. This guard only judges teachable assistant output.
+        return []
+    for reply in replies:
+        opens = len(_TOOL_CALL_OPEN_RE.findall(reply))
+        closes = len(_TOOL_CALL_CLOSE_RE.findall(reply))
+        if opens != closes:
+            reasons.append(
+                f"unbalanced <tool_call> tags ({opens} open, {closes} close)")
+        for m in _TOOL_CALL_SPAN_RE.finditer(reply):
+            body = m.group(1).strip()
+            try:
+                call = json.loads(body)
+            except json.JSONDecodeError:
+                # Judge it exactly as the runtime does. parse_tools falls back
+                # to _repair_tool_call_json for the one thing this model
+                # reliably gets wrong -- an unescaped quote or a raw newline
+                # inside a JSON string -- and those calls DO execute. Calling
+                # every one of them "not JSON" deleted samples of behaviour
+                # that works.
+                #
+                # A legacy tag only means a splice once the JSON has actually
+                # failed to parse. Checked unconditionally on the raw body it
+                # fired on every VALID call whose arguments merely mentioned a
+                # tag -- a note explaining <cmd>, say -- and dropped it
+                # silently. Here the tag is what broke the object, which is
+                # the defect this guard was written for, and it stands even
+                # when the repair salvages a name out of the wreckage.
+                if _LEGACY_TAG_RE.search(body):
+                    reasons.append(
+                        f"legacy tag spliced inside <tool_call>: {body[:60]!r}")
+                    continue
+                call = _repair_tool_call_json(body)
+                if call is None:
+                    reasons.append(f"<tool_call> body is not JSON: {body[:60]!r}")
+                    continue
+            if not isinstance(call, dict) or "name" not in call:
+                reasons.append(f"<tool_call> body has no tool name: {body[:60]!r}")
+    return reasons
+
+def drop_broken_tool_call_samples(role: str | None = None) -> dict[str, list[tuple[int, str]]]:
+    """Remove samples whose assistant turn emits a broken <tool_call>.
+
+    Same shape as drop_degenerate_samples: a sample that trains the model to
+    emit a tool call the runtime cannot parse teaches a failure as if it were
+    the behaviour that produced the observation that follows. Each removal is
+    returned with its file and 1-based line number for the caller to print.
+    Returns {path: [(lineno, preview), ...]} for files that changed.
+    """
+    removed: dict[str, list[tuple[int, str]]] = {}
+    for path in (_train_file_for(role), _valid_file_for(role)):
+        if not path.exists():
+            continue
+        kept: list[str] = []
+        dropped: list[tuple[int, str]] = []
+        for lineno, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                text = json.loads(line).get("text", "")
+            except (json.JSONDecodeError, AttributeError):
+                kept.append(line)  # left for drop_degenerate_samples to judge
+                continue
+            reasons = broken_tool_call_reasons(text)
+            if reasons:
+                dropped.append((lineno, reasons[0]))
                 continue
             kept.append(line)
         if dropped:
@@ -1668,9 +1782,75 @@ def resume_source(adapter_dir: Path, model_name: str, num_layers: int,
                       + "; ".join(mismatches) + ")")
     return weights, "recipe matches"
 
+@contextlib.contextmanager
+def weighted_corpus(train_file: Path, weights: list[float] | None):
+    """Materialise a per-sample weight vector for the duration of a run.
+
+    mlx_lm's trainer is a SUBPROCESS reading train.jsonl, so there is no loss
+    function in this process to scale — the weights have to exist in the data.
+    Writing sample i `round(w_i)` times is an integer-weighted loss in
+    expectation, and it is the only weighting an external trainer accepts
+    without forking it.
+
+    The original file is restored on the way out however the run ends. A
+    corpus left expanded would be expanded again by the next run, and the
+    weighting would compound silently until one sample was most of the data.
+
+    `weights is None` yields without touching the file at all.
+    """
+    if weights is None:
+        yield train_file
+        return
+    original = train_file.read_text(encoding="utf-8")
+    lines = [l for l in original.splitlines() if l.strip()]
+    if len(weights) != len(lines):
+        raise ValueError(
+            f"sample_weights has {len(weights)} entries for {len(lines)} corpus "
+            f"lines; a misaligned vector would weight the wrong samples")
+    backup = train_file.with_suffix(train_file.suffix + ".preweight")
+    backup.write_text(original, encoding="utf-8")
+    try:
+        expanded: list[str] = []
+        for line, weight in zip(lines, weights):
+            # Floored at one. A weight of zero would drop a sample from the run
+            # entirely, and weighting must never be able to delete a lesson --
+            # curriculum.plan holds the same rule upstream.
+            expanded.extend([line] * max(1, int(round(float(weight)))))
+        train_file.write_text("\n".join(expanded) + "\n", encoding="utf-8")
+        print(f"  [Train] Weighted corpus: {len(lines)} sample(s) -> "
+              f"{len(expanded)} line(s) for this run.")
+        yield train_file
+    finally:
+        train_file.write_text(original, encoding="utf-8")
+        backup.unlink(missing_ok=True)
+
+
 def run_training(config: dict[str, Any], iters: int | None = None,
                  role: str | None = None, model_name: str | None = None,
-                 resume: bool = False) -> bool:
+                 resume: bool = False,
+                 sample_weights: list[float] | None = None) -> bool:
+    """Run a LoRA fine-tune, optionally weighting the corpus for this run.
+
+    `sample_weights` is one weight per corpus line, in file order. Omitted,
+    nothing is opened, rewritten or restored and the run is exactly what it
+    was — the unweighted path does not change shape to accommodate the
+    weighted one.
+
+    The validation split is taken BEFORE expanding, so a heavily weighted
+    sample cannot end up duplicated into valid.jsonl and be validated against
+    itself. ensure_validation_split returns early when valid.jsonl already
+    exists, so the inner call below is a no-op.
+    """
+    if sample_weights is None:
+        return _run_training(config, iters, role, model_name, resume)
+    ensure_validation_split(role=role)
+    with weighted_corpus(_train_file_for(role), sample_weights):
+        return _run_training(config, iters, role, model_name, resume)
+
+
+def _run_training(config: dict[str, Any], iters: int | None = None,
+                  role: str | None = None, model_name: str | None = None,
+                  resume: bool = False) -> bool:
     """Run a LoRA fine-tune. `iters` overrides lora.iters for short passes
     (e.g. the correction-learning batches). `role`/`model_name` train a
     worker's own adapter against its own data directory instead of the
@@ -1731,6 +1911,19 @@ def run_training(config: dict[str, Any], iters: int | None = None,
     if not train_file.exists() or train_file.stat().st_size == 0:
         print("  [System] No training data left after the template check.")
         return False
+    # Same class of guard, and before the split for the same reason as the
+    # template sweep above: a broken <tool_call> envelope is corruption the
+    # runtime already ignored once, and training on it teaches the splice.
+    # Run after the split instead and a sample cleared from train.jsonl still
+    # sits in valid.jsonl, while a valid.jsonl this sweep empties is never
+    # refilled -- the emptiness check below only looks at the training file.
+    for path, entries in drop_broken_tool_call_samples(role=role).items():
+        for lineno, reason in entries:
+            print(f"  [Train] Dropped sample with a broken tool call "
+                  f"{path}:{lineno}: {reason}")
+        print(f"  [Train] Removed {len(entries)} broken-tool-call sample(s) "
+              f"from {path}.")
+
     ensure_validation_split(role=role)
 
     # Deliberately NOT inside the diagnostic's try/except below. This one is a

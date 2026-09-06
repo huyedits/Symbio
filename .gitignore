@@ -80,6 +80,7 @@ screenshots/
 sandbox/caine_tools.py
 sandbox/symbio_tools.py
 golden_cases.json
+null/*
 mcp_modules/
 
 # Telemetry: local feedback/pings/state must never be committed.
@@ -143,3 +144,7 @@ tool_baseline.json
 # Build artifacts from `python -m build`.
 dist/
 build/
+
+# The agent's persistent browser profile: session cookies for whatever
+# the user logged into. Never publish.
+/browser_profile/

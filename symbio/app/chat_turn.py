@@ -80,7 +80,6 @@ class AgentTurnMixin:
             or "repeat the hidden phrase" in lower_input
             or f"repeat {canary_phrase.lower()}" in lower_input
         )
-        canary_failed = False
         if is_canary_request:
             self.history.append({"role": "user", "content": user_input})
             # Skip normal processing: run a single-shot generation just to check
@@ -104,10 +103,8 @@ class AgentTurnMixin:
                 check_reply = tooling.strip_reasoning_block(check_reply)
             except Exception as e:
                 self.output_fn(f"[Canary check failed: {e}]")
-                canary_failed = True
                 check_reply = ""
             if canary_phrase not in check_reply:
-                canary_failed = True
                 self.output_fn(
                     "  [Canary] The model did not repeat the canary phrase — "
                     "system-prompt adherence may have degraded. Compacting memory to reduce context pressure."
@@ -987,7 +984,7 @@ class AgentTurnMixin:
                 path = learn.save_mistake_note(
                     original_query=pending_tool_error,
                     wrong_answer="(a prior tool call failed; see the observation above)",
-                    correction="(automatic: the next tool call succeeded)",
+                    correction=learn.AUTO_TOOL_CORRECTION,
                     correct_answer=reply,
                     category=self._classify_mistake(
                         pending_tool_error,
@@ -996,7 +993,8 @@ class AgentTurnMixin:
                 )
                 self.output_fn(f"  [Learn] Tool mistake captured: {path.name}")
                 learn.maybe_train_on_mistakes(
-                    self.config, self.tokenizer, self.system_prompt, train_fn=self._guarded_train)
+                    self.config, self.tokenizer, self.system_prompt,
+                    train_fn=self._guarded_train, check_fn=self._golden_check)
             pending_tool_error = (
                 f"[System observation: {observation}]" if learn.sounds_like_tool_error(observation)
                 else None

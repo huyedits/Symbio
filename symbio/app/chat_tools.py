@@ -258,6 +258,43 @@ class ToolsMixin:
             })
         return observation
 
+    # Actions that are supposed to change the page. A scroll that hits the
+    # bottom legitimately changes nothing, and browser_close has no "after" to
+    # read, so neither is judged here.
+    _MUST_CHANGE_THE_PAGE = ("browser_click", "browser_type", "browser_press")
+
+    def _no_effect_note(self, name: str, before: str, out: str) -> str:
+        """A sentence saying the action left the page untouched, or "".
+
+        The tools report what they DID ("Clicked element containing text
+        'Post'"), never what it achieved, so an action aimed at the wrong
+        element reads exactly like one that worked. Nothing downstream can
+        tell the difference, and the model reads its own successful-sounding
+        observation and reports the job done.
+
+        Only ever adds information: it does not turn the action into a
+        failure, because a click can be correct and still not repaint (a
+        focus change, a menu that renders identically). It says what is true
+        — the page did not change — and lets the model account for it.
+        """
+        if name not in self._MUST_CHANGE_THE_PAGE or not before:
+            return ""
+        if "failed" in out.lower() or "error" in out.lower():
+            return ""  # already reported as a failure; do not pile on
+        try:
+            after = self.browser.get_text()
+        except Exception:
+            return ""
+        if not after or after != before:
+            return ""
+        return (
+            "\n[Note: the page did not change. This action had no visible "
+            "effect, so whatever it was meant to accomplish has NOT happened "
+            "yet — do not report it as done. If you were trying to submit, "
+            "the control you hit was probably not the one that submits; try a "
+            "more specific target, or the keyboard shortcut for the form.]"
+        )
+
     def _dispatch_tool(self, name: str, params: dict[str, Any]) -> str:
         if name == "write_note":
             # Same idiom as the browser actions below: name the missing field
@@ -609,6 +646,21 @@ class ToolsMixin:
                         return f"{name} error: {exc}"
                     raise
 
+            # What the page looked like before, so the observation can say
+            # whether the action did anything. A click that hits the wrong
+            # element and a click that works both return "Clicked element
+            # containing text 'Post'", and the model cannot tell them apart —
+            # live 2026-09-02 it clicked the nav "Post" (first of three
+            # matches) instead of the composer's submit, twice, and announced
+            # "the post has been successfully published" both times while the
+            # text sat in the composer untouched.
+            before = ""
+            if name != "browser_close":
+                try:
+                    before = self.browser.get_text()
+                except Exception:
+                    before = ""
+
             out = _act()
 
             # Reopen and retry once when the page is gone.
@@ -650,6 +702,7 @@ class ToolsMixin:
                     f"{out} Use <browse>https://...</browse> to load a page first, "
                     "then retry the action."
                 )
+            out += self._no_effect_note(name, before, out)
             return out + _browser_peek(self.browser, self.config)
 
         if name == "save_memory":

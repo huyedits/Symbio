@@ -12,6 +12,7 @@ from typing import Any
 # Map each parsed tool name to the user-facing group used for enable/disable menus.
 _TOOL_GROUPS: dict[str, str] = {
     "write_note": "notes",
+    "delete_note": "notes",
     "save_skill": "notes",
     "run_command": "terminal",
     "execute_code": "code",
@@ -91,7 +92,7 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "read_page",
-        "description": "Fetch a URL's text content.",
+        "description": "Fetch a URL's text content over plain HTTP, without opening the browser. Use only for a one-off read of a page that needs no login, no JavaScript and no follow-up action. For a real website the user names — anything you may then need to click, scroll, type in or press a key on, or that depends on being signed in — use browser_open instead.",
         "parameters": {
             "type": "object",
             "properties": {"url": {"type": "string", "description": "The URL to read."}},
@@ -109,7 +110,7 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "browser_open",
-        "description": "Open a URL in the live browser and return the page text.",
+        "description": "Open a URL in the live browser and return the page text. Prefer this over read_page whenever the user names a real site to read or act on: it keeps their logged-in session and leaves the page open, so you can click, scroll, type or press keys on it afterwards.",
         "parameters": {
             "type": "object",
             "properties": {"url": {"type": "string", "description": "The URL to open."}},
@@ -146,6 +147,15 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "browser_scroll",
+        "description": "Scroll the open browser page up or down.",
+        "parameters": {
+            "type": "object",
+            "properties": {"direction": {"type": "string", "description": "'up' or 'down'. Default 'down'."}},
+            "required": ["direction"],
+        },
+    },
+    {
         "name": "browser_close",
         "description": "Close the controllable browser session.",
         "parameters": {
@@ -155,10 +165,10 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "browser_press",
-        "description": "Press a keyboard key in the open browser (e.g. 'down', 'up', 'enter', 'esc', 'space'). Use for keyboard navigation; do not invent shell commands for key presses.",
+        "description": "Press a keyboard key in the open browser (e.g. 'down', 'up', 'enter', 'esc', 'space'). Modifier combinations work too, written with '+': 'cmd+enter', 'ctrl+enter', 'shift+tab'. Many web apps submit a text box with cmd+enter rather than enter — plain enter inserts a newline and posts nothing. Use for keyboard navigation; do not invent shell commands for key presses.",
         "parameters": {
             "type": "object",
-            "properties": {"key": {"type": "string", "description": "Key name such as 'down', 'up', 'enter', 'esc', 'space', 'tab', 'home', 'end'."}},
+            "properties": {"key": {"type": "string", "description": "Key name such as 'down', 'up', 'enter', 'esc', 'space', 'tab', 'home', 'end', or a combination like 'cmd+enter'."}},
             "required": ["key"],
         },
     },
@@ -797,7 +807,13 @@ def build_tools_block(groups: set[str] | None = None) -> str:
     """
     tools = _TOOLS
     if groups is not None:
-        tools = [t for t in _TOOLS if _TOOL_GROUPS.get(t["name"]) in groups]
+        # Through the Hermes map, not the catalog name directly: the shell
+        # tool is advertised as "terminal" and grouped under its internal
+        # name, "run_command". A raw lookup missed it, so an install that had
+        # the terminal group ON was shown a prompt with no shell tool in it.
+        tools = [t for t in _TOOLS
+                 if _TOOL_GROUPS.get(
+                     _HERMES_NAME_MAP.get(t["name"], t["name"])) in groups]
     return "<tools>" + json.dumps(tools, ensure_ascii=False, separators=(",", ":")) + "</tools>"
 
 
@@ -1151,7 +1167,6 @@ def _find_function_attr_calls(
         out.append((m.start(), m.end(), name,
                     _normalize_args(name, {_PRIMARY_ARG[name]: m.group(3)})))
 
-
     for m in _FUNC_JSON_RE.finditer(scan):
         if _in_code_fence(reply, m.start()):
             continue
@@ -1341,6 +1356,37 @@ def _extract_gemma_tool_calls(reply: str) -> list[tuple[str, dict[str, Any]]]:
 _TOOL_CALL_ENVELOPE_RE = re.compile(r'<tool_call>\s*(.*?)\s*</tool_call>', re.DOTALL)
 
 
+_TOOL_RESPONSE_RE = re.compile(r'<tool_response>.*?</tool_response>', re.DOTALL)
+
+
+def _blank_tool_responses(reply: str) -> str:
+    """Blank out any <tool_response> the MODEL wrote.
+
+    That tag is the runtime's channel, not the model's: it is how an executed
+    tool's real output is fed back in. A model that writes one is imitating
+    the transcript format and inventing an observation it never received.
+
+    Seen live 2026-09-06 on Falcon3-10B, asked for 13 * 17:
+
+        <tool_call>{"name": "terminal", "arguments": {"cmd": "echo ... | bc"}}</tool_call>
+        <tool_response>{"name": "terminal", "content": "221\n"}</tool_response>
+        The answer is 221
+
+    Nothing ran. The number was right by luck, and on a real command the same
+    shape reports success for something that never happened. Worse, the JSON
+    scanners then found `{"name": "terminal", ...}` inside the fabricated
+    response and parsed it as a SECOND call — `run_command` with no arguments
+    at all — so an invented observation became an executable one.
+
+    Blanked rather than removed so every offset into the reply still lines up,
+    exactly as _shield_tool_call_data does.
+    """
+    out = reply
+    for m in _TOOL_RESPONSE_RE.finditer(reply):
+        out = out[:m.start()] + (" " * (m.end() - m.start())) + out[m.end():]
+    return out
+
+
 def _shield_tool_call_data(reply: str) -> str:
     """Blank out the argument DATA of well-formed <tool_call> envelopes.
 
@@ -1404,6 +1450,11 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     If `enabled_groups` is provided, drop tools whose group is disabled.
     """
     tools: list[tuple[str, dict[str, Any]]] = []
+
+    # Before anything else: a <tool_response> the model wrote is fabricated,
+    # and both scanner families were fooled by it -- the legacy ones through
+    # `scan`, the JSON ones through `reply`. Rebinding here covers both.
+    reply = _blank_tool_responses(reply)
 
     # The legacy tag scanners below read `scan`, not `reply`: a tag
     # quoted inside a well-formed <tool_call>'s arguments is that call's
@@ -1680,6 +1731,9 @@ def enabled_tool_names(enabled_groups: set[str] | None) -> list[str]:
 # strip_tool_tags (full replies) and StreamingStripper (incremental chunks),
 # so both agree on what "safe to remove" means.
 _COMPLETE_TAG_PATTERNS: list[str] = [
+    # A fabricated observation is not the model's answer and must never be
+    # shown as one; parse_tools already refuses to dispatch it.
+    r'<tool_response>.*?</tool_response>',
     r'<note\s+title=(["\'])(.*?)\1>(.*?)</note>',
     # Executed above, so it must be stripped here too or the raw tag is what
     # the user sees as the reply.

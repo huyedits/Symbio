@@ -1,7 +1,5 @@
 """FastMCP server exposing `brain_solve`."""
 
-from fastmcp import FastMCP
-
 import asyncio
 
 from fastmcp import FastMCP

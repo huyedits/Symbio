@@ -192,6 +192,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # user's personal browser profile. It must still ask for confirmation
         # the first time it visits a new domain.
         "enabled": False,
+        # Keep cookies between sessions in constants.BROWSER_PROFILE_DIR, so a
+        # site logged into once by hand stays logged in for later turns. Off by
+        # default: a profile is standing access to whatever it holds, on every
+        # future turn, not just the one that asked for it. The per-action
+        # domain confirmations still apply either way, and the directory is
+        # gitignored because it holds session cookies.
+        "persistent_profile": False,
+        # Where that profile lives. null uses constants.BROWSER_PROFILE_DIR
+        # (isolated, inside the project). Point it at Chrome's own user-data
+        # dir -- "~/Library/Application Support/Google/Chrome" on macOS -- to
+        # use real Chrome instead, and set chrome_profile to pick WHICH profile
+        # inside it. Playwright always opens "Default" otherwise, which is the
+        # identity logged into everything; a dedicated profile keeps the agent
+        # to the accounts you deliberately signed it into.
+        #
+        # Chrome locks its user-data dir: it must be fully quit before the
+        # agent launches, or the launch fails.
+        "profile_dir": None,
+        "chrome_profile": None,
     },
     "web": {
         "search_results": 5,
@@ -311,6 +330,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "remember_research": True,
         "note_decay_days": 90,
         "mistake_threshold": 5,
+        # At mistake_threshold, when every pending note was captured
+        # automatically from a failed tool call, ask the golden battery
+        # whether the model is actually broken before spending a retrain on
+        # it. A model that passes keeps its weights and the notes are
+        # archived. Set False to go straight to training as before.
+        "mistake_pretrain_check": True,
         "batch_train_iters": 25,
         "iters_per_severity": 5,
         "max_batch_train_iters": 100,
@@ -523,9 +548,22 @@ def load_config() -> dict[str, Any]:
         try:
             user_config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
             config.update(user_config)
-            for section in ("lora", "agent", "rag", "memory", "web", "sandbox", "learn", "telegram", "tools", "dispatch", "archive", "prune", "gpu"):
-                if section in user_config:
-                    config[section] = {**DEFAULT_CONFIG.get(section, {}), **user_config[section]}
+            # Re-merge EVERY dict section, derived from DEFAULT_CONFIG rather
+            # than a hand-maintained list. config.update above replaces a
+            # section wholesale, so any default the user's file does not
+            # mention is dropped -- and a list that has to be edited whenever a
+            # section is added silently forgets the ones nobody remembered.
+            #
+            # Measured 2026-09-02: browser, eval, remote, safety and telemetry
+            # were all missing from the list. A user with {"browser":
+            # {"enabled": true}} could not see browser.persistent_profile at
+            # all -- `config set` reported "Unknown config key". The same hole
+            # meant a new safety default would never reach anyone who had ever
+            # touched that section.
+            for section, default in DEFAULT_CONFIG.items():
+                if isinstance(default, dict) and isinstance(
+                        user_config.get(section), dict):
+                    config[section] = {**default, **user_config[section]}
         except Exception as e:
             print(f"[Config warning] Could not read {constants.CONFIG_FILE}: {e}")
     _apply_env_overrides(config)

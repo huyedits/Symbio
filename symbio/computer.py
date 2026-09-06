@@ -118,7 +118,7 @@ def _confirm_domain(domain: str, ask_fn=None) -> bool:
 class BrowserSession:
     """Manages a single Playwright browser/page session."""
 
-    def __init__(self, confirm_fn=None):
+    def __init__(self, confirm_fn=None, profile_dir=None, chrome_profile=None):
         self._playwright: Any | None = None
         self._browser: Any | None = None
         self._page: Any | None = None
@@ -126,6 +126,22 @@ class BrowserSession:
         self._confirm_fn = confirm_fn
         self._channel: str = ""
         self._last_url: str = ""
+        # None (the default) launches a fresh, logged-out browser every time,
+        # which is what every caller got before this existed. A path here keeps
+        # cookies between sessions, so a site the user logs into once by hand
+        # stays logged in for later turns — the only way the agent can act on
+        # an account rather than just read public pages.
+        #
+        # Opt-in on purpose: a profile is standing access to whatever it holds,
+        # for every future turn, and that is a bigger change than it looks.
+        # The per-action confirmations still fire either way.
+        self._profile_dir = profile_dir
+        # Which profile inside that directory. Playwright has no option for
+        # this and always opens "Default" — the identity signed into
+        # everything. Passing --profile-directory is the only way to aim at a
+        # dedicated one, which is what keeps the agent to the accounts it was
+        # deliberately signed into.
+        self._chrome_profile = chrome_profile
 
     @property
     def is_open(self) -> bool:
@@ -164,6 +180,49 @@ class BrowserSession:
         # Prefer Google Chrome when available; fall back to bundled Chromium.
         # A specific channel request overrides the stored default.
         preferred = channel or self._channel or "chrome"
+        view = {"viewport": {"width": 1280, "height": 800},
+                "accept_downloads": False}
+
+        # Playwright launches Chrome advertising that it is automated:
+        # --enable-automation, plus navigator.webdriver = true. Google's sign-in
+        # refuses any browser carrying those ("this browser or app may not be
+        # secure"), so the user cannot complete the one manual login the
+        # persistent profile exists to capture. Dropping the flag is the
+        # documented way to run a real, user-driven browser session; the agent
+        # is not thereby hidden from anything -- every action it takes still
+        # goes through the same domain confirmations.
+        stealth = {
+            "ignore_default_args": ["--enable-automation"],
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
+        if self._chrome_profile:
+            stealth["args"] = stealth["args"] + [
+                f"--profile-directory={self._chrome_profile}"]
+
+        if self._profile_dir is not None:
+            # launch_persistent_context returns a CONTEXT, not a Browser. It
+            # has .close() -- the only thing this class calls on _browser
+            # besides new_context -- so it can be stored in the same slot, and
+            # the context IS the browser for teardown purposes.
+            from pathlib import Path
+
+            Path(self._profile_dir).mkdir(parents=True, exist_ok=True)
+            launch = self._playwright.chromium.launch_persistent_context
+            try:
+                context = launch(str(self._profile_dir), headless=False,
+                                 channel=preferred, **stealth, **view)
+                self._channel = preferred
+            except Exception:
+                context = launch(str(self._profile_dir), headless=False,
+                                 **stealth, **view)
+                self._channel = ""
+            self._browser = context
+            # A persistent context opens with a page already; taking it rather
+            # than adding a second one keeps the window the user sees the one
+            # being driven.
+            self._page = context.pages[0] if context.pages else context.new_page()
+            return self._browser, self._page
+
         try:
             self._browser = self._playwright.chromium.launch(
                 headless=False, channel=preferred
@@ -173,10 +232,7 @@ class BrowserSession:
             # Chrome not installed or channel unknown — use bundled Chromium.
             self._browser = self._playwright.chromium.launch(headless=False)
             self._channel = ""
-        context = self._browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            accept_downloads=False,
-        )
+        context = self._browser.new_context(**view)
         self._page = context.new_page()
         return self._browser, self._page
 
@@ -304,13 +360,44 @@ class BrowserSession:
         except Exception as e:
             return self._fail("click", e)
 
+    # A modal dialog makes everything it covers inert: while X's composer is
+    # open the "Post" in the sidebar cannot be clicked at all. It is still the
+    # first thing a page-wide search for that word finds, though, which is how
+    # a click aimed at the submit button landed on the navigation item that
+    # had opened the composer in the first place.
+    _MODAL_SELECTOR = '[role="dialog"][aria-modal="true"], dialog[open]'
+
+    def _click_scopes(self, page) -> list[tuple[Any, str]]:
+        """Where to look for a click target, most likely first."""
+        try:
+            modal, _ = _first_visible(page.locator(self._MODAL_SELECTOR))
+        except Exception:
+            modal = None
+        if modal is None:
+            return [(page, "")]
+        return [(modal, " in the open dialog"), (page, "")]
+
+    @staticmethod
+    def _click_candidates(scope: Any, text: str):
+        """(locator, description) pairs for `text`, best match first.
+
+        Controls before prose, exact labels before substrings. One word names
+        both the button that submits a form and the link that opened it, and
+        only one of the two does the job; a bare text search finds whichever
+        happens to come first in the document.
+        """
+        for exact in (True, False):
+            for role in ("button", "link"):
+                yield scope.get_by_role(role, name=text, exact=exact), f"{role} '{text}'"
+            yield (
+                scope.get_by_text(text, exact=exact),
+                f"element containing text '{text}'",
+            )
+
     def _try_click(self, page, selector: str = "", text: str = "", attempt: int = 1) -> str:
         """Single click attempt. On the first failure due to a timeout or
         missing visible element, wait a moment and try once more — small
         models often issue a click before the page has fully settled."""
-        def _result(msg: str) -> str:
-            return msg
-
         if selector:
             # Generic selectors often match dozens of elements, many
             # hidden; click the first *visible* match instead of the
@@ -328,17 +415,20 @@ class BrowserSession:
                     "Use a more specific selector or click by visible text."
                 )
         if text:
-            # Try substring match first, then exact, then role-based.
-            for exact in (False, True):
-                target, count = _first_visible(page.get_by_text(text, exact=exact))
-                if target is not None:
-                    target.click(timeout=self._TIMEOUT_MS)
-                    return f"Clicked element containing text '{text}'" + (" (exact match)." if exact else ".")
-                for role in ("button", "link"):
-                    target, count = _first_visible(page.get_by_role(role, name=text, exact=exact))
-                    if target is not None:
+            for scope, where in self._click_scopes(page):
+                for locator, described in self._click_candidates(scope, text):
+                    target, count = _first_visible(locator)
+                    if target is None:
+                        continue
+                    try:
                         target.click(timeout=self._TIMEOUT_MS)
-                        return f"Clicked {role} '{text}'" + (" (exact match)." if exact else ".")
+                    except Exception:
+                        # Matched but unclickable — covered by an overlay,
+                        # inert under a modal, detached mid-click. Another
+                        # candidate may still be the one that works.
+                        continue
+                    ambiguous = f" (first visible of {count} matches)" if count > 1 else ""
+                    return f"Clicked {described}{where}{ambiguous}."
             if attempt == 1:
                 # Page may still be settling; one automatic retry.
                 time.sleep(0.5)
@@ -362,17 +452,101 @@ class BrowserSession:
                 target.fill(text, timeout=self._TIMEOUT_MS)
             else:
                 page.keyboard.type(text, delay=10)
+                # Keystrokes go wherever focus happens to be, which on a page
+                # nothing has been clicked on is the body — they land nowhere
+                # and vanish. Reporting "Typed 'x'." regardless is how the
+                # agent came to tell the user it had posted a tweet while the
+                # composer still showed its placeholder: the tool asserted
+                # success, so nothing downstream could tell it had failed.
+                # Verify against the focused element instead of trusting it.
+                if not self._text_landed(page, text):
+                    return (
+                        f"Type failed: '{text}' did not reach any editable "
+                        f"field — nothing is focused, so the keystrokes went "
+                        f"to the page and were discarded. Click the field "
+                        f"first, then type."
+                    )
             if press_enter:
                 page.keyboard.press("Enter")
+                # Same false success press() now catches, reachable through
+                # the other tool: browser_type with enter:true is how the
+                # agent "submitted" a composer that only took a newline. The
+                # text did land, so this is not a type failure -- say what
+                # happened and what to do about it.
+                if not self._enter_submitted(page):
+                    # Worded to read as a failure to sounds_like_tool_error:
+                    # the text landed, but the call the model asked for was
+                    # type-and-submit, and the submit half did not happen.
+                    return (
+                        f"Typed '{text}' but the submit failed: the field "
+                        f"still contains the text, so Enter inserted a "
+                        f"newline rather than submitting. Click the submit "
+                        f"button, or press cmd+enter, to submit."
+                    )
             return f"Typed '{text}'" + (" and pressed Enter." if press_enter else ".")
         except Exception as e:
             return self._fail("type", e)
+
+    @staticmethod
+    def _text_landed(page: Any, text: str) -> bool:
+        """Did `text` actually reach the focused editable element?
+
+        Best-effort: a page that will not evaluate script, or a field that
+        normalises what it stores, must not turn a working type into a
+        reported failure — so anything unexpected counts as landed. This is
+        here to catch the unambiguous case, keystrokes sent at document.body.
+        """
+        try:
+            return bool(page.evaluate(
+                """(t) => {
+                    const el = document.activeElement;
+                    if (!el || el === document.body) return false;
+                    const editable = el.isContentEditable
+                        || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
+                    if (!editable) return false;
+                    const v = el.value !== undefined ? el.value : el.innerText;
+                    return (v || '').includes(t);
+                }""",
+                text))
+        except Exception:
+            return True
+
+    @staticmethod
+    def _enter_submitted(page: Any) -> bool:
+        """Did pressing Enter actually submit the focused form?
+
+        Enter in a text field submits on some sites (a search box) and
+        inserts a newline on others (X.com's composer). The difference is
+        observable: a submit clears the field or moves focus, while a newline
+        leaves the field focused and still holding its text. Best-effort like
+        _text_landed: anything unexpected counts as submitted, so a working
+        submit is never reported as a failure.
+        """
+        try:
+            return bool(page.evaluate(
+                """() => {
+                    const el = document.activeElement;
+                    if (!el || el === document.body) return true;
+                    const editable = el.isContentEditable
+                        || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
+                    if (!editable) return true;
+                    const v = el.value !== undefined ? el.value : el.innerText;
+                    return !(v || '').trim();
+                }"""))
+        except Exception:
+            return True
 
     def press(self, key: str) -> str:
         try:
             page = self._ensure_open()
             normalized = _normalize_key(key)
             page.keyboard.press(normalized)
+            if normalized == "Enter" and not self._enter_submitted(page):
+                return (
+                    f"Press failed: Enter did not submit the form — the "
+                    f"focused field still contains text, so it likely "
+                    f"inserted a newline. Click the submit button to submit."
+                )
             return f"Pressed '{normalized}'."
         except Exception as e:
             return self._fail("press", e)

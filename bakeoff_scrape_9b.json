@@ -1,0 +1,121 @@
+{
+  "skill": "Scrape Script",
+  "tasks_source": "generated",
+  "threshold": 0.6,
+  "arms": {
+    "qwen3-4b+adapter": {
+      "passed": 0,
+      "total": 5,
+      "mean_coverage": 0.2,
+      "mean_latency": 4.2,
+      "tasks": [
+        {
+          "id": "direct",
+          "passed": false,
+          "coverage": 0.1429,
+          "output": "import time\nimport logging\nimport requests\nfrom bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"https://example.com\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contac"
+        },
+        {
+          "id": "howto",
+          "passed": false,
+          "coverage": 0.4286,
+          "output": "1. **Define the Target URL**: Identify the website you want to scrape, e.g., \"https://example.com/data\".\n2. **Choose a Tool**: Select a programming language and library, such as Python with `requests`"
+        },
+        {
+          "id": "request",
+          "passed": false,
+          "coverage": 0.1429,
+          "output": "Understood. Please provide the URL you want to scrape and specify which data you want to extract. Once you give me these details, I will generate the appropriate scraping script for you."
+        },
+        {
+          "id": "broken",
+          "passed": false,
+          "coverage": 0.1429,
+          "output": "import time\nimport logging\nimport requests\nfrom bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"https://example.com\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contac"
+        },
+        {
+          "id": "terse",
+          "passed": false,
+          "coverage": 0.1429,
+          "output": "import time\nimport logging\nimport requests\nfrom bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"https://example.com\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contac"
+        }
+      ]
+    },
+    "qwen3.5-9b-base": {
+      "passed": 0,
+      "total": 5,
+      "mean_coverage": 0.3429,
+      "mean_latency": 8.176,
+      "tasks": [
+        {
+          "id": "direct",
+          "passed": false,
+          "coverage": 0.2857,
+          "output": "Please provide the **target URL** and specify the **data elements** you wish to extract (e.g., titles, prices, dates). Once provided, I will generate the complete, ready-to-run Python script for you."
+        },
+        {
+          "id": "howto",
+          "passed": false,
+          "coverage": 0.5714,
+          "output": "To walk you through the **Scrape Script** skill, here is the step-by-step process for executing a web scraping task:\n\n1.  **Identify the Target**: Determine the specific URL or website you need to ext"
+        },
+        {
+          "id": "request",
+          "passed": false,
+          "coverage": 0.4286,
+          "output": "Please provide the following details so I can generate the scrape script for you:\n\n1.  **Target URL(s)**: The specific website or page you want to scrape.\n2.  **Data to Extract**: What specific inform"
+        },
+        {
+          "id": "broken",
+          "passed": false,
+          "coverage": 0.2857,
+          "output": "To proceed with the **Scrape Script** skill, I need the following details:\n\n1.  **Target URL**: What website do you want to scrape?\n2.  **Data Needed**: What specific information do you want to extrac"
+        },
+        {
+          "id": "terse",
+          "passed": false,
+          "coverage": 0.1429,
+          "output": "{\n  \"status\": \"ready\",\n  \"message\": \"Scrape Script specialist active. Please provide the target URL and the specific data points you wish to extract (e.g., title, price, date) or a sample HTML snippet"
+        }
+      ]
+    },
+    "qwen3.5-9b+adapter": {
+      "passed": 0,
+      "total": 5,
+      "mean_coverage": 0.1429,
+      "mean_latency": 10.127,
+      "tasks": [
+        {
+          "id": "direct",
+          "passed": false,
+          "coverage": 0.1429,
+          "output": "import time\nimport logging\nimport requests\nfrom bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"example.com\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contact@exampl"
+        },
+        {
+          "id": "howto",
+          "passed": false,
+          "coverage": 0.1429,
+          "output": "import time\nimport logging\nfrom bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"https://example.com\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contact@example.com)\"}"
+        },
+        {
+          "id": "request",
+          "passed": false,
+          "coverage": 0.1429,
+          "output": "import time\nimport logging\nimport requests\nfrom bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"https://example.com\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contac"
+        },
+        {
+          "id": "broken",
+          "passed": false,
+          "coverage": 0.1429,
+          "output": "import time\nimport logging\nimport requests\nfrom bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"https://example.com\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contac"
+        },
+        {
+          "id": "terse",
+          "passed": false,
+          "coverage": 0.1429,
+          "output": "import time\nimport logging\nimport requests\nfrom bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"https://example.com\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contac"
+        }
+      ]
+    }
+  }
+}

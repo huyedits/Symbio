@@ -15,12 +15,12 @@ agent (app paths, tag stripping, and iters-override training).
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from symbio import constants, safety
-from symbio.app import memory, training
+from symbio.app import belief, curriculum, memory, training
 from symbio.app.tooling import redact_secrets, strip_tool_tags
 
 
@@ -805,6 +805,10 @@ def _slug_category(raw: str) -> str:
     """Normalise a model-named category to a short snake_case slug so trivially
     different spellings ('Tool Error', 'tool-error') land in one bucket."""
     slug = re.sub(r"[^a-z0-9]+", "_", (raw or "").strip().lower()).strip("_")
+    # The prompt ends on the literal word "Category:", and the model echoes it
+    # often enough to matter. Left in, the two-word trim below turns
+    # "Category: tool_error" into the bucket "category_tool".
+    slug = re.sub(r"^category_", "", slug)
     # Keep it to the first two words: the model sometimes returns a short phrase.
     slug = "_".join(slug.split("_")[:2])
     return slug[:32] or "general"
@@ -843,6 +847,13 @@ def classify_mistake_category(
     # sentence after the label despite the instruction.
     first = answer.strip().splitlines()[0] if answer.strip() else ""
     return _slug_category(first)
+
+
+# The `correction` text a tool-error note carries when nobody typed it: the
+# capture in chat_turn.py writes it when a failed call is followed by one that
+# works. pending_mistakes_are_all_automatic() reads it back to tell an
+# environment failure ("nothing was focused") from a real user correction.
+AUTO_TOOL_CORRECTION = "(automatic: the next tool call succeeded)"
 
 
 def save_mistake_note(original_query: str, wrong_answer: str,
@@ -905,14 +916,58 @@ def mistake_category_counts() -> dict[str, int]:
             continue
         category = "general"
         try:
-            for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
-                if line.startswith("**Category:**"):
-                    category = line.split("**Category:**", 1)[1].strip() or "general"
-                    break
+            # The field is the third line of a note whose body can run to a
+            # whole tool observation, and this is rendered on the boot banner
+            # beside mistake_note_count()'s walk of the same directory. Read
+            # the header, not the corpus.
+            with f.open(encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if line.startswith("**Category:**"):
+                        category = line.split("**Category:**", 1)[1].strip() or "general"
+                        break
+                    if line.startswith("**Severity:**"):
+                        break  # past the header: this note predates the field
         except OSError:
-            continue
+            # Still one of the notes mistake_note_count() counted, so keep it
+            # in the totals rather than letting the breakdown sum to less than
+            # the counter printed next to it.
+            pass
         counts[category] = counts.get(category, 0) + 1
     return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def pending_mistakes_are_all_automatic() -> bool:
+    """True when every pending mistake note was captured by the tool loop
+    rather than typed by the user.
+
+    An automatic note records that a tool call failed and the next one worked
+    — usually because the page had not settled, nothing was focused, or a
+    button was not on screen yet. The model's answer was not wrong; the
+    environment moved. A batch made only of those is the case where a retrain
+    costs an unload/train/reload cycle to teach the weights nothing, so
+    maybe_train_on_mistakes checks the model instead of training it.
+
+    False when there are no notes at all: "nothing pending" is not "all
+    automatic", and the caller must not read it as a reason to skip."""
+    files = [f for f in constants.MISTAKES_DIR.glob("*.md") if f.is_file()] \
+        if constants.MISTAKES_DIR.exists() else []
+    if not files:
+        return False
+    for f in files:
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            # Unreadable: assume it is a real correction, so an I/O error can
+            # never be the thing that silently cancels a retrain.
+            return False
+        correction = ""
+        for line in content.splitlines():
+            if line.startswith("**Correction:**"):
+                correction = line.split("**Correction:**", 1)[1].strip()
+                break
+        if correction != AUTO_TOOL_CORRECTION:
+            return False
+    return True
 
 
 def archive_mistake_notes() -> int:
@@ -970,13 +1025,180 @@ def digest_mistakes_to_training(tokenizer, system_prompt: str, boost: int = 1) -
     return added, total_severity
 
 
+# ---- the prediction path ------------------------------------------------
+#
+# Everything above this line is REACTIVE: it fires after the model was wrong,
+# turns the correction into a sample, and retrains. That loop is correct and
+# stays, but by construction it can only ever teach "do not do what you did".
+# It cannot produce a sample that teaches anticipating a moment, and it cannot
+# produce one that teaches waiting — a turn where the right move was to do
+# nothing generates no mistake, so it generates no training data at all.
+#
+# These two functions are the other direction: record what was expected before
+# the outcome, score it when reality lands, and digest the well-timed ones.
+
+
+def record_prediction(hypothesis: str, evidence, *, timescale_s: float | None = None,
+                      dynamics: str | None = None, soft_rank: float = 0.5,
+                      store=None) -> str:
+    """Write down what is expected, before it is known. Returns the belief id.
+
+    Called at the point a prediction is made rather than when it is graded,
+    because a prediction reconstructed after the fact is not a prediction —
+    it is a memory of one, and it always turns out to have been right.
+    """
+    store = store or belief.BeliefStore()
+    return store.add_belief(hypothesis, evidence, timescale_s=timescale_s,
+                            dynamics=dynamics, soft_rank=soft_rank)
+
+
+def resolve_prediction(belief_id: str, outcome: bool, when=None, store=None):
+    """Reality arrived: score the prediction on accuracy AND timing."""
+    store = store or belief.BeliefStore()
+    return store.update_confidence(belief_id, outcome, when)
+
+
+def digest_predictions_to_training(tokenizer, system_prompt: str, boost: int = 1,
+                                   min_score: float = 0.6, store=None) -> int:
+    """Add well-timed predictions and correct restraint to the corpus.
+
+    Mirrors digest_mistakes_to_training deliberately — same tokenizer, same
+    append_chat_pair, same corpus — so a prediction sample is indistinguishable
+    from any other once written and needs no new training path. Returns the
+    number of samples added.
+
+    Unlike the mistake digest, nothing is archived on the way out: a belief's
+    score keeps moving as more observations arrive, and consuming it once would
+    freeze a two-observation judgement forever. Re-digesting is prevented by
+    the corpus itself, which drops duplicate samples.
+    """
+    store = store or belief.BeliefStore()
+    added = 0
+    for sample in store.training_samples(min_score=min_score):
+        # Weight by how well-timed it was, not just that it happened: a
+        # prediction that landed on the moment is worth repeating more than one
+        # that was right but a day early, and boosting them equally would teach
+        # the corpus that timing does not matter.
+        repeats = max(1, int(round(boost * sample["score"])))
+        for _ in range(repeats):
+            training.append_chat_pair(sample["prompt"], sample["reply"],
+                                      tokenizer, system_prompt)
+        added += 1
+    return added
+
+
+def digest_divergences_to_training(tokenizer, system_prompt: str, boost: int = 1,
+                                   threshold: float = 0.35, store=None) -> int:
+    """Teach the predictions the model was sure about and reality refused.
+
+    The third source, and the one neither existing loop can see: the mistake
+    loop needs a user correction or a failed tool, and the prediction digest
+    only rewards what went well. A confident belief that quietly did not hold
+    produces neither, so it was invisible — which is the failure mode that
+    lets a model stay confidently wrong about the same thing indefinitely.
+    """
+    store = store or belief.BeliefStore()
+    added = 0
+    for sample in curriculum.divergence_samples(store, threshold=threshold):
+        # Repeat proportionally to how badly it diverged: being sure of
+        # something that did not happen at all is a bigger lesson than being
+        # slightly overconfident, and boosting them equally teaches neither.
+        repeats = max(1, int(round(boost * (1.0 + sample["divergence"]))))
+        for _ in range(repeats):
+            training.append_chat_pair(sample["prompt"], sample["reply"],
+                                      tokenizer, system_prompt)
+        added += 1
+    return added
+
+
+def adaptive_training_plan(eval_result, config: dict[str, Any], *,
+                           cases=None, half_life_days=None, boost: int = 1,
+                           corpus_path=None) -> list[dict[str, Any]]:
+    """Weight the pending mistake notes by what the model currently fails.
+
+    The mistake loop decides WHEN to train; this decides what that run should
+    spend itself on. Notes about cases the held-out eval says are broken get
+    repeated harder, notes about cases it passes get repeated less, and notes
+    whose lesson is both absorbed and cold drop to a single mention.
+
+    Raises HeldOutViolation if the eval set has leaked into the corpus, rather
+    than falling back to unweighted training: a silent fallback hides the leak,
+    and the leak is what makes the whole signal circular.
+    """
+    from symbio.app import eval as eval_mod
+
+    cases = list(cases if cases is not None else eval_mod.EVAL_CASES)
+    curriculum.assert_held_out(cases, config, corpus_path)
+    half_life = (half_life_days if half_life_days is not None
+                 else float(config.get("learn", {}).get(
+                     "sample_half_life_days", curriculum.DEFAULT_HALF_LIFE_DAYS)))
+
+    samples = []
+    for path in sorted(constants.MISTAKES_DIR.glob("*.md")) \
+            if constants.MISTAKES_DIR.exists() else []:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        query = answer = ""
+        for line in text.splitlines():
+            if line.startswith("**Original question:**"):
+                query = line.split("**Original question:**", 1)[1].strip()
+            elif line.startswith("**Correct answer:**"):
+                answer = line.split("**Correct answer:**", 1)[1].strip()
+        if not query or not answer:
+            continue
+        samples.append({
+            "path": str(path), "text": f"{query} {answer}",
+            "query": query, "answer": answer,
+            # The note's own mtime, not the filename stamp: a note that was
+            # re-saved is newer evidence than the day it was first written.
+            "created_at": datetime.fromtimestamp(
+                path.stat().st_mtime, tz=timezone.utc).isoformat(),
+        })
+    return curriculum.plan(eval_result, cases, config, samples,
+                           half_life_days=half_life, base_boost=boost)
+
+
+def digest_mistakes_adaptively(tokenizer, system_prompt: str, eval_result,
+                               config: dict[str, Any], boost: int = 1,
+                               cases=None) -> tuple[int, int]:
+    """digest_mistakes_to_training, but weighted by measured weakness.
+
+    Same notes, same corpus, same archival — only the repeat count differs, so
+    this is a strict refinement of the reactive path rather than a replacement
+    for it. Every note still reaches the corpus at least once; see
+    curriculum.plan for why a weight of zero is not allowed to exist.
+    Returns (notes digested, total samples written).
+    """
+    planned = adaptive_training_plan(eval_result, config, cases=cases, boost=boost)
+    written = 0
+    for item in planned:
+        for _ in range(item["repeats"]):
+            training.append_chat_pair(item["query"], item["answer"],
+                                      tokenizer, system_prompt)
+            written += 1
+    print(curriculum.summarise(planned))
+    archive_mistake_notes()
+    return len(planned), written
+
+
 def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: str,
-                            train_fn=None) -> bool:
+                            train_fn=None, check_fn=None) -> bool:
     """If enough mistake notes have accumulated, digest them and run a short
     LoRA pass. Returns True when training completed (caller reloads model).
     `train_fn(config, iters=...)` defaults to training.run_training; pass a
     wrapper (e.g. one that golden-checks and rolls back a regression) to
-    guard this path the same way as manual /train."""
+    guard this path the same way as manual /train.
+
+    `check_fn()` returns (passing, total) from the golden battery run against
+    the live model, or None when it could not run. It gates the retrain: at
+    the threshold, a batch made entirely of automatic tool-error captures asks
+    the model a fixed set of questions BEFORE spending an unload/train/reload
+    cycle on it, and a model that answers all of them is left alone. Without
+    it a run of browser failures — a page that had not settled, nothing
+    focused — fires a full LoRA pass mid-conversation, which is how a 16 GB
+    machine ends up with two model copies resident and dies."""
     train_fn = train_fn or training.run_training
     learn_cfg = config.get("learn", {})
     if not learn_cfg.get("enabled", True):
@@ -988,6 +1210,32 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
         print(f"  [Learn] {count}/{threshold} mistake note(s) collected; "
               f"training after {threshold - count} more.")
         return False
+
+    if (check_fn is not None
+            and learn_cfg.get("mistake_pretrain_check", True)
+            and pending_mistakes_are_all_automatic()):
+        print(f"\n  [Learn] {count} mistake note(s) reached, all captured "
+              f"automatically from failed tool calls. Checking the model "
+              f"before retraining on them...")
+        checked = None
+        try:
+            checked = check_fn()
+        except Exception as e:
+            # A check that cannot run must not cancel the retrain: fall
+            # through to the normal path rather than deciding on nothing.
+            print(f"  [Learn] Check could not run ({e}); training as usual.")
+        if checked is not None:
+            passing, total = checked
+            print(f"  [Learn] Golden checks: {passing}/{total} passing.")
+            if total and passing >= total:
+                archived = archive_mistake_notes()
+                print(f"  [Learn] The model answers every golden case, and none "
+                      f"of these {count} note(s) is a correction you typed — "
+                      f"they are environment failures, not wrong answers. "
+                      f"Archived {archived} note(s) without retraining.")
+                return False
+            print(f"  [Learn] {total - passing} golden case(s) failing; "
+                  f"the retrain is worth running.")
 
     print(f"\n  [Learn] {count} mistake note(s) reached. Digesting into training data...")
     boost = max(1, int(learn_cfg.get("boost_factor", 3)))

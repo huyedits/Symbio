@@ -519,7 +519,9 @@ def load_model_with_adapter(config: dict[str, Any], adapter_path: str | Path | b
     (model, tokenizer, adapter_loaded).
     """
     path = str(adapter_path) if adapter_path else str(ADAPTER_DIR)
-    if adapter_path is False or not (Path(path) / "adapter_config.json").exists():
+    if (adapter_path is False
+            or not (Path(path) / "adapter_config.json").exists()
+            or not any(Path(path).glob("*.safetensors"))):
         model, tokenizer = load(config["model_name"])
         return model, tokenizer, False
     model, tokenizer = load(config["model_name"], adapter_path=path)

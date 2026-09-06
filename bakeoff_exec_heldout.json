@@ -1,0 +1,317 @@
+{
+  "prompt": "Scrape the listing page at /listing?page=1 into rows of sku, title and price. Reply with only the Python script.",
+  "arms": {
+    "4b+v1-sealed": {
+      "skill_prompt": "Scrape Script",
+      "seen": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: ModuleNotFoundError: No module named 'bs4'",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import time\nimport logging\nimport requests\nfrom bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"https://example.com/livingroom\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contact@example.com)\"}\n\nrp = RobotFileParser()\nrp.set_url(\"https://example.com/robots.txt\")\nrp.read()\nif not rp.can_fetch(HEADERS[\"User-Agent\"], URL):\n    raise SystemExit(\"disallowed by robots.txt\")\n\nresp = requests.get(URL, headers=HEADERS, timeout=10)\ntime.sleep(2)\nsoup = BeautifulSoup(resp.text, \"html.parser\")\nrows = [[r.select_one(\".sku\").text, r.select_one(\".title\").text, r.select_one(\".price\").text] for r in soup.select(\".row\")]\nlogging.info(\"scraped %d rows\", len(rows))"
+      },
+      "held_out": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: SyntaxError: Did you mean to use 'from ... import ...' instead?",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import time\nimport logging\nimport requests from bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"https://example.com/catalogue?page=2\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contact@example.com)\"}\n\nrp = RobotFileParser()\nrp.set_url(\"https://example.com/robots.txt\")\nrp.read()\nif not rp.can_fetch(HEADERS[\"User-Agent\"], URL):\n    raise SystemExit(\"disallowed by robots.txt\")\n\nresp = requests.get(URL, headers=HEADERS, timeout=10)\ntime.sleep(2)\nsoup = BeautifulSoup(resp.text, \"html.parser\")\nitems = [(t.select_one(\".sku\").text, t.select_one(\".title\").text, t.select_one(\".price\").text) for t in soup.select(\".item-card\")]\nlogging.info(\"scraped %d rows\", len(items))"
+      }
+    },
+    "4b+v2-degenerate": {
+      "skill_prompt": "Scrape Script",
+      "seen": {
+        "checks": {
+          "runs": true,
+          "via_proxy": true,
+          "uses_selectolax": true,
+          "spares_origin": true,
+          "quarantines_bad": false,
+          "gets_good_rows": true,
+          "cursor_last": true,
+          "survives_reskin": true
+        },
+        "notes": {
+          "exit": "rc=0",
+          "origin_hits": 1
+        },
+        "passed": 7,
+        "script": "import json, shutil, urllib.request\nfrom pathlib import Path\nfrom selectolax.parser import HTMLParser\n\nPROXY = \"http://127.0.0.1:8817\"   # step 1: through the cache proxy, never origin\nTARGET = \"/listing?page=1\"               # step 2: the listing page to scrape\nPENDING, CLEAN, QUAR = (Path(\"scraped\") / d for d in (\"pending\", \"clean\", \"quarantine\"))\n\nhtml = urllib.request.urlopen(PROXY + TARGET, timeout=5).read().decode()\ncontainer = HTMLParser(html).css_first('[data-testid=\"listing-container\"]')  # step 3\nrows = [{\n    \"sku\": li.attributes.get(\"data-sku\", \"\"),\n    \"title\": li.text().strip(),\n    \"price\": li.attributes.get(\"data-price\", \"\"),\n} for li in container.css('[data-testid=\"listing-row\"]')]\n\npending_file = PENDING / \"rows.json\"          # step 4\npending_file.write_text(json.dumps(rows, indent=2))\nshutil.move(str(pending_file), (CLEAN if rows else QUAR) / \"rows.json\")\n\nstate = json.loads(Path(\"state.json\").read_text())  # step 5: cursor from state\nstate[\"cursor\"] = state.get(\"cursor\", 0) + len(rows)\nPath(\"state.json\").write_text(json.dumps(state, indent=2))"
+      },
+      "held_out": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": true,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: SyntaxError: invalid syntax",
+          "origin_hits": 0
+        },
+        "passed": 1,
+        "script": "import json, shutil, urllib.request\nfrom pathlib import Path\nfrom selectolax.parser import HTMLParser\n\nPROXY = \"http://127.0.0.1:8817\"   # step 1: through the cache proxy, never origin\nTARGET = \"/catalogue?page=2\"               # step 2: the page to scrape\nPENDING, CLEAN, QUAR = (Path(\"scraped\") / d for d in (\"pending\", \"clean\", \"quarantine\"))\n\nhtml = urllib.request.urlopen(PROXY + TARGET, timeout=5).read().decode()\ncontainer = HTMLParser(html).css_first('[data-testid=\"item-grid\"]')  # step 3\nrows = [{\n    \"sku\": li.attributes.get(\"data-testid\", \"\").split()[-1],\n    \"title\": li.css_first('[data-testid=\"item-card\"]')?.text().strip() or \"\",\n    \"price\": li.css_first('[data-testid=\"sku\"]')?.text().strip() or \"\",\n} for li in container.css('[data-testid=\"item-card\"]')]\n\npending_file = PENDING / \"rows.json\"          # step 4\npending_file.write_text(json.dumps(rows, indent=2))\nshutil.move(str(pending_file), (CLEAN if rows else QUAR) / \"rows.json\")\n\nstate = json.loads(Path(\"state.json\").read_text())  # step 5: cursor from state\nstate[\"cursor\"] = state.get(\"cursor\", 0) + len(rows)\nPath(\"state.json\").write_text(json.dumps(state, indent=2))"
+      }
+    },
+    "4b+v3-varied": {
+      "skill_prompt": "Scrape A Listing Page",
+      "seen": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": true,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: OSError: [Errno 30] Read-only file system: '/results'",
+          "origin_hits": 0
+        },
+        "passed": 1,
+        "script": "import json, shutil, urllib.request\nfrom pathlib import Path\nfrom selectolax.parser import HTMLParser\n\n# Set the path for the output file, create the directory if it doesn't exist\noutput_dir = \"/results\"\nPath(output_dir).mkdir(parents=True, exist_ok=True)\noutput_file = f\"{output_dir}/products.json\"\n\n# Fetch through the local cache proxy on port 8817 -- never hit the\n# live site twice, the proxy replays the first response.\nPROXY = \"http://127.0.0.1:8817\"\nshutil.copy(\"/listing?page=1\", \"/cache/latest.html\", ignore=shutil.ignore-files)\n\n# Parse with selectolax, select the container by its data-testid\nhtml = urllib.request.urlopen(PROXY + \"/listing?page=1\").read().decode()\ntree = HTMLParser(html)\ncontainer = tree.css_first('[data-testid=\"product-grid\"]')\nif container is None:\n    raise SystemExit(\"container product-grid missing -- page markup changed\")\n\nrows = []\nfor row in container.css('[data-testid=\"product-card\"]'):\n    rows.append({\n        \"sku\": row.css_first('[data-testid=\"sku\"]').text().strip(),\n        \"title\": row.css_first('[data-testid=\"title\"]').text().strip(),\n        \"price\": row.css_first('[data-testid=\"price\"]').text().strip(),\n    })\n\n# Write to scraped/pending first, then move each record on to clean\npending_file = f\"{output_dir}/pending.json\"\npending = json.dumps(rows, indent=2)\nusable = json.dumps(rows, indent=2)\nshutil.copy(pending, pending_file)\nshutil.copy(usable, output_file)"
+      },
+      "held_out": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": true,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: SyntaxError: unterminated string literal (detected at line 9)",
+          "origin_hits": 0
+        },
+        "passed": 1,
+        "script": "```python\nimport json, shutil, urllib.request\nfrom pathlib import Path\nfrom selectolax.parser import HTMLParser\n\n# Set the path to the directory containing the scraped data on the local machine -- never hit the\n# live site twice, the first time through the script will create the directory, the second time\n# will move the record on to the clean slate.\nfolder = \"/catalogue?page=2\", \"items\", \"records"
+      }
+    },
+    "4b-base": {
+      "skill_prompt": "Scrape A Listing Page",
+      "seen": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: ModuleNotFoundError: No module named 'bs4'",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import requests\nfrom bs4 import BeautifulSoup\n\nurl = 'https://example.com/listing?page=1'\nresponse = requests.get(url)\nsoup = BeautifulSoup(response.content, 'html.parser')\n\nrows = []\n\nfor item in soup.select('.item'):\n    sku = item.select_one('.sku').text.strip() if item.select_one('.sku') else 'N/A'\n    title = item.select_one('.title').text.strip() if item.select_one('.title') else 'N/A'\n    price = item.select_one('.price').text.strip() if item.select_one('.price') else 'N/A'\n    rows.append((sku, title, price))\n\nprint(rows)"
+      },
+      "held_out": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: ModuleNotFoundError: No module named 'bs4'",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import requests\nfrom bs4 import BeautifulSoup\n\nurl = 'https://example.com/catalogue?page=2'\nheaders = {\n    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'\n}\n\nresponse = requests.get(url, headers=headers)\nsoup = BeautifulSoup(response.content, 'html.parser')\n\nitems = soup.find_all('div', {'data-testid': 'item-card'})\n\nskus = []\ntitles = []\nprices = []\n\nfor item in items:\n    sku = item.find('div', {'data-testid': 'item-sku'})\n    title = item.find('h3', {'data-testid': 'item-title'})\n    price = item.find('div', {'data-testid': 'item-price'})\n    \n    if sku and title and price:\n        skus.append(sku.text)\n        titles.append(title.text)\n        prices.append(price.text)\n\nprint(skus)\nprint(titles)\nprint(prices)"
+      }
+    },
+    "9b+v1": {
+      "skill_prompt": "Scrape Script",
+      "seen": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: ModuleNotFoundError: No module named 'bs4'",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import time\nimport logging\nimport requests\nfrom bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"https://example.com/listing?page=1\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contact@example.com)\"}\n\nrp = RobotFileParser()\nrp.set_url(\"https://example.com/robots.txt\")\nrp.read()\nif not rp.can_fetch(HEADERS[\"User-Agent\"], URL):\n    raise SystemExit(\"disallowed by robots.txt\")\n\nresp = requests.get(URL, headers=HEADERS, timeout=10)\ntime.sleep(2)\nsoup = BeautifulSoup(resp.text, \"html.parser\")\nrows = [(s.select_one(\".sku\").text, s.select_one(\".title\").text, s.select_one(\".price\").text) for s in soup.select(\".listing\")]\nlogging.info(\"scraped %d rows\", len(rows))"
+      },
+      "held_out": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: ModuleNotFoundError: No module named 'bs4'",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import time\nimport logging\nimport requests\nfrom bs4 import BeautifulSoup\nfrom urllib.robotparser import RobotFileParser\n\nURL = \"https://example.com/catalogue?page=2\"\nHEADERS = {\"User-Agent\": \"research-bot/1.0 (+contact@example.com)\"}\n\nrp = RobotFileParser()\nrp.set_url(\"https://example.com/robots.txt\")\nrp.read()\nif not rp.can_fetch(HEADERS[\"User-Agent\"], URL):\n    raise SystemExit(\"disallowed by robots.txt\")\n\nresp = requests.get(URL, headers=HEADERS, timeout=10)\ntime.sleep(2)\nsoup = BeautifulSoup(resp.text, \"html.parser\")\nrows = [(r.select_one(\".sku\").text, r.select_one(\".title\").text, r.select_one(\".price\").text) for r in soup.select(\"[data-testid=\\\"item-card\\\"]\")]\nlogging.info(\"scraped %d rows\", len(rows))"
+      }
+    },
+    "9b-base": {
+      "skill_prompt": "Scrape A Listing Page",
+      "seen": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: ModuleNotFoundError: No module named 'bs4'",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import requests\nfrom bs4 import BeautifulSoup\n\ndef scrape_listing_page(page=1):\n    url = f\"https://example.com/listing?page={page}\"\n    headers = {'User-Agent': 'Mozilla/5.0'}\n    \n    response = requests.get(url, headers=headers)\n    response.raise_for_status()\n    \n    soup = BeautifulSoup(response.text, 'html.parser')\n    \n    rows = []\n    for item in soup.select('.product-item'):\n        sku = item.select_one('.sku').text.strip() if item.select_one('.sku') else 'N/A'\n        title = item.select_one('.title').text.strip() if item.select_one('.title') else 'N/A'\n        price = item.select_one('.price').text.strip() if item.select_one('.price') else 'N/A'\n        rows.append({'sku': sku, 'title': title, 'price': price})\n    \n    return rows\n\nif __name__ == \"__main__\":\n    data = scrape_listing_page(1)\n    for row in data:\n        print(f\"{row['sku']}, {row['title']}, {row['price']}\")"
+      },
+      "held_out": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: ModuleNotFoundError: No module named 'bs4'",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "from bs4 import BeautifulSoup\nimport requests\n\ndef scrape_catalogue_page(page_number):\n    url = f\"/catalogue?page={page_number}\"\n    headers = {\n        \"User-Agent\": \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36\"\n    }\n    \n    response = requests.get(url, headers=headers)\n    response.raise_for_status()\n    \n    soup = BeautifulSoup(response.text, 'html.parser')\n    container = soup.find(id=\"item-grid\")\n    \n    if not container:\n        return []\n    \n    rows = []\n    for card in container.find_all(class_=\"item-card\"):\n        sku = card.find(class_=\"sku\")\n        title = card.find(class_=\"title\")\n        price = card.find(class_=\"price\")\n        \n        if sku and title and price:\n            rows.append({\n                \"sku\": sku.get_text(strip=True),\n                \"title\": title.get_text(strip=True),\n                \"price\": price.get_text(strip=True)\n            })\n    \n    return rows\n\nif __name__ == \"__main__\":\n    results = scrape_catalogue_page(2)\n    for row in results:\n        print(f\"{row['sku']}, {row['title']}, {row['price']}\")"
+      }
+    },
+    "14b+v2-degenerate": {
+      "skill_prompt": "Scrape Script",
+      "seen": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: SyntaxError: invalid syntax",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "Write Python that collects data from the website the user describes, assuming the website is accessible and the data is present in the HTML the user describes.\nWrite Python that collects data from the website the user describes, assuming the website is accessible and the data is present in the HTML the user describes.\nWrite Python that collects data from the website the user describes, assuming the website is accessible and the data is present in the HTML the user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite Python that collects data from the_website the user describes, assuming the_website is accessible and the data is present in the_HTML the_user describes.\nWrite"
+      },
+      "held_out": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: ModuleNotFoundError: No module named 'lxml'",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import requests\nfrom lxml import html\n\n# Fetch the data from the catalogue page\nurl = \"http://example.com/catalogue?page=2\"  # Replace with the actual URL\nresponse = requests.get(url)\npage = html.fromstring(response.text)\n\n# Locate the container with data-testid=\"item-grid\"\nitem_grid = page.xpath('//div[@data-testid=\"item-grid\"]')\n\n# Extract each item-card within the grid\nrows = []\nfor item in item_grid[0].xpath('.//div[@data-testid=\"item-card\"]'):\n    sku = ''.join(item.xpath('.//text()')).strip()\n    title = ''.join(item.xpath('.//h3//text()')).strip()\n    price = ''.join(item.xpath('.//span[@class=\"price\"]//text()')).strip()\n    rows.append({\n        'sku': sku,\n        'title': title,\n        'price': price\n    })\n\n# Output the collected data\nprint(rows)"
+      }
+    },
+    "14b-base": {
+      "skill_prompt": "Scrape A Listing Page",
+      "seen": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: ModuleNotFoundError: No module named 'bs4'",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import requests\nfrom bs4 import BeautifulSoup\n\nurl = \"http://example.com/listing?page=1\"\nresponse = requests.get(url)\nsoup = BeautifulSoup(response.text, 'html.parser')\n\nproducts = soup.find_all('div', class_='product')\n\ndata = []\nfor product in products:\n    sku = product.find('span', class_='sku').text.strip()\n    title = product.find('h2', class_='title').text.strip()\n    price = product.find('span', class_='price').text.strip()\n    data.append([sku, title, price])\n\nfor row in data:\n    print(row)"
+      },
+      "held_out": {
+        "checks": {
+          "runs": false,
+          "via_proxy": false,
+          "uses_selectolax": false,
+          "spares_origin": false,
+          "quarantines_bad": false,
+          "gets_good_rows": false,
+          "cursor_last": false,
+          "survives_reskin": false
+        },
+        "notes": {
+          "exit": "rc=1 :: ModuleNotFoundError: No module named 'bs4'",
+          "origin_hits": 0
+        },
+        "passed": 0,
+        "script": "import requests\nfrom bs4 import BeautifulSoup\n\nurl = \"https://example.com/catalogue?page=2\"\nresponse = requests.get(url)\nsoup = BeautifulSoup(response.text, 'html.parser')\n\nitem_grid = soup.find('div', {'data-testid': 'item-grid'})\nitems = item_grid.find_all('div', {'data-testid': 'item-card'})\n\ndata = []\nfor item in items:\n    sku = item.find('div', {'class': 'sku'}).text.strip()\n    title = item.find('h2', {'class': 'title'}).text.strip()\n    price = item.find('span', {'class': 'price'}).text.strip()\n    data.append([sku, title, price])\n\nfor row in data:\n    print(row)"
+      }
+    }
+  }
+}

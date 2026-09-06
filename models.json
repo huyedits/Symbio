@@ -1,62 +1,86 @@
 {
+  "qwythos_9b_6bit": {
+    "model_name": "usermma/Qwythos-9B-Claude-Mythos-5-1M-mlx-6Bit",
+    "description": "Qwen3.5-9B (Qwythos Claude-Mythos fine-tune), 6-bit MLX — the headmaster from 2026-09-03. Hybrid attention (linear_attention x3 then full_attention, full_attention_interval 4), 32 layers, hidden 4096, head_dim 256, 1M context. Supported by stock mlx_lm 0.31.3 via models/qwen3_5.py — no fork needed. Vocab 248,044, which is NOT the Qwen3 tokenizer, so the old Qwen3-0.6B-4bit draft does not match it. Drafting with models/Qwen3.5-0.8B-4bit (same vocab) is DEPTH-CRITICAL, measured greedy over 3 prompts 2026-09-03: no draft 13.5 tok/s, k=1 16.3 (+21%, very tight: 16.3/16.2/16.3), k=2 14.8, k=3 11.8. Its hybrid cache is not trimmable (ArraysCache) so mlx_compat's snapshot path runs, and linear attention makes deep drafts cost more to verify — k=1 is the only depth that wins. BUT that +21% is unreachable while agent.repetition_penalty is set: logits_processors are unsupported on the hybrid path, so the shim silently falls back to plain decoding and drafted/undrafted both land at ~13.4. agent.draft_model is therefore \"\" (num_draft_tokens 1). To claim the +21%, drop repetition_penalty and re-verify the model does not loop — 3 prompts showed no degeneration either way, which is not yet enough.",
+    "adapter_compatible": false,
+    "memory_note": "7.3 GB on disk. Hidden 4096 vs the 14B's 5120, so no Qwen3 LoRA loads onto it — the headmaster runs base-only until an adapter is trained against this base. Fine-tuning is unproven here: at 248k vocab the output-logit memory is what OOM'd the 9B runs on this 16 GB machine, not the parameter count."
+  },
   "dense_14b": {
     "model_name": "Qwen/Qwen3-14B-MLX-4bit",
-    "description": "Dense 14B, 4-bit \u2014 the headmaster since 2026-08-26. Measured on this 16 GB M4 at 1.5k context, greedy: 12.72 tok/s alone, 26.04 tok/s with the Qwen3-0.6B-4bit draft at k=3 (peak k; 25.14 at k=4, 24.86 at k=5). That is within 11% of the 8B's own speculative speed (29.38), so the size costs almost nothing on decode. Shares the Qwen3 tokenizer (151,669, hash c079f0df0a2405ef) with the 8B and the 0.6B draft, and keeps a trimmable KV cache \u2014 no mlx_compat fork needed.",
+    "description": "Dense 14B, 4-bit — the headmaster since 2026-08-26. Measured on this 16 GB M4 at 1.5k context, greedy: 12.72 tok/s alone, 26.04 tok/s with the Qwen3-0.6B-4bit draft at k=3 (peak k; 25.14 at k=4, 24.86 at k=5). That is within 11% of the 8B's own speculative speed (29.38), so the size costs almost nothing on decode. Shares the Qwen3 tokenizer (151,669, hash c079f0df0a2405ef) with the 8B and the 0.6B draft, and keeps a trimmable KV cache — no mlx_compat fork needed.",
     "adapter_compatible": true,
-    "memory_note": "~7.3 GB on disk; 9.05 GB peak at 1.5k context, 10.77 GB at 8k. One model resident at a time on 16 GB \u2014 keep dispatch.headmaster_deep_sleep_while_workers on."
+    "memory_note": "~7.3 GB on disk; 9.05 GB peak at 1.5k context, 10.77 GB at 8k. One model resident at a time on 16 GB — keep dispatch.headmaster_deep_sleep_while_workers on."
   },
   "dense_7b": {
     "model_name": "mlx-community/Qwen3-8B-4bit",
-    "description": "Dense 8B \u2014 best balance of quality, speed, and LoRA compatibility",
+    "description": "Dense 8B — best balance of quality, speed, and LoRA compatibility",
     "adapter_compatible": true,
     "memory_note": "~4.6 GB on disk, ~6-8 GB RAM at runtime"
   },
   "dense_7b_3bit": {
     "model_name": "mlx-community/Qwen3-8B-3bit",
-    "description": "Dense 8B, 3-bit \u2014 lighter/faster than 4-bit, more headroom on 16 GB",
+    "description": "Dense 8B, 3-bit — lighter/faster than 4-bit, more headroom on 16 GB",
     "adapter_compatible": true,
     "memory_note": "~3.6 GB on disk, ~5-7 GB RAM at runtime"
   },
   "dense_3b": {
     "model_name": "mlx-community/Qwen2.5-3B-Instruct-4bit",
-    "description": "Dense 3B \u2014 smaller fallback, does not match the current LoRA adapter",
+    "description": "Dense 3B — smaller fallback, does not match the current LoRA adapter",
     "adapter_compatible": false,
     "memory_note": "~2 GB on disk, ~4-6 GB RAM at runtime"
   },
   "moe_a27b": {
     "model_name": "mlx-community/Qwen1.5-MoE-A2.7B-Chat-4bit",
-    "description": "MoE 14.3B total / 2.7B active \u2014 experimental, weaker tool following",
+    "description": "MoE 14.3B total / 2.7B active — experimental, weaker tool following",
     "adapter_compatible": false,
     "memory_note": "~8 GB on disk, ~8-10 GB RAM at runtime"
   },
   "dense_1.5b": {
     "model_name": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
-    "description": "Dense 1.5B \u2014 smallest/fastest dense option, no matching LoRA adapter",
+    "description": "Dense 1.5B — smallest/fastest dense option, no matching LoRA adapter",
     "adapter_compatible": false,
     "memory_note": "~1 GB on disk, ~2-3 GB RAM at runtime"
   },
   "phi4_mini_4bit": {
     "model_name": "mlx-community/Phi-4-mini-instruct-4bit",
-    "description": "Dense 3.8B Phi-4-mini instruct, 4-bit \u2014 strong tool/tag following, LoRA-compatible footprint",
+    "description": "Dense 3.8B Phi-4-mini instruct, 4-bit — strong tool/tag following, LoRA-compatible footprint",
     "adapter_compatible": false,
     "memory_note": "~2.2 GB on disk, ~3-4 GB RAM at runtime; LoRA headroom on 16 GB"
   },
   "phi4_14b_4bit": {
     "model_name": "mlx-community/phi-4-4bit",
-    "description": "Dense 14B Phi-4, 4-bit \u2014 measured 2026-08-23 as a worker base: 4/8 on a deterministic battery vs Qwen3-8B's 6/8 (lost arithmetic, spelling, fraction comparison). Not used as the default worker base for that reason",
+    "description": "Dense 14B Phi-4, 4-bit — measured 2026-08-23 as a worker base: 4/8 on a deterministic battery vs Qwen3-8B's 6/8 (lost arithmetic, spelling, fraction comparison). Not used as the default worker base for that reason",
     "adapter_compatible": false,
     "memory_note": "~8.3 GB on disk, ~9-10 GB RAM at runtime; one model resident at a time on 16 GB"
   },
   "ternary_8b": {
     "model_name": "prism-ml/Ternary-Bonsai-8B-mlx-2bit",
-    "description": "Ternary 2-bit 8B \u2014 the best tool-calling result measured here, 2026-08-30. BFCL bfcl_simple n=120: 94.17%, against Qwen3-8B-4bit 80.83% and Qwen3-14B-3bit 78.33% \u2014 and it beat both WITHOUT the 0.6B draft model they each had. 285s for the suite against their ~1100s. Loads in 1.6s. The win is reliability of FORM, not smarter arguments: it emitted a call on 120/120 tasks where Qwen3-8B produced none on 19, and on calls actually emitted Qwen3-8B is slightly better on argument values (96.0% vs 94.2%). Its chat template hard-closes <think></think> unconditionally, so it never reasons and never burns the token budget; forcing the block open makes it strictly worse (never terminates, 3.6-9x slower, wrong answers). Serve it no-think, which is the only mode it has.",
+    "description": "Ternary 2-bit 8B — the best tool-calling result measured here, 2026-08-30. BFCL bfcl_simple n=120: 94.17%, against Qwen3-8B-4bit 80.83% and Qwen3-14B-3bit 78.33% — and it beat both WITHOUT the 0.6B draft model they each had. 285s for the suite against their ~1100s. Loads in 1.6s. The win is reliability of FORM, not smarter arguments: it emitted a call on 120/120 tasks where Qwen3-8B produced none on 19, and on calls actually emitted Qwen3-8B is slightly better on argument values (96.0% vs 94.2%). Its chat template hard-closes <think></think> unconditionally, so it never reasons and never burns the token budget; forcing the block open makes it strictly worse (never terminates, 3.6-9x slower, wrong answers). Serve it no-think, which is the only mode it has.",
     "adapter_compatible": false,
-    "memory_note": "2.15 GB on disk, 2.4 GB peak \u2014 a third of the 14B. Fits wired memory with room to spare; set gpu.wired_limit_mb or it pages to SSD."
+    "memory_note": "2.15 GB on disk, 2.4 GB peak — a third of the 14B. Fits wired memory with room to spare; set gpu.wired_limit_mb or it pages to SSD."
   },
   "ternary_27b": {
     "model_name": "prism-ml/Ternary-Bonsai-27B-mlx-2bit",
-    "description": "Ternary 2-bit 27B, multimodal (Qwen3_5ForConditionalGeneration, vision tower included). Runs fine on 16 GB with wired memory: 3.9s load, 11.5 tok/s, GPU 100%. An earlier 'non-functional' verdict was wrong \u2014 it was measured with pageable memory on a machine already 5.5 GB into swap. BFCL bfcl_simple n=30: 86.67%, which at that sample is statistically indistinguishable from the 8B's 94.17% (95% CI roughly 74-99%). It costs 6.5s/task against the 8B's 2.7s for no measured gain. Needs a tokenizer patch: tokenizer_config.json declares TokenizersBackend, change tokenizer_class to PreTrainedTokenizerFast or it will not load.",
+    "description": "Ternary 2-bit 27B, multimodal (Qwen3_5ForConditionalGeneration, vision tower included). Runs fine on 16 GB with wired memory: 3.9s load, 11.5 tok/s, GPU 100%. An earlier 'non-functional' verdict was wrong — it was measured with pageable memory on a machine already 5.5 GB into swap. BFCL bfcl_simple n=30: 86.67%, which at that sample is statistically indistinguishable from the 8B's 94.17% (95% CI roughly 74-99%). It costs 6.5s/task against the 8B's 2.7s for no measured gain. Needs a tokenizer patch: tokenizer_config.json declares TokenizersBackend, change tokenizer_class to PreTrainedTokenizerFast or it will not load.",
     "adapter_compatible": false,
     "memory_note": "7.9 GB on disk, ~8.4 GB in GPU memory. Requires gpu.wired_limit_mb set (11264 works on 16 GB); unwired it pages to SSD and stalls."
+  },
+  "nemo_12b": {
+    "model_name": "mlx-community/Mistral-Nemo-Instruct-2407-4bit",
+    "description": "Dense 12.2B Mistral-Nemo (2407), 4-bit MLX. Measured here 2026-09-03 on bfcl_simple n=120: 92.50% against Qwen3-8B-4bit's 80.83% and Qwen3-14B-3bit's 78.33% -- and in 516s against the 8B's 1157s, WITHOUT a draft model where the Qwen runs had one. Plain MistralForCausalLM, so a trimmable KV cache and stock mlx_lm support, no fork. Vocab 131,072 -- BELOW the 14B's 151,936, so the output-logit memory that governs the LoRA ceiling on this 16 GB machine is cheaper here than on the model that already fine-tunes. No draft model shares its tokenizer, so agent.draft_model must be cleared or speculative decoding runs against the wrong vocab. Older than it looks: July 2024, against Qwen3-8B's April 2025.",
+    "adapter_compatible": false,
+    "memory_note": "6.89 GB weights + ~1.09 GB KV at the current 7.1k-token prompt = ~8.0 GB, against the Qwen3-14B's ~8.9 GB that freezes this machine with a browser open. Only ~0.9 GB of headroom bought, so pair it with agent.kv_bits 8 and fewer tools.enabled_groups if browsing. Hidden 5120 / 40 layers -- same KV geometry as the 14B, so the cache costs the same per token."
+  },
+  "ministral3_8b": {
+    "model_name": "mlx-community/Ministral-3-8B-Instruct-2512-4bit",
+    "description": "Dense 8B Ministral-3 (Dec 2025), 4-bit MLX. The best tool-calling result measured on this machine: bfcl_simple n=120 95.00%, above Ternary-Bonsai-8B's 94.17% and Qwen3-8B-4bit's 80.83%, and unlike Bonsai it is LoRA-trainable. Mistral3ForConditionalGeneration, supported by stock mlx_lm 0.31.3. Vocab 131,072, shared with Ministral-3-3B and -14B, so the 3B is a matched draft model -- the speculative pairing the Qwen3 family had.",
+    "adapter_compatible": false,
+    "memory_note": "5.60 GB weights + ~0.93 GB KV = ~6.5 GB, which is the only candidate that leaves real room for a browser alongside it. 34 layers / hidden 4096."
+  },
+  "falcon3_10b": {
+    "model_name": "mlx-community/Falcon3-10B-Instruct-4bit",
+    "description": "Dense 10B Falcon3, 4-bit MLX. The best tool-calling result measured on this machine: bfcl_simple n=120 95.83%, above Ministral-3-8B's 95.00%, Ternary-Bonsai-8B's 94.17% and Qwen3-8B-4bit's 80.83% -- in 544s without a draft model. Its 5 failures are all symbolic-math argument values (calculate_derivative, integrate), the same cases every model here misses; no format breakage. Plain llama architecture, so stock mlx_lm and a trimmable KV cache -- no fork, and chat.py's prompt-cache trim path stays live. Vocab 131,072, below the 14B's 151,936, so the output-logit memory that sets the LoRA ceiling on this 16 GB machine is cheaper here than on the model that already fine-tunes. Untested beyond tool calling: no CLI run, no golden battery, no ARC.",
+    "adapter_compatible": false,
+    "memory_note": "5.80 GB weights + ~1.16 GB KV at the current 7.1k prompt = ~6.96 GB, against the Qwen3-14B's ~9.01 GB that freezes this machine with a browser open. Two gigabytes of headroom is the difference that matters here. 40 layers, hidden 3072, and only 4 KV heads (GQA) -- which is why a 10B has a smaller cache than the 8B it replaces."
   }
 }

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from mlx_lm import load
+from symbio.config import _adapter_matches_model, adapter_weights_present
 from symbio import AIAgent, DEFAULT_CONFIG, load_config, parse_tools
 
 PROJECT_DIR = Path(__file__).parent.resolve()
@@ -36,15 +37,25 @@ def run_case(agent, case):
 def main():
     config = load_config()
     print(f"Loading {config['model_name']}...")
-    adapter_config = ADAPTER_DIR / "adapter_config.json"
-    if adapter_config.exists():
+    # Three questions, not one. chat.py asks all three before loading an
+    # adapter; this asked only the first, so switching the headmaster to a
+    # model of a different width failed every case with
+    #   [matmul] ... shape (1,2048,3072) must match ... (4096,8)
+    # — an adapter trained at hidden 4096 loaded onto a 3072-wide model. The
+    # smoke test then reported eight behavioural failures for what was
+    # actually one load-time mismatch.
+    adapter_loaded = adapter_weights_present() and _adapter_matches_model(config)
+    if adapter_loaded:
         print("Found adapter. Loading with LoRA...")
         model, tokenizer = load(config["model_name"], adapter_path=str(ADAPTER_DIR))
     else:
-        print("No adapter found. Using base model.")
+        if (ADAPTER_DIR / "adapter_config.json").exists():
+            print("Adapter does not match this model. Using base model.")
+        else:
+            print("No adapter found. Using base model.")
         model, tokenizer = load(config["model_name"])
 
-    agent = AIAgent(config, model, tokenizer, adapter_config.exists())
+    agent = AIAgent(config, model, tokenizer, adapter_loaded)
 
     cases = [
         ("Identity: assistant name", "What is your name?", []),

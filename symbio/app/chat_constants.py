@@ -66,6 +66,7 @@ _MAX_RATE_LIMIT_WAIT = 5.0
 _TELEGRAM_CONFIRM_TOOLS = frozenset({
     "execute_code", "run_command", "edit_file", "write_file", "digest_notes", "train_adapter",
     "schedule_job", "config_set", "delete_cron_job", "update_cron_job",
+    "delete_note",
 })
 
 # Map internal tool names back to Hermes-style names for <tool_response> labels.
@@ -98,13 +99,13 @@ _COMPLETION_CLAIM = re.compile(
     r"\b(?:"
     r"I(?:'ve| have)\s+(?:just\s+|already\s+)?(?:run|ran|executed|fetched|scraped|"
     r"saved|written|wrote|created|made|moved|updated|bumped|downloaded|installed|"
-    r"deleted|removed|sent|opened|read)"
+    r"deleted|removed|sent|opened|read|posted|submitted|published|tweeted)"
     r"|I\s+(?:ran|executed|fetched|scraped|saved|wrote|created|moved|updated|bumped|"
-    r"downloaded|installed|deleted|removed|sent)"
+    r"downloaded|installed|deleted|removed|sent|posted|submitted|published|tweeted)"
     r"|(?:has|have|had)\s+been\s+(?:run|executed|saved|written|created|moved|updated|"
-    r"downloaded|installed|deleted|removed|sent|scraped)"
+    r"downloaded|installed|deleted|removed|sent|scraped|posted|submitted|published|tweeted)"
     r"|successfully\s+(?:ran|executed|fetched|scraped|saved|created|moved|updated|"
-    r"downloaded|installed|deleted|sent)"
+    r"downloaded|installed|deleted|sent|posted|submitted|published|tweeted)"
     r")\b",
     re.I)
 

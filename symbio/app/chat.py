@@ -27,7 +27,7 @@ from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
 from symbio.rag import Retriever
 from symbio import constants
-from symbio.config import _adapter_matches_model
+from symbio.config import _adapter_matches_model, adapter_weights_present
 from symbio.computer import BrowserSession
 from symbio import safety
 from symbio.tools import tool_few_shots
@@ -198,7 +198,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # adapter_loaded state is "unknown" when no model is supplied. We infer
         # presence cheaply from disk without loading weights, so the banner can
         # still show something useful before the model wakes up.
-        self.adapter_loaded = adapter_loaded if adapter_loaded is not None else self.adapter_config.exists()
+        self.adapter_loaded = adapter_loaded if adapter_loaded is not None else adapter_weights_present()
         # model/tokenizer may be None until _ensure_model_loaded() runs.
         self.model: Any | None = model if model is not None else None
         self.tokenizer: Any | None = tokenizer if tokenizer is not None else None
@@ -212,7 +212,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # setup immediately (same behavior as before lazy loading).
         if self._model_loaded:
             if adapter_loaded is None:
-                self.adapter_loaded = self.adapter_config.exists()
+                self.adapter_loaded = adapter_weights_present()
             self._finish_model_setup()
             self._run_post_load_self_check()
 
@@ -234,7 +234,27 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                                    exclude_session_id=self.session_id,
                                    llm_fn=self._generate_tag_metadata)
         self.tag_index: TagIndex | None = None
-        self.browser = BrowserSession(confirm_fn=self.confirm_fn)
+        # Only pass profile_dir when the feature is on, so the default call is
+        # byte-identical to what it was. Tests (and anything else) substitute a
+        # BrowserSession stub built for the old signature, and an unconditional
+        # keyword breaks every one of them for a feature they never enabled.
+        _bcfg = self.config.get("browser") or {}
+        _profile = None
+        if _bcfg.get("persistent_profile"):
+            _profile = (Path(_bcfg["profile_dir"]).expanduser()
+                        if _bcfg.get("profile_dir")
+                        else constants.BROWSER_PROFILE_DIR)
+        # Grow the call only as far as the config actually asks. Tests and
+        # other front-ends substitute a BrowserSession stub built for the old
+        # signature, and an unconditional keyword breaks every one of them —
+        # which is exactly what happened once persistent_profile was switched
+        # on in a real config.json and the suite started taking this branch.
+        _kw = {"confirm_fn": self.confirm_fn}
+        if _profile is not None:
+            _kw["profile_dir"] = _profile
+            if _bcfg.get("chrome_profile"):
+                _kw["chrome_profile"] = _bcfg["chrome_profile"]
+        self.browser = BrowserSession(**_kw)
         # Worker models are loaded lazily on first delegated task — this
         # just holds the (empty) pool, no extra RAM until dispatch.enabled
         # and something actually delegates. Status messages go through the
@@ -473,10 +493,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # 5120 is the served model's width, 4096 the adapter's. A session
             # that boots fine and breaks the first time a worker runs is worse
             # than one that never loads the adapter at all.
-            if self.adapter_config.exists() and not _adapter_matches_model(self.config):
+            if adapter_weights_present() and not _adapter_matches_model(self.config):
                 self.model, self.tokenizer = load(self.config["model_name"])
                 self.adapter_loaded = False
-            elif self.adapter_config.exists():
+            elif adapter_weights_present():
                 self.model, self.tokenizer = load(
                     self.config["model_name"], adapter_path=str(constants.ADAPTER_DIR)
                 )
@@ -531,14 +551,14 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # while the download bar shows progress.
             self.output_fn(" Waking model...")
             try:
-                if self.adapter_config.exists() and not _adapter_matches_model(self.config):
+                if adapter_weights_present() and not _adapter_matches_model(self.config):
                     self.output_fn(
                         " [Warning] Existing adapter was trained for a different model."
                         " Loading base model only."
                     )
                     self.model, self.tokenizer = load(self.config["model_name"])
                     self.adapter_loaded = False
-                elif self.adapter_config.exists():
+                elif adapter_weights_present():
                     self.output_fn(" Loading adapter...")
                     try:
                         self.model, self.tokenizer = load(
@@ -1647,7 +1667,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         remove it. Declining or asking to keep it both just reset the grace
         period so the reminder does not repeat every session — nothing is
         ever deleted unless the user explicitly agrees to remove it."""
-        if not self.adapter_config.exists():
+        if not adapter_weights_present():
             return
         if self.adapter_loaded:
             # Actively in use this session; that alone counts as "used".
@@ -1786,7 +1806,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         try:
             trained = self._train_unloaded(iters=iters)
             local_telemetry.log_event("train", iters=iters, ok=bool(trained))
-            if not trained or not self.adapter_config.exists():
+            if not trained or not adapter_weights_present():
                 # Covers the "trained but no adapter on disk" case, which
                 # _train_unloaded treats as success and so leaves unloaded.
                 self._restore_model()
@@ -2066,7 +2086,28 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 pass
 
         learn.maybe_train_on_mistakes(
-            self.config, self.tokenizer, self.system_prompt, train_fn=self._guarded_train)
+            self.config, self.tokenizer, self.system_prompt,
+            train_fn=self._guarded_train, check_fn=self._golden_check)
+
+    def _golden_check(self) -> tuple[int, int] | None:
+        """Run the golden battery against the live model and return
+        (passing, total), without training or touching the adapter.
+
+        This is _guarded_train's pre-train baseline on its own, for the caller
+        that wants to know whether the model is healthy BEFORE deciding to
+        spend a training run. Returns None when the battery is switched off or
+        could not run, which every caller must read as "no answer" rather than
+        as a failing score."""
+        if not self.config.get("learn", {}).get("golden_set_enabled", True):
+            return None
+        try:
+            result = golden.run_golden_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config, self.enabled_groups)
+        except Exception as e:
+            self.output_fn(f"  [Learn] Golden check failed to run: {e}")
+            return None
+        return result.pass_count, result.total
 
     def _classify_mistake(self, original_query: str, wrong_answer: str,
                           correct_answer: str) -> str:
@@ -2094,12 +2135,26 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 max_tokens=12, verbose=False)
             return tooling.strip_tool_tags(tooling.strip_reasoning_block(raw)).strip()
 
-        known = tuple(learn.mistake_category_counts().keys())
+        # Every other model call in this file marks the session busy first
+        # (the boot prefill, _generate_reply, the tag indexer's own path). The
+        # background note-indexer only waits on this flag, and it drives the
+        # same model through _generate_tag_metadata -- so without it this
+        # throwaway classification can run a second forward pass concurrently
+        # with an indexing pass, which on a 16 GB box means two live KV caches
+        # for one model rather than one.
+        was_busy = self._indexing_now
+        self._indexing_now = True
         try:
+            # Inside the try with the generation: this reads every pending
+            # mistake note off disk, and a failure there must not cost the
+            # capture it only annotates.
+            known = tuple(learn.mistake_category_counts().keys())
             return learn.classify_mistake_category(
                 original_query, wrong_answer, correct_answer, _classify_fn, known)
         except Exception:
             return "general"
+        finally:
+            self._indexing_now = was_busy
 
     def _decay_stale_notes(self) -> list[str]:
         """Archive expired 'Learned:' research notes and purge their training
