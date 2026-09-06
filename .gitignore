@@ -147,3 +147,10 @@ build/
 # The agent's persistent browser profile: session cookies for whatever
 # the user logged into. Never publish.
 /browser_profile/
+
+# Chromium writes a profile directory here when a launch is given the literal
+# path "null" -- what a shell redirect meant as /dev/null leaves behind. It is
+# browser state (Safe Browsing lists, NativeMessagingHosts, a first-party-sets
+# db), so it is both junk and the same kind of thing browser_profile/ is
+# ignored for.
+/null/
