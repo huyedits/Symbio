@@ -97,7 +97,32 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # (3 was too few; 6 handled an ordinary moving API; raised to 15 on
         # 2026-08-31 after a 14B gave up mid-crack with rounds to spare.)
         "max_tool_rounds": 15,
+        # A cap on MESSAGES, over messages of unbounded size. 20 turns of
+        # ordinary chat is a couple of thousand tokens; 20 turns of browser
+        # automation is 20 x max_page_chars, and that is the arithmetic that
+        # hard-froze the Mac — see agent.kv_budget_mb, which bounds the same
+        # history in tokens because tokens are what the KV cache is priced in.
         "history_limit": 20,
+        # How much RAM the KV cache may occupy, and so — divided by the
+        # measured cost of one cached token — how long a prompt this box can
+        # afford. The cache is the one part of a session that grows without
+        # limit: on the 14B plus its draft a token costs ~285 KB of BF16 KV
+        # (1.8 GB for the 6.6k-token system prefix, measured), so a 50k-token
+        # conversation wants ~14 GB of cache on top of ~9 GB of weights. On a
+        # 16 GB machine that is not an OOM kill, it is swap, and the whole
+        # desktop stops responding — reported 2026-09-07 as "after 50k the
+        # whole thing freezes".
+        #
+        # 4000 MB leaves the browser the ~6 GB it needs beside the model. It
+        # is a floor on capability, not a ceiling: agent.kv_bits quarters the
+        # per-token cost, and the cap is derived from the LIVE cache, so
+        # turning quantisation on roughly quadruples the affordable context
+        # without touching this number.
+        "kv_budget_mb": 4000,
+        # "auto" derives the prompt cap from kv_budget_mb; an integer sets it
+        # in tokens directly; 0 switches the cap off entirely (which is what
+        # every version before 2026-09-07 did).
+        "max_prompt_tokens": "auto",
         "sandbox_timeout": 30,
         "code_timeout": 60,
         "max_output_len": 4000,
@@ -185,6 +210,39 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # directory first creates a numbered backup (e.g. file.txt.1.bak). The
         # user can disable this in setup or config if they prefer in-place edits.
         "backup_before_edit": True,
+    },
+    # Which compute stack runs the model: "mlx" (Apple Silicon, the tested
+    # path) or "cuda". Empty means detect — Apple Silicon picks mlx, a machine
+    # with a visible NVIDIA device picks cuda. SYMBIO_BACKEND overrides the
+    # detection; this setting overrides both.
+    #
+    # The CUDA path has never been executed. See symbio/backend.py.
+    "backend": "",
+    "cuda": {
+        # Bits to load the base model at. 4 (NF4 via bitsandbytes) is the
+        # equivalent of the pre-quantized -4bit repos the MLX side uses, and
+        # is what makes a 14B fit on a 16 GB card. 8 is also quantized; any
+        # other value loads unquantized.
+        "load_in_bits": 4,
+    },
+    "vision": {
+        # A vision-language model that looks at screenshots and reports what is
+        # on screen, with pixel coordinates you can click. On by default: the
+        # tools that need it are themselves opt-in, and a browser the assistant
+        # can drive but not see is how it came to post a half-typed message to
+        # a composer it had opened by accident.
+        "enabled": True,
+        # Qwen3-VL 4B, 4-bit (~2.5 GB on disk, ~4.2 GB peak while generating).
+        # It grounds: boxes come back normalised 0-1000 and rescale to within
+        # a couple of pixels of the real element. Swapping this for a model
+        # that only describes screens loses the coordinates and with them the
+        # point -- see symbio/vision.py.
+        "model_name": "lmstudio-community/Qwen3-VL-4B-Instruct-MLX-4bit",
+        # Unload the main model while the vision model runs. On 16 GB the two
+        # of them plus a browser do not fit, and the failure is a hard freeze
+        # rather than an error. Turn it off only on a machine with the RAM to
+        # hold both, where it saves an unload/reload per look.
+        "sleep_main_model": True,
     },
     "browser": {
         # Browser automation is off by default. When enabled, the agent launches
