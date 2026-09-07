@@ -57,7 +57,9 @@ from symbio.app.chat_constants import (  # noqa: F401  (re-exported; see above)
     THINKING_LEVELS, THINKING_ORDER, _QUIT, _HANDLED, _WEB_TOOLS, _BROWSER_TOOLS,
     _BROWSER_ACTION_TOOLS, _MAX_TOOL_RETRIES, _MAX_RATE_LIMIT_RETRIES,
     _MAX_RATE_LIMIT_WAIT, _TELEGRAM_CONFIRM_TOOLS, _INTERNAL_TO_HERMES_NAME,
-    _internal_to_hermes_name, _common_prefix_len, _COMPLETION_CLAIM, _CLAIM_HEDGE,
+    _internal_to_hermes_name, _common_prefix_len, _cache_nbytes,
+    _message_fingerprint,
+    _COMPLETION_CLAIM, _CLAIM_HEDGE,
     _claims_completion
 )
 from symbio.app.chat_text import (  # noqa: F401  (re-exported; see above)
@@ -74,6 +76,7 @@ from symbio.app.chat_text import (  # noqa: F401  (re-exported; see above)
     _AFFECT_EXASPERATION_NORM, _CMD_START_RE, infer_user_affect, _MOOD_TAG_RE,
     _VALID_MOODS
 )
+from symbio.app import chat_style
 from symbio.app.chat_ui import (  # noqa: F401  (re-exported; see above)
     _persist_health_report, _make_chat_logger, _RAINBOW_COLORS, rainbow, _Spinner,
     _adapter_trained_at, _adapter_iters, _fmt_ago, learn_progress_line,
@@ -82,6 +85,21 @@ from symbio.app.chat_ui import (  # noqa: F401  (re-exported; see above)
 from symbio.app.chat_commands import CommandsMixin
 from symbio.app.chat_tools import ToolsMixin
 from symbio.app.chat_turn import AgentTurnMixin
+
+
+def _cfg_path(value: Any) -> str | None:
+    """A config path, or None when the value is unset or the literal "null".
+
+    A config.json that says "profile_dir": "null" (the string, not JSON null)
+    has actually happened: the string is truthy, so the old code passed
+    Path("null") to Chromium, which wrote a full profile into a directory
+    named null/. Treat the string as unset so it can never recur.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() == "null":
+        return None
+    return value
 
 
 def _browser_peek(browser: BrowserSession, config: dict | None = None) -> str:
@@ -137,6 +155,25 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # under it (adapter reload, a generation that errored mid-stream).
         self._prompt_cache: list | None = None
         self._cached_prompt_ids: list[int] | None = None
+        # What one cached token actually costs on this box, measured off the
+        # live cache rather than derived from layer counts and head dimensions
+        # — the arithmetic changes with every headmaster swap and with
+        # agent.kv_bits, and the cache can just be weighed. None until the
+        # first prefill has something to weigh.
+        self._kv_bytes_per_token: float | None = None
+        # Whether the session has already told the user it is dropping old
+        # turns, so a long browser run does not repeat the notice every time.
+        self._said_context_full = False
+        # Fingerprint of the oldest message still being shown to the model.
+        # The trim has to be sticky or it is worse than useless: recomputed
+        # from the full history every turn, it drops two more messages every
+        # turn, which moves the start of the prompt every turn, which is the
+        # one thing that invalidates the KV prefix. Measured on the 0.6B before
+        # this existed: reuse fell to 18 tokens and every single turn
+        # re-prefilled its whole 3.6k-token context. Holding the boundary still
+        # until it actually has to move is what makes the intervening turns
+        # cheap. See _fit_messages_to_cap.
+        self._context_floor: str | None = None
         # Speculative decoding's draft model, loaded on first use. A small
         # model proposes several tokens, the real one verifies them in a single
         # pass; on a memory-bound Mac that is where the speedup comes from.
@@ -241,8 +278,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         _bcfg = self.config.get("browser") or {}
         _profile = None
         if _bcfg.get("persistent_profile"):
-            _profile = (Path(_bcfg["profile_dir"]).expanduser()
-                        if _bcfg.get("profile_dir")
+            _profile_dir = _cfg_path(_bcfg.get("profile_dir"))
+            _profile = (Path(_profile_dir).expanduser()
+                        if _profile_dir
                         else constants.BROWSER_PROFILE_DIR)
         # Grow the call only as far as the config actually asks. Tests and
         # other front-ends substitute a BrowserSession stub built for the old
@@ -252,8 +290,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         _kw = {"confirm_fn": self.confirm_fn}
         if _profile is not None:
             _kw["profile_dir"] = _profile
-            if _bcfg.get("chrome_profile"):
-                _kw["chrome_profile"] = _bcfg["chrome_profile"]
+            _chrome_profile = _cfg_path(_bcfg.get("chrome_profile"))
+            if _chrome_profile:
+                _kw["chrome_profile"] = _chrome_profile
         self.browser = BrowserSession(**_kw)
         # Worker models are loaded lazily on first delegated task — this
         # just holds the (empty) pool, no extra RAM until dispatch.enabled
@@ -513,6 +552,30 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     def _status(self, message: str):
         self.output_fn(message)
 
+    # One rule for both of these, the same one style_line follows: colour on
+    # means the new look, colour off means EXACTLY the legacy text. Anything
+    # that reads this output rather than looking at it — the pty harnesses in
+    # verify_transcript_fixes.py, the Telegram bridge, a piped log — waits on
+    # the literal "Huy     : " prompt, so a styled one hangs it forever. Off a
+    # terminal, or under NO_COLOR / SYMBIO_NO_COLOR, nothing changes at all.
+    def assistant_prefix(self) -> str:
+        """What precedes the assistant's streamed reply."""
+        if not chat_style.colors_enabled():
+            return f"{self.config['assistant_name']:8}: "
+        return chat_style.assistant_prefix()
+
+    def user_prompt(self) -> str:
+        """What the person types on.
+
+        A method rather than an f-string at the call site because the two
+        places that draw this prompt — the reader, and the redraw after a
+        background thread prints over it — have to agree, and they drifted
+        apart once already when only one of them was changed.
+        """
+        if not chat_style.colors_enabled():
+            return f"{self.config['user_name']:8}: "
+        return chat_style.user_prompt()
+
     def _ensure_model_loaded(self):
         """Load the model on first use. Idempotent and thread-safe.
 
@@ -766,6 +829,173 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             caches = caches + make_prompt_cache(draft)
         return caches
 
+    # Nothing bounded the conversation in tokens. history_limit counts
+    # MESSAGES, and a browser turn's messages are page dumps of up to
+    # max_page_chars each, so twenty of them is tens of thousands of tokens —
+    # and the KV cache holding them grows linearly and is never trimmed. On the
+    # 14B plus its draft a token costs ~285 KB, so a 50k-token session asks for
+    # ~14 GB of cache beside ~9 GB of weights on a 16 GB machine. macOS does
+    # not OOM-kill that: it swaps, and the desktop stops responding. Reported
+    # 2026-09-07 as "after 50k the whole thing freezes".
+    #
+    # A conservative stand-in until the live cache has been weighed once, sized
+    # for the 14B + draft at BF16 so the first turn of a cold session errs
+    # toward trimming rather than toward the freeze.
+    _FALLBACK_KV_BYTES_PER_TOKEN = 285 * 1024
+    # Below this the cap is doing more harm than the freeze it prevents: the
+    # system prompt alone is thousands of tokens, and a cap under it would trim
+    # the whole conversation away every turn and still not fit.
+    _MIN_TOKEN_CAP = 4096
+    # Trimming lands here rather than exactly at the cap. Landing at the cap
+    # means overflowing again on the very next turn, and each overflow moves
+    # the start of the conversation, which is the one thing that invalidates
+    # the KV prefix — so trimming to the line would re-prefill the whole
+    # remaining context every single turn. Undershooting buys several cheap
+    # turns per expensive one.
+    _TRIM_TARGET = 0.75
+
+    def _measure_kv_cost(self, tokens: int) -> None:
+        """Weigh the live cache and remember what a token costs.
+
+        Called wherever the cache and its token count are both known and
+        agree. A measurement is only kept if it is positive and sane: a
+        half-built cache would otherwise report a per-token cost near zero and
+        hand back a cap of millions of tokens, which is the freeze again.
+        """
+        if tokens <= 0:
+            return
+        nbytes = _cache_nbytes(self._prompt_cache)
+        if nbytes <= 0:
+            return
+        per_token = nbytes / tokens
+        if per_token < 1024:  # smaller than any real model's per-token KV
+            return
+        self._kv_bytes_per_token = per_token
+
+    def _prompt_token_cap(self) -> int:
+        """The longest prompt this box can hold in cache, in tokens.
+
+        0 disables the cap, which is what every version before 2026-09-07 did.
+        """
+        agent_cfg = self.config.get("agent", {})
+        setting = agent_cfg.get("max_prompt_tokens", "auto")
+        if isinstance(setting, bool):
+            setting = "auto"
+        if isinstance(setting, (int, float)):
+            return 0 if setting <= 0 else max(self._MIN_TOKEN_CAP, int(setting))
+        if isinstance(setting, str) and setting.strip().lstrip("-").isdigit():
+            value = int(setting.strip())
+            return 0 if value <= 0 else max(self._MIN_TOKEN_CAP, value)
+        try:
+            budget_mb = float(agent_cfg.get("kv_budget_mb", 4000))
+        except (TypeError, ValueError):
+            budget_mb = 4000.0
+        if budget_mb <= 0:
+            return 0
+        per_token = self._kv_bytes_per_token or self._FALLBACK_KV_BYTES_PER_TOKEN
+        return max(self._MIN_TOKEN_CAP, int(budget_mb * 1024 * 1024 / per_token))
+
+    def _fit_messages_to_cap(
+        self, messages: list[dict[str, str]], counts: list[int],
+        overhead: int, cap: int,
+    ) -> tuple[list[dict[str, str]], int]:
+        """Drop and, as a last resort, truncate the oldest messages to fit.
+
+        Returns (messages, dropped). Works on token counts already taken so a
+        long conversation is tokenized once here, not once per candidate trim.
+
+        The system prompt and the last few turns are never dropped: the tail is
+        the question being answered, and the head is the only thing telling the
+        model what it is. When even that floor does not fit — one enormous page
+        dump — the oldest kept message is cut down by characters instead, and
+        says so in its own text, because a silently shortened observation is
+        how a model comes to report what it cannot see.
+        """
+        # min(), not max(): _MIN_TOKEN_CAP is a floor on the CAP, and
+        # reusing it here made the target equal the cap on any small
+        # budget — which is no undershoot at all, so a session that had
+        # gone over trimmed again on every single turn. Measured on the
+        # 0.6B: 7 trims in 7 turns, reuse pinned at 18 tokens.
+        target = max(1, min(cap, int(cap * self._TRIM_TARGET)))
+        keep_head = 1 if messages and messages[0].get("role") == "system" else 0
+        keep_tail = min(4, max(0, len(messages) - keep_head))
+        total = overhead + sum(counts)
+        first = keep_head
+        last_droppable = len(messages) - keep_tail
+        dropped = 0
+        # Start from where the last trim left off, so an over-budget session
+        # keeps showing the model the SAME window until the window itself
+        # stops fitting. A floor whose message is no longer in the list at all
+        # — history_limit dropped it, or this is a different conversation
+        # entirely — is simply ignored rather than guessed at.
+        fingerprints = [_message_fingerprint(m) for m in messages]
+        if self._context_floor is not None:
+            hits = [i for i in range(keep_head, last_droppable)
+                    if fingerprints[i] == self._context_floor]
+            # Exactly one match, or none of them: two messages with the same
+            # fingerprint are two identical messages, and picking either is a
+            # guess. Guessing the early one silently re-expands the window,
+            # which reads downstream as the trim having failed.
+            if len(hits) == 1:
+                while first < hits[0]:
+                    total -= counts[first]
+                    first += 1
+                    dropped += 1
+        # Hold that window while it still FITS — trimming back to the target
+        # every turn spends the undershoot the moment it is bought, which is
+        # how the first sticky version still trimmed on all 7 over-budget
+        # turns. Only a window that has itself outgrown the cap moves again.
+        if first == keep_head or total > cap:
+            while total > target and first < last_droppable:
+                total -= counts[first]
+                first += 1
+                dropped += 1
+        # The boundary has to be findable again, and an identical message
+        # earlier in the list (two "ok"s from a model with a short reply
+        # budget, the same page fetched twice) makes the lookup a coin flip.
+        # Nudge it forward onto a message that IS unique — usually the next
+        # one, since a repeated assistant line sits between two distinct
+        # observations — and give up after two, rather than eating the
+        # conversation on a list where everything looks alike.
+        for _ in range(2):
+            if (first >= last_droppable
+                    or fingerprints.count(fingerprints[first]) == 1):
+                break
+            total -= counts[first]
+            first += 1
+            dropped += 1
+        self._context_floor = (
+            fingerprints[first]
+            if first < len(messages) and fingerprints.count(fingerprints[first]) == 1
+            else None)
+        kept = messages[:keep_head] + messages[first:]
+        kept_counts = counts[:keep_head] + counts[first:]
+        if total <= cap:
+            return kept, dropped
+        # Still over: shorten bodies, oldest first, largest first among those.
+        order = sorted(range(keep_head, len(kept)),
+                       key=lambda i: (-kept_counts[i], i))
+        for i in order:
+            if total <= target:
+                break
+            content = str(kept[i].get("content", ""))
+            tokens = kept_counts[i]
+            if tokens <= 0 or not content:
+                continue
+            allowed = max(0, tokens - (total - target))
+            if allowed >= tokens:
+                continue
+            # Characters per token, from this very message, so the ratio is
+            # right for whatever it holds — prose and a base64 blob are not
+            # the same currency.
+            keep_chars = max(0, int(len(content) * allowed / tokens))
+            note = (f"\n\n[... {tokens - allowed} tokens cut from here to fit "
+                    f"the context budget. Ask again for what you need from it "
+                    f"rather than assuming this is all there was.]")
+            kept[i] = {**kept[i], "content": content[:keep_chars] + note}
+            total -= (tokens - allowed)
+        return kept, dropped
+
     def _kv_quant_kwargs(self) -> dict:
         """KV-cache quantization options, or {} when it is switched off.
 
@@ -899,6 +1129,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # stops before generating any output tokens.
                 self._prompt_cache = self._prefill_new_cache(system_ids)
                 self._cached_prompt_ids = list(system_ids)
+                # Weigh it here too, so the very first user turn sizes its cap
+                # against this model rather than the fallback constant.
+                self._measure_kv_cost(len(system_ids))
                 # Persist the cache while it holds exactly the system prefix.
                 # Saving at exit instead would store the whole conversation,
                 # which the next run's prefix diff could not reuse.
@@ -1157,6 +1390,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             return False
         self._prompt_cache = cache
         self._cached_prompt_ids = list(system_ids)
+        # The loaded cache is as weighable as a freshly prefilled one, and this
+        # is the path a warm boot takes — leaving it out would mean the common
+        # case never measures anything and always caps off the fallback.
+        self._measure_kv_cost(len(system_ids))
         # A hit used to be the only outcome that said nothing, which is how a
         # cache that never once loaded looked exactly like one that always did.
         self._log_info(f"Prompt cache hit: {len(system_ids)} tokens, "
@@ -1308,6 +1545,40 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # Templating the whole message list renders everything correctly.
             ids = self.tokenizer.encode(prompt_text)
             prompt_tokens = len(ids)
+            # Bound the prompt before it is ever fed to the model. Everything
+            # else in this method is about reusing the cache cheaply; this is
+            # about the cache having a size the machine can survive. See
+            # _prompt_token_cap.
+            cap = self._prompt_token_cap()
+            if cap and prompt_tokens > cap:
+                per_message = [
+                    len(self.tokenizer.encode(str(m.get("content", "")) or " "))
+                    for m in messages
+                ]
+                # Whatever the chat template adds on top of the message bodies
+                # (role markers, tool preamble, the generation prompt). Counted
+                # rather than guessed, and never negative.
+                overhead = max(0, prompt_tokens - sum(per_message))
+                messages, dropped = self._fit_messages_to_cap(
+                    messages, per_message, overhead, cap)
+                prompt_text = self.tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                    enable_thinking=think,
+                )
+                ids = self.tokenizer.encode(prompt_text)
+                if not self._said_context_full:
+                    self._said_context_full = True
+                    tokenizing_spinner.stop()
+                    self.output_fn(
+                        f"  [Context] {prompt_tokens} tokens is over this "
+                        f"machine's {cap}-token budget, so the oldest turns are "
+                        f"being dropped from what the model sees (they stay in "
+                        f"the transcript). Raise agent.kv_budget_mb, or set "
+                        f"agent.kv_bits to 4 to fit roughly four times as much.")
+                    tokenizing_spinner.start()
+                prompt_tokens = len(ids)
+                if timings is not None:
+                    timings["dropped_messages"] = dropped
             if timings is not None:
                 timings["prompt_tokens"] = prompt_tokens
                 timings["prompt_chars"] = len(prompt_text)
@@ -1331,10 +1602,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                     # unclosed think block is mid-reasoning, not the real end.
                     m = tooling.END_TURN_RE.search(text)
                     if m:
-                        think_open = tooling._QWEN_THINK_OPEN
-                        think_close = tooling._QWEN_THINK_CLOSE
                         prefix = text[:m.start()]
-                        if prefix.count(think_open) <= prefix.count(think_close):
+                        if tooling.think_block_closed(prefix):
                             text = prefix
                 finally:
                     self._indexing_now = False
@@ -1486,15 +1755,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # that strip_reasoning_block treats as the answer, causing
                 # spurious "malformed tool call" errors on every turn.
                 if tooling.END_TURN_RE.search(raw_acc):
-                    # Count think open/close delimiters in raw_acc. If there
-                    # are more opens than closes, the think block is unclosed
-                    # and <end> is inside reasoning — ignore it.
-                    think_open = tooling._QWEN_THINK_OPEN
-                    think_close = tooling._QWEN_THINK_CLOSE
-                    opens = raw_acc.count(think_open)
-                    closes = raw_acc.count(think_close)
+                    # If the think block is unclosed, <end> is inside reasoning
+                    # — ignore it. think_block_closed covers both Qwen's and
+                    # Mistral's delimiter forms.
                     m = tooling.END_TURN_RE.search(raw_acc)
-                    if opens <= closes and not raw_acc[m.end():].strip():
+                    if tooling.think_block_closed(raw_acc) and not raw_acc[m.end():].strip():
                         break
         except BaseException:
             # The real MLX cache may already be mutated beyond what our
@@ -1528,6 +1793,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 if first_token_time is not None else timings["gen_ms"])
 
         self._cached_prompt_ids = ids + gen_ids
+        # The cache and its token count are both known and agree exactly here,
+        # which is the only place that is true — weigh it, so the next turn's
+        # cap is derived from this model at this quantisation rather than from
+        # the fallback constant.
+        self._measure_kv_cost(len(self._cached_prompt_ids))
         return "".join(text_parts), shown
 
     def _generate_tag_metadata(self, prompt: str) -> str:
@@ -2314,7 +2584,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
         while True:
             try:
-                user_input = self.input_fn(f"{self.config['user_name']:8}: ").strip()
+                user_input = self.input_fn(self.user_prompt()).strip()
             except (EOFError, KeyboardInterrupt):
                 self.output_fn("")
                 user_input = "/quit"
@@ -2386,9 +2656,18 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
         except ImportError:
             _readline = None
         _main_thread = threading.main_thread()
-        _user_prompt = f"{config['user_name']:8}: "
+        # The styled prompt is what gets redrawn after a background print, so
+        # it has to be the same string the reader below actually shows.
+        _user_prompt = (chat_style.user_prompt()
+                        if chat_style.colors_enabled()
+                        else f"{config['user_name']:8}: ")
 
         def _cli_output(message=""):
+            # Skin the status line here and nowhere else. This wrapper is the
+            # local terminal's alone — the daemon and Telegram supply their own
+            # output_fn — so the plain text they parse, and the identical text
+            # the model reads out of self.history, are both untouched.
+            message = chat_style.style_line(message)
             if threading.current_thread() is _main_thread or not sys.stdin.isatty() or _readline is None:
                 print(message)
                 return

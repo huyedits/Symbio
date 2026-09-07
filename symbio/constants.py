@@ -31,6 +31,12 @@ DIGEST_MANIFEST = DATA_DIR / "digest_manifest.json"
 CONFIG_FILE = PROJECT_DIR / "config.json"
 MODELS_FILE = PROJECT_DIR / "models.json"
 GATEWAY_PID_FILE = PROJECT_DIR / "gateway.pid"
+# Resident-model daemon: keeps the headmaster loaded between `symb chat`
+# sessions so the 30s weight load is paid once, not every session. The socket
+# is the readiness signal (created only after the model is loaded); the pid
+# file is for stop/status.
+DAEMON_SOCKET = PROJECT_DIR / "daemon.sock"
+DAEMON_PID_FILE = PROJECT_DIR / "daemon.pid"
 # Paths used by the tag-based agent in symbio.app.
 PROMPT_FILE = PROJECT_DIR / "prompt.md"
 CRON_FILE = PROJECT_DIR / "cron_jobs.json"

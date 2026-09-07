@@ -1,0 +1,610 @@
+{
+ "suite": "bfcl_live",
+ "model": "/Users/huygpt/.cache/huggingface/hub/models--mlx-community--GLM-4-9B-0414-4bit/snapshots/fecf35efe04b11a7e11ae434bf30693ac4c38e2c/",
+ "draft": null,
+ "n": 120,
+ "accuracy": 73.33333333333333,
+ "elapsed_s": 477.4718466250051,
+ "records": [
+  {
+   "index": 1,
+   "passed": true,
+   "response": "{\"name\": \"get_user_info\", \"arguments\": {\"user_id\": 7890, \"special\": \"black\"}}"
+  },
+  {
+   "index": 2,
+   "passed": true,
+   "response": "{\"name\": \"github_star\", \"arguments\": {\"repos\": \"ShishirPatil/gorilla,gorilla-llm/gorilla-cli\", \"aligned\": true}}"
+  },
+  {
+   "index": 3,
+   "passed": true,
+   "response": "{\"name\": \"uber.ride\", \"arguments\": {\"loc\": \"2020 Addison Street, Berkeley, CA, USA\", \"type\": \"comfort\", \"time\": 600}}"
+  },
+  {
+   "index": 4,
+   "passed": true,
+   "response": "{\"name\": \"uber.ride\", \"arguments\": {\"loc\": \"221B Baker Street, Berkeley, CA, USA\", \"type\": \"plus\", \"time\": 600}}"
+  },
+  {
+   "index": 5,
+   "passed": false,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Tel Aviv, Country\", \"unit\": \"fahrenheit\"}}"
+  },
+  {
+   "index": 6,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Divin\u00f3polis, MG\", \"unit\": \"fahrenheit\"}}"
+  },
+  {
+   "index": 7,
+   "passed": false,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"San Francisco\", \"unit\": \"fahrenheit\"}}"
+  },
+  {
+   "index": 8,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Riga, Latvia\"}}"
+  },
+  {
+   "index": 9,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"London, UK\", \"unit\": \"fahrenheit\"}}"
+  },
+  {
+   "index": 10,
+   "passed": false,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Hyderabad, IN\", \"unit\": \"fahrenheit\"}}"
+  },
+  {
+   "index": 11,
+   "passed": false,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Yosemite National Park, Mariposa, CA\", \"unit\": \"celsius\"}}"
+  },
+  {
+   "index": 12,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Naples, FL\"}}"
+  },
+  {
+   "index": 13,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"New York, NY\", \"unit\": \"celsius\"}}"
+  },
+  {
+   "index": 14,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Shanghai, China\", \"unit\": \"celsius\"}}"
+  },
+  {
+   "index": 15,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Bangkok, Thailand\", \"unit\": \"fahrenheit\"}}"
+  },
+  {
+   "index": 16,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Chennai, Tamil Nadu\", \"unit\": \"fahrenheit\"}}"
+  },
+  {
+   "index": 17,
+   "passed": false,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Lang Son\", \"unit\": \"fahrenheit\"}}"
+  },
+  {
+   "index": 18,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Boston, MA\", \"unit\": \"fahrenheit\"}}"
+  },
+  {
+   "index": 19,
+   "passed": false,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Moscow, Country\", \"unit\": \"celsius\"}}"
+  },
+  {
+   "index": 20,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Quintana Roo, Mexico\", \"unit\": \"celsius\"}}"
+  },
+  {
+   "index": 21,
+   "passed": false,
+   "response": "{\"name\": \"change_food\", \"arguments\": {\"food_item\": \"burger\", \"modification_request\": \"no onions,extra cheese\"}}"
+  },
+  {
+   "index": 22,
+   "passed": true,
+   "response": "{\"name\": \"change_food\", \"arguments\": {\"food_item\": \"chicken dish\", \"modification_request\": \"extra spicy\"}}"
+  },
+  {
+   "index": 23,
+   "passed": true,
+   "response": "{\"name\": \"ChaFod\", \"arguments\": {\"TheFod\": \"BURGER\"}}"
+  },
+  {
+   "index": 24,
+   "passed": true,
+   "response": "{\"name\": \"ChaFod\", \"arguments\": {\"TheFod\": \"PIZZA\"}}"
+  },
+  {
+   "index": 25,
+   "passed": true,
+   "response": "{\"name\": \"ChaFod\", \"arguments\": {\"TheFod\": \"BURGER\"}}"
+  },
+  {
+   "index": 26,
+   "passed": true,
+   "response": "{\"name\": \"ChaFod\", \"arguments\": {\"TheFod\": \"SALAD\"}}"
+  },
+  {
+   "index": 27,
+   "passed": false,
+   "response": "{\"name\": \"uber.ride\", \"arguments\": {\"loc\": \"123 \u0110\u01b0\u1eddng \u0110\u1ea1i h\u1ecdc, Berkeley, CA 94704\", \"type\": \"plus\", \"time\": 10}}"
+  },
+  {
+   "index": 28,
+   "passed": true,
+   "response": "{\"name\": \"uber.eat.order\", \"arguments\": {\"restaurant\": \"uber pitada\", \"items\": [\"burgers\", \"chicken wings\"], \"quantities\": [5, 6]}}"
+  },
+  {
+   "index": 29,
+   "passed": true,
+   "response": "{\"name\": \"uber.eat.order\", \"arguments\": {\"restaurant\": \"\u80af\u5fb7\u57fa\", \"items\": [\"\u9ea6\u8fa3\u9e21\u817f\u5821\", \"\u53ef\u53e3\u53ef\u4e50\", \"\u6cb9\u70b8\u9e21\u7fc5\", \"\u85af\u6761\"], \"quantities\": [10, 50, 30, 90]}}"
+  },
+  {
+   "index": 30,
+   "passed": true,
+   "response": "```json\n{\"name\": \"uber.eat.order\", \"arguments\": {\"restaurant\": \"McDonald's\", \"items\": [\"pizza\"], \"quantities\": [1]}}\n```"
+  },
+  {
+   "index": 31,
+   "passed": true,
+   "response": "{\"name\": \"aws.lexv2_models.list_exports\", \"arguments\": {\"botId\": \"my-bot-id\", \"botVersion\": \"v2\", \"sortBy\": \"ASC\", \"maxResults\": 50}}"
+  },
+  {
+   "index": 32,
+   "passed": true,
+   "response": "{\"name\": \"aws.lexv2_models.list_exports\", \"arguments\": {\"botId\": \"B12345\", \"botVersion\": \"v1\", \"sortBy\": \"DESC\"}}"
+  },
+  {
+   "index": 33,
+   "passed": false,
+   "response": "{\"name\": \"answer.string\", \"arguments\": {\"answer\": \"\"}}"
+  },
+  {
+   "index": 34,
+   "passed": true,
+   "response": "{\"name\": \"answer.string\", \"arguments\": {\"answer\": \"Logistic regression is not present in the text, therefore I cannot answer this question.\"}}"
+  },
+  {
+   "index": 35,
+   "passed": false,
+   "response": "{\"name\": \"answer.string\", \"arguments\": {\"answer\": \"**Logistic regression is not present in the text, therefore I cannot answer this question.**\"}}"
+  },
+  {
+   "index": 36,
+   "passed": false,
+   "response": "{\"name\": \"answer.string\", \"arguments\": {\"answer\": \"**Logistic regression is not present in the text, therefore I cannot answer this question.**\"}}"
+  },
+  {
+   "index": 37,
+   "passed": true,
+   "response": "{\"name\": \"parseAnswer\", \"arguments\": {\"answer\": \"The text does not define logistic regression, therefore I cannot answer this question.\"}}"
+  },
+  {
+   "index": 38,
+   "passed": true,
+   "response": "{\"name\": \"parseAnswer\", \"arguments\": {\"answer\": \"The text does not define logistic regression, therefore I cannot answer this question.\"}}"
+  },
+  {
+   "index": 39,
+   "passed": false,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"37.8651 N, 119.5383 W\", \"unit\": \"fahrenheit\"}}"
+  },
+  {
+   "index": 40,
+   "passed": true,
+   "response": "{\"name\": \"fetch_weather_data\", \"arguments\": {\"latitude\": 37.8651, \"longitude\": -119.5383, \"units\": \"metric\", \"language\": \"en\"}}"
+  },
+  {
+   "index": 41,
+   "passed": false,
+   "response": "{\"name\": \"ThinQ_Connect\", \"arguments\": {\"body\": {\"airConJobMode\": \"AIR_CLEAN\", \"windStrength\": \"HIGH\", \"monitoringEnabled\": true}}}"
+  },
+  {
+   "index": 42,
+   "passed": true,
+   "response": "```json\n{\"name\": \"ThinQ_Connect\", \"arguments\": {\"body\": {\"airConJobMode\": \"AIR_DRY\", \"windStrength\": \"MID\"}}}\n```"
+  },
+  {
+   "index": 43,
+   "passed": false,
+   "response": "{\"name\": \"ThinQ_Connect\", \"arguments\": {\"body\": {\"airConJobMode\": \"AIR_DRY\", \"windStrength\": \"MID\", \"targetTemperature\": 22}}}"
+  },
+  {
+   "index": 44,
+   "passed": true,
+   "response": "{\"name\": \"ThinQ_Connect\", \"arguments\": {\"body\": {\"airConJobMode\": \"COOL\", \"coolTargetTemperature\": 24, \"windStrength\": \"HIGH\"}}}"
+  },
+  {
+   "index": 45,
+   "passed": true,
+   "response": "{\"name\": \"ThinQ_Connect\", \"arguments\": {\"body\": {\"airConOperationMode\": \"POWER_ON\", \"currentJobMode\": \"COOL\"}}}"
+  },
+  {
+   "index": 46,
+   "passed": false,
+   "response": "{\"name\": \"ThinQ_Connect\", \"arguments\": {\"body\": {\"currentJobMode\": \"COOL\", \"coolTargetTemperature\": 20, \"airCleanOperationMode\": \"START\"}}}"
+  },
+  {
+   "index": 47,
+   "passed": false,
+   "response": "```json\n{\"name\": \"ThinQ_Connect\", \"arguments\": {\"airConJobMode\": \"COOL\", \"windStrength\": \"MID\", \"monitoringEnabled\": true, \"airCleanOperationMode\": \"START\", \"powerSaveEnabled\": false, \"targetTemperature\": 24}}\n```"
+  },
+  {
+   "index": 48,
+   "passed": true,
+   "response": "{\"name\": \"multiply\", \"arguments\": {\"a\": 3, \"b\": 2}}"
+  },
+  {
+   "index": 49,
+   "passed": true,
+   "response": "{\"name\": \"find_beer\", \"arguments\": {\"brewery\": \"Sierra Nevada\", \"taste\": \"bitter\", \"aroma\": \"hoppy\", \"color\": \"pale\", \"style\": \"lager\"}}"
+  },
+  {
+   "index": 50,
+   "passed": false,
+   "response": "{\"name\": \"find_beer\", \"arguments\": {\"brewery\": \"Creek\", \"taste\": \"bitter\", \"aroma\": \"chocolate\", \"color\": \"dark\", \"style\": \"porter\"}}"
+  },
+  {
+   "index": 51,
+   "passed": true,
+   "response": "{\"name\": \"get_latest_carbon_intensity\", \"arguments\": {\"zone\": \"Great Britain\"}}"
+  },
+  {
+   "index": 52,
+   "passed": false,
+   "response": "```json\n{\"name\": \"ThinQ_Connect\", \"arguments\": {\"body\": {\"airConJobMode\": \"COOL\", \"targetTemperature\": 22, \"powerSaveEnabled\": true, \"windStrength\": \"HIGH\", \"relativeHourToStart\": 1, \"relativeMinuteToStart\": 30}}}\n```"
+  },
+  {
+   "index": 53,
+   "passed": true,
+   "response": "```json\n{\"name\": \"ThinQ_Connect\", \"arguments\": {\"body\": {\"airConJobMode\": \"COOL\", \"windStrength\": \"MID\", \"targetTemperature\": 20, \"relativeHourToStop\": 1, \"airConOperationMode\": \"POWER_ON\"}}}\n```"
+  },
+  {
+   "index": 54,
+   "passed": true,
+   "response": "{\"name\": \"todo_add\", \"arguments\": {\"content\": \"go for shopping at 9 pm\"}}"
+  },
+  {
+   "index": 55,
+   "passed": true,
+   "response": "{\"name\": \"todo\", \"arguments\": {\"type\": \"delete\", \"content\": \"todo random\"}}"
+  },
+  {
+   "index": 56,
+   "passed": true,
+   "response": "{\"name\": \"todo\", \"arguments\": {\"type\": \"add\", \"content\": \"go for shopping at 9 pm\"}}"
+  },
+  {
+   "index": 57,
+   "passed": true,
+   "response": "```json\n{\"name\": \"todo_manager.handle_action\", \"arguments\": {\"type\": \"delete\", \"content\": \"go to gym\"}}\n```"
+  },
+  {
+   "index": 58,
+   "passed": true,
+   "response": "```json\n{\"name\": \"todo_manager.handle_action\", \"arguments\": {\"type\": \"add\", \"content\": \"go to sleep at 9 pm\"}}\n```"
+  },
+  {
+   "index": 59,
+   "passed": false,
+   "response": "```json\n{\"name\": \"get_movies\", \"arguments\": {\"city\": \"All\", \"movie_date\": \"current date in India\"}}\n```"
+  },
+  {
+   "index": 60,
+   "passed": false,
+   "response": "```json\n{\"name\": \"get_movies\", \"arguments\": {\"city\": \"India\", \"movie_date\": \"2023-04-14\"}}\n```"
+  },
+  {
+   "index": 61,
+   "passed": true,
+   "response": "{\"name\": \"todo\", \"arguments\": {\"type\": \"complete\", \"content\": \"Submit monthly financial report\"}}"
+  },
+  {
+   "index": 62,
+   "passed": true,
+   "response": "{\"name\": \"todo\", \"arguments\": {\"type\": \"add\", \"content\": \"go to gym tomorrow.\"}}"
+  },
+  {
+   "index": 63,
+   "passed": true,
+   "response": "{\"name\": \"todo\", \"arguments\": {\"type\": \"delete\", \"content\": \"ravi\"}}"
+  },
+  {
+   "index": 64,
+   "passed": true,
+   "response": "```json\n{\"name\": \"todo\", \"arguments\": {\"type\": \"add\", \"content\": \"go to sleep at 9 pm\"}}\n```"
+  },
+  {
+   "index": 65,
+   "passed": true,
+   "response": "{\"name\": \"todo\", \"arguments\": {\"type\": \"add\", \"content\": \"go to Goa\"}}"
+  },
+  {
+   "index": 66,
+   "passed": true,
+   "response": "{\"name\": \"todo\", \"arguments\": {\"type\": \"add\", \"content\": \"Hi charlie\"}}"
+  },
+  {
+   "index": 67,
+   "passed": false,
+   "response": "```json\n{\"name\": \"inventory.restock_check\", \"arguments\": {\"item_ids\": [], \"threshold\": 0}}\n```"
+  },
+  {
+   "index": 68,
+   "passed": false,
+   "response": "{\"name\": \"obtener_cotizacion_de_creditos\", \"arguments\": {\"monto_del_credito\": 1000000, \"plazo_del_credito_mensual\": 12, \"producto\": \"auto\", \"a\u00f1o_veh\u00edculo\": 2024, \"enganche\": 0.2}}"
+  },
+  {
+   "index": 69,
+   "passed": true,
+   "response": "{\"name\": \"sum\", \"arguments\": {\"a\": 5.0, \"b\": 3.0}}"
+  },
+  {
+   "index": 70,
+   "passed": true,
+   "response": "{\"name\": \"analysis_api.AnalysisApi.retrieve_analysis\", \"arguments\": {\"project\": \"SUPERFANCY\", \"component\": \"AB1010CD\", \"vulnerability\": \"ef903ac-893-f00\"}}"
+  },
+  {
+   "index": 71,
+   "passed": false,
+   "response": "{\"name\": \"get_sensor_alerts\", \"arguments\": {\"sensorSerial\": \"Q3CC-CRT3-SZ2G\", \"perPage\": 10, \"t0\": \"2023-04-14\"}}"
+  },
+  {
+   "index": 72,
+   "passed": false,
+   "response": "```json\n{\"name\": \"extract_parameters_v1\", \"arguments\": {\"targets\": [\"Apple\"], \"metrics\": [\"view\"], \"demographics\": [\"millennials\"], \"min_date\": \"2022-07-01\"}}\n```"
+  },
+  {
+   "index": 73,
+   "passed": true,
+   "response": "{\"name\": \"detect_beats_and_filter\", \"arguments\": {\"capture_percentage\": 50, \"confidence_window_size\": 0.5}}"
+  },
+  {
+   "index": 74,
+   "passed": true,
+   "response": "{\"name\": \"detect_beats_and_filter\", \"arguments\": {\"capture_percentage\": 90, \"confidence_window_size\": 0.25}}"
+  },
+  {
+   "index": 75,
+   "passed": true,
+   "response": "{\"name\": \"detect_beats_and_filter\", \"arguments\": {\"capture_percentage\": 70, \"confidence_window_size\": 0.8}}"
+  },
+  {
+   "index": 76,
+   "passed": true,
+   "response": "{\"name\": \"detect_beats_and_filter\", \"arguments\": {\"capture_percentage\": 93, \"confidence_window_size\": 0.5}}"
+  },
+  {
+   "index": 77,
+   "passed": true,
+   "response": "{\"name\": \"language_translator.translate\", \"arguments\": {\"source_language\": \"en\", \"target_language\": \"fr\", \"text\": \"What is your name?\"}}"
+  },
+  {
+   "index": 78,
+   "passed": true,
+   "response": "{\"name\": \"weather.get\", \"arguments\": {\"city\": \"London\", \"country\": \"GB\"}}"
+  },
+  {
+   "index": 79,
+   "passed": false,
+   "response": "```json\n{\"name\": \"send_email\", \"arguments\": {\"to_address\": \"andy@gorilla.com\", \"subject\": \"Request for Sales Forecast Spreadsheet\"}}\n```"
+  },
+  {
+   "index": 80,
+   "passed": true,
+   "response": "{\"name\": \"search_hotels\", \"arguments\": {\"location\": \"San Diego, CA\"}}"
+  },
+  {
+   "index": 81,
+   "passed": false,
+   "response": "{\"name\": \"sitefinity_create_contentitem\", \"arguments\": {\"Title\": \"Breakthrough in Artificial Intelligence\", \"Content\": \"recent breakthroughs in machine learning algorithms\", \"MetaTitle\": \"AI Breakthrough Latest Developments in Machine Learning\", \"MetaDescription\": \"An overview of the recent significant advancements in artificial intelligence and machine learning technology\", \"UrlName\": \"ai-breakthrough-latest-developments\"}}"
+  },
+  {
+   "index": 82,
+   "passed": true,
+   "response": "{\"name\": \"sitefinity_create_contentitem\", \"arguments\": {\"ContentItem\": \"NewsItem\", \"Title\": \"Julian is testing12\"}}"
+  },
+  {
+   "index": 83,
+   "passed": true,
+   "response": "{\"name\": \"sitefinity_create_contentitem\", \"arguments\": {\"ContentItem\": \"News\", \"Title\": \"Julian is testing\"}}"
+  },
+  {
+   "index": 84,
+   "passed": true,
+   "response": "{\"name\": \"sitefinity_create_contentitem\", \"arguments\": {\"ContentItem\": \"news\", \"Title\": \"Julian is Testing\", \"Content\": \"a detailed analysis on the impact of sleep patterns on productivity\", \"MetaTitle\": \"Productivity and Sleep Patterns\", \"UrlName\": \"julian-testing-productivity\", \"MetaDescription\": \"Exploring how sleep affects work efficiency\"}}"
+  },
+  {
+   "index": 85,
+   "passed": true,
+   "response": "{\"name\": \"get_coordinates_from_city\", \"arguments\": {\"city_name\": \"Seattle\"}}"
+  },
+  {
+   "index": 86,
+   "passed": true,
+   "response": "{\"name\": \"open_meteo_api.fetch_weather_data\", \"arguments\": {\"coordinates\": [37.8715, -122.2730], \"units\": \"Celsius\"}}"
+  },
+  {
+   "index": 87,
+   "passed": true,
+   "response": "{\"name\": \"sort_array\", \"arguments\": {\"array\": [1, 54, 3, 1, 76, 2343, 21], \"reverse\": false}}"
+  },
+  {
+   "index": 88,
+   "passed": true,
+   "response": "{\"name\": \"get_current_loc\", \"arguments\": {\"coordinate_format\": \"DMS\", \"include_altitude\": true}}"
+  },
+  {
+   "index": 89,
+   "passed": true,
+   "response": "{\"name\": \"log_food\", \"arguments\": {\"food_name\": \"chai tea\", \"portion_amount\": 16, \"portion_unit\": \"ounces\", \"meal_name\": \"snack\"}}"
+  },
+  {
+   "index": 90,
+   "passed": true,
+   "response": "{\"name\": \"interior_design_analysis.generate_report\", \"arguments\": {\"user_preferences\": \"{\\\"style\\\": \\\"modern\\\", \\\"color_scheme\\\": \\\"warm\\\", \\\"budget\\\": \\\"mid-range\\\"}\", \"data_source\": \"internal_database\", \"output_format\": \"DOCX\", \"include_visuals\": true}}"
+  },
+  {
+   "index": 91,
+   "passed": true,
+   "response": "{\"name\": \"temperature\", \"arguments\": {\"location\": \"Paris, France\"}}"
+  },
+  {
+   "index": 92,
+   "passed": true,
+   "response": "{\"name\": \"fetchPerson\", \"arguments\": {\"id\": 4}}"
+  },
+  {
+   "index": 93,
+   "passed": true,
+   "response": "{\"name\": \"play_artist\", \"arguments\": {\"artist_name\": \"K\u00e4\u00e4rij\u00e4\"}}"
+  },
+  {
+   "index": 94,
+   "passed": true,
+   "response": "{\"name\": \"play_artist\", \"arguments\": {\"artist_name\": \"K\u00e4\u00e4rij\u00e4\"}}"
+  },
+  {
+   "index": 95,
+   "passed": true,
+   "response": "{\"name\": \"play_song\", \"arguments\": {\"artist_name\": \"K\u00e4\u00e4rij\u00e4\", \"song_name\": \"Cha Cha Cha\"}}"
+  },
+  {
+   "index": 96,
+   "passed": true,
+   "response": "{\"name\": \"process_data\", \"arguments\": {\"data\": [2.5, 3.6, 4.1, 5.2], \"normalize\": true, \"categories\": [\"red\", \"blue\", \"green\"], \"encoding_type\": \"one-hot\"}}"
+  },
+  {
+   "index": 97,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Boston, MA\"}}"
+  },
+  {
+   "index": 98,
+   "passed": true,
+   "response": "{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"El Gastor, Andalusia\"}}"
+  },
+  {
+   "index": 99,
+   "passed": true,
+   "response": "{\"name\": \"get_weather_by_coordinates\", \"arguments\": {\"city\": \"Chennai\", \"lat\": 13.0827, \"lon\": 80.2707}}"
+  },
+  {
+   "index": 100,
+   "passed": true,
+   "response": "{\"name\": \"connectBluetooth\", \"arguments\": {\"device_name\": \"ue boom\"}}"
+  },
+  {
+   "index": 101,
+   "passed": true,
+   "response": "{\"name\": \"connectBluetooth\", \"arguments\": {\"device_name\": \"JBL Flip 4\"}}"
+  },
+  {
+   "index": 102,
+   "passed": true,
+   "response": "{\"name\": \"askForSSID\", \"arguments\": {\"prompt_message\": \"Please enter the Wi-Fi network name you wish to connect to:\"}}"
+  },
+  {
+   "index": 103,
+   "passed": false,
+   "response": "{\"name\": \"calculate_tax\", \"arguments\": {\"purchase_amount\": 59.99, \"state\": \"CA\", \"city\": \"San Francisco\"}}"
+  },
+  {
+   "index": 104,
+   "passed": true,
+   "response": "{\"name\": \"calculate_tax\", \"arguments\": {\"purchase_amount\": 999.0, \"state\": \"CA\"}}"
+  },
+  {
+   "index": 105,
+   "passed": true,
+   "response": "{\"name\": \"calculate_tax\", \"arguments\": {\"purchase_amount\": 250.0, \"state\": \"NY\"}}"
+  },
+  {
+   "index": 106,
+   "passed": true,
+   "response": "{\"name\": \"classify\", \"arguments\": {\"clean_hello\": [\"hello\"], \"faq_link_accounts_start\": [\"link my account\", \"connect my accounts\"]}}"
+  },
+  {
+   "index": 107,
+   "passed": false,
+   "response": "```json\n{\n  \"name\": \"record\",\n  \"arguments\": {\n    \"acc_routing_start\": [\"Please provide the routing number for my account.\", \"Which account number should I use for setting up eStatements?\", \"Please give me the account number for my business checking account.\"],\n    \"activate_card_start\": [\"Activate my new card for loyalty program enrollment\", \"Can you walk me through the activation process for my new bank card?\"],\n    \"atm_finder_start\": [\"Looking for the closest ATM for cash withdrawal, can you assist me in finding one?\", \"Locate ATM for immediate cash needs\", \"Searching for ATM for money withdrawal\", \"Find ATM for urgent cash needs\", \"I urgently need to find an ATM for cash withdrawal, can you help me locate the nearest one?\", \"Can I purchase a cashier's check through this chat service?\", \"I need a cashier's check, how can I get one?\"],\n    \"card_rewards_start\": [\"What rewards are offered for my card?\", \"What rewards are available on my card?\", \"What are the benefits of using my rewards points for entertainment?\"],\n    \"cancel_card_start\": [\"I want to cancel my card and ensure the safety of my account.\"],\n    \"clean_goodbye_start\": [\"I'm done here. Goodbye!\", \"Thanks for your assistance. Goodbye!\", \"You're amazing. Goodbye!\"]\n  }\n}\n```"
+  },
+  {
+   "index": 108,
+   "passed": false,
+   "response": "```json\n{\"name\": \"record\", \"arguments\": {\"faq_describe_telephone_banking_start\": [\"How do I sign up for tele-banking services through the mobile app?\", \"Can I sign up for telephone banking services?\", \"Where can I find the application for telephone banking services?\"], \"bank_hours_start\": [\"Are any banks open in Sri Lanka right now?\"], \"faq_describe_accounts_start\": [\"I'm interested in opening a long term savings account. What options do you have?\", \"Do you offer any special accounts for children or minors?\", \"Do you offer any special accounts for individuals looking to save for a home purchase or renovation?\"]}}\n```"
+  },
+  {
+   "index": 109,
+   "passed": false,
+   "response": "```json\n{\"name\": \"record\", \"arguments\": {\"money_movement_start\": [\"'Can you show me all outgoing wire transfers?'\"], \"get_transactions_start\": [\"'I need to view all transactions labeled as 'checks' on my account.'\", \"'Can you give me a summary of my recent debit card transactions?'\", \"'I would like to see the details of my most recent ATM withdrawal.'\"], \"credit_limit_increase_start\": [\"'I need my credit card limit raised.'\", \"'Can you assist me in getting a higher credit card limit?'\"], \"faq_link_accounts_start\": [\"'Can you assist me in combining my personal and savings accounts?'\", \"'Please assist me in combining my accounts for a streamlined experience.'\", \"'How can I link my auto loan and savings accounts?'\"]}}\n```"
+  },
+  {
+   "index": 110,
+   "passed": true,
+   "response": "{\"name\": \"record\", \"arguments\": {\"pma_income_requirements_start\": [\"Can I use bonuses or commissions as part of my income for a loan application?\", \"Will my income be verified during the loan application process?\", \"Is there a minimum income threshold for loan approval?\"], \"faq_auto_withdraw_start\": [\"Can I schedule automatic withdrawals for different dates?\"], \"payment_information_start\": [\"How much do I owe on my home equity loan?\"], \"outofscope\": []}}"
+  },
+  {
+   "index": 111,
+   "passed": false,
+   "response": "{\"name\": \"atm_finder_start\", \"arguments\": {\"atm_finder_start\": [\"Need ATM location\"]}}"
+  },
+  {
+   "index": 112,
+   "passed": true,
+   "response": "{\"name\": \"record\", \"arguments\": {\"get_balance_start\": [\"What is my balance?\", \"Tell me my available balance, please\", \"What is my current available balance?\", \"Please provide my current account balance\", \"Show me my balance information.\", \"What is the balance in my account at this moment?\", \"How much money is in my account?\", \"Tell me my available balance\"], \"atm_finder_start\": [\"Where is the closest ATM to my current location?\", \"Find ATM for immediate cash needs\"]}}"
+  },
+  {
+   "index": 113,
+   "passed": false,
+   "response": "{\"name\": \"outofscope\", \"arguments\": {\"outofscope\": [\"what is the weather like\"]}}"
+  },
+  {
+   "index": 114,
+   "passed": true,
+   "response": "{\"name\": \"calculate_dynamic_pricing\", \"arguments\": {\"geolocation\": \"34.0522, -118.2437\", \"base_price\": 100.0, \"minimum_price\": 90.0}}"
+  },
+  {
+   "index": 115,
+   "passed": true,
+   "response": "{\"name\": \"update_user_profile\", \"arguments\": {\"user_id\": 12345, \"profile_data\": {\"email\": \"john.doe@example.com\", \"age\": 30}}}"
+  },
+  {
+   "index": 116,
+   "passed": true,
+   "response": "{\"name\": \"calculate_sum\", \"arguments\": {\"number1\": 133, \"number2\": 34}}"
+  },
+  {
+   "index": 117,
+   "passed": true,
+   "response": "{\"name\": \"sum_numbers\", \"arguments\": {\"numbers_list\": [133.0, 34.0]}}"
+  },
+  {
+   "index": 118,
+   "passed": true,
+   "response": "{\"name\": \"reverse_input\", \"arguments\": {\"input_value\": \"say hi\"}}"
+  },
+  {
+   "index": 119,
+   "passed": true,
+   "response": "{\"name\": \"get_temperature\", \"arguments\": {\"units\": \"Celsius\", \"location\": \"Hyderabad, India\"}}"
+  },
+  {
+   "index": 120,
+   "passed": true,
+   "response": "{\"name\": \"GetPrimeMinisters\", \"arguments\": {\"countries\": [\"Australia\", \"Canada\", \"India\"]}}"
+  }
+ ]
+}

@@ -635,6 +635,19 @@ class CommandsMixin:
                         f"    Prompt: {prompt_tokens} tokens "
                         f"(cached {cached or 0}, new {new or 0})"
                     )
+                # What the context budget is doing, shown next to the latency
+                # it explains: a trimmed turn is both slower (the KV prefix
+                # moved, so it re-prefills) and shorter-memoried, and without
+                # this the two look like the model getting worse.
+                cap = self._prompt_token_cap()
+                if cap:
+                    per_token = getattr(self, "_kv_bytes_per_token", None)
+                    measured = (f"{per_token / 1024:.0f} KB/token measured"
+                                if per_token else "not yet measured")
+                    dropped = timings.get("dropped_messages") or 0
+                    tail = f", {dropped} older message(s) dropped" if dropped else ""
+                    self.output_fn(
+                        f"    Context budget: {cap} tokens ({measured}{tail})")
 
         elif cmd.startswith("/config"):
             parts = user_input.split(None, 3)[1:]

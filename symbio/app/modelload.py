@@ -47,6 +47,14 @@ def load(*args: Any, **kwargs: Any):
     """
     from mlx_lm import load as _mlx_load
 
+    # Mistral tokenizers ship a pre-tokenizer regex that mis-splits some
+    # Unicode (transformers warns and asks for fix_mistral_regex=True on load).
+    # It is a no-op for every non-Mistral tokenizer, so pass it unconditionally
+    # rather than special-casing the model name.
+    tokenizer_config = dict(kwargs.get("tokenizer_config") or {})
+    tokenizer_config.setdefault("fix_mistral_regex", True)
+    kwargs["tokenizer_config"] = tokenizer_config
+
     model, tokenizer = _mlx_load(*args, **kwargs)
     added = trust_tokenizer_eos(tokenizer)
     if added is not None:

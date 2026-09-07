@@ -124,17 +124,31 @@ def adapter_weights_present() -> bool:
     return any(adapter_dir.glob("*.safetensors"))
 
 
-def _adapter_matches_model(config: dict[str, Any]) -> bool:
-    """Check whether the saved adapter was trained for the current model_name."""
+def _saved_adapter_model() -> str | None:
+    """The model_name the saved adapter was trained for, or None if absent."""
     adapter_config = ADAPTER_DIR / "adapter_config.json"
     if not adapter_config.exists():
-        return True  # no adapter present is fine
+        return None
     try:
         adapter_cfg = json.loads(adapter_config.read_text(encoding="utf-8"))
-        saved_model = adapter_cfg.get("model", "")
-        return not saved_model or saved_model == config["model_name"]
+        return adapter_cfg.get("model") or None
     except Exception:
-        return False
+        return None
+
+
+def _adapter_matches_model_name(model_name: str) -> bool:
+    """Whether the saved adapter was trained for the given model_name.
+
+    A missing adapter is fine (base-only). A killed/OOM'd run can leave
+    adapter_config.json behind with no weights; that is still a real answer.
+    """
+    saved_model = _saved_adapter_model()
+    return saved_model is None or saved_model == model_name
+
+
+def _adapter_matches_model(config: dict[str, Any]) -> bool:
+    """Check whether the saved adapter was trained for the current model_name."""
+    return _adapter_matches_model_name(config["model_name"])
 
 
 def can_run_lora(config: dict[str, Any], model_type: str) -> tuple[bool, str]:
@@ -318,10 +332,13 @@ def switch_model_preset(config: dict[str, Any], preset_key: str) -> bool:
 
     print(f"  Switched model preset: {preset_key}")
     print(f"    {old_model} -> {preset['model_name']}")
-    if preset.get("adapter_compatible"):
+    saved = _saved_adapter_model()
+    if saved is None:
+        print("    No LoRA adapter present (base model only).")
+    elif saved == preset["model_name"]:
         print("    LoRA adapter is compatible.")
     else:
-        print("    LoRA adapter will be disabled (base model only).")
+        print(f"    LoRA adapter was trained for {saved} and will be disabled (base model only).")
     print(f"    Memory estimate: {preset.get('memory_note', '')}")
     print("  Restart Symbio to load the new model.")
     return True
@@ -334,10 +351,16 @@ def list_model_presets(config: dict[str, Any]):
         print("  No models.json preset file found.")
         return
     current = config.get("model_name", "")
+    saved = _saved_adapter_model()
     print("  Available model presets:")
     for key, info in presets.items():
         marker = "*" if info.get("model_name") == current else " "
-        adapter = "LoRA OK" if info.get("adapter_compatible") else "base only"
+        if saved is None:
+            adapter = "no adapter"
+        elif saved == info.get("model_name", ""):
+            adapter = "LoRA OK"
+        else:
+            adapter = "base only"
         print(f"    [{marker}] {key}: {info.get('model_name')}")
         print(f"        {info.get('description', '')}")
         print(f"        Adapter: {adapter} | {info.get('memory_note', '')}")

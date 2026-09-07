@@ -9,6 +9,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).parent.resolve()
 CONFIG_FILE = PROJECT_DIR / "config.json"
 MODELS_FILE = PROJECT_DIR / "models.json"
+ADAPTER_DIR = PROJECT_DIR / "adapters"
 
 
 def load_models() -> dict:
@@ -29,11 +30,40 @@ def save_config(config: dict):
     CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
+def saved_adapter_model() -> str | None:
+    """The model_name the saved LoRA adapter was trained for, or None if absent.
+
+    Mirrors symbio.config._adapter_matches_model, but standalone so this
+    script stays import-light. A killed/OOM'd run can leave adapter_config.json
+    behind with no weights; that is still a real answer here, not an error.
+    """
+    adapter_config = ADAPTER_DIR / "adapter_config.json"
+    if not adapter_config.exists():
+        return None
+    try:
+        adapter_cfg = json.loads(adapter_config.read_text(encoding="utf-8"))
+        return adapter_cfg.get("model") or None
+    except Exception:
+        return None
+
+
+def adapter_matches_model(model_name: str) -> bool:
+    """Whether the saved LoRA adapter was trained for the given model_name."""
+    saved = saved_adapter_model()
+    return saved is None or saved == model_name
+
+
 def list_presets(models: dict, current_model: str):
     print("Available model presets:")
+    saved = saved_adapter_model()
     for key, info in models.items():
         marker = "*" if info.get("model_name") == current_model else " "
-        adapter = "LoRA OK" if info.get("adapter_compatible") else "base only"
+        if saved is None:
+            adapter = "no adapter"
+        elif saved == info.get("model_name", ""):
+            adapter = "LoRA OK"
+        else:
+            adapter = "base only"
         print(f"  [{marker}] {key}: {info.get('model_name')}")
         print(f"      {info.get('description', '')}")
         print(f"      Adapter: {adapter} | {info.get('memory_note', '')}")
@@ -55,10 +85,13 @@ def switch_preset(preset_key: str):
 
     print(f"Switched model preset: {preset_key}")
     print(f"  {old_model} -> {preset['model_name']}")
-    if preset.get("adapter_compatible"):
+    saved = saved_adapter_model()
+    if saved is None:
+        print("  No LoRA adapter present (base model only).")
+    elif saved == preset["model_name"]:
         print("  The current LoRA adapter is compatible with this model.")
     else:
-        print("  The current LoRA adapter will be DISABLED for this model (base model only).")
+        print(f"  The current LoRA adapter was trained for {saved} and will be DISABLED (base model only).")
         print("  Re-train with /train if you want a LoRA for this model.")
     print(f"  Memory estimate: {preset.get('memory_note', '')}")
     print("\nRestart Symbio to load the new model.")

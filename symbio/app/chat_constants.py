@@ -6,6 +6,7 @@ chat itself, which imports the mixins to build ChatSession. Nothing here may
 import another chat module: this is the bottom of that graph.
 """
 
+import hashlib
 import re
 
 
@@ -93,6 +94,49 @@ def _common_prefix_len(a: list[int] | None, b: list[int]) -> int:
     while i < n and a[i] == b[i]:
         i += 1
     return i
+
+
+def _message_fingerprint(message: dict) -> str:
+    """A stable id for one chat message, for finding it again next turn.
+
+    Content, not position: the list a prompt is built from slides as history
+    grows, so "the 7th message" means something different every turn while
+    "the message that starts this observation" does not. Hashed rather than
+    kept whole because these are page dumps, and the id gets held for the life
+    of the session.
+    """
+    content = str(message.get("content", ""))
+    return hashlib.sha1(
+        f"{message.get('role', '')}:{len(content)}:{content[:256]}".encode(
+            "utf-8", "replace")).hexdigest()
+
+
+def _cache_nbytes(cache) -> int:
+    """Bytes a live KV cache currently occupies, or 0 if it cannot be read.
+
+    Reads .state, which is what save_prompt_cache serialises, so this is the
+    same number that lands on disk — and it covers the draft model's half of a
+    speculative cache and any KV quantisation without being told either is
+    there. That is the point: the per-token cost of a cache is the one input to
+    the context budget, and deriving it from layer counts and head dimensions
+    goes stale with every headmaster swap and every change to agent.kv_bits,
+    while weighing the thing itself never does.
+    """
+    total = 0
+    try:
+        for layer in cache or ():
+            state = getattr(layer, "state", None)
+            if state is None:
+                continue
+            if not isinstance(state, (tuple, list)):
+                state = (state,)
+            for arr in state:
+                nbytes = getattr(arr, "nbytes", None)
+                if isinstance(nbytes, int):
+                    total += nbytes
+    except Exception:
+        return 0
+    return total
 
 
 _COMPLETION_CLAIM = re.compile(

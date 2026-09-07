@@ -44,8 +44,12 @@ training_data/tmp*.yaml
 adapters.premask.*
 demo_skills/*
 demo_finetune_loop.py
-benchmark_*
-bench/*
+# Benchmark measurement results (bench/*.json and root benchmark_*.json) are
+# tracked: they are the model-score records the memory notes and models.json
+# descriptions cite, and a disk purge already ate nine of them. The datasets
+# they were measured against (bench/data/) are large and re-downloadable, so
+# those stay ignored.
+bench/data/
 Adapter_skills/*
 adapters.9b-scrape/*
 # Per-user data: every install generates its own config, notes,
@@ -66,6 +70,8 @@ security.md.default
 security.md.bak.*
 cron_jobs.json
 gateway.pid
+daemon.pid
+daemon.sock
 agent_memory.md
 user_profile.md
 # Standing instructions: the user's own style preferences, kept across
@@ -148,3 +154,10 @@ build/
 # The agent's persistent browser profile: session cookies for whatever
 # the user logged into. Never publish.
 /browser_profile/
+
+# Chromium writes a profile directory here when a launch is given the literal
+# path "null" -- what a shell redirect meant as /dev/null leaves behind. It is
+# browser state (Safe Browsing lists, NativeMessagingHosts, a first-party-sets
+# db), so it is both junk and the same kind of thing browser_profile/ is
+# ignored for.
+/null/
