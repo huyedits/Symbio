@@ -2060,28 +2060,15 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
         print(f"  [Train] {iters} iters for {samples} sample(s) at batch "
               f"{lora['batch_size']} (~{lora.get('epochs', 2)} epochs).")
 
-    cmd = [
-        sys.executable, "-m", "mlx_lm", "lora",
-        "--model", model_name or config["model_name"],
-        "--train",
-        "--data", str(data_dir),
-        "--batch-size", str(lora["batch_size"]),
-        "--num-layers", str(lora["num_layers"]),
-        "--iters", str(iters),
-        "--learning-rate", str(lora["learning_rate"]),
-        "--steps-per-eval", str(lora["steps_per_eval"]),
-        # Without this mlx_lm defaults to 25 batches and re-scores the whole
-        # validation split on every evaluation. At this corpus's ~2,160-token
-        # samples that is ~11s per batch on an 8B, so a 438-iteration run spent
-        # about an hour inside evaluation alone. The point of the number is to
-        # spot a plateau or a divergence, and a handful of batches carries that
-        # signal — it is a progress check, not a benchmark.
-        "--val-batches", str(lora.get("val_batches", 8)),
-        "--max-seq-length", str(lora["max_seq_length"]),
-        "--adapter-path", str(adapter_dir),
-        "--save-every", str(lora["save_every"]),
-        "--config", config_path,
-    ]
+    # Which trainer, decided in one place. On MLX this returns exactly the
+    # argv that was written here inline; on CUDA it points at symbio.cuda_lora,
+    # which takes the same flags so the progress parsing, early stop and
+    # adapter handling below need no branch of their own.
+    from symbio import backend
+
+    cmd = backend.trainer_command(
+        model_name or config["model_name"], str(data_dir), str(adapter_dir),
+        lora, iters, config_path, config)
 
     # Continue from the existing adapter rather than replacing it. Checked
     # rather than assumed: resuming onto a different recipe is the one way
@@ -2656,7 +2643,37 @@ def _run_training_with_early_stop(
             except OSError:
                 pass
 
+    reseal_adapter(adapter_dir)
     return True
+
+
+def reseal_adapter(adapter_dir: Path) -> bool:
+    """Re-seal the adapter this run just wrote, and rebuild the root.
+
+    Without this the seal is a photograph that goes out of date the moment you
+    train, every later load warns about weights that are fine, and everyone
+    learns to ignore the warning — which is the only way a tripwire actually
+    fails. Sealing at the end of a run is also the one moment the seal is worth
+    the most: adapter_seal.py's own docstring is blunt that a seal is worth
+    exactly as much as the moment it was written.
+
+    Best-effort. A training run that produced good weights must not be reported
+    as failed because the bookkeeping after it could not be written.
+    """
+    from symbio import adapter_integrity
+
+    module = adapter_integrity._seal()
+    if module is None or not any(Path(adapter_dir).glob("*.safetensors")):
+        return False
+    try:
+        # integrity_only: the live adapter directory holds weights with no
+        # training_data/ beside them, so there is nothing to weld it to. The
+        # seal says which of the two claims it is making.
+        module.seal(Path(adapter_dir), quiet=True, integrity_only=True)
+        module.build_root(constants.PROJECT_DIR, quiet=True)
+        return True
+    except Exception:
+        return False
 
 PROGRESS_FILE = "training_progress.json"
 
