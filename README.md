@@ -1,3 +1,4 @@
+### CUDA SUPPORT NEEDED
 # Symbio - that fine tuning agent.
 
 > **A local-first AI agent that learns from your corrections.**
