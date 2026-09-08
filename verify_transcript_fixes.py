@@ -369,7 +369,12 @@ class LiveSession:
             [sys.executable, "-m", "symbio.app.cli", "chat"],
             cwd=PROJECT_DIR,
             stdin=slave, stdout=slave, stderr=slave, close_fds=True,
-            env=dict(os.environ, PYTHONUNBUFFERED="1"),
+            # SYMBIO_NO_COLOR keeps the CLI in its plain, parseable form. The
+            # interactive terminal now renders status lines as glyphs and the
+            # prompt as "> ", and this harness waits on the literal
+            # "Huy     : " — styled, it would never match and every run would
+            # hang at the first prompt. Graders read behaviour, not looks.
+            env=dict(os.environ, PYTHONUNBUFFERED="1", SYMBIO_NO_COLOR="1"),
         )
         os.close(slave)
         threading.Thread(target=self._read, daemon=True).start()

@@ -1159,11 +1159,30 @@ def run_single_tool(agent: AIAgent, name: str, params: dict[str, Any]) -> str:
     # Same refusal the tag agent enforces in ChatSession._execute_tool. Every
     # tool table that can write needs it, or the protection is only as good as
     # which front-end happens to be running.
+    from symbio import safety
     from symbio.app import security as _security
 
     _blocked = _security.block_reason(name, params)
     if _blocked is not None:
         return _blocked
+
+    # And the risk gate, for the same reason the refusal check is here: this
+    # front-end runs the same tools through a different dispatcher, and it
+    # consulted only block_reason. So the 3/3 scores on desktop_type and
+    # desktop_press — arbitrary shell execution when the focused window is a
+    # Terminal — were enforced in ChatSession and nowhere else, which makes
+    # them a property of which front-end happens to be running rather than of
+    # the action. Same shape as the hole the refusal check above closes.
+    _risk = safety.assess_tool_risk(name, params, agent.config)
+    _allowed, _reason = safety.maybe_confirm(name, params, _risk, agent.config)
+    if not _allowed:
+        safety.log_security_event("tool_blocked", {
+            "tool": name, "params": params, "risk": _risk, "reason": _reason,
+        })
+        return (
+            f"Tool '{name}' was not approved (risk score {_risk['risk_score']}/3: "
+            f"{', '.join(_risk['flags'])})."
+        )
 
     meta = tool_metadata(name, agent.tools, agent)
     runner: Callable[[dict[str, Any]], str] = meta.get("run", lambda _: f"Unknown tool: {name}")

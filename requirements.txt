@@ -1,4 +1,6 @@
 mlx-lm>=0.21.0
+# Vision: lets the assistant see screenshots instead of guessing from page text.
+mlx-vlm>=0.6.0
 transformers>=4.40.0
 torch
 safetensors>=0.4.0
@@ -7,3 +9,8 @@ playwright>=1.45.0
 PyAutoGUI>=0.9.54
 Pillow>=10.0.0
 python-telegram-bot>=20.0
+
+# CUDA backend (symbio/backend.py, symbio/cuda_lora.py). Not installed by
+# default and NEVER EXECUTED — written on a Mac with no NVIDIA device.
+# On a CUDA box install torch for your CUDA version from pytorch.org, then:
+#   pip install peft accelerate bitsandbytes datasets

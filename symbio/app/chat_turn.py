@@ -339,6 +339,7 @@ class AgentTurnMixin:
         claim_nudged = False
         unparsed_tag_nudged = False
         echo_retry_nudged = False
+        thinking_cut_retried = False
         # The round index used to select thinking (think=round_num > 0);
         # agent.thinking_level owns that now, so nothing reads the counter.
         for _round_num in range(max_rounds):
@@ -415,7 +416,10 @@ class AgentTurnMixin:
             messages.extend(tool_few_shots(self.config))
             messages.extend(working_history)
 
-            chunk_prefix = f"{self.config['assistant_name']:8}: " if self.stream_prefix else ""
+            # The assistant's own line. Styled only when a person is watching
+            # a real terminal; chat_style falls back to plain text otherwise,
+            # so piped output and the scripted harnesses still see the name.
+            chunk_prefix = (self.assistant_prefix() if self.stream_prefix else "")
             # Resample once if the reply has a dangling (truncated) tool call —
             # the model started emitting a tool tag but hit max_tokens or got
             # cut off. A fresh sample usually completes it, avoiding a system-
@@ -476,6 +480,76 @@ class AgentTurnMixin:
                 # first — so leave it to the self-correction observation
                 # below, which repairs the turn without duplicating output.
                 if streamed_live:
+                    break
+            if gen_aborted:
+                break
+
+            # Reasoning that ran out of road.
+            #
+            # thinking_level gives the <think> block a token allowance on top
+            # of the reply budget, but it is a budget, not a leash: a model
+            # that keeps deliberating is cut off at the end of it, mid-thought
+            # and mid-sentence, having written no answer and emitted no tool
+            # call. Live 2026-09-06, asked to post to @grok, the model reasoned
+            # in circles about what the page might look like — it could not see
+            # it — and the transcript simply stops.
+            #
+            # What reaches the user then is not silence, which is why this
+            # needs its own branch rather than the blank-reply nudge below.
+            # strip_reasoning_block matches <think>...</think>, so on an
+            # unclosed block it removes the dangling opening tag and leaves the
+            # prose: the model's private deliberation — "Maybe the composer is
+            # at the top. Or maybe I should check the page structure again" —
+            # becomes the visible answer, delivered in the assistant's voice as
+            # though it were one. The reply is not empty, so nothing downstream
+            # treats it as a failure.
+            #
+            # An unclosed block is therefore the whole signal, whatever prose
+            # came with it. The fix is to change the thing that ran out:
+            # resample once with thinking OFF, which ends the prompt with an
+            # already-closed block and puts every token into the answer. One
+            # retry per turn, then the normal paths take over.
+            if (raw_reply.strip()
+                    and not tooling.think_block_closed(raw_reply)
+                    and not thinking_cut_retried):
+                thinking_cut_retried = True
+                self.output_fn(
+                    "  [Reasoning] Ran out of tokens mid-thought; retrying "
+                    "without the thinking block so the budget goes to the "
+                    "answer.")
+                try:
+                    # If the cut-off deliberation already went to the screen,
+                    # the retry must not stream too: the sample-retry above
+                    # breaks outright on streamed_live for this reason ("a
+                    # second sample would print a whole second reply
+                    # underneath the first"). Breaking is not an option here —
+                    # that ships the deliberation as the answer, which is what
+                    # this branch exists to stop — so silence the retry
+                    # instead and let the post-loop print the real reply once,
+                    # under the notice that explains what happened.
+                    _live = self.stream_chunk_fn
+                    if streamed_live:
+                        self.stream_chunk_fn = None
+                    try:
+                        raw_reply, streamed_live = self._generate_reply(
+                            messages, chunk_prefix=chunk_prefix,
+                            timings=timings, think=False, reasoning_budget=0,
+                        )
+                    finally:
+                        self.stream_chunk_fn = _live
+                    reasoning = tooling.extract_reasoning(raw_reply)
+                    reply = tooling.clean_response(
+                        tooling.strip_reasoning_block(raw_reply)).strip()
+                    self.logger.info(f"RAW_REPLY (no-think retry): {raw_reply!r}")
+                except Exception as e:
+                    # gen_aborted, not a bare break. Every other error exit in
+                    # this loop sets it, and for a reason: breaking straight
+                    # out leaves `reply` holding the FIRST generation — the
+                    # stripped, unclosed deliberation — and the post-loop
+                    # finalisation then ships it to the user in the assistant's
+                    # voice, which is exactly what this block exists to stop.
+                    self.output_fn(f"[MLX Error: {e}]")
+                    gen_aborted = True
                     break
             if gen_aborted:
                 break
@@ -700,12 +774,36 @@ class AgentTurnMixin:
                     browser_retry_nudged = True
                     self.output_fn(
                         "  [Browser] Previous action failed; prompting retry...")
+                    # Point it at its eyes, not at another guess.
+                    #
+                    # This used to say "retry with a different exact visible
+                    # text or selector, use browser_get_text if needed" — which
+                    # is a description of the blind-guessing loop, not a way
+                    # out of it. Observed live 2026-09-07: a type failed for
+                    # want of focus, and the model spent eight rounds clicking
+                    # "Post" and re-reading page text, reasoning that "without
+                    # seeing the actual page, it's tricky", before it thought
+                    # to look. Page text is exactly what does not distinguish
+                    # the nav item from the submit button, or show where a
+                    # field is; a screenshot does, and see_screen returns
+                    # coordinates browser_click_at can use.
+                    if self._can_look():
+                        recovery = (
+                            "Do not explain the failure, and do not guess at "
+                            "another label. Call see_screen first to see where "
+                            "things actually are, then act on the coordinates "
+                            "it returns with browser_click_at. "
+                        )
+                    else:
+                        recovery = (
+                            "Do not explain the failure. Retry the browser "
+                            "action with a different exact visible text or "
+                            "selector. Use browser_get_text if needed. "
+                        )
                     self.history.append({"role": "user", "content": (
                         f"[System observation: {pending_browser_error} "
-                        "Do not explain the failure. Retry the browser action "
-                        "with a different exact visible text or selector. "
-                        "Use browser_get_text if needed. Do not end the turn "
-                        "until the user's request is completed.]"
+                        f"{recovery}Do not end the turn until the user's "
+                        "request is completed.]"
                     )})
                     self._trim_history()
                     continue

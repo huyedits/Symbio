@@ -856,6 +856,52 @@ def classify_mistake_category(
 AUTO_TOOL_CORRECTION = "(automatic: the next tool call succeeded)"
 
 
+# From the start of the wrapper to the END OF THE OBSERVATION — not to the
+# first "[End untrusted ...]", which is a marker the page itself can write.
+# Matching to the close was two holes at once: page text containing the
+# literal end-marker terminated the block early and everything after it was
+# kept (verified — a forged marker put a whole timeline into the note), and a
+# block left UNCLOSED, by history trimming or truncation, matched nothing at
+# all so the entire dump survived. Both are the same failure the wrapper
+# exists to prevent, arriving through the thing that reads it.
+#
+# Cutting to end-of-string needs no cooperation from the content. The error
+# and its recovery advice — the part worth training on — are always in front
+# of the wrapper, so nothing of value is behind it.
+_UNTRUSTED_BLOCK_RE = re.compile(r"\[Begin untrusted .*$", re.DOTALL)
+# The unasked-for snapshot appended after every browser action.
+_PAGE_DUMP_RE = re.compile(r"\s*Page text now:.*$", re.DOTALL)
+# What is left is an error message and its recovery advice; anything longer
+# than this is page text that slipped past both patterns.
+_MISTAKE_CONTEXT_CHARS = 600
+
+
+def _mistake_context(text: str) -> str:
+    """The part of a failed observation that is worth training on.
+
+    Measured on a real note, 2026-09-07: of 2,792 characters of "original
+    question", 150 were the actual error — `Type failed: no visible element
+    matches ...` — while 1,121 were the untrusted-content wrapper and 1,518
+    were a raw dump of the user's X timeline, other people's posts and ads
+    included. All of it was headed for train.jsonl.
+
+    Two reasons that is not merely untidy. The corpus is the thing this
+    project trains on, so bulk page text becomes weights; and the text is
+    attacker-controllable by construction — it is wrapped as untrusted
+    precisely because anyone can write it — so learning from it is a way for
+    a page to reach the model that survives the session it arrived in.
+
+    The error and the recovery advice are what generalise. Keep those.
+    """
+    text = _UNTRUSTED_BLOCK_RE.sub(" ", text or "")
+    text = _PAGE_DUMP_RE.sub("", text)
+    text = redact_secrets(text).replace("\n", " ")
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    if len(text) > _MISTAKE_CONTEXT_CHARS:
+        text = text[:_MISTAKE_CONTEXT_CHARS].rstrip() + " …(truncated)"
+    return text
+
+
 def save_mistake_note(original_query: str, wrong_answer: str,
                       correction: str, correct_answer: str,
                       severity: int = 1, category: str = "general") -> Path:
@@ -872,7 +918,7 @@ def save_mistake_note(original_query: str, wrong_answer: str,
     # "Save conversation for training?" prompt -- answering "n" there does not
     # reach it, so redaction has to happen here or a credential typed into one
     # turn survives on disk and, at mistake_threshold, in the weights.
-    original_query = redact_secrets(original_query).replace("\n", " ")
+    original_query = _mistake_context(original_query)
     wrong_answer = redact_secrets(wrong_answer).replace("\n", " ")
     correction = redact_secrets(correction).replace("\n", " ")
     correct_answer = redact_secrets(correct_answer).replace("\n", " ")
