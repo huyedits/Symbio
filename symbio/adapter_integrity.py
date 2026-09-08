@@ -127,7 +127,11 @@ def check_adapter(adapter_path: str | Path | None) -> dict | None:
                               constants.PROJECT_DIR)
     except Exception:
         return None
-    return None if report.get("state") == "unsealed" else report
+    # "stale-format" is a seal this version cannot read, which is the same
+    # kind of answer as "unsealed": no claim it can check, so no claim to
+    # contradict. The CLI says re-seal; a load has nothing to report.
+    return (None if report.get("state") in ("unsealed", "stale-format")
+            else report)
 
 
 def describe(report: dict) -> str:

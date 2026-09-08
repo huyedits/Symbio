@@ -105,8 +105,26 @@ def _training_files(folder: Path) -> list[Path]:
                   key=lambda p: str(p.relative_to(d)))
 
 
+def _weights_files(folder: Path) -> list[Path]:
+    """EVERY safetensors in the folder, sorted.
+
+    Not one of them. A folder routinely holds more than a single weights file
+    — mlx_lm writes 0000100_adapters.safetensors checkpoints beside the final
+    adapters.safetensors, and a killed run leaves them there, which is
+    precisely the case a load-time check exists for. Sealing only the first
+    one sorted was worse than a gap: '0' sorts before 'a', so the seal covered
+    the CHECKPOINT and left adapters.safetensors — the file mlx_lm actually
+    loads — free to be replaced without the seal noticing.
+    """
+    return sorted(folder.glob("*.safetensors"))
+
+
 def _weights_file(folder: Path) -> Path | None:
-    """The archived weights, whatever they are called."""
+    """The one that gets loaded, for naming it in the seal.
+
+    Preference order matters for the same reason: the manifest's answer, then
+    the conventional name, and only then whatever sorts first.
+    """
     man = folder / "manifest.json"
     if man.exists():
         try:
@@ -115,9 +133,27 @@ def _weights_file(folder: Path) -> Path | None:
                 return folder / name
         except json.JSONDecodeError:
             pass
-    for p in sorted(folder.glob("*.safetensors")):
+    conventional = folder / "adapters.safetensors"
+    if conventional.exists():
+        return conventional
+    for p in _weights_files(folder):
         return p
     return None
+
+
+def weights_digest(folder: Path) -> tuple[str, dict[str, str]]:
+    """Root over every weights file, plus the per-file hashes.
+
+    Same shape as data_digest, and for the same reason: the root is what the
+    leaf is built from, and the per-file hashes are what lets a failed verify
+    name the file that moved instead of only saying something did.
+    """
+    per_file = {p.name: _sha256_file(p) for p in _weights_files(folder)}
+    root = hashlib.sha256()
+    for name in sorted(per_file):
+        root.update(name.encode("utf-8"))
+        root.update(bytes.fromhex(per_file[name]))
+    return root.hexdigest(), per_file
 
 
 def data_digest(folder: Path) -> tuple[str, dict[str, str]]:
@@ -157,9 +193,11 @@ def _measure(folder: Path) -> dict:
     if weights is None:
         raise FileNotFoundError(f"no .safetensors in {folder}")
     d_hex, per_file = data_digest(folder)
+    a_hex, weight_files = weights_digest(folder)
     return {
         "weights_name": weights.name,
-        "adapter_digest": _sha256_file(weights),
+        "adapter_digest": a_hex,
+        "weight_files": weight_files,
         "data_digest": d_hex,
         "files": per_file,
     }
@@ -243,10 +281,16 @@ def seal(folder: Path, quiet: bool = False, integrity_only: bool = False) -> int
     salt = secrets.token_hex(16)
     key = pair_key(m["data_digest"], m["adapter_digest"], salt)
     doc = {
-        "version": 1,
+        # 2: adapter_digest became a root over EVERY weights file in the
+        # folder rather than the hash of one of them. A version-1 seal cannot
+        # be verified against a version-2 measurement, and reporting that
+        # mismatch as "the weights changed" would be a lie — check() calls it
+        # what it is and asks for a re-seal.
+        "version": 2,
         "sealed": datetime.now().isoformat(timespec="seconds"),
         "weights_name": m["weights_name"],
         "adapter_digest": m["adapter_digest"],
+        "weight_files": m["weight_files"],
         "data_digest": m["data_digest"],
         "file_count": len(m["files"]),
         "files": m["files"],
@@ -306,9 +350,24 @@ def check(folder: Path, root_doc: dict | None = None,
         return {"name": folder.name, "state": "unreadable",
                 "problems": [str(e)], "sealed": None, "file_count": 0}
 
+    if int(doc.get("version", 1)) < 2:
+        return {"name": folder.name, "state": "stale-format",
+                "problems": ["sealed by an older adapter_seal (version "
+                             f"{doc.get('version', 1)}); re-seal to check it"],
+                "sealed": doc.get("sealed"), "file_count": 0}
+
     problems: list[str] = []
     if m["adapter_digest"] != doc.get("adapter_digest"):
-        problems.append("adapter weights changed")
+        sealed, now = doc.get("weight_files", {}), m["weight_files"]
+        for name in sorted(set(sealed) | set(now)):
+            if name not in now:
+                problems.append(f"weights file removed: {name}")
+            elif name not in sealed:
+                problems.append(f"weights file added: {name}")
+            elif sealed[name] != now[name]:
+                problems.append(f"weights file changed: {name}")
+        if not problems:
+            problems.append("adapter weights changed")
     if m["data_digest"] != doc.get("data_digest"):
         sealed, now = doc.get("files", {}), m["files"]
         for name in sorted(set(sealed) | set(now)):
