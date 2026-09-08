@@ -71,6 +71,10 @@ security.md.bak.*
 cron_jobs.json
 gateway.pid
 daemon.pid
+# The Merkle root over THIS install's adapters, and the per-adapter seals
+# under it. Every install has its own adapters, so shipping one person's root
+# would only ever tell someone else their own weights are wrong.
+adapters_root.json
 daemon.sock
 agent_memory.md
 user_profile.md

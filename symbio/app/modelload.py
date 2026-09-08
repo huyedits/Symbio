@@ -45,6 +45,21 @@ def load(*args: Any, **kwargs: Any):
     just to run a slash command -- see the boot-time work behind `symb chat`
     feeling instant.
     """
+    from symbio import adapter_integrity, backend
+
+    config = kwargs.pop("config", None)
+    # Before the weights are handed to the model, not after. Every caller that
+    # loads an adapter comes through here, so this is the one place that can
+    # say "these are not the bytes that were sealed" while it still means
+    # anything — see symbio/adapter_integrity.py.
+    adapter_integrity.enforce(kwargs.get("adapter_path"), config)
+
+    if backend.is_cuda(config):
+        # Delegated whole: the CUDA path has its own tokenizer handling and
+        # none of the mlx-specific repair below applies to it.
+        return backend.load(args[0] if args else kwargs.pop("model_name"),
+                            adapter_path=kwargs.pop("adapter_path", None))
+
     from mlx_lm import load as _mlx_load
 
     # Mistral tokenizers ship a pre-tokenizer regex that mis-splits some

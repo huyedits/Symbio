@@ -462,6 +462,26 @@ class BrowserSession:
                         f"({count} hidden match(es))."
                     )
                 target.fill(text, timeout=self._TIMEOUT_MS)
+                # fill() is not a promise that the text is there. It was
+                # treated as one: the keyboard branch below checks
+                # _text_landed and this branch returned "Typed 'x'."
+                # unconditionally, which is the same false success the focus
+                # check was added to remove — in the path the tool description
+                # tells the model to PREFER, on the grounds that filling by
+                # selector "cannot miss". It can. A React or Lexical composer
+                # that rebuilds its DOM from its own state reverts a
+                # programmatic fill, and browser_type was taken out of
+                # _MUST_CHANGE_THE_PAGE on the reasoning that type_text
+                # verifies itself — true of the branch below, and of nothing
+                # here.
+                if not self._selector_holds(page, selector, text):
+                    return (
+                        f"Type failed: '{selector}' does not contain the text "
+                        f"after filling it. The field took the keystrokes and "
+                        f"put them back — a composer that rebuilds itself from "
+                        f"its own state does this. Click the field and type "
+                        f"into it instead of filling it."
+                    )
             else:
                 # Check focus BEFORE sending anything. The old order typed
                 # first and complained afterwards, and "the keystrokes went to
@@ -585,6 +605,29 @@ class BrowserSession:
                     return !!(el.isContentEditable
                         || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
                 }"""))
+        except Exception:
+            return True
+
+    @staticmethod
+    def _selector_holds(page: Any, selector: str, text: str) -> bool:
+        """Does the element `selector` names actually contain `text` now?
+
+        Best-effort in the same direction as every other check here: anything
+        it cannot answer counts as landed, so a verification that will not run
+        never fails a type that worked. querySelector does not speak XPath, so
+        an XPath target raises and passes — which is the honest outcome, since
+        this cannot see it either way.
+        """
+        try:
+            return bool(page.evaluate(
+                """([sel, t]) => {
+                    const el = document.querySelector(sel);
+                    if (!el) return true;
+                    const v = el.value !== undefined && el.value !== null
+                        ? el.value : el.innerText;
+                    return typeof v === 'string' ? v.includes(t) : true;
+                }""",
+                [selector, text]))
         except Exception:
             return True
 

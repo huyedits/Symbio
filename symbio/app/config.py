@@ -123,6 +123,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # in tokens directly; 0 switches the cap off entirely (which is what
         # every version before 2026-09-07 did).
         "max_prompt_tokens": "auto",
+        # What to do when an adapter's bytes do not match its seal (see
+        # adapter_seal.py and symbio/adapter_integrity.py): "warn" says so and
+        # loads anyway, "refuse" will not hand the model tampered weights,
+        # "off" does not look. warn by default because the innocent cause — an
+        # adapter retrained since it was last sealed — is far more common than
+        # the alarming one, and a check that cries wolf gets switched off.
+        # A training run re-seals what it just wrote, which is what makes
+        # "refuse" livable for anyone who wants it.
+        "verify_adapters": "warn",
         "sandbox_timeout": 30,
         "code_timeout": 60,
         "max_output_len": 4000,
