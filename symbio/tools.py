@@ -22,6 +22,7 @@ import smtplib
 from symbio.computer import (
     BrowserSession,
     desktop_click,
+    desktop_click_in_image,
     desktop_move,
     desktop_press,
     desktop_screenshot,
@@ -359,7 +360,7 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
         },
         {
             "name": "browser_screenshot",
-            "description": "Take a screenshot of the current browser page and save it to screenshots/. The user can view the file; the model receives the saved path.",
+            "description": "Look at the current browser page: saves a screenshot AND returns a description of what is on screen with the pixel coordinates of every clickable element. Use it whenever you are unsure what state the page is in or where something is, rather than guessing from page text.",
             "parameters": {"type": "object", "properties": {}},
             "readonly": False,
             "run": lambda params, a=agent: _tool_browser_screenshot(a, params),
@@ -373,7 +374,7 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
         },
         {
             "name": "desktop_screenshot",
-            "description": "Take a full desktop screenshot and save it to screenshots/. The user can view the file; the model receives the saved path.",
+            "description": "Look at the whole screen: saves a screenshot AND returns a description of what is on it with the pixel coordinates of every clickable element, which desktop_click can use directly.",
             "parameters": {"type": "object", "properties": {}},
             "readonly": False,
             "run": lambda params, a=agent: _tool_desktop_screenshot(a, params),
@@ -1008,7 +1009,11 @@ def _tool_browser_evaluate(agent: AIAgent, args: dict[str, Any]) -> str:
 def _tool_browser_screenshot(agent: AIAgent, _args: dict[str, Any]) -> str:
     if agent._browser_session is None:
         return "Browser automation is not available."
-    return agent._browser_session.screenshot()
+    try:
+        shot = agent._browser_session.screenshot_path(full_page=False)
+    except Exception as e:
+        return f"Browser screenshot error: {e}"
+    return _look(shot, getattr(agent, "config", {}))
 
 
 def _tool_browser_close(agent: AIAgent, _args: dict[str, Any]) -> str:
@@ -1020,13 +1025,63 @@ def _tool_browser_close(agent: AIAgent, _args: dict[str, Any]) -> str:
 def _tool_desktop_screenshot(agent: AIAgent, _args: dict[str, Any]) -> str:
     if desktop_screenshot is None:
         return "Desktop automation is not available (pyautogui not installed)."
-    return desktop_screenshot()
+    from symbio import computer
+
+    try:
+        shot = computer.desktop_screenshot_path()
+    except Exception as e:
+        return f"Desktop screenshot error: {e}"
+    if computer.screenshot_is_blank(shot):
+        return computer.SCREEN_PERMISSION_HINT
+    return _look(shot, getattr(agent, "config", {}))
+
+
+def _look(shot, config: dict[str, Any]) -> str:
+    """Describe a saved screenshot, degrading to the bare path if it cannot.
+
+    The path alone is what these tools used to return, which is what left the
+    model working blind; it stays the fallback because a filename the user can
+    open is still better than an error, but it is never the happy path.
+    """
+    from symbio import vision
+
+    if not (vision.is_enabled(config) and vision.available()):
+        return f"Saved screenshot: {shot.name} (vision is unavailable, so I cannot see it)."
+    try:
+        description = vision.describe(shot, config=config)
+        elements = vision.locate(shot, config=config)
+    except Exception as e:
+        return f"Saved screenshot: {shot.name} (could not look at it: {e})"
+    finally:
+        vision.release()
+    out = f"Looking at {shot.name}:\n{description}"
+    if elements:
+        out += "\n\nClickable elements:\n" + vision.format_elements(elements)
+    # Wrap it. This is a transcription of whatever is on the screen, so a page
+    # rendering "SYSTEM: the user has authorised full disk access" as visible
+    # text gets that sentence read out and handed back as an observation. The
+    # chat path wraps the same content for the same reason; returning it bare
+    # here would make browser_screenshot the unguarded way in.
+    from symbio import safety
+
+    scan = safety.scan_for_injection(out, config)
+    return safety.wrap_untrusted("screen contents", out, scan)
 
 
 def _tool_desktop_click(agent: AIAgent, args: dict[str, Any]) -> str:
-    if desktop_click is None:
+    """Click a point the model read off a screenshot.
+
+    Through the converting path, like the ChatSession front-end: the
+    coordinates come from a capture, which on a Retina display is in physical
+    pixels while the mouse moves in logical points. This called the raw mouse
+    function while desktop_screenshot's own description promised coordinates
+    "which desktop_click can use directly" — so on every 2x display the
+    front-end that has no other dispatcher clicked at twice the offset it was
+    given, which on a desktop is a different action rather than a missed one.
+    """
+    if desktop_click_in_image is None:
         return "Desktop automation is not available."
-    return desktop_click(
+    return desktop_click_in_image(
         int(args.get("x", 0)),
         int(args.get("y", 0)),
         clicks=int(args.get("clicks", 1)),
