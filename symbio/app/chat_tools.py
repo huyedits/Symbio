@@ -10,6 +10,7 @@ inherits it.
 """
 
 import json
+import math
 import re
 import shlex
 from pathlib import Path
@@ -46,9 +47,19 @@ def _coords(params: dict[str, Any]) -> tuple[int, int] | None:
     aimed at ("640", "318") is a click that does not happen.
     """
     try:
-        return int(float(params["x"])), int(float(params["y"]))
+        x, y = float(params["x"]), float(params["y"])
     except (KeyError, TypeError, ValueError):
         return None
+    # inf and NaN are floats and neither is a place. int(float("1e400")) raises
+    # OverflowError, which is not a ValueError and so escaped the handler
+    # entirely: the model got "Tool 'browser_click_at' failed unexpectedly:
+    # cannot convert float infinity to integer" in place of the recovery
+    # advice this function exists to make possible. Negatives parse fine and
+    # are never a point on a screen — click_at rejects them against the
+    # viewport, desktop_click does not check at all.
+    if not (math.isfinite(x) and math.isfinite(y)) or x < 0 or y < 0:
+        return None
+    return int(x), int(y)
 
 
 def _browser_peek(browser, config=None) -> str:
@@ -297,7 +308,7 @@ class ToolsMixin:
     # type_text verifies itself against the focused element's value (and, for
     # enter:true, against whether the field cleared), which is strictly better
     # evidence than a rendered-text diff. Leave the judgement to it.
-    _MUST_CHANGE_THE_PAGE = ("browser_click", "browser_press")
+    _MUST_CHANGE_THE_PAGE = ("browser_click", "browser_click_at", "browser_press")
 
     def _no_effect_note(self, name: str, before: str, out: str) -> str:
         """A sentence saying the action left the page untouched, or "".
@@ -452,7 +463,15 @@ class ToolsMixin:
         self._status(f"  [Vision] Looking at {where}...")
         # Read the page's own controls before the model sleeps: it costs
         # nothing, and it is the half of a look that vision cannot supply.
-        controls = self.browser.controls() if where == "the browser page" else []
+        # Whether the DOM was READ, not just whether it returned anything.
+        # controls() answers [] both when nothing matched and when the read
+        # never happened, and the absence claim below turns the second into
+        # the first — telling the model a control is NOT present when all that
+        # happened is that the page would not evaluate.
+        if where == "the browser page":
+            controls, dom_read = self.browser.controls_read()
+        else:
+            controls, dom_read = [], False
         try:
             description, elements = self._run_vision(shot, question)
         except Exception as e:
@@ -506,10 +525,23 @@ class ToolsMixin:
             # itself the vision model answers a question about an absent
             # element by confidently pointing at something else, so an empty
             # result must not read as a failed look.
-            lines.append(
-                "\nI could not locate that on screen. Treat it as NOT "
-                "present rather than as a failed look — do not click "
-                "anything on the strength of this.")
+            #
+            # But only when the DOM was actually consulted. On the desktop
+            # there is none to consult, and in the browser a read that threw
+            # looks identical to one that found nothing — asserting absence
+            # off the back of that inverts the correction the note above
+            # exists to make, about the same small control it was written for.
+            if dom_read or where == "the desktop":
+                lines.append(
+                    "\nI could not locate that on screen. Treat it as NOT "
+                    "present rather than as a failed look — do not click "
+                    "anything on the strength of this.")
+            else:
+                lines.append(
+                    "\nI could not locate that on screen, and the page's own "
+                    "controls could not be read either — so this is a failed "
+                    "look, NOT evidence the thing is missing. Scroll or "
+                    "reload and look again before concluding anything.")
         # A screenshot of a logged-in page is exactly as attacker-controlled as
         # its text: the words in it were written by whoever wrote the page.
         # browser_get_text wraps page text for that reason and this is the same
@@ -865,15 +897,6 @@ class ToolsMixin:
         if name == "see_screen":
             return self._see_screen(params)
 
-        if name == "browser_click_at":
-            if not self.config.get("browser", {}).get("enabled", False):
-                return "Browser automation is disabled."
-            coords = _coords(params)
-            if coords is None:
-                return ("Click failed: browser_click_at needs numeric 'x' and 'y'. "
-                        "Call see_screen first and use the coordinates it reports.")
-            return self.browser.click_at(*coords)
-
         if name in ("desktop_click", "desktop_type", "desktop_press"):
             return self._desktop_action(name, params)
 
@@ -916,6 +939,16 @@ class ToolsMixin:
             return safety.wrap_untrusted("page text", text, scan)
 
         browser_action_tools = {
+            # In the dict, not returned early above. Every other browser
+            # action gets the envelope around this block: the reopen-and-retry
+            # for a session that was never opened (450 of 453 logged click
+            # failures), the no-effect note, and _browser_peek. A coordinate
+            # click returned straight out of the dispatcher got none of it —
+            # so the one tool the model reaches for after LOOKING at the page
+            # was also the one that handed back no page afterwards, which is
+            # the blind state the whole see-then-click loop exists to end.
+            "browser_click_at": lambda: self.browser.click_at(
+                *(_coords(params) or (0, 0))),
             "browser_click": lambda: self.browser.click(
                 selector=params.get("target", "") if str(params.get("target", "")).startswith(("#", ".", "//", "[")) else "",
                 text=params.get("target", "") if not str(params.get("target", "")).startswith(("#", ".", "//", "[")) else "",
@@ -946,6 +979,10 @@ class ToolsMixin:
                 )
             # Validate required parameters for browser actions so malformed
             # tool calls produce clear, actionable errors instead of crashing.
+            if name == "browser_click_at" and _coords(params) is None:
+                return ("Click failed: browser_click_at needs numeric 'x' and "
+                        "'y' inside the viewport. Call see_screen first and "
+                        "use the coordinates it reports.")
             if name == "browser_click" and not params.get("target"):
                 return (
                     "Click failed: missing 'target'. "

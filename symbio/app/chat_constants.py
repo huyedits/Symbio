@@ -45,8 +45,13 @@ _BROWSER_TOOLS = {
 }
 
 # Browser actions that can sensibly be retried with a different target.
+# browser_click_at belongs here even though its "different target" is a
+# different coordinate: a failed one has to set pending_browser_error, or the
+# retry nudge — the one that now says "call see_screen, then click what it
+# reports" — never fires for the tool that nudge points at.
 _BROWSER_ACTION_TOOLS = {
-    "browser_click", "browser_type", "browser_scroll", "browser_press",
+    "browser_click", "browser_click_at", "browser_type",
+    "browser_scroll", "browser_press",
 }
 
 # How many times one identical tool call may be attempted in a single turn.
