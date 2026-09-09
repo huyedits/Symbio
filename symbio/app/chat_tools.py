@@ -360,6 +360,61 @@ class ToolsMixin:
         "no visible element matches",
     )
 
+    # Words that say what KIND of thing is being asked about rather than
+    # which one, so they must not be what makes a match.
+    _LOOK_STOPWORDS = frozenset({
+        "where", "what", "which", "is", "are", "the", "a", "an", "on", "in",
+        "at", "of", "to", "for", "this", "that", "there", "it", "screen",
+        "page", "window", "find", "locate", "show", "me", "see", "look",
+        "does", "do", "have", "has", "any", "and", "or", "can", "i",
+    })
+
+    @staticmethod
+    def _control_line(c: dict, click_tool: str = "browser_click_at") -> str:
+        """One control, with everything needed to act on it.
+
+        Including its COORDINATES, which _CONTROLS_JS has always computed —
+        the exact viewport centre, in the same space click_at uses — and which
+        every renderer here dropped on the floor, sending the model off to
+        ground the same control with a vision model that cannot see anything
+        under 32px. The DOM's own answer is exact, free, and was already in
+        the dict.
+        """
+        bits = f"  {c.get('kind', 'button'):6} {c.get('selector', '')}"
+        if c.get("label"):
+            bits += f"  — {c['label']}"
+        if c.get("value"):
+            bits += f"  [currently: {c['value']!r}]"
+        if c.get("disabled"):
+            bits += "  [disabled]"
+        if c.get("x") is not None and c.get("y") is not None:
+            bits += f"  ({click_tool} x={c['x']} y={c['y']})"
+        return bits
+
+    @classmethod
+    def _dom_matches(cls, question: str, controls: list[dict]) -> list[dict]:
+        """Controls whose own words answer `question`, best first.
+
+        Deliberately literal. A fuzzy match here would answer confidently
+        about the wrong control, which is the failure mode the whole looking
+        apparatus exists to correct — so a word has to actually appear in the
+        control's label, selector or contents, and a question made only of
+        stopwords matches nothing rather than everything.
+        """
+        words = [w for w in re.findall(r"[a-z0-9]+", (question or "").lower())
+                 if w not in cls._LOOK_STOPWORDS and len(w) > 1]
+        if not words:
+            return []
+        scored = []
+        for c in controls:
+            hay = " ".join(str(c.get(k, "")) for k in
+                           ("label", "selector", "value", "kind")).lower()
+            hits = sum(1 for w in words if w in hay)
+            if hits:
+                scored.append((hits, c))
+        scored.sort(key=lambda pair: -pair[0])
+        return [c for _hits, c in scored]
+
     def _targeting_help(self, name: str, out: str) -> str:
         """Put the page's real handles into the failure that needs them.
 
@@ -382,14 +437,17 @@ class ToolsMixin:
         buttons = [c for c in controls if c.get("kind") != "field"]
         lines = ["\n[This page's actual controls — retry with one of these:"]
         for c in fields:
-            value = f" [currently: {c['value']!r}]" if c.get("value") else ""
-            lines.append(
-                f"   field  {c['selector']} — {c.get('label') or '?'}{value}"
-                f"   (browser_type with selector={c['selector']!r})")
+            lines.append(f" {self._control_line(c)}"
+                         f"   (browser_type with selector={c['selector']!r})")
         for c in buttons[:6]:
-            state = " [disabled]" if c.get("disabled") else ""
-            lines.append(f"   button {c['selector']} — {c.get('label') or '?'}{state}")
-        lines.append("  Filling by selector needs no click and cannot miss.]")
+            lines.append(f" {self._control_line(c)}")
+        # Not "cannot miss": a composer that rebuilds its DOM from its own
+        # state reverts a programmatic fill, which is why type_text reads the
+        # field back afterwards. Both handles are given because they fail in
+        # different places — a selector needs no coordinates and no focus, a
+        # coordinate needs no selector to be stable.
+        lines.append("  Fill by selector, or click the coordinates; the type "
+                     "is checked afterwards either way.]")
         return "\n".join(lines)
 
     def _can_look(self) -> bool:
@@ -452,15 +510,13 @@ class ToolsMixin:
             if not self.browser.is_open:
                 return ("The browser is not open, so there is nothing to look "
                         "at. Use browser_open with a URL first.")
-            try:
-                # Viewport, not full page: the coordinates have to be ones the
-                # mouse can reach. See BrowserSession.screenshot_path.
-                shot = self.browser.screenshot_path(full_page=False)
-            except Exception as e:
-                return f"Could not capture the page: {e}"
+            # Captured below, only if the DOM cannot answer. A viewport
+            # capture of a heavy page is not free, and it writes a file every
+            # time — pointless work when the question is about a control the
+            # browser can name outright.
+            shot = None
             where = "the browser page"
 
-        self._status(f"  [Vision] Looking at {where}...")
         # Read the page's own controls before the model sleeps: it costs
         # nothing, and it is the half of a look that vision cannot supply.
         # Whether the DOM was READ, not just whether it returned anything.
@@ -472,6 +528,48 @@ class ToolsMixin:
             controls, dom_read = self.browser.controls_read()
         else:
             controls, dom_read = [], False
+
+        # Ask the page before waking anything. A look at a web page costs a
+        # full headmaster unload and reload — ~10 GB out and back — plus
+        # several VLM passes, and the tool description tells the model to do
+        # it before an action AND after it. For a control the DOM can name,
+        # every byte of that is spent rediscovering, badly, something the
+        # browser already knows exactly: the selector, the current contents,
+        # and the viewport centre in the same coordinate space click_at uses.
+        #
+        # So: if the question names something the page's own controls answer,
+        # answer from them and do not look at all. Vision stays for what has
+        # no DOM handle — a canvas, an image, the desktop — which is the only
+        # place it was ever the better instrument.
+        if question and dom_read and controls:
+            hits = self._dom_matches(question, controls)
+            if hits:
+                self._status("  [Page] Answered from the page's own controls "
+                             "(no screenshot needed).")
+                lines = [
+                    f"The page's own controls answer that — no screenshot "
+                    f"needed, these coordinates and selectors are exact:",
+                    *(self._control_line(c) for c in hits[:6]),
+                ]
+                rest = [c for c in controls if c not in hits]
+                if rest:
+                    lines.append("\nEverything else on the page:")
+                    lines.extend(self._control_line(c) for c in rest[:12])
+                lines.append(
+                    "\nFill a field with browser_type selector=..., press a "
+                    "button with browser_click_at at its coordinates. Look "
+                    "with see_screen only if you need something the page "
+                    "cannot name — an image, a canvas, or how it LOOKS.")
+                return self._wrap_look("\n".join(lines))
+
+        if shot is None:
+            try:
+                # Viewport, not full page: the coordinates have to be ones the
+                # mouse can reach. See BrowserSession.screenshot_path.
+                shot = self.browser.screenshot_path(full_page=False)
+            except Exception as e:
+                return f"Could not capture the page: {e}"
+        self._status(f"  [Vision] Looking at {where}...")
         try:
             description, elements = self._run_vision(shot, question)
         except Exception as e:
@@ -511,14 +609,9 @@ class ToolsMixin:
                 "\nControls on this page (use 'selector' with browser_type to "
                 "fill a field exactly, rather than clicking and hoping):")
             for c in controls:
-                bits = f"  {c['kind']:6} {c['selector']}"
-                if c.get("label"):
-                    bits += f"  — {c['label']}"
-                if c.get("value"):
-                    bits += f"  [currently: {c['value']!r}]"
-                if c.get("disabled"):
-                    bits += "  [disabled]"
-                lines.append(bits)
+                lines.append(self._control_line(
+                    c, "desktop_click" if where == "the desktop"
+                    else "browser_click_at"))
         elif not elements and question:
             # Nothing seen AND nothing in the DOM to contradict it: now "not
             # present" is a real answer and has to be delivered as one. Left to
@@ -542,18 +635,24 @@ class ToolsMixin:
                     "controls could not be read either — so this is a failed "
                     "look, NOT evidence the thing is missing. Scroll or "
                     "reload and look again before concluding anything.")
-        # A screenshot of a logged-in page is exactly as attacker-controlled as
-        # its text: the words in it were written by whoever wrote the page.
-        # browser_get_text wraps page text for that reason and this is the same
-        # content arriving through a different sense.
+        return self._wrap_look("\n".join(lines))
+
+    def _wrap_look(self, body: str) -> str:
+        """Everything a look returns, wrapped as the untrusted content it is.
+
+        A screenshot of a logged-in page is exactly as attacker-controlled as
+        its text: the words in it were written by whoever wrote the page.
+        browser_get_text wraps page text for that reason and this is the same
+        content arriving through a different sense — including the DOM answer,
+        whose labels and values are written by the same author.
+
+        Scans the whole body, not just the prose: it carries vision's element
+        labels and every control's label and value, all page-authored, so
+        scanning the description alone calibrated the wrapper's severity on a
+        fraction of what it wraps and a payload in a button's aria-label rode
+        inside without ever contributing to the score.
+        """
         self._untrusted_this_turn = True
-        # Scan the whole body, not just the prose. The block also carries
-        # vision's element labels and every DOM control's label and value, all
-        # of them page-authored — so scanning `description` alone calibrated
-        # the wrapper's severity on a fraction of what it wraps, and a payload
-        # in a button's aria-label rode inside the wrapper without ever
-        # contributing to the score.
-        body = "\n".join(lines)
         scan = safety.scan_for_injection(body, self.config)
         return safety.wrap_untrusted("screen contents", body, scan)
 

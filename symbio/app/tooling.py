@@ -192,7 +192,7 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "see_screen",
-        "description": "LOOK at the screen and get back a description of what is actually there, plus the pixel coordinates of what you asked about. Use this whenever you are unsure what is on screen, what state a page is in, whether a field already has text in it, or where something is — instead of guessing from page text or reasoning about what a click 'probably' did. Look before you click into an unfamiliar layout, and look again after an action to check it worked. Coordinates it returns can be clicked directly with browser_click_at or desktop_click. Name ONE thing per call in 'question' ('where is the composer?'); asking about several at once makes the positions unreliable.",
+        "description": "LOOK at the screen and get back what is actually there: every control with its exact selector, its current contents, and coordinates you can click directly with browser_click_at or desktop_click. On a web page this is instant and exact — it asks the page itself and does not need a screenshot — so use it freely rather than guessing a label, and use it FIRST when a click or a type has just failed. It also tells apart two controls with the same name, which page text cannot. Only a question the page cannot answer about itself — how something looks, an image, a canvas, or anything on the desktop — falls back to the slower screenshot. Name ONE thing per call in 'question' ('where is the composer?'); asking about several at once makes the positions unreliable.",
         "parameters": {
             "type": "object",
             "properties": {
