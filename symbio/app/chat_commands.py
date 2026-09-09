@@ -15,8 +15,9 @@ from pathlib import Path
 from symbio import constants
 from symbio.config import adapter_weights_present
 from symbio.app import (
-    cron, dispatch, golden, health, local_telemetry, memory, pending, prompts,
-    sandbox, security, setup, skills, tooling, training,
+    cron, dispatch, golden, health, local_telemetry, memory, note_history,
+    pending, prompts, sandbox, security, sessions, setup, skills, tooling,
+    training,
 )
 from symbio.app.config import config_show, set_config_value
 from symbio.app.chat_constants import (
@@ -253,6 +254,11 @@ class CommandsMixin:
         # body, while the real /notes handler further down was unreachable
         # code for a command the banner advertises. Found by typing it into
         # a real session, which is the only place the two are adjacent.
+        # `/note-history` is the same trap one prefix deeper, so it is handled
+        # before the `/note` composer.
+        elif cmd == "/note-history" or cmd.startswith("/note-history "):
+            self._cmd_note_history(user_input[len("/note-history"):].strip())
+
         elif cmd.startswith("/note") and cmd.rstrip() != "/notes":
             self._cmd_note(user_input[5:].strip())
 
@@ -498,6 +504,9 @@ class CommandsMixin:
                 self.output_fn(f"  {len(files)} note(s):")
                 for f in files:
                     self.output_fn(f"    - {f.name}")
+
+        elif cmd == "/history" or cmd.startswith("/history "):
+            self._cmd_history(user_input[len("/history"):].strip())
 
         elif cmd == "/health":
             report = health.system_check(self.config)
@@ -872,6 +881,106 @@ class CommandsMixin:
             self.output_fn("  -> Logged to training data.\n")
         else:
             self.output_fn("  -> No output; not logged to training data.\n")
+
+    def _cmd_history(self, arg: str):
+        """Browse or search past conversation sessions."""
+        if not arg:
+            recent = sessions.SessionStore.list_sessions()
+            if not recent:
+                self.output_fn("  No past sessions yet.")
+                return
+            self.output_fn(f"  {len(recent)} recent session(s):")
+            for s in recent:
+                self.output_fn(
+                    f"    {s['session_id']}  ({s['turns']} turns, {s['started']})"
+                )
+                preview = s["first_user"].replace("\n", " ")
+                if preview:
+                    self.output_fn(f"      {preview}")
+            return
+
+        # An exact session id wins over a search query.
+        if (constants.SESSIONS_DIR / f"{arg}.jsonl").exists():
+            rows = sessions.SessionStore.read_session(arg)
+            if not rows:
+                self.output_fn(f"  Session {arg} is empty.")
+                return
+            self.output_fn(f"  Session {arg} ({len(rows)} turns):")
+            for r in rows:
+                role = r.get("role", "?")
+                content = str(r.get("content", "")).replace("\n", " ")
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                self.output_fn(f"    [{role}] {content}")
+            return
+
+        # Otherwise treat it as a search query across past sessions.
+        results = sessions.SessionStore.search(
+            arg, limit=10, exclude_session=getattr(self, "session_id", None))
+        if not results:
+            self.output_fn(f"  No past sessions match '{arg}'.")
+            return
+        self.output_fn(f"  {len(results)} match(es) for '{arg}':")
+        for r in results:
+            ts = r.get("timestamp", "?")
+            role = r.get("role", "?")
+            content = str(r.get("content", "")).replace("\n", " ")
+            if len(content) > 200:
+                content = content[:200] + "..."
+            self.output_fn(f"    [{ts} / {role}] {content}")
+
+    def _cmd_note_history(self, arg: str):
+        """View and restore previous versions of a note."""
+        arg = arg.strip()
+        if not arg:
+            dirs = note_history.all_history_dirs()
+            if not dirs:
+                self.output_fn("  No note history yet.")
+                return
+            self.output_fn(f"  {len(dirs)} note(s) with history:")
+            for d in dirs:
+                self.output_fn(f"    - {d.name}")
+            return
+
+        # A note name can contain spaces ("Proxy Info"), so only a trailing
+        # bare integer is treated as a version index; everything else is the
+        # name.
+        name = arg
+        index = None
+        head, _, tail = arg.rpartition(" ")
+        if tail.isdigit():
+            name = head
+            index = int(tail)
+
+        dirs = note_history.matching_history_dirs(name)
+        if not dirs:
+            self.output_fn(f"  No note history matches '{name}'.")
+            return
+        if len(dirs) > 1:
+            self.output_fn(f"  {len(dirs)} notes match '{name}'; be more specific:")
+            for d in dirs:
+                self.output_fn(f"    - {d.name}")
+            return
+
+        d = dirs[0]
+        note_path = constants.NOTES_DIR / f"{d.name}.md"
+        vers = note_history.versions(note_path)
+        if index is None:
+            if not vers:
+                self.output_fn(f"  No versions for '{d.name}'.")
+                return
+            self.output_fn(f"  {len(vers)} version(s) for {d.name}:")
+            for i, v in enumerate(vers):
+                self.output_fn(f"    [{i}] {v.name}")
+            self.output_fn("  Restore with /note-history <name> <index>.")
+            return
+
+        if not (0 <= index < len(vers)):
+            self.output_fn(f"  Version index {index} out of range (0-{len(vers) - 1}).")
+            return
+        note_history.restore(note_path, vers[index])
+        self.retriever.invalidate_cache()
+        self.output_fn(f"  Restored {d.name} to version {index}.")
 
     def _cmd_note(self, title: str):
         if not title:

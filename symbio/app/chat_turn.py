@@ -20,6 +20,7 @@ from symbio.app import (
 )
 from symbio.app.chat_constants import (
     _BROWSER_ACTION_TOOLS, _MAX_RATE_LIMIT_RETRIES, _MAX_RATE_LIMIT_WAIT,
+    user_turn_floor,
     _MAX_TOOL_RETRIES, _WEB_TOOLS, _claims_completion, _internal_to_hermes_name,
 )
 from symbio.app.chat_text import (
@@ -293,7 +294,7 @@ class AgentTurnMixin:
         timings["prompt_ms"] = (time.perf_counter() - turn_start) * 1000
 
         self.user_turns += 1
-        nudge_block = self._nudge_block()
+        nudge_block = self._nudge_block(user_input)
 
         max_rounds = self.config["agent"]["max_tool_rounds"]
         executed_calls: set[str] = set()
@@ -385,7 +386,18 @@ class AgentTurnMixin:
                     "and ask what the user needs. Do NOT call any tool — just "
                     "say hi back.]\n\n" + context_block
                 ).lstrip()
-            working_history = list(self.history[-self.config["agent"]["history_limit"]:])
+            # history_limit counts messages, and a tool loop appends two per
+            # round, so the limit is spent on observations long before it is
+            # spent on conversation: the question that started a browser
+            # session fell out of the window while its own page dumps stayed
+            # in. Take the limit OR the last few real user turns, whichever
+            # reaches further back, so the model can still see what it was
+            # asked. The token budget in _generate_reply enforces the size;
+            # this only decides what is eligible.
+            history_limit = self.config["agent"]["history_limit"]
+            start = min(max(0, len(self.history) - history_limit),
+                        user_turn_floor(self.history))
+            working_history = list(self.history[start:])
             if context_block:
                 attached = False
                 for i in range(len(working_history) - 1, -1, -1):

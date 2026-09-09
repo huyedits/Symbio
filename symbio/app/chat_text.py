@@ -608,10 +608,49 @@ def infer_user_affect(text: str) -> str:
     return "neutral"
 
 
-# Model-emitted mood tag 
+# Model-emitted mood tag
 # tag to emit for types of emotiuons. too basic but who tf cares
 _MOOD_TAG_RE = re.compile(r"<mood>\s*([a-zA-Z]+)\s*</mood>", re.IGNORECASE)
 _VALID_MOODS = {
     "angry", "frustrated", "impatient", "confused", "sad", "anxious",
     "grateful", "happy", "excited", "curious", "neutral",
 }
+
+
+# Phrases that signal the user is disclosing something durable about
+# themselves, their preferences, or a decision — the moments worth saving as a
+# note. Coarse by design: a false positive only costs one nudge line, which the
+# model is told to skip when nothing is worth keeping.
+_DURABLE_FACT_PHRASES = (
+    # explicit memory requests
+    "remember that", "remember this", "don't forget", "note this", "save this",
+    "from now on",
+    # identity
+    "my name is", "i go by", "call me ",
+    "i'm a ", "i am a ", "i'm from", "i am from",
+    # preferences
+    "i prefer", "i'd prefer", "i like to", "i don't like", "i hate",
+    "my favorite", "my favourite",
+    # work / location
+    "i work at", "i work for", "i work as", "i live in", "i live at",
+    # projects / decisions
+    "my project", "i decided", "i've decided", "i have decided",
+    "i'm working on", "i am working on", "i'm building", "i am building",
+    "i'm learning", "i am learning", "i'm trying to", "i am trying to",
+    "i use ", "i'm using", "i am using",
+    # contact / personal details
+    "my birthday", "my address", "my phone", "my email",
+)
+
+
+def looks_durable_fact(text: str) -> bool:
+    """True when a message looks like it discloses a durable fact worth saving.
+
+    A coarse, low-cost signal for the note-making nudge: self-disclosure,
+    preferences, decisions, and explicit "remember this" requests. Returns False
+    on empty or slash-command input.
+    """
+    if not text or not text.strip() or text.lstrip().startswith("/"):
+        return False
+    lower = text.lower()
+    return any(p in lower for p in _DURABLE_FACT_PHRASES)

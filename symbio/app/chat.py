@@ -58,6 +58,7 @@ from symbio.app.chat_constants import (  # noqa: F401  (re-exported; see above)
     _BROWSER_ACTION_TOOLS, _MAX_TOOL_RETRIES, _MAX_RATE_LIMIT_RETRIES,
     _MAX_RATE_LIMIT_WAIT, _TELEGRAM_CONFIRM_TOOLS, _INTERNAL_TO_HERMES_NAME,
     _internal_to_hermes_name, _common_prefix_len, _cache_nbytes,
+    is_real_user_turn, user_turn_floor,
     _message_fingerprint,
     _COMPLETION_CLAIM, _CLAIM_HEDGE,
     _claims_completion
@@ -74,7 +75,7 @@ from symbio.app.chat_text import (  # noqa: F401  (re-exported; see above)
     _AFFECT_FRUSTRATION, _AFFECT_IMPATIENCE, _AFFECT_CONFUSED, _AFFECT_GRATEFUL,
     _AFFECT_HAPPY, _AFFECT_CURIOUS, _AFFECT_EXASPERATION,
     _AFFECT_EXASPERATION_NORM, _CMD_START_RE, infer_user_affect, _MOOD_TAG_RE,
-    _VALID_MOODS
+    _VALID_MOODS, looks_durable_fact
 )
 from symbio.app import chat_style
 from symbio.app.chat_ui import (  # noqa: F401  (re-exported; see above)
@@ -918,10 +919,16 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # 0.6B: 7 trims in 7 turns, reuse pinned at 18 tokens.
         target = max(1, min(cap, int(cap * self._TRIM_TARGET)))
         keep_head = 1 if messages and messages[0].get("role") == "system" else 0
+        # Never trim past the keep-th most recent thing the person actually
+        # said. keep_tail alone counts MESSAGES, and one browser round appends
+        # two of them, so four messages is two rounds of page dumps — the
+        # request that prompted them was dropped while the evidence was kept,
+        # and the model went on working with no task attached.
         keep_tail = min(4, max(0, len(messages) - keep_head))
+        floor = user_turn_floor(messages)
         total = overhead + sum(counts)
         first = keep_head
-        last_droppable = len(messages) - keep_tail
+        last_droppable = max(keep_head, min(len(messages) - keep_tail, floor))
         dropped = 0
         # Start from where the last trim left off, so an over-budget session
         # keeps showing the model the SAME window until the window itself
@@ -972,10 +979,19 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         kept_counts = counts[:keep_head] + counts[first:]
         if total <= cap:
             return kept, dropped
-        # Still over: shorten bodies, oldest first, largest first among those.
-        order = sorted(range(keep_head, len(kept)),
-                       key=lambda i: (-kept_counts[i], i))
-        for i in order:
+        # Still over: shorten bodies, largest first — but the person's own
+        # turns last and never to nothing. Protecting a question from being
+        # DROPPED and then cutting it to zero characters is the same
+        # forgetting by another route, and it is never the question that is
+        # big: the bulk is always page dumps and command output.
+        def _order(indexes):
+            return sorted(indexes, key=lambda i: (-kept_counts[i], i))
+
+        bulk = _order(i for i in range(keep_head, len(kept))
+                      if not is_real_user_turn(kept[i]))
+        asked = _order(i for i in range(keep_head, len(kept))
+                       if is_real_user_turn(kept[i]))
+        for i in bulk + asked:
             if total <= target:
                 break
             content = str(kept[i].get("content", ""))
@@ -989,6 +1005,17 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # right for whatever it holds — prose and a base64 blob are not
             # the same currency.
             keep_chars = max(0, int(len(content) * allowed / tokens))
+            # A user turn keeps enough to still be a request. Below this it
+            # stops being one, and the model is back to working on evidence
+            # with no task attached.
+            if is_real_user_turn(kept[i]):
+                keep_chars = max(keep_chars, min(len(content), 400))
+            if keep_chars >= len(content):
+                # The floor above gave the whole thing back, so nothing was
+                # cut. Saying otherwise would be the same false report this
+                # file keeps closing: a note claiming a cut that did not
+                # happen teaches the model to distrust text that is complete.
+                continue
             note = (f"\n\n[... {tokens - allowed} tokens cut from here to fit "
                     f"the context budget. Ask again for what you need from it "
                     f"rather than assuming this is all there was.]")
@@ -2288,7 +2315,18 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             self.history.pop(0)
 
 
-    def _nudge_block(self) -> str:
+    def _nudge_block(self, user_input: str) -> str:
+        # A message that discloses a durable fact is worth saving right now,
+        # not on the next interval tick. This is a nudge, not an auto-save: the
+        # model still decides whether anything was actually worth keeping.
+        if self.config["memory"]["enabled"] and looks_durable_fact(user_input):
+            return (
+                f"\n\n[Reminder: {self.config['user_name']} just shared something "
+                f"durable about themselves or a preference. Save it now with "
+                f"<note> (or <memory>/<profile> if it is about identity or "
+                f"preferences) — only what was actually said, with no inferred "
+                f"or invented details. Skip if nothing is worth keeping.]"
+            )
         nudge_every = self.config["memory"]["nudge_interval"]
         if not (self.config["memory"]["enabled"] and nudge_every
                 and self.user_turns % nudge_every == 0):

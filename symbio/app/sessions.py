@@ -32,6 +32,55 @@ class SessionStore:
             f.write("\n")
 
     @staticmethod
+    def list_sessions(limit: int = 20) -> list[dict[str, Any]]:
+        """Return recent sessions (newest first) with id, start time, turn
+        count, and a preview of the first user message."""
+        files = sorted(constants.SESSIONS_DIR.glob("*.jsonl"), reverse=True)[:limit]
+        sessions: list[dict[str, Any]] = []
+        for path in files:
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            started = ""
+            turns = 0
+            first_user = ""
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                turns += 1
+                if not started:
+                    started = row.get("timestamp", "")
+                if not first_user and row.get("role") == "user":
+                    first_user = row.get("content", "")
+            sessions.append({
+                "session_id": path.stem,
+                "started": started,
+                "turns": turns,
+                "first_user": first_user[:80],
+            })
+        return sessions
+
+    @staticmethod
+    def read_session(session_id: str) -> list[dict[str, Any]]:
+        """Return the turns of one session, in order."""
+        path = constants.SESSIONS_DIR / f"{session_id}.jsonl"
+        if not path.exists():
+            return []
+        rows: list[dict[str, Any]] = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+        except OSError:
+            return []
+        return rows
+
+    @staticmethod
     def search(query: str, limit: int = 5, exclude_session: str | None = None) -> list[dict[str, Any]]:
         terms = {w for w in re.sub(r"[^\w\s]", " ", query.lower()).split() if len(w) > 1}
         if not terms:

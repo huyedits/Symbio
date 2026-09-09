@@ -552,8 +552,15 @@ class Retriever:
             return ""
 
         max_tokens = self._max_context_tokens()
-        lines = ["Retrieved context (use this first when answering):"]
+        lines = [
+            "Retrieved context — answer from this first. If a note below answers "
+            "the question, use its content directly; do not re-derive or ignore it:"
+        ]
         used_tokens = _token_count_approx(lines[0])
+        # The top result is the one most likely to answer the question; give it
+        # a generous cap so a long procedure is not cut off before its steps,
+        # while later results respect the normal token budget.
+        top_cap = max(max_tokens, 2000)
 
         for i, r in enumerate(results, 1):
             source = r["source"]
@@ -568,7 +575,11 @@ class Retriever:
             body = r["text"].strip().replace("\n", " ")
             snippet = f"{header}\n{body}"
             tokens = _token_count_approx(snippet)
-            if used_tokens + tokens > max_tokens:
+            if i == 1:
+                if tokens > top_cap:
+                    snippet = snippet[: top_cap * 4] + " ... (truncated)"
+                    tokens = _token_count_approx(snippet)
+            elif used_tokens + tokens > max_tokens:
                 break
             lines.append(snippet)
             used_tokens += tokens
