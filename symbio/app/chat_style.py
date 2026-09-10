@@ -70,8 +70,6 @@ _SECURITY_RE = re.compile(r"^\s*\[(Security|Safety|Blocked)\b([^\]]*)\]\s*(.*)$"
 # Tags that report something going wrong or needing attention, and so keep
 # their colour rather than fading into the background.
 _ALERT_TAGS = {"security", "safety", "blocked", "unverified", "mlx error", "error"}
-_WORK_TAGS = {"vision", "dispatch", "learn", "train", "golden", "browser",
-              "cache", "memory", "cron", "rag", "format", "reasoning", "blank"}
 
 
 def _indent_continuations(body: str, pad: str) -> str:
@@ -140,8 +138,12 @@ def style_line(message: str, color: bool | None = None) -> str:
         key = tag.lower()
         if key in _ALERT_TAGS:
             return "  " + _paint(f"{tag} {body}".rstrip(), _RED, enabled=on)
-        if key in _WORK_TAGS:
-            return "  " + _paint(f"· {tag.lower()} {body}".rstrip(), _DIM, enabled=on)
+        # Work tags and unknown tags render the same, deliberately: a tag
+        # nobody has classified yet is still work, and giving it the work
+        # style is the forgiving reading. The two branches that used to say
+        # this returned byte-identical strings, so the _WORK_TAGS set that
+        # gated one of them decided nothing — configuration in appearance
+        # only, and now deleted.
         return "  " + _paint(f"· {tag.lower()} {body}".rstrip(), _DIM, enabled=on)
 
     return message

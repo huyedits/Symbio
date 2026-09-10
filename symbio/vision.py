@@ -54,7 +54,6 @@ import os
 import re
 import tempfile
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -107,7 +106,6 @@ _LOCK = threading.Lock()
 _MODEL: Any = None
 _PROCESSOR: Any = None
 _LOADED_NAME: str = ""
-_LOADED_AT: float = 0.0
 
 
 class VisionUnavailable(RuntimeError):
@@ -140,11 +138,10 @@ def load(name: str = "") -> tuple[Any, Any]:
     """Load (or return the already-loaded) VLM. Not thread-safe by accident:
     the module lock is held so two tool calls cannot race two copies of a
     2.5 GB model into memory at the same time."""
-    global _MODEL, _PROCESSOR, _LOADED_NAME, _LOADED_AT
+    global _MODEL, _PROCESSOR, _LOADED_NAME
     target = name or DEFAULT_VISION_MODEL
     with _LOCK:
         if _MODEL is not None and _LOADED_NAME == target:
-            _LOADED_AT = time.time()
             return _MODEL, _PROCESSOR
         # A different model than the one resident: free first, then load.
         # Loading first would hold both, which is the whole thing we are
@@ -168,7 +165,6 @@ def load(name: str = "") -> tuple[Any, Any]:
             _MODEL = _PROCESSOR = None
             raise VisionUnavailable(f"Could not load vision model '{target}': {e}") from e
         _LOADED_NAME = target
-        _LOADED_AT = time.time()
         return _MODEL, _PROCESSOR
 
 
@@ -233,10 +229,6 @@ def release() -> bool:
             return False
         _release_locked()
         return True
-
-
-def idle_seconds() -> float:
-    return time.time() - _LOADED_AT if _MODEL is not None else 0.0
 
 
 # ---------------------------------------------------------------- generation

@@ -954,7 +954,7 @@ class BrowserSession:
         const q = 'input, textarea, [contenteditable="true"], button, a[href], ' +
                   '[role="button"], [role="textbox"], [role="link"]';
         for (const el of document.querySelectorAll(q)) {
-            if (out.length >= 200) break;
+            if (out.length >= limit) break;
             const r = el.getBoundingClientRect();
             if (r.width < 4 || r.height < 4) continue;
             if (r.bottom < 0 || r.top > innerHeight) continue;
@@ -1011,7 +1011,13 @@ class BrowserSession:
         """
         try:
             page = self._ensure_open()
-            found = list(page.evaluate(self._CONTROLS_JS, limit) or [])
+            # A wider sweep than the caller's limit, then sorted and cut in
+            # Python: fields come before buttons, and a DOM-order cut of 25 on
+            # x.com returns eighteen sidebar links and neither control anyone
+            # needs. The JS cap only stops a pathological page from serialising
+            # thousands of nodes — it used to be hardcoded at 200 while `limit`
+            # was passed in and ignored.
+            found = list(page.evaluate(self._CONTROLS_JS, max(limit * 8, 200)) or [])
         except Exception:
             return [], False
         fields = [c for c in found if c.get("kind") == "field"]
