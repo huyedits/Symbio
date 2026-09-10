@@ -75,6 +75,8 @@ daemon.pid
 # under it. Every install has its own adapters, so shipping one person's root
 # would only ever tell someone else their own weights are wrong.
 adapters_root.json
+# ...and its signature. Per-install like the root it covers.
+adapters_root.json.sig
 daemon.sock
 agent_memory.md
 user_profile.md

@@ -132,6 +132,21 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # A training run re-seals what it just wrote, which is what makes
         # "refuse" livable for anyone who wants it.
         "verify_adapters": "warn",
+        # Who signed adapters_root.json. Empty means the signature check is
+        # off entirely — silent, because a check with nothing to check against
+        # would warn on every install that has not set one up, and a check
+        # that fires when nothing is wrong is one people switch off.
+        #
+        # Set it and the root becomes the one thing on this disk a tamperer
+        # cannot forge: re-sealing over changed weights and rebuilding the root
+        # passes both other checks (verified), and fails this one. Create the
+        # key with:
+        #   ssh-keygen -t ed25519-sk -O resident -O verify-required
+        # so the private half stays on the security key and signing needs a
+        # touch. Verification uses only the public half, so a load works with
+        # the key unplugged.
+        "adapter_signer_identity": "",
+        "adapter_signers": "~/.ssh/allowed_signers",
         "sandbox_timeout": 30,
         "code_timeout": 60,
         "max_output_len": 4000,
