@@ -78,6 +78,9 @@ adapters_root.json
 daemon.sock
 agent_memory.md
 user_profile.md
+# The assistant's own read of what it is for, and of how this user works.
+# Per-install by definition — one person's soul.md is a description of them.
+soul.md
 # Standing instructions: the user's own style preferences, kept across
 # sessions and served to the model as trusted text. Per-user by definition —
 # see symbio.app.memory.save_standing_instruction.

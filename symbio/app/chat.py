@@ -84,6 +84,7 @@ from symbio.app.chat_ui import (  # noqa: F401  (re-exported; see above)
     adapter_status_value, print_banner
 )
 from symbio.app.chat_commands import CommandsMixin
+from symbio.app import soul
 from symbio.app.chat_tools import ToolsMixin
 from symbio.app.chat_turn import AgentTurnMixin
 
@@ -175,6 +176,12 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # until it actually has to move is what makes the intervening turns
         # cheap. See _fit_messages_to_cap.
         self._context_floor: str | None = None
+        # Whether a turn has happened that the soul pass has not seen yet, and
+        # whether one of them was drastic enough to skip the wait. See
+        # _queue_soul_observation.
+        self._soul_pending = False
+        self._soul_drastic = False
+        self._soul_wake = threading.Event()
         # Speculative decoding's draft model, loaded on first use. A small
         # model proposes several tokens, the real one verifies them in a single
         # pass; on a memory-bound Mac that is where the speedup comes from.
@@ -342,6 +349,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         self._indexing_now = False
         self._index_stop = threading.Event()
         threading.Thread(target=self._background_index_worker, daemon=True).start()
+        # Shares _index_stop and _index_lock with the indexer above on
+        # purpose: they are the two things that generate off the main thread,
+        # and they must never do it at the same time.
+        threading.Thread(target=self._soul_worker, daemon=True).start()
 
     # ---- Infrastructure ----
 
@@ -1929,6 +1940,91 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 "       Try a larger model or lower the broad_tag guardrail."
             )
         self.retriever.invalidate_cache()
+
+    # ------------------------------------------------------------- the soul
+
+    def _queue_soul_observation(self, user_input: str, observation: str,
+                                is_correction: bool) -> None:
+        """Note that this turn is worth reflecting on. Never blocks.
+
+        The reflection itself is a full generation, and it runs on the
+        background thread beside the note indexer — the reply has already been
+        printed by the time this is called, and making the user wait for a
+        note about themselves is precisely the friction such a note would be
+        recording.
+        """
+        if not self.config.get("memory", {}).get("soul_enabled", True):
+            return
+        drastic = is_correction or soul.is_drastic(
+            user_input, observation, self.history, self.config)
+        # Only the flag is kept, not a backlog. A queue of turns to reflect on
+        # would grow while the model is busy and then run a pass per entry the
+        # moment it is free; one pass over the recent history says the same
+        # thing, and the history is where the turns already are.
+        self._soul_pending = True
+        self._soul_drastic = self._soul_drastic or drastic
+        if drastic:
+            # Wake the worker rather than waiting out its interval: a turn
+            # that revised the read is the one worth writing down before the
+            # next turn overwrites the evidence for it.
+            self._soul_wake.set()
+
+    def _soul_generate(self, prompt: str) -> str:
+        """One short, greedy completion for the reflection pass."""
+        from mlx_lm import generate as _generate
+
+        from symbio.app import eval as eval_mod
+
+        self._ensure_model_loaded()
+        rendered = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        return _generate(
+            self.model, self.tokenizer, prompt=rendered,
+            sampler=eval_mod._make_sampler(
+                {**self.config,
+                 "agent": {**self.config.get("agent", {}), "temperature": 0.0}}),
+            max_tokens=120, verbose=False)
+
+    def _soul_worker(self) -> None:
+        """Daemon thread that writes the soul store when the model is free.
+
+        Same discipline as the note indexer next to it: it waits out
+        _indexing_now rather than competing for the model, and it holds the
+        same lock, because two generations at once on this box is the double
+        residency that hard-freezes it.
+        """
+        if not self.config.get("memory", {}).get("soul_enabled", True):
+            return
+        interval = max(30, int(self.config.get("memory", {}).get(
+            "soul_interval_seconds", 180)))
+        while not self._index_stop.is_set():
+            # A drastic turn sets the event and is picked up immediately;
+            # everything else waits out the interval.
+            self._soul_wake.wait(timeout=interval)
+            self._soul_wake.clear()
+            if self._index_stop.is_set():
+                return
+            if not self._soul_pending:
+                continue
+            while self._indexing_now and not self._index_stop.is_set():
+                time.sleep(0.5)
+            if self._index_stop.is_set():
+                return
+            self._soul_pending = False
+            self._soul_drastic = False
+            with self._index_lock:
+                self._indexing_now = True
+                try:
+                    written = soul.reflect(
+                        list(self.history), self.config, self._soul_generate)
+                except Exception as e:
+                    self._log_info(f"Soul pass failed: {e!r}")
+                    written = []
+                finally:
+                    self._indexing_now = False
+            for kind, line in written:
+                self._log_info(f"Soul [{kind}]: {line}")
 
     def _background_index_worker(self) -> None:
         """Daemon thread that periodically reindexes notes when idle.
