@@ -75,6 +75,13 @@ daemon.pid
 # under it. Every install has its own adapters, so shipping one person's root
 # would only ever tell someone else their own weights are wrong.
 adapters_root.json
+# ...and its signature. Per-install like the root it covers.
+adapters_root.json.sig
+# The age recipients/identity for a locked adapter. The identity file
+# holds no secret (the key does the decryption) but it names this
+# install's hardware, and the recipients file is this install's alone.
+adapter_recipients.txt
+adapter_identity.txt
 daemon.sock
 agent_memory.md
 user_profile.md

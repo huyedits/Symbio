@@ -38,6 +38,24 @@ as that moment was. Seal at the end of a training run and it means a great
 deal; seal an adapter you found lying around and it means the two files were
 sitting next to each other when you said so.
 
+SIGNING THE ROOT (and why it is the part that matters)
+
+    python3 adapter_seal.py sign-root --key ~/.ssh/id_ed25519_sk.pub
+    python3 adapter_seal.py verify-signature --identity you@example.com
+
+    Every check below this line reads files that live in the same directory
+    tree as the adapters. Whoever can rewrite an adapter can rewrite its seal,
+    and can rebuild the root beside it, and then everything verifies clean —
+    which is exactly the attack the root was supposed to answer. A signature
+    is the first thing here that an attacker with write access cannot forge,
+    because the private half is not on the disk they are attacking.
+
+    Use the .pub of a FIDO2 key (`ssh-keygen -t ed25519-sk -O resident -O
+    verify-required`) and the private half never leaves the security key;
+    signing then also needs a touch, which is right, because sealing is a
+    deliberate act. Verification needs only the public half, so the load-time
+    check runs with the key in a drawer.
+
 ONE ROOT OVER ALL OF THEM
 
     `root` builds a Merkle tree over every sealed adapter — leaf per adapter
@@ -73,6 +91,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -583,6 +602,83 @@ def build_root(root: Path, quiet: bool = False) -> int:
     return 0
 
 
+# ---------------------------------------------------- signing the root
+
+# The SSH signature namespace. Keeps a root signature from being replayable as
+# any other kind of SSH signature made with the same key — a git commit, say.
+SIG_NAMESPACE = "symbio-adapters"
+SIG_SUFFIX = ".sig"
+
+
+def _sig_path(root: Path) -> Path:
+    return root / (ROOT_NAME + SIG_SUFFIX)
+
+
+def sign_root(root: Path, key: str, quiet: bool = False) -> int:
+    """Sign adapters_root.json with an SSH key.
+
+    THIS is what makes the root worth more than the seals under it. Every
+    check up to here reads files that sit in the same directory tree as the
+    adapters, so whoever can rewrite an adapter can rewrite its seal, and can
+    rewrite the root beside it — re-sealing over a tamper and rebuilding the
+    root makes everything verify clean again. A signature breaks that: the
+    private half is not on the disk being attacked.
+
+    `key` is a path to the private key, or to the .pub of a FIDO2 key whose
+    private half lives on a security key (ssh-keygen resolves the handle). A
+    hardware key created with -O verify-required also asks for a touch here,
+    which is the property worth having: sealing is a deliberate act and
+    verification is not.
+    """
+    path = root / ROOT_NAME
+    if not path.exists():
+        print(f"  no {ROOT_NAME} — run `root` first")
+        return 1
+    sig = _sig_path(root)
+    try:
+        sig.unlink()
+    except OSError:
+        pass
+    result = subprocess.run(
+        ["ssh-keygen", "-Y", "sign", "-f", str(Path(key).expanduser()),
+         "-n", SIG_NAMESPACE, str(path)],
+        capture_output=True, text=True)
+    if result.returncode != 0 or not sig.exists():
+        print(f"  signing failed: {(result.stderr or result.stdout).strip()}")
+        return 1
+    if not quiet:
+        print(f"  signed {ROOT_NAME} with {key}")
+        print(f"    {sig.name}")
+    return 0
+
+
+def verify_root_signature(root: Path, signers: str, identity: str
+                          ) -> tuple[bool, str]:
+    """(ok, detail) for the root's signature.
+
+    Verification needs only the PUBLIC half, so it runs with the security key
+    in a drawer — which is what keeps this usable: a check that needed the
+    hardware present would be one people switch off.
+    """
+    path = root / ROOT_NAME
+    sig = _sig_path(root)
+    if not sig.exists():
+        return False, f"no {sig.name}"
+    signers_path = Path(signers).expanduser()
+    if not signers_path.exists():
+        return False, f"no allowed-signers file at {signers_path}"
+    try:
+        with open(path, "rb") as handle:
+            result = subprocess.run(
+                ["ssh-keygen", "-Y", "verify", "-f", str(signers_path),
+                 "-I", identity, "-n", SIG_NAMESPACE, "-s", str(sig)],
+                stdin=handle, capture_output=True, text=True)
+    except OSError as e:
+        return False, str(e)
+    detail = (result.stdout or result.stderr).strip().splitlines()
+    return result.returncode == 0, (detail[0] if detail else "")
+
+
 def load_root_doc(root: Path) -> dict | None:
     """The whole adapters_root.json, or None when no root has been built."""
     try:
@@ -649,12 +745,20 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("action", choices=["seal", "verify", "seal-all", "verify-all",
                                        "challenge", "respond", "check",
-                                       "root", "verify-root"])
+                                       "root", "verify-root",
+                                       "sign-root", "verify-signature"])
     ap.add_argument("folder", nargs="?", help="an Adapter_skills/<NAME> folder")
     ap.add_argument("--nonce")
     ap.add_argument("--proof")
     ap.add_argument("--integrity-only", action="store_true",
                     help="seal weights with no training data beside them")
+    ap.add_argument("--key", default="~/.ssh/id_ed25519_sk.pub",
+                    help="ssh key to sign the root with; the .pub of a FIDO2 "
+                         "key keeps the private half on the security key")
+    ap.add_argument("--signers", default="~/.ssh/allowed_signers",
+                    help="allowed-signers file used to verify the signature")
+    ap.add_argument("--identity", default="",
+                    help="the signer's identity in that file")
     ap.add_argument("--root", default=str(Path(__file__).resolve().parent))
     args = ap.parse_args()
 
@@ -662,6 +766,17 @@ def main() -> int:
         return build_root(Path(args.root))
     if args.action == "verify-root":
         return verify_root(Path(args.root))
+    if args.action == "sign-root":
+        return sign_root(Path(args.root), args.key)
+    if args.action == "verify-signature":
+        if not args.identity:
+            print("verify-signature needs --identity (the signer in the "
+                  "allowed-signers file)")
+            return 1
+        ok, detail = verify_root_signature(
+            Path(args.root), args.signers, args.identity)
+        print(f"  {'SIGNATURE OK' if ok else 'SIGNATURE BAD'}  {detail}")
+        return 0 if ok else 1
 
     if args.action in ("seal-all", "verify-all"):
         folders = _folders(Path(args.root))

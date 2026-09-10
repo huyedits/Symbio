@@ -134,6 +134,37 @@ def check_adapter(adapter_path: str | Path | None) -> dict | None:
             else report)
 
 
+def signature_problem(config: dict | None) -> str | None:
+    """Why the root's signature is unacceptable, or None if it is fine.
+
+    Silent until an identity is configured. A signature check with nothing to
+    check against would warn on every install that has not set one up, and a
+    check that fires when nothing is wrong is one people switch off — which
+    would take the real check with it.
+
+    This is the only check here an attacker with write access cannot satisfy.
+    Everything else reads files that sit beside the adapters: re-sealing over
+    tampered weights and rebuilding the root makes both of them pass, verified
+    live. The private half of the signing key is not on that disk.
+    """
+    agent_cfg = (config or {}).get("agent", {})
+    identity = str(agent_cfg.get("adapter_signer_identity", "") or "").strip()
+    if not identity:
+        return None
+    module = _seal()
+    if module is None:
+        return None
+    from symbio import constants
+
+    signers = str(agent_cfg.get("adapter_signers", "~/.ssh/allowed_signers"))
+    try:
+        ok, detail = module.verify_root_signature(
+            constants.PROJECT_DIR, signers, identity)
+    except Exception as e:
+        return f"the root's signature could not be checked ({e})"
+    return None if ok else (detail or "the root's signature did not verify")
+
+
 def describe(report: dict) -> str:
     """One block of text for a person, naming what moved."""
     lines = [f"  [Adapter] {report['name']}: SEAL BROKEN"]
@@ -156,6 +187,19 @@ def enforce(adapter_path: str | Path | None, config: dict | None,
     """
     if policy(config) == "off":
         return
+
+    # The signature first: it covers every adapter at once, and it is the one
+    # thing a tamperer cannot forge from the disk.
+    problem = signature_problem(config)
+    if problem is not None:
+        output_fn(
+            f"  [Adapter] The signed root does not verify: {problem}\n"
+            f"      Re-sign after a legitimate change:\n"
+            f"        python3 adapter_seal.py root && "
+            f"python3 adapter_seal.py sign-root --key <your key>")
+        if policy(config) == "refuse":
+            raise RuntimeError(f"adapters_root.json failed its signature: {problem}")
+
     report = check_adapter(adapter_path)
     if report is None or report.get("state") == "intact":
         return
