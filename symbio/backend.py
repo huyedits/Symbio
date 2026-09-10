@@ -344,6 +344,12 @@ def trainer_command(model_name: str, data_dir: str, adapter_dir: str,
         "--scale", str(lora.get("scale", 20.0)),
         "--keys", ",".join(lora.get("keys") or []),
         "--grad-checkpoint", str(bool(lora.get("grad_checkpoint", True))).lower(),
+        # The MLX branch passes this and the CUDA branch dropped it, while
+        # cuda_lora declares the flag and run_training still builds and
+        # unlinks the file. Anything the YAML carries and the flags do not —
+        # mask_prompt today, whatever is added tomorrow — was silently lost on
+        # this backend with nothing reporting it.
+        "--config", config_path,
     ]
 
 

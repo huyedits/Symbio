@@ -2719,12 +2719,26 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
                         if chat_style.colors_enabled()
                         else f"{config['user_name']:8}: ")
 
+        assistant_prefix = f"{config['assistant_name']:8}: "
+
+        def _is_assistant_reply(message) -> bool:
+            return (isinstance(message, str)
+                    and message.startswith(assistant_prefix))
+
         def _cli_output(message=""):
             # Skin the status line here and nowhere else. This wrapper is the
             # local terminal's alone — the daemon and Telegram supply their own
             # output_fn — so the plain text they parse, and the identical text
             # the model reads out of self.history, are both untouched.
-            message = chat_style.style_line(message)
+            # The model's own reply is not a status line and must not be
+            # reshaped as one. It arrives as "Name    : text", it can be many
+            # lines long, and any line of it shaped like "[Note] remember to
+            # ..." — prose, or something inside a fenced code block — was
+            # being lowercased, bulleted and re-indented. chat_style's own
+            # docstring promises it only skins status lines; this is where
+            # that promise is kept.
+            if not _is_assistant_reply(message):
+                message = chat_style.style_line(message)
             if threading.current_thread() is _main_thread or not sys.stdin.isatty() or _readline is None:
                 print(message)
                 return
