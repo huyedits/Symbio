@@ -84,6 +84,7 @@ from symbio.app.chat_ui import (  # noqa: F401  (re-exported; see above)
     adapter_status_value, print_banner
 )
 from symbio.app.chat_commands import CommandsMixin
+from symbio import backend
 from symbio.app import soul
 from symbio.app.chat_tools import ToolsMixin
 from symbio.app.chat_turn import AgentTurnMixin
@@ -141,8 +142,15 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         self.input_fn = input_fn if input_fn is not None else input
         self.output_fn = output_fn if output_fn is not None else print
         self.confirm_fn = confirm_fn
-        self.generate_fn = generate_fn if generate_fn is not None else generate
-        self.stream_fn = stream_fn if stream_fn is not None else stream_generate
+        # Through the backend seam, not straight at mlx_lm. On MLX both of
+        # these delegate to exactly the function that used to be called here,
+        # with the same signature and the same kwargs — so an Apple Silicon
+        # install generates through the identical code path — while a CUDA
+        # install stops handing a transformers model to mlx_lm.
+        self.generate_fn = (generate_fn if generate_fn is not None
+                            else backend.generate)
+        self.stream_fn = (stream_fn if stream_fn is not None
+                          else backend.stream_generate)
         # Called with each safe chunk of text as a reply streams in (e.g.
         # incremental terminal printing or a throttled Telegram message
         # edit). None means no live output — replies are shown once
@@ -817,7 +825,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             return self._draft_model
         self._draft_tried = True
         path = str(self.config.get("agent", {}).get("draft_model", "") or "").strip()
-        if not path or self.stream_fn is not stream_generate:
+        if not path or not self._mlx_generation():
             return None
         candidate = Path(path)
         if not candidate.is_absolute():
@@ -828,6 +836,28 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             self.output_fn(f"  [Draft] speculative decoding off: {e}")
             self._draft_model = None
         return self._draft_model
+
+    def _mlx_generation(self) -> bool:
+        """Is this a real generator AND the MLX one?
+
+        Four call sites asked half of this by comparing stream_fn against
+        mlx_lm's stream_generate — which stopped being the default the moment
+        generation was routed through the seam, silently, each failing open in
+        a different direction: KV quantisation off, no draft model, no boot
+        prefill, no logits processors. So the question gets a name.
+
+        Both halves are load-bearing and they guard different things. The
+        stream_fn check keeps mlx-specific arguments away from the callables
+        front-ends and tests inject, which never took them. The backend check
+        keeps the whole MLX prompt-cache machinery — make_prompt_cache,
+        generate_step, mx.array — away from a torch model, which is the thing
+        that made "select cuda" mean "hand a transformers model to mlx_lm".
+        Every feature behind this gate is an MLX feature; on CUDA they are
+        correctly absent rather than broken.
+        """
+        if backend.is_cuda(self.config):
+            return False
+        return self.stream_fn in (stream_generate, backend.stream_generate)
 
     def _new_prompt_cache(self):
         """An empty cache in the layout the generation path expects.
@@ -1053,7 +1083,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         generator — front-ends and tests inject stream_fns that never took
         these arguments.
         """
-        if self.stream_fn is not stream_generate:
+        if not self._mlx_generation():
             return {}
         agent_cfg = self.config.get("agent", {})
         bits = agent_cfg.get("kv_bits")
@@ -1103,7 +1133,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         Only runs with the real MLX model/stream path — tests and front-ends
         that inject fake objects should not trigger a real model call.
         """
-        if self.stream_fn is not stream_generate:
+        if not self._mlx_generation():
             return
         if self.model is None or self.tokenizer is None:
             return
@@ -1762,7 +1792,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # stream_fn, and those fakes take the arguments this loop has always
             # passed. speculative_generate_step accepts it too, so the draft
             # path is covered.
-            if self.stream_fn is stream_generate and getattr(
+            if self._mlx_generation() and getattr(
                     self, "logits_processors", None):
                 _spec_kw["logits_processors"] = self.logits_processors
             # Same quantization the cache was prefilled under. Passing it here
