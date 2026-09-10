@@ -7,6 +7,7 @@ self-check so the first launch is as smooth as possible.
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Callable
 
@@ -167,6 +168,62 @@ def ensure_identity_defaults(config: dict[str, Any]) -> bool:
     return changed
 
 
+def _adapter_lock_step(config: dict[str, Any],
+                       input_fn: Callable[[str], str],
+                       output_fn: Callable[[str], Any]) -> None:
+    """Offer to make the adapter unreadable off this machine.
+
+    Opt-in and default NO, because it deletes the plaintext weights, and a
+    wizard that quietly encrypts hours of training because someone pressed
+    Enter would be the worst kind of default. Anyone who says no is told the
+    one command that does it later.
+
+    Nothing here is asked at all unless the tools are present: a setup step
+    whose first act is to tell you to install two things is a step that should
+    have checked first.
+    """
+    from symbio import adapter_crypto
+
+    adapters = constants.ADAPTER_DIR
+    # Locked FIRST. A locked directory holds no *.safetensors — that is what
+    # locked means — so asking "is anything trained" before "is it already
+    # locked" reads an encrypted adapter as an absent one.
+    if adapter_crypto.is_locked(adapters):
+        output_fn(f"\n  Adapter is already locked to a key.")
+        return
+    if not any(adapters.glob("*.safetensors")):
+        return                       # nothing trained yet; nothing to lock
+
+    enclave = shutil.which("age-plugin-se") is not None
+    if not (adapter_crypto.age_available() and (enclave or shutil.which(
+            "age-plugin-yubikey"))):
+        return
+
+    output_fn("\n  Adapter lock (optional)")
+    output_fn("    Your trained adapter is readable by anything that can read")
+    output_fn("    the folder. Locking encrypts it to a key that cannot leave"
+              + (" this Mac," if enclave else " your security key,"))
+    output_fn("    so a copied folder, a backup or a stolen disk is useless.")
+    if not _ask_yes_no("    Lock the adapter?", input_fn, default=False):
+        output_fn("    Skipped. Later: python3 symbio/adapter_crypto.py setup")
+        return
+
+    identity = Path("~/.config/symbio/adapter_identity.txt").expanduser()
+    recipients = constants.PROJECT_DIR / adapter_crypto.RECIPIENTS
+    access = "passcode" if _ask_yes_no(
+        "    Ask for your login password at each load?", input_fn, default=False
+    ) else "none"
+    if enclave:
+        code = adapter_crypto.setup_secure_enclave(identity, recipients,
+                                                   access=access)
+    else:
+        code = adapter_crypto.setup(identity, recipients)
+    if code == 0:
+        adapter_crypto.finish(adapters, identity, recipients)
+    else:
+        output_fn("    Left unlocked. Nothing was changed.")
+
+
 def run_setup_wizard(
     config: dict[str, Any],
     input_fn: Callable[[str], str] = input,
@@ -284,6 +341,8 @@ def run_setup_wizard(
         token_set = bool(config["telegram"].get("bot_token") or os.environ.get("SYMBIO_TELEGRAM_TOKEN"))
         output_fn(f"      Token set:      {'yes' if token_set else 'no'}")
         output_fn(f"      Allowed IDs:    {ids if ids else '(none yet)'}")
+
+    _adapter_lock_step(config, input_fn, output_fn)
 
     ok = _ask_yes_no("  Save this configuration?", input_fn, default=True)
     if not ok:
