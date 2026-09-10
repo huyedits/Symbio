@@ -45,7 +45,7 @@ def load(*args: Any, **kwargs: Any):
     just to run a slash command -- see the boot-time work behind `symb chat`
     feeling instant.
     """
-    from symbio import adapter_integrity, backend
+    from symbio import adapter_crypto, adapter_integrity, backend
 
     config = kwargs.pop("config", None)
     # Before the weights are handed to the model, not after. Every caller that
@@ -53,6 +53,31 @@ def load(*args: Any, **kwargs: Any):
     # say "these are not the bytes that were sealed" while it still means
     # anything — see symbio/adapter_integrity.py.
     adapter_integrity.enforce(kwargs.get("adapter_path"), config)
+
+    # A locked adapter is ciphertext until the security key says otherwise.
+    # THIS is the moment the key is called: age hands the header to
+    # age-plugin-yubikey, which needs the key present and, under a cached or
+    # always touch policy, a touch. The plaintext exists only inside the with
+    # block — a private temp directory removed in a finally — because
+    # safetensors is mmap'd and there has to be a real file to load.
+    adapter_path = kwargs.get("adapter_path")
+    if adapter_crypto.should_unlock(adapter_path, config):
+        with adapter_crypto.Unlocked(
+                adapter_path, adapter_crypto.identity_path(config)) as plaintext:
+            kwargs["adapter_path"] = str(plaintext)
+            return _load_with_backend(args, kwargs, config)
+    return _load_with_backend(args, kwargs, config)
+
+
+def _load_with_backend(args: tuple, kwargs: dict, config: dict | None):
+    """The load itself, split out so the locked path can wrap it in a `with`.
+
+    Returning from inside that block is what keeps the plaintext's lifetime
+    exactly the length of the load: the model is in memory before the
+    directory goes, and the directory goes whether the load succeeded or
+    raised.
+    """
+    from symbio import backend
 
     if backend.is_cuda(config):
         # Delegated whole: the CUDA path has its own tokenizer handling and

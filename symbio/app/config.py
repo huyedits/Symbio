@@ -147,6 +147,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # the key unplugged.
         "adapter_signer_identity": "",
         "adapter_signers": "~/.ssh/allowed_signers",
+        # Where the age identity for a LOCKED adapter lives. An identity file
+        # written by `age-plugin-yubikey --identity` holds no secret: it names
+        # the slot on the key, and the key does the decryption. Empty is fine
+        # — a locked adapter is detected from the directory either way, so an
+        # unset identity produces "plug in the security key" rather than a
+        # confusing loader error about a missing file.
+        "adapter_identity": "~/.config/symbio/adapter_identity.txt",
         "sandbox_timeout": 30,
         "code_timeout": 60,
         "max_output_len": 4000,
