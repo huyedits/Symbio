@@ -8,6 +8,7 @@ self-check so the first launch is as smooth as possible.
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -184,6 +185,15 @@ def _adapter_lock_step(config: dict[str, Any],
     """
     from symbio import adapter_crypto
 
+    # Only ever asked of someone who can answer. A scripted or piped wizard
+    # run has no one at the keyboard, and a question nobody answers must not
+    # consume an input that the next question was expecting — which is what it
+    # did: three scripted setup tests ran out of answers and died on the
+    # "Save this configuration?" prompt that followed. Silence is not consent
+    # to encrypt someone's weights, and it is not an answer to borrow either.
+    if not sys.stdin.isatty():
+        return
+
     adapters = constants.ADAPTER_DIR
     # Locked FIRST. A locked directory holds no *.safetensors — that is what
     # locked means — so asking "is anything trained" before "is it already
@@ -204,15 +214,29 @@ def _adapter_lock_step(config: dict[str, Any],
     output_fn("    the folder. Locking encrypts it to a key that cannot leave"
               + (" this Mac," if enclave else " your security key,"))
     output_fn("    so a copied folder, a backup or a stolen disk is useless.")
-    if not _ask_yes_no("    Lock the adapter?", input_fn, default=False):
+    # Anything other than an explicit yes means no, INCLUDING a prompt that
+    # could not be answered at all — a scripted run that has no answer left, a
+    # closed stdin, a front-end driving the wizard non-interactively. _ask
+    # catches EOF and interrupt; a scripted input_fn raises StopIteration,
+    # which it does not. The default has to hold in every one of those cases,
+    # because the alternative is encrypting someone's weights on silence.
+    try:
+        wants_lock = _ask_yes_no("    Lock the adapter?", input_fn, default=False)
+    except Exception:
+        wants_lock = False
+    if not wants_lock:
         output_fn("    Skipped. Later: python3 symbio/adapter_crypto.py setup")
         return
 
     identity = Path("~/.config/symbio/adapter_identity.txt").expanduser()
     recipients = constants.PROJECT_DIR / adapter_crypto.RECIPIENTS
-    access = "passcode" if _ask_yes_no(
-        "    Ask for your login password at each load?", input_fn, default=False
-    ) else "none"
+    try:
+        wants_passcode = _ask_yes_no(
+            "    Ask for your login password at each load?", input_fn,
+            default=False)
+    except Exception:
+        wants_passcode = False
+    access = "passcode" if wants_passcode else "none"
     if enclave:
         code = adapter_crypto.setup_secure_enclave(identity, recipients,
                                                    access=access)

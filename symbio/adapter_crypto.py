@@ -529,7 +529,15 @@ def main(argv: list[str] | None = None) -> int:
         description=_USAGE.splitlines()[0],
         epilog=_USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("action", choices=["setup", "status", "lock", "unlock"])
-    ap.add_argument("folder", nargs="?", default="adapters")
+    # Absolute, resolved from where this FILE lives, not from the caller's
+    # working directory. The default used to be the relative string
+    # "adapters", so `setup` run from the project root locked the real adapter
+    # while an identical command run from a scratch directory locked a test
+    # copy — the same command meaning two different things depending on cwd.
+    # That is how a live adapter got encrypted during testing. Anything else
+    # has to be named explicitly.
+    ap.add_argument("folder", nargs="?",
+                    default=str(Path(__file__).resolve().parent.parent / "adapters"))
     ap.add_argument("--recipients", default=RECIPIENTS)
     ap.add_argument("--identity", default=IDENTITY)
     ap.add_argument("--touch-policy", default="cached",
@@ -560,7 +568,7 @@ def main(argv: list[str] | None = None) -> int:
             not args.yubikey and sys.platform == "darwin"
             and shutil.which("age-plugin-se") is not None)
         identity = Path("~/.config/symbio/adapter_identity.txt").expanduser()
-        recipients = Path(RECIPIENTS).resolve()
+        recipients = Path(__file__).resolve().parent.parent / RECIPIENTS
         if use_enclave:
             code = setup_secure_enclave(identity, recipients,
                                         access=args.access_control)
