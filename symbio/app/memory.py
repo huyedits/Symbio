@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from symbio import constants, safety
-from symbio.app import note_history, prune, skills
+from symbio.app import note_history, prune, skills, soul
 
 
 def save_note(title: str, body: str) -> Path:
@@ -608,4 +608,10 @@ def curated_memory_block(config: dict[str, Any]) -> str:
         text = constants.PROFILE_FILE.read_text(encoding="utf-8").strip()
         if text:
             parts.append(safety.wrap_untrusted(f"about {config['user_name']}", text, safety.scan_for_injection(text, config)))
+    # The soul store rides with them: same always-on placement, same untrusted
+    # wrapper, same reason — it is derived from conversation, and conversation
+    # includes whatever a page said.
+    soul_text = soul.soul_block(config).strip()
+    if soul_text:
+        parts.append(soul_text)
     return ("\n\n" + "\n\n".join(parts)) if parts else ""

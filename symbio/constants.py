@@ -42,6 +42,12 @@ PROMPT_FILE = PROJECT_DIR / "prompt.md"
 CRON_FILE = PROJECT_DIR / "cron_jobs.json"
 MEMORY_FILE = PROJECT_DIR / "agent_memory.md"
 PROFILE_FILE = PROJECT_DIR / "user_profile.md"
+# What the assistant takes itself to be USED AS, and the operating values it
+# has inferred from how the user works. Neither fits the two stores above:
+# agent_memory.md holds facts, user_profile.md holds who the user is, and
+# "wants the least possible friction" is neither — it is a reading of the
+# relationship, and it decides how a turn should go. See symbio/app/soul.py.
+SOUL_FILE = PROJECT_DIR / "soul.md"
 # A persistent Chrome profile for the agent's browser. Holds session
 # cookies, so it is gitignored and never leaves the machine.
 BROWSER_PROFILE_DIR = PROJECT_DIR / "browser_profile"

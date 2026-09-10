@@ -1818,13 +1818,31 @@ def weighted_corpus(train_file: Path, weights: list[float] | None):
     if weights is None:
         yield train_file
         return
+    backup = train_file.with_suffix(train_file.suffix + ".preweight")
+    # A backup left behind is a run that was KILLED between expanding the
+    # corpus and restoring it — the finally below never ran, so train.jsonl is
+    # still holding duplicated lines. The file existed for exactly this and
+    # was never read back: nothing in the codebase mentioned .preweight except
+    # the line that wrote it, so the next run either weighted the already
+    # weighted corpus ("the weighting would compound silently until one sample
+    # was most of the data", per this function's own docstring) or raised on a
+    # length mismatch. Restore first, then measure.
+    if backup.exists():
+        print(f"  [Train] Restoring {train_file.name} from an interrupted "
+              f"weighted run.")
+        train_file.write_text(backup.read_text(encoding="utf-8"),
+                              encoding="utf-8")
+        try:
+            backup.unlink()
+        except OSError:
+            pass
+
     original = train_file.read_text(encoding="utf-8")
     lines = [l for l in original.splitlines() if l.strip()]
     if len(weights) != len(lines):
         raise ValueError(
             f"sample_weights has {len(weights)} entries for {len(lines)} corpus "
             f"lines; a misaligned vector would weight the wrong samples")
-    backup = train_file.with_suffix(train_file.suffix + ".preweight")
     backup.write_text(original, encoding="utf-8")
     try:
         expanded: list[str] = []
@@ -2088,7 +2106,13 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     # Activation memory scales with the sequence window, and this corpus runs
     # a 3k window on an 8B, so this is the lever that actually moves peak
     # memory — far more than the trainable-layer count does.
-    if lora.get("grad_checkpoint", False):
+    # mlx_lm declares this store_true; cuda_lora declares it value-taking, and
+    # backend.trainer_command's CUDA branch already emitted
+    # "--grad-checkpoint true". Appending a bare flag on top made argparse
+    # exit 2 ("expected one argument") before training started, so every CUDA
+    # run failed at launch. Only the MLX form is added here, and only when the
+    # CUDA branch has not already said it.
+    if lora.get("grad_checkpoint", False) and "--grad-checkpoint" not in cmd:
         cmd.append("--grad-checkpoint")
         print("  [Train] Gradient checkpointing on: less memory, slower steps.")
 
@@ -2136,7 +2160,12 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
         _trainer_child_exited = True
 
     config_file = adapter_dir / "adapter_config.json"
-    weight_files = list(adapter_dir.glob("adapters.*"))
+    # Both spellings. mlx_lm writes adapters.safetensors; peft's
+    # save_pretrained, which the CUDA trainer ends with, writes
+    # adapter_model.safetensors — so a successful CUDA run reported "Adapter
+    # files missing after training" with the weights sitting right there.
+    weight_files = (list(adapter_dir.glob("adapters.*"))
+                    + list(adapter_dir.glob("adapter_model.*")))
     if not config_file.exists() or not weight_files:
         print("  [System] Adapter files missing after training.")
         return False

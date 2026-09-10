@@ -92,6 +92,14 @@ def score_humaneval(row, response, timeout=10):
     """Run the reference unit tests against the generated function."""
     code = _extract_code(response, row["prompt"])
     program = f"{code}\n\n{row['test']}\n\ncheck({row['entry_point']})\n"
+    # Deliberately not symbio.app.sandbox.run_sandboxed. That gives no
+    # OS-level containment either — it is a denylist of BINARIES plus a cwd —
+    # and the binary here is always sys.executable, so the list has nothing to
+    # match. It would also move every candidate into one shared SANDBOX_DIR,
+    # where they would see each other's files. A fresh temp cwd per candidate
+    # with a timeout is the stronger isolation for this job, not the weaker
+    # one. Real containment for model-written code needs a seatbelt profile,
+    # which nothing in this project has yet.
     with tempfile.TemporaryDirectory() as d:
         f = Path(d) / "cand.py"
         f.write_text(program, encoding="utf-8")

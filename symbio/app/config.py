@@ -360,6 +360,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "memory_char_limit": 2200,
         "profile_char_limit": 1375,
+        # soul.md: what the assistant takes itself to be USED AS, and the
+        # operating values it has read off how the user works. Smaller than
+        # the other two because it is a reading rather than a record — a long
+        # one is a diary, and the point of it is to be short enough to sit in
+        # every prompt and actually change the turn.
+        "soul_enabled": True,
+        "soul_char_limit": 1200,
+        # How long the background pass waits between ordinary turns. A turn
+        # that CORRECTED it, refused it, or failed skips this entirely: those
+        # revise the read, and a revision that waits is one the next turn
+        # overwrites the evidence for.
+        "soul_interval_seconds": 180,
         "nudge_interval": 10,
         "flush_min_turns": 6,
         # Compact the curated stores when the machine is under memory pressure,

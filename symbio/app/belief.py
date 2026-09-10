@@ -4,7 +4,7 @@ Three jobs in one module on purpose, because they are one thing seen from
 three sides: what the agent currently bets on (A), the material that teaches
 it to bet better (B), and the ordering that says which bet matters most when
 two disagree (C). Splitting them would mean three files sharing one schema
-and drifting apart. 
+and drifting apart.
 
 So every belief carries `timescale_s` and a `dynamics` shape, and
 `update_confidence` scores a prediction on *when* it landed, not merely

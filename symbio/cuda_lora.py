@@ -189,7 +189,24 @@ def main(argv: list[str] | None = None) -> int:
         # equivalent is to restrict which layers get adapters.
         layers_to_transform=_last_n_layers(model, args.num_layers),
     )
-    model = get_peft_model(model, peft_config)
+    # Continue an existing adapter when one was named, instead of building a
+    # fresh one on top of it. The flag was parsed and never read, so the
+    # caller printed "Resuming from the existing adapter" while this trained
+    # from scratch — the exact silent-nothing failure resume_source exists to
+    # catch, reintroduced on the new backend. Refusing outright is better than
+    # accepting a flag and ignoring it, so a load that fails stops the run.
+    resume = (args.resume_adapter_file or "").strip()
+    if resume:
+        from peft import PeftModel
+
+        source = Path(resume)
+        # The caller may name the weights file; peft loads the directory.
+        if source.is_file():
+            source = source.parent
+        print(f"  [CUDA] Resuming from {source}", flush=True)
+        model = PeftModel.from_pretrained(model, str(source), is_trainable=True)
+    else:
+        model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
 
     train_ds, valid_ds = build_datasets(Path(args.data), tokenizer,

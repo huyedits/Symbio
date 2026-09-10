@@ -338,6 +338,7 @@ class AgentTurnMixin:
         browser_retry_nudged = False
         blank_retry_nudged = False
         claim_nudged = False
+        last_observation = ""
         unparsed_tag_nudged = False
         echo_retry_nudged = False
         thinking_cut_retried = False
@@ -1193,6 +1194,9 @@ class AgentTurnMixin:
             else:
                 pending_browser_error = None
 
+            # Kept past the loop for the end-of-turn soul pass, which needs to
+            # know whether anything actually failed this turn.
+            last_observation = observation
             self.output_fn(f"  [Observation] {observation.replace(chr(10), chr(10) + '  ')}")
             timings["tools_ms"] = (time.perf_counter() - gen_start) * 1000
             # Web results must ground the answer: tell the model to answer from
@@ -1263,6 +1267,17 @@ class AgentTurnMixin:
         timings["total_ms"] = (time.perf_counter() - turn_start) * 1000
         self.last_turn_timings = timings
         self.logger.info(f"Timings: {timings}")
+
+        # What this turn showed about what the assistant is being used for.
+        # Queued, not run: the pass is a real generation and the reply has
+        # just been printed, so making the user wait for a note about
+        # themselves is the exact friction the note would be recording.
+        # _soul_worker picks it up. A drastic turn — a correction, a refusal,
+        # a failed action — is queued as such, because those are the turns
+        # that REVISE a read rather than confirm it, and a revision that waits
+        # for the next idle moment is one that gets overwritten first.
+        self._queue_soul_observation(
+            user_input, last_observation, is_correction)
 
         if is_correction:
             # The corrected answer is now in history; capture and maybe retrain.

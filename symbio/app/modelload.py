@@ -57,8 +57,17 @@ def load(*args: Any, **kwargs: Any):
     if backend.is_cuda(config):
         # Delegated whole: the CUDA path has its own tokenizer handling and
         # none of the mlx-specific repair below applies to it.
+        # config= as well, or the backend re-selects from env/detection
+        # inside and answers a different question than the branch above. Two
+        # concrete effects: cuda.load_in_bits was read off an empty dict, so a
+        # user asking for 8- or 16-bit silently got 4-bit NF4; and a config
+        # naming cuda on a machine detect() calls mlx made the outer branch
+        # true and the inner one false, which re-entered this function and
+        # quietly loaded through mlx_lm instead of saying CUDA was
+        # unavailable.
         return backend.load(args[0] if args else kwargs.pop("model_name"),
-                            adapter_path=kwargs.pop("adapter_path", None))
+                            adapter_path=kwargs.pop("adapter_path", None),
+                            config=config)
 
     from mlx_lm import load as _mlx_load
 
