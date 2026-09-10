@@ -361,12 +361,58 @@ def setup_secure_enclave(identity_out: Path, recipients_out: Path,
         say(f"  That includes worker swaps and deep-sleep wakes, which happen")
         say(f"  several times in a browser session. --access-control none")
         say(f"  removes the prompt and still binds the adapter to this Mac.")
-    say("\nNext, and read this line before you run it: locking DELETES the")
-    say("plaintext weights. Keep a copy until a real load has worked.")
-    say("    cp -R adapters adapters.backup")
-    say(f"    python3 symbio/adapter_crypto.py lock adapters "
-        f"--recipients {recipients_out}")
-    say(f"    ./symb config set agent.adapter_identity {identity_out}")
+    return 0
+
+
+def finish(folder: Path, identity_out: Path, recipients_out: Path,
+           set_config: bool = True) -> int:
+    """Back up, lock, and record where the identity lives — in one go.
+
+    Printing three more commands at the end of a setup is how a setup becomes
+    four commands again. The backup is taken HERE rather than suggested,
+    because locking deletes the plaintext and an adapter is hours of training:
+    the one step nobody should be trusted to remember is the one that makes
+    the rest reversible.
+    """
+    folder = Path(folder)
+    if not any(folder.glob("*.safetensors")):
+        say(f"\n  Nothing to lock in {folder} (no weights).")
+        return 0
+
+    backup = folder.with_name(folder.name + ".backup")
+    if backup.exists():
+        say(f"\n{_found(True)}backup already at {backup}")
+    else:
+        shutil.copytree(folder, backup)
+        say(f"\n{_found(True)}backup: {backup}")
+
+    if lock(folder, recipients_out, quiet=True) != 0:
+        say("      locking failed; the plaintext is untouched")
+        return 1
+    say(f"{_found(True)}locked {folder}")
+
+    if set_config:
+        # config.json directly, with stdlib json. Importing symbio.app.config
+        # for a one-line edit pulls the whole inference stack in behind it —
+        # it failed here on a missing fastmcp — and it would cost this module
+        # the property that makes it useful: nothing but the standard library,
+        # so it runs on a machine with no MLX and without loading the package.
+        config_file = Path(__file__).resolve().parent.parent / "config.json"
+        try:
+            import json
+
+            cfg = json.loads(config_file.read_text(encoding="utf-8")) \
+                if config_file.exists() else {}
+            cfg.setdefault("agent", {})["adapter_identity"] = str(identity_out)
+            config_file.write_text(json.dumps(cfg, indent=2) + "\n",
+                                   encoding="utf-8")
+            say(f"{_found(True)}agent.adapter_identity = {identity_out}")
+        except Exception as e:
+            say(f"  --  could not write {config_file.name} ({e}); set it yourself:")
+            say(f"      ./symb config set agent.adapter_identity {identity_out}")
+
+    say(f"\nDone. `./symb chat` will now unlock the adapter at load.")
+    say(f"If anything goes wrong: rm -rf {folder} && mv {backup} {folder}")
     return 0
 
 
@@ -489,6 +535,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--touch-policy", default="cached",
                     choices=["cached", "always", "never"])
     ap.add_argument("--slot", default="")
+    ap.add_argument("--yubikey", action="store_true",
+                    help="use a YubiKey's PIV applet instead of the Secure "
+                         "Enclave (three PINs, and it can lock you out)")
+    ap.add_argument("--no-lock", action="store_true",
+                    help="set up the key but stop before encrypting anything")
     ap.add_argument("--secure-enclave", action="store_true",
                     help="use this Mac's Secure Enclave instead of a YubiKey: "
                          "no PIN, no PUK, nothing that can block")
@@ -499,11 +550,23 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.action == "setup":
-        if args.secure_enclave:
-            return setup_secure_enclave(
-                Path("~/.config/symbio/adapter_identity.txt").expanduser(),
-                Path(RECIPIENTS).resolve(),
-                access=args.access_control)
+        # Secure Enclave is the default on a Mac, and the YubiKey route is now
+        # the one you opt into. Not a preference: PIV carries three separate
+        # credentials, requires a 6-8 byte PIN that a shorter FIDO2 PIN cannot
+        # satisfy, and blocks after three wrong tries — which is exactly how
+        # setting this up the first time ended, before a single byte was
+        # encrypted. The enclave has no PIN, no PUK and nothing that can block.
+        use_enclave = args.secure_enclave or (
+            not args.yubikey and sys.platform == "darwin"
+            and shutil.which("age-plugin-se") is not None)
+        identity = Path("~/.config/symbio/adapter_identity.txt").expanduser()
+        recipients = Path(RECIPIENTS).resolve()
+        if use_enclave:
+            code = setup_secure_enclave(identity, recipients,
+                                        access=args.access_control)
+            if code != 0 or args.no_lock:
+                return code
+            return finish(Path(args.folder), identity, recipients)
         return setup(
             Path("~/.config/symbio/adapter_identity.txt").expanduser(),
             Path(RECIPIENTS).resolve(),
