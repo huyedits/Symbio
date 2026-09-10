@@ -897,6 +897,19 @@ def think_block_closed(text: str) -> bool:
     return True
 
 
+def count_think_closes(text: str) -> int:
+    """How many reasoning blocks this text CLOSES.
+
+    think_block_closed compares opens against closes, which is the right
+    question about a self-contained reply and the wrong one about a reply
+    generated with thinking on: the chat template puts the opening tag in the
+    prompt, so a truncated reply has neither tag and `opens > closes` reports
+    it closed. Counting closes alone answers "did the model finish
+    deliberating", which is what the caller in that case actually wants.
+    """
+    return sum(text.count(c) for _o, c in _THINK_PAIRS)
+
+
 def tool_group(name: str) -> str | tuple[str, ...] | None:
     """The user-facing group(s) for a tool, or None if unknown.
 

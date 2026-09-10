@@ -1637,6 +1637,18 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 if timings is not None:
                     timings["gen_ms"] = (time.perf_counter() - gen_start) * 1000
                     timings["ttft_ms"] = timings["gen_ms"]
+                    # Same report as the cached path below. Set here too or
+                    # the truncation retry silently stops existing whenever
+                    # prompt caching is off — a feature that depends on a
+                    # signal only one of two branches emits is a feature that
+                    # works by luck. Measured after the end-marker trim, which
+                    # only ever removes tokens: a reply that found its own
+                    # ending is correctly reported as not cut off.
+                    try:
+                        generated = len(self.tokenizer.encode(text))
+                    except Exception:
+                        generated = 0
+                    timings["hit_token_cap"] = generated >= max_tokens
                 return text, False
 
             # Reuse the KV cache across calls: only the token-level suffix that's
@@ -1818,6 +1830,13 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             timings["ttft_ms"] = (
                 (first_token_time - gen_start) * 1000
                 if first_token_time is not None else timings["gen_ms"])
+            # Whether the reply STOPPED or was CUT OFF. The caller cannot tell
+            # from the text: with thinking on the opening <think> lives in the
+            # prompt, so a reply truncated mid-deliberation and a short
+            # complete answer both carry no tags at all. Running out of budget
+            # is the thing that actually happened, and it is only knowable
+            # here.
+            timings["hit_token_cap"] = gen_tokens >= max_tokens
 
         self._cached_prompt_ids = ids + gen_ids
         # The cache and its token count are both known and agree exactly here,

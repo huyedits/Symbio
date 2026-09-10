@@ -124,25 +124,42 @@ def adapter_weights_present() -> bool:
     return any(adapter_dir.glob("*.safetensors"))
 
 
-def _saved_adapter_model() -> str | None:
-    """The model_name the saved adapter was trained for, or None if absent."""
+# Returned when adapter_config.json exists but cannot be read. Distinct from
+# None, which means there is no adapter to ask about — the two used to be the
+# same answer and they call for opposite behaviour.
+UNREADABLE_ADAPTER = object()
+
+
+def _saved_adapter_model() -> str | Any | None:
+    """The model_name the saved adapter was trained for.
+
+    None when there is no adapter config at all; UNREADABLE_ADAPTER when there
+    is one and it will not parse.
+    """
     adapter_config = ADAPTER_DIR / "adapter_config.json"
     if not adapter_config.exists():
         return None
     try:
         adapter_cfg = json.loads(adapter_config.read_text(encoding="utf-8"))
-        return adapter_cfg.get("model") or None
     except Exception:
-        return None
+        return UNREADABLE_ADAPTER
+    return adapter_cfg.get("model") or None
 
 
 def _adapter_matches_model_name(model_name: str) -> bool:
     """Whether the saved adapter was trained for the given model_name.
 
-    A missing adapter is fine (base-only). A killed/OOM'd run can leave
-    adapter_config.json behind with no weights; that is still a real answer.
+    A missing adapter is fine (base-only). A CORRUPT one is not: an
+    unparseable adapter_config.json is what an OOM-killed training run leaves
+    behind, and this used to answer True for it — the file failed to parse,
+    _saved_adapter_model returned None, and None reads as "nothing to
+    contradict the model name". The fail-safe pointed the wrong way, so
+    weights that might have been trained for a different model were handed to
+    mlx_lm as compatible. Unreadable means assume incompatible and run base.
     """
     saved_model = _saved_adapter_model()
+    if saved_model is UNREADABLE_ADAPTER:
+        return False
     return saved_model is None or saved_model == model_name
 
 

@@ -521,8 +521,29 @@ class AgentTurnMixin:
             # resample once with thinking OFF, which ends the prompt with an
             # already-closed block and puts every token into the answer. One
             # retry per turn, then the normal paths take over.
-            if (raw_reply.strip()
-                    and not tooling.think_block_closed(raw_reply)
+            # think_block_closed alone cannot see this. With thinking ON —
+            # thinking_level "low" is the shipped default — the chat template
+            # ends the PROMPT with an open <think>, so a reply cut off at the
+            # reasoning budget carries neither tag: 0 opens, 0 closes, and
+            # `opens > closes` reports CLOSED. The branch never ran in the one
+            # configuration it was written for, and the test passed because
+            # its fixture hardcodes a literal <think>, which is the shape
+            # produced only when thinking is OFF.
+            #
+            # So ask the generation, not the text. "Ran out of road" means the
+            # token budget was exhausted, which _generate_reply reports and
+            # nothing downstream can infer: a reply cut off mid-deliberation
+            # and a short complete answer look identical once the opening tag
+            # is in the prompt rather than the text. Requiring the cap to have
+            # been hit is also what keeps this off ordinary replies — an
+            # earlier version asked only whether a block was closed and fired
+            # on every tagless answer, costing a second generation each time.
+            cut_off = bool(timings.get("hit_token_cap"))
+            if self.thinking_setting()[0]:
+                unclosed = tooling.count_think_closes(raw_reply) < 1
+            else:
+                unclosed = not tooling.think_block_closed(raw_reply)
+            if (raw_reply.strip() and cut_off and unclosed
                     and not thinking_cut_retried):
                 thinking_cut_retried = True
                 self.output_fn(
