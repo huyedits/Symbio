@@ -2075,8 +2075,18 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     if iters is None:
         samples = count_samples(role=role)
         iters = iters_for_corpus(lora, samples)
+        # The epochs the run will ACTUALLY do, not the ones requested. iters
+        # is capped by lora.max_iters, so a 770-sample corpus asking for 2
+        # epochs (1540 steps) was capped to 600 and still announced "~2
+        # epochs" — it saw 0.78 of the data once. A budget that reports the
+        # number it was denied is how "each retrain silently drops older
+        # behaviours" hides, which is the failure iters_for_epochs exists to
+        # prevent.
+        actual = (iters * max(1, int(lora["batch_size"])) / samples) if samples else 0
+        asked = float(lora.get("epochs", 2))
+        note = "" if abs(actual - asked) < 0.05 else f", capped from ~{asked:g}"
         print(f"  [Train] {iters} iters for {samples} sample(s) at batch "
-              f"{lora['batch_size']} (~{lora.get('epochs', 2)} epochs).")
+              f"{lora['batch_size']} (~{actual:.2g} epochs{note}).")
 
     # Which trainer, decided in one place. On MLX this returns exactly the
     # argv that was written here inline; on CUDA it points at symbio.cuda_lora,
@@ -2179,7 +2189,10 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
             (adapter_dir / PROGRESS_FILE).unlink(missing_ok=True)
         except OSError:
             pass
-    total = record_adapter_iters(iters, role=role)
+    # What ran, not what was budgeted: `trained` carries the kept step when
+    # early stop restored an earlier checkpoint.
+    ran = trained if isinstance(trained, int) and not isinstance(trained, bool) else iters
+    total = record_adapter_iters(ran, role=role)
 
     # Here, where both branches meet — not inside the early-stop one, which
     # is where this started and which lora.early_stop_enabled defaults to
@@ -2557,6 +2570,9 @@ def _run_training_with_early_stop(
 
     best_loss: float | None = None
     best_step: int | None = None
+    # Set when a checkpoint is restored, so the caller can record the steps
+    # that happened rather than the steps that were budgeted.
+    kept_iters: int | None = None
     steps_without_improvement = 0
     process: subprocess.Popen | None = None
     stopped_early = False
@@ -2656,12 +2672,19 @@ def _run_training_with_early_stop(
                     stopped_early = True
                     _stop_trainer(process)
                     _restore_best(best_step)
+                    # What the weights on disk ACTUALLY reflect. Without it the
+                    # caller records the configured budget instead: this run
+                    # stopped at iter 90, restored iter 30, and filed itself as
+                    # "600 total iters" — a number no adapter ever reached, on
+                    # the label every future snapshot inherits.
+                    kept_iters = best_step
                     break
 
         if not stopped_early:
             process.wait()
             if process.returncode != 0:
                 return False
+            kept_iters = None          # ran the whole budget
     except KeyboardInterrupt:
         print("  [System] Training stopped.")
         if process is not None:
@@ -2682,7 +2705,10 @@ def _run_training_with_early_stop(
             except OSError:
                 pass
 
-    return True
+    # The kept step when early stop cut the run short, otherwise True for a
+    # full budget. An int is truthy, so every `if trained:` downstream reads
+    # exactly as it did before.
+    return kept_iters if kept_iters else True
 
 
 def reseal_adapter(adapter_dir: Path) -> bool:
