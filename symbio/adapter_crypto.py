@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,16 @@ from typing import Any
 SUFFIX = ".age"
 RECIPIENTS = "adapter_recipients.txt"
 IDENTITY = "adapter_identity.txt"
+
+
+def say(text: str = "") -> None:
+    """Print, unbuffered.
+
+    The setup below hands the terminal to age-plugin-yubikey, which writes
+    straight to it — so with these buffered, its errors appeared ABOVE the
+    header explaining what was being attempted.
+    """
+    print(text, flush=True)
 
 
 def age_available() -> bool:
@@ -77,14 +88,14 @@ def lock(folder: Path, recipients: Path | str, quiet: bool = False) -> int:
     folder = Path(folder)
     recipients = Path(str(recipients)).expanduser()
     if not age_available():
-        print("  age is not installed (brew install age age-plugin-yubikey)")
+        say("  age is not installed (brew install age age-plugin-yubikey)")
         return 1
     if not recipients.exists():
-        print(f"  no recipients file at {recipients}")
+        say(f"  no recipients file at {recipients}")
         return 1
     targets = [p for p in sorted(folder.glob("*.safetensors"))]
     if not targets:
-        print(f"  no weights in {folder}")
+        say(f"  no weights in {folder}")
         return 1
     for target in targets:
         out = target.with_suffix(target.suffix + SUFFIX)
@@ -96,11 +107,11 @@ def lock(folder: Path, recipients: Path | str, quiet: bool = False) -> int:
                   f"{(result.stderr or result.stdout).strip()}")
             return 1
         if out.stat().st_size <= 0:
-            print(f"  lock produced an empty file for {target.name}")
+            say(f"  lock produced an empty file for {target.name}")
             return 1
         target.unlink()
         if not quiet:
-            print(f"  locked {target.name} -> {out.name}")
+            say(f"  locked {target.name} -> {out.name}")
     return 0
 
 
@@ -208,6 +219,149 @@ def should_unlock(adapter_path: str | Path | None,
     return folder.is_dir() and is_locked(folder)
 
 
+# -------------------------------------------------------------------- setup
+
+def _found(ok: bool) -> str:
+    return "  ok  " if ok else "  --  "
+
+
+def _ykman() -> str | None:
+    """ykman, wherever it was installed. pipx puts it outside PATH for a
+    non-login shell, which is where a lot of "not installed" comes from."""
+    found = shutil.which("ykman")
+    if found:
+        return found
+    guess = Path.home() / ".local/bin/ykman"
+    return str(guess) if guess.exists() else None
+
+
+def _yubikeys() -> list[str]:
+    ykman = _ykman()
+    if not ykman:
+        return []
+    try:
+        out = subprocess.run([ykman, "list"], capture_output=True, text=True,
+                             timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line for line in out.stdout.strip().splitlines() if line.strip()]
+
+
+def _piv_warnings() -> list[str]:
+    """Default PIN/PUK/management key, which decide what the lock is worth.
+
+    With them at defaults, anyone holding the key can reset the PIV applet and
+    regenerate the slot — so a lost key is a lost adapter AND a usable key for
+    whoever finds it. Worth saying before someone locks hours of training to it.
+    """
+    ykman = _ykman()
+    if not ykman:
+        return []
+    try:
+        out = subprocess.run([ykman, "piv", "info"], capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line.strip() for line in out.stdout.splitlines()
+            if line.strip().startswith("WARNING:")]
+
+
+def _age_identities() -> str:
+    try:
+        out = subprocess.run(["age-plugin-yubikey", "--list"],
+                             capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip()
+
+
+def setup(identity_out: Path, recipients_out: Path, touch: str = "cached",
+          slot: str = "", name: str = "symbio-adapters") -> int:
+    """Walk the whole thing, checking each step instead of assuming it.
+
+    Every failure this replaces was a real one, hit in sequence: a redirect
+    into a directory that did not exist; `ykman piv keys generate`, which makes
+    a key with no certificate so age cannot see it; and an empty recipients
+    file that only announced itself several commands later as "no recipients
+    found". Each of those is a step that half-worked and said nothing.
+    """
+    say("Locking the adapter to a security key\n")
+
+    have_age = age_available()
+    say(f"{_found(have_age)}age")
+    have_plugin = shutil.which("age-plugin-yubikey") is not None
+    say(f"{_found(have_plugin)}age-plugin-yubikey")
+    if not (have_age and have_plugin):
+        say("\n  Install both, then run this again:")
+        print("    brew install age age-plugin-yubikey")
+        return 1
+
+    keys = _yubikeys()
+    say(f"{_found(bool(keys))}security key" + (f": {keys[0]}" if keys else ""))
+    if not keys:
+        say("\n  Plug the YubiKey in and run this again.")
+        return 1
+
+    for warning in _piv_warnings():
+        say(f"  !!  {warning}")
+    if _piv_warnings():
+        say("      Anyone holding this key could reset it and regenerate the")
+        print("      slot. Worth fixing before locking hours of training to it:")
+        say("        ykman piv access change-pin")
+        print("        ykman piv access change-puk")
+        say("        ykman piv access change-management-key --generate --protect")
+        print()
+
+    existing = _age_identities()
+    if existing:
+        say(f"{_found(True)}age identity already on the key")
+    else:
+        say(f"{_found(False)}age identity — generating one now")
+        if not sys.stdin.isatty():
+            # It prompts for a PIN and waits for a touch, and neither can
+            # happen down a pipe. Saying so beats age's "IO error: not a
+            # terminal" followed by this script guessing at a busy slot.
+            say("\n  This step needs a terminal: it asks for the PIV PIN and")
+            say("  waits for you to touch the key. Run it directly:")
+            say("      python3 symbio/adapter_crypto.py setup")
+            return 1
+        say("      This asks for the PIV PIN (default 123456) and a touch.\n")
+        cmd = ["age-plugin-yubikey", "--generate",
+               "--touch-policy", touch, "--name", name]
+        if slot:
+            cmd += ["--slot", slot, "--force"]
+        # stdio inherited on purpose: it prompts, and capturing that turns a
+        # PIN prompt into a hang with no explanation.
+        if subprocess.run(cmd).returncode != 0:
+            say("\n  Generation failed. If the slot is already in use, pass")
+            print("  --slot 9a to overwrite it.")
+            return 1
+        existing = _age_identities()
+        if not existing:
+            say("\n  The key generated but age still lists no recipients.")
+            return 1
+
+    for path, flag, label in ((identity_out, "--identity", "identity"),
+                              (recipients_out, "--list", "recipients")):
+        path = Path(path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        out = subprocess.run(["age-plugin-yubikey", flag],
+                             capture_output=True, text=True)
+        if out.returncode != 0 or not out.stdout.strip():
+            say(f"  --  could not write the {label} file")
+            return 1
+        path.write_text(out.stdout)
+        say(f"{_found(True)}{label}: {path}  ({len(out.stdout)} bytes)")
+
+    say("\nNext, and read this line before you run it: locking DELETES the")
+    print("plaintext weights. Keep a copy until a real load has worked.")
+    say(f"    cp -R adapters adapters.backup")
+    print(f"    python3 symbio/adapter_crypto.py lock adapters "
+          f"--recipients {recipients_out}")
+    say(f"    ./symb config set agent.adapter_identity {identity_out}")
+    return 0
+
+
 # ---------------------------------------------------------------------- cli
 
 _USAGE = """Lock an adapter to a security key, and see whether it is locked.
@@ -233,22 +387,31 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=_USAGE.splitlines()[0],
         epilog=_USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("action", choices=["status", "lock", "unlock"])
-    ap.add_argument("folder")
+    ap.add_argument("action", choices=["setup", "status", "lock", "unlock"])
+    ap.add_argument("folder", nargs="?", default="adapters")
     ap.add_argument("--recipients", default=RECIPIENTS)
     ap.add_argument("--identity", default=IDENTITY)
+    ap.add_argument("--touch-policy", default="cached",
+                    choices=["cached", "always", "never"])
+    ap.add_argument("--slot", default="")
     args = ap.parse_args(argv)
+
+    if args.action == "setup":
+        return setup(
+            Path("~/.config/symbio/adapter_identity.txt").expanduser(),
+            Path(RECIPIENTS).resolve(),
+            touch=args.touch_policy, slot=args.slot)
 
     folder = Path(args.folder)
     if args.action == "status":
         locked = encrypted_files(folder)
         if not locked:
-            print(f"  {folder}: not locked")
+            say(f"  {folder}: not locked")
             return 1
         state = "locked" if is_locked(folder) else "HALF LOCKED (plaintext still present)"
-        print(f"  {folder}: {state}")
+        say(f"  {folder}: {state}")
         for path in locked:
-            print(f"    {path.name}")
+            say(f"    {path.name}")
         return 0 if is_locked(folder) else 1
 
     if args.action == "lock":
@@ -259,11 +422,11 @@ def main(argv: list[str] | None = None) -> int:
     # the plaintext back here is a deliberate, permanent undo.
     ok, detail = unlock_into(folder, args.identity, folder)
     if not ok:
-        print(f"  unlock failed: {detail}")
+        say(f"  unlock failed: {detail}")
         return 1
     for path in encrypted_files(folder):
         path.unlink()
-    print(f"  {folder}: unlocked in place; the weights are plaintext again")
+    say(f"  {folder}: unlocked in place; the weights are plaintext again")
     return 0
 
 
