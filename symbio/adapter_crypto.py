@@ -275,6 +275,101 @@ def _age_identities() -> str:
     return out.stdout.strip()
 
 
+def _looks_like_identity(path: Path) -> bool:
+    """Does this file hold an age identity, rather than merely exist?"""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(line.strip().upper().startswith("AGE-")
+               for line in text.splitlines())
+
+
+def _has_recipients(path: Path) -> bool:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(line.strip().startswith("age1") for line in text.splitlines())
+
+
+def setup_secure_enclave(identity_out: Path, recipients_out: Path,
+                         access: str = "passcode") -> int:
+    """The Apple Secure Enclave route: no PIN, no PUK, nothing that can block.
+
+    Here because the YubiKey route cost a blocked PIV PIN and a spent PUK try
+    before anything was encrypted. PIV has three separate credentials, its own
+    6-8 byte PIN rule that a shorter FIDO2 PIN cannot satisfy, and a lockout
+    that needs a factory reset of the applet to clear. The enclave has none of
+    that: the private key is generated inside this Mac and cannot leave it.
+
+    access="none" prompts for nothing and still means a locked adapter copied
+    to another machine, restored from a backup, or read off the SSD is
+    unreadable — the key is not in the file, it is in this Mac.
+    access="passcode" additionally asks for the login password at each load,
+    which also covers someone sitting at this Mac while it is unlocked.
+    """
+    say("Locking the adapter to this Mac's Secure Enclave\n")
+    have_plugin = shutil.which("age-plugin-se") is not None
+    say(f"{_found(age_available())}age")
+    say(f"{_found(have_plugin)}age-plugin-se")
+    if not (age_available() and have_plugin):
+        say("\n  Install both, then run this again:")
+        say("    brew install age age-plugin-se")
+        return 1
+
+    identity_out = Path(identity_out).expanduser()
+    identity_out.parent.mkdir(parents=True, exist_ok=True)
+    # Existence is not validity, which is the same mistake as the empty
+    # recipients file this whole guided setup exists to prevent — and it was
+    # made here too: a zero-byte identity left by an earlier failed redirect
+    # was reported as "identity already at ...", reused, and produced an empty
+    # recipients file that age then rejected two commands later.
+    if _looks_like_identity(identity_out):
+        say(f"{_found(True)}identity already at {identity_out}")
+    else:
+        if identity_out.exists():
+            say(f"  --  {identity_out} exists but holds no identity; replacing it")
+        result = subprocess.run(
+            ["age-plugin-se", "keygen", "--access-control", access,
+             "-o", str(identity_out)],
+            capture_output=True, text=True)
+        if result.returncode != 0:
+            say(f"  --  keygen failed: "
+                f"{(result.stderr or result.stdout).strip()}")
+            return 1
+        say(f"{_found(True)}identity: {identity_out}  (access control: {access})")
+
+    recipients_out = Path(recipients_out).expanduser()
+    recipients_out.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        ["age-plugin-se", "recipients", "-i", str(identity_out),
+         "-o", str(recipients_out)],
+        capture_output=True, text=True)
+    # Content, not existence: age-plugin-se exits 0 having written nothing
+    # when the identity it was given is empty, and the failure then surfaces
+    # from `age` at lock time as "no recipients found".
+    if result.returncode != 0 or not _has_recipients(recipients_out):
+        detail = (result.stderr or result.stdout).strip()
+        say(f"  --  could not derive recipients"
+            + (f": {detail}" if detail else " (the file came out empty)"))
+        return 1
+    say(f"{_found(True)}recipients: {recipients_out}")
+
+    if access != "none":
+        say(f"\n  Each adapter load will ask for your Mac login password.")
+        say(f"  That includes worker swaps and deep-sleep wakes, which happen")
+        say(f"  several times in a browser session. --access-control none")
+        say(f"  removes the prompt and still binds the adapter to this Mac.")
+    say("\nNext, and read this line before you run it: locking DELETES the")
+    say("plaintext weights. Keep a copy until a real load has worked.")
+    say("    cp -R adapters adapters.backup")
+    say(f"    python3 symbio/adapter_crypto.py lock adapters "
+        f"--recipients {recipients_out}")
+    say(f"    ./symb config set agent.adapter_identity {identity_out}")
+    return 0
+
+
 def setup(identity_out: Path, recipients_out: Path, touch: str = "cached",
           slot: str = "", name: str = "symbio-adapters") -> int:
     """Walk the whole thing, checking each step instead of assuming it.
@@ -394,9 +489,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--touch-policy", default="cached",
                     choices=["cached", "always", "never"])
     ap.add_argument("--slot", default="")
+    ap.add_argument("--secure-enclave", action="store_true",
+                    help="use this Mac's Secure Enclave instead of a YubiKey: "
+                         "no PIN, no PUK, nothing that can block")
+    ap.add_argument("--access-control", default="passcode",
+                    choices=["none", "passcode", "any-biometry-or-passcode"],
+                    help="secure-enclave only; 'none' binds the adapter to "
+                         "this Mac without prompting for anything")
     args = ap.parse_args(argv)
 
     if args.action == "setup":
+        if args.secure_enclave:
+            return setup_secure_enclave(
+                Path("~/.config/symbio/adapter_identity.txt").expanduser(),
+                Path(RECIPIENTS).resolve(),
+                access=args.access_control)
         return setup(
             Path("~/.config/symbio/adapter_identity.txt").expanduser(),
             Path(RECIPIENTS).resolve(),
