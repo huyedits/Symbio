@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 from datetime import datetime
 from email import message_from_bytes
 from email.header import decode_header
@@ -1159,11 +1160,48 @@ def run_single_tool(agent: AIAgent, name: str, params: dict[str, Any]) -> str:
     # Same refusal the tag agent enforces in ChatSession._execute_tool. Every
     # tool table that can write needs it, or the protection is only as good as
     # which front-end happens to be running.
+    from symbio import safety
     from symbio.app import security as _security
 
     _blocked = _security.block_reason(name, params)
     if _blocked is not None:
         return _blocked
+
+    # And the risk gate, for the same reason the refusal check is here: this
+    # front-end runs the same tools through a different dispatcher, and it
+    # consulted only block_reason. So the 3/3 scores on desktop_type and
+    # desktop_press — arbitrary shell execution when the focused window is a
+    # Terminal — were enforced in ChatSession and nowhere else, which makes
+    # them a property of which front-end happens to be running rather than of
+    # the action. Same shape as the hole the refusal check above closes.
+    _risk = safety.assess_tool_risk(name, params, agent.config)
+    # The front-end's own asker, when it has one. Passing nothing left
+    # maybe_confirm on its stdin fallback, which returns False off a TTY — so
+    # adding this gate silently denied every run_command and execute_code in
+    # piped, cron and gateway runs that used to work. And execute_tools fans
+    # this out over four threads, where several input() calls on one stdin
+    # interleave into an unreadable prompt, so only the main thread may ask.
+    _asker = getattr(agent, "confirm_fn", None)
+    if _asker is None and threading.current_thread() is not threading.main_thread():
+        _asker = lambda _prompt: False  # noqa: E731
+    _allowed, _reason = safety.maybe_confirm(
+        name, params, _risk, agent.config, _asker)
+    if not _allowed:
+        safety.log_security_event("tool_blocked", {
+            "tool": name, "params": params, "risk": _risk, "reason": _reason,
+        })
+        # Name the reason it could not be approved rather than only that it
+        # was not. "Not approved" on a cron run reads as the user refusing;
+        # nobody was there to refuse.
+        _unattended = _reason is not None and not safety.can_prompt(_asker)
+        return (
+            f"Tool '{name}' was not approved (risk score {_risk['risk_score']}/3: "
+            f"{', '.join(_risk['flags'])})."
+            + ("  Nothing here can ask for approval — this run has no "
+               "terminal. Run it interactively, or raise "
+               "safety.require_confirm_score if this tool should not need "
+               "asking." if _unattended else "")
+        )
 
     meta = tool_metadata(name, agent.tools, agent)
     runner: Callable[[dict[str, Any]], str] = meta.get("run", lambda _: f"Unknown tool: {name}")

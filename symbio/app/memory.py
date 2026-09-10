@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from symbio import constants, safety
-from symbio.app import prune, skills
+from symbio.app import note_history, prune, skills
 
 
 def save_note(title: str, body: str) -> Path:
@@ -18,6 +18,10 @@ def save_note(title: str, body: str) -> Path:
     safe = safe.strip().replace(" ", "_")[:40]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = constants.NOTES_DIR / f"{ts}_{safe}.md"
+    # Same-second collision with an existing note of the same title: preserve
+    # the old content before overwriting it.
+    if path.exists():
+        note_history.snapshot(path)
     path.write_text(f"# {title}\n\n{body}\n", encoding="utf-8")
     skills.record_note_usage(path)
     return path
@@ -89,6 +93,7 @@ def delete_note(query: str) -> tuple[bool, str]:
             f"identity notes are removed deliberately, not by tool call."
         )
     try:
+        note_history.snapshot(path)
         path.unlink()
     except OSError as exc:
         return False, f"Could not delete note '{title}': {exc}"

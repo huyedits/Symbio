@@ -966,7 +966,13 @@ def main(argv: list[str] | None = None) -> int:
         if not getattr(args, "no_attach", False):
             from symbio.app import daemon
             if daemon.daemon_ready():
-                return daemon.DaemonClient(config).run()
+                exit_code = daemon.DaemonClient(config).run()
+                # None means the daemon could not be reached. Falling through
+                # to chat_loop below is the whole point: the local path is one
+                # line away, and returning the client's failure made a wedged
+                # daemon the reason `symb chat` would not start at all.
+                if exit_code is not None:
+                    return exit_code
         chat_loop(config)
         return 0
     if command == "setup":

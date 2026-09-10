@@ -2152,6 +2152,16 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
             pass
     total = record_adapter_iters(iters, role=role)
 
+    # Here, where both branches meet — not inside the early-stop one, which
+    # is where this started and which lora.early_stop_enabled defaults to
+    # False. A plain run then left the seal describing the previous weights,
+    # so the load-time check reported SEAL BROKEN after every single train:
+    # the "everyone learns to ignore the warning" failure reseal_adapter's own
+    # docstring names, and under verify_adapters "refuse" it would have made
+    # the assistant unloadable by training it.
+    if trained:
+        reseal_adapter(adapter_dir)
+
     adapter_kb = sum(f.stat().st_size for f in adapter_dir.iterdir() if f.is_file()) // 1024
     print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB "
           f"({adapter_label(role)}, {total} total iters)")
@@ -2643,7 +2653,6 @@ def _run_training_with_early_stop(
             except OSError:
                 pass
 
-    reseal_adapter(adapter_dir)
     return True
 
 

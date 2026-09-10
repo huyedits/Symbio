@@ -46,8 +46,24 @@ def daemon_ready() -> bool:
 
     The socket is created only after the model is loaded, so its presence is
     the readiness signal — a pid file alone means the process is still loading.
+
+    Presence alone was the whole test, and a Unix socket file outlives the
+    process that bound it: an OOM kill (which this project takes regularly)
+    left the node behind, daemon_ready() kept saying yes, and every later
+    `symb chat` died on ECONNREFUSED with no fallback. So the pid has to be
+    alive too — daemon_running() already removes a dead pid file — and a
+    socket with nothing behind it is cleared here rather than left as a trap.
     """
-    return constants.DAEMON_SOCKET.exists()
+    if not constants.DAEMON_SOCKET.exists():
+        return False
+    running, _pid = daemon_running()
+    if running:
+        return True
+    try:
+        constants.DAEMON_SOCKET.unlink()
+    except OSError:
+        pass
+    return False
 
 
 def _cleanup_daemon_files() -> None:
@@ -207,7 +223,29 @@ def daemon_main(config: dict[str, Any]) -> int:
     print("Model loaded. Listening for clients.", flush=True)
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.bind(str(constants.DAEMON_SOCKET))
+    # Owner-only, and the umask is what makes it owner-only from the instant
+    # it exists — a chmod after bind leaves a window in which the socket is
+    # already listening and still world-connectable.
+    #
+    # This is not a hardening nicety. Whoever connects gets a real ChatSession
+    # with the whole tool registry, and _serve_connection wires confirm_fn
+    # back to that same client — so safety.maybe_confirm asks the caller
+    # whether the caller's own run_command is approved, and the caller
+    # answers. Bound at the default umask the mode was 0o755 (verified), which
+    # makes that local code execution as this user for anything that can
+    # traverse to the project directory. On a Unix socket the file mode IS the
+    # peer check: 0600 means only this uid can connect at all.
+    previous_umask = os.umask(0o177)
+    try:
+        sock.bind(str(constants.DAEMON_SOCKET))
+    finally:
+        os.umask(previous_umask)
+    try:
+        os.chmod(constants.DAEMON_SOCKET, 0o600)
+    except OSError:
+        # A platform that will not chmod a socket node still had the umask
+        # applied at bind; nothing here should take the daemon down.
+        pass
     sock.listen(1)
 
     try:
@@ -233,13 +271,27 @@ class DaemonClient:
     def __init__(self, config: dict[str, Any]):
         self.config = config
 
-    def run(self) -> int:
+    def run(self) -> int | None:
+        """Exit code, or None when there is no daemon to talk to.
+
+        None rather than 1 so the caller can fall through to a local session:
+        a daemon that cannot be reached is a missing optimisation, not a
+        reason the assistant will not start.
+        """
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             sock.connect(str(constants.DAEMON_SOCKET))
         except OSError as e:
-            print(f"Could not connect to daemon: {e}")
-            return 1
+            # Not a fatal error: the local path is right there. Returning 1
+            # here meant a wedged or half-dead daemon took `symb chat` down
+            # with it until someone deleted the socket by hand.
+            print(f"Could not connect to the daemon ({e}); starting a local "
+                  f"session instead.")
+            try:
+                constants.DAEMON_SOCKET.unlink()
+            except OSError:
+                pass
+            return None
 
         rfile = sock.makefile("rb")
         wfile = sock.makefile("wb")

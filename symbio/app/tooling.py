@@ -26,6 +26,23 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_press": "browser",
     "browser_close": "browser",
     "browser_get_text": "browser",
+    # Looking is grouped with the browser, not with desktop control: seeing the
+    # page the assistant already drives is the same capability as reading it,
+    # and gating it behind a second opt-in would leave the browser tools blind
+    # for anyone who enabled only "browser" — which is the exact state that
+    # produced the blind-clicking failures this exists to fix.
+    # Looking is reachable from either capability, gated per target inside
+    # _see_screen. Grouping it under "browser" alone left a desktop-only
+    # install with desktop_click/type/press enabled and no way to call the one
+    # tool that produces their coordinates — while _desktop_action's own
+    # failure text told the model to "call see_screen with target='desktop'
+    # first", advice for a tool it could not call.
+    "see_screen": ("browser", "desktop"),
+    "browser_click_at": "browser",
+    # Driving the whole machine is a separate, opt-in capability.
+    "desktop_click": "desktop",
+    "desktop_type": "desktop",
+    "desktop_press": "desktop",
     "save_memory": "memory",
     "compact_memory": "memory",
     "set_standing_instruction": "memory",
@@ -136,11 +153,12 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "browser_type",
-        "description": "Type text into the focused field in the open browser. Set enter=true to submit with Return after typing.",
+        "description": "Type text into the open browser. With no selector it types into whatever is focused, so click the field first. Prefer 'selector' when you know one — it fills the field directly and cannot miss, which is the only reliable way into controls too small or too crowded to click accurately (e.g. a site's post composer). Set enter=true to submit with Return after typing.",
         "parameters": {
             "type": "object",
             "properties": {
                 "text": {"type": "string", "description": "The text to type."},
+                "selector": {"type": "string", "description": "Optional CSS selector for the field to fill, e.g. '[data-testid=\"tweetTextarea_0\"]' or '#search'. Fills it directly; no clicking or focus needed."},
                 "enter": {"type": "boolean", "description": "Press Enter after typing. Default false."},
             },
             "required": ["text"],
@@ -169,6 +187,59 @@ _TOOLS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {"key": {"type": "string", "description": "Key name such as 'down', 'up', 'enter', 'esc', 'space', 'tab', 'home', 'end', or a combination like 'cmd+enter'."}},
+            "required": ["key"],
+        },
+    },
+    {
+        "name": "see_screen",
+        "description": "LOOK at the screen and get back what is actually there: every control with its exact selector, its current contents, and coordinates you can click directly with browser_click_at or desktop_click. On a web page this is instant and exact — it asks the page itself and does not need a screenshot — so use it freely rather than guessing a label, and use it FIRST when a click or a type has just failed. It also tells apart two controls with the same name, which page text cannot. Only a question the page cannot answer about itself — how something looks, an image, a canvas, or anything on the desktop — falls back to the slower screenshot. Name ONE thing per call in 'question' ('where is the composer?'); asking about several at once makes the positions unreliable.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "'browser' to look at the open browser page (default), or 'desktop' to look at the whole screen."},
+                "question": {"type": "string", "description": "Optional. What you want to know, e.g. 'is the composer empty and where is the Post button?'. Leave out for a general description."},
+            },
+        },
+    },
+    {
+        "name": "browser_click_at",
+        "description": "Click exact pixel coordinates in the open browser viewport. Use with coordinates from see_screen when clicking by visible text is ambiguous — e.g. when the same word labels both a navigation link and the button that submits a form.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "integer", "description": "Horizontal pixel coordinate from see_screen."},
+                "y": {"type": "integer", "description": "Vertical pixel coordinate from see_screen."},
+            },
+            "required": ["x", "y"],
+        },
+    },
+    {
+        "name": "desktop_click",
+        "description": "Click pixel coordinates anywhere on the macOS screen. Use coordinates returned by see_screen with target='desktop'.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "x": {"type": "integer", "description": "Horizontal pixel coordinate from see_screen."},
+                "y": {"type": "integer", "description": "Vertical pixel coordinate from see_screen."},
+            },
+            "required": ["x", "y"],
+        },
+    },
+    {
+        "name": "desktop_type",
+        "description": "Type text into whatever has keyboard focus on the macOS desktop. Click the field first with desktop_click, and confirm with see_screen that the caret is where you expect.",
+        "parameters": {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "The text to type."}},
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "desktop_press",
+        "description": "Press a key on the macOS desktop (e.g. 'enter', 'esc', 'tab', 'down').",
+        "parameters": {
+            "type": "object",
+            "properties": {"key": {"type": "string", "description": "Key name such as 'enter', 'esc', 'tab', 'down'."}},
             "required": ["key"],
         },
     },
@@ -826,12 +897,40 @@ def think_block_closed(text: str) -> bool:
     return True
 
 
-def tool_group(name: str) -> str | None:
-    """Return the user-facing group for a tool name, or None if unknown."""
+def count_think_closes(text: str) -> int:
+    """How many reasoning blocks this text CLOSES.
+
+    think_block_closed compares opens against closes, which is the right
+    question about a self-contained reply and the wrong one about a reply
+    generated with thinking on: the chat template puts the opening tag in the
+    prompt, so a truncated reply has neither tag and `opens > closes` reports
+    it closed. Counting closes alone answers "did the model finish
+    deliberating", which is what the caller in that case actually wants.
+    """
+    return sum(text.count(c) for _o, c in _THINK_PAIRS)
+
+
+def tool_group(name: str) -> str | tuple[str, ...] | None:
+    """The user-facing group(s) for a tool, or None if unknown.
+
+    A tuple means "any of these is enough" — see see_screen, which serves both
+    the browser and the desktop and is gated per target where it runs.
+    """
     group = _TOOL_GROUPS.get(name)
     if group is None and name.startswith("mcp_"):
         return "mcp"
     return group
+
+
+def tool_group_enabled(name: str, groups: set[str] | None) -> bool:
+    """Is `name` reachable with `groups` turned on? Unknown tools are allowed
+    through here; the dispatcher decides what to do with a name it lacks."""
+    group = tool_group(name)
+    if group is None or groups is None:
+        return True
+    if isinstance(group, tuple):
+        return any(g in groups for g in group)
+    return group in groups
 
 
 def build_tools_block(groups: set[str] | None = None) -> str:
@@ -847,8 +946,10 @@ def build_tools_block(groups: set[str] | None = None) -> str:
         # name, "run_command". A raw lookup missed it, so an install that had
         # the terminal group ON was shown a prompt with no shell tool in it.
         tools = [t for t in _TOOLS
-                 if _TOOL_GROUPS.get(
-                     _HERMES_NAME_MAP.get(t["name"], t["name"])) in groups]
+                 if tool_group_enabled(
+                     _HERMES_NAME_MAP.get(t["name"], t["name"]), groups)
+                 and tool_group(
+                     _HERMES_NAME_MAP.get(t["name"], t["name"])) is not None]
     return "<tools>" + json.dumps(tools, ensure_ascii=False, separators=(",", ":")) + "</tools>"
 
 
@@ -1719,7 +1820,8 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     if enabled_groups is not None:
         tools = [
             (name, params) for name, params in tools
-            if _TOOL_GROUPS.get(name) in enabled_groups
+            if tool_group(name) is not None
+            and tool_group_enabled(name, enabled_groups)
         ]
     return tools
 
@@ -1741,10 +1843,9 @@ def dropped_tool_calls(reply: str,
         return []
     dropped: list[tuple[str, str]] = []
     for name, _params in parse_tools(reply, None):
-        group = _TOOL_GROUPS.get(name)
-        if group is None:
+        if tool_group(name) is None:
             dropped.append((name, "unknown"))
-        elif group not in enabled_groups:
+        elif not tool_group_enabled(name, enabled_groups):
             dropped.append((name, "disabled"))
     return dropped
 
@@ -1755,8 +1856,8 @@ def enabled_tool_names(enabled_groups: set[str] | None) -> list[str]:
     for spec in _TOOLS:
         advertised = spec["name"]
         internal = _HERMES_NAME_MAP.get(advertised, advertised)
-        group = _TOOL_GROUPS.get(internal)
-        if enabled_groups is None or group in enabled_groups:
+        if tool_group(internal) is not None and tool_group_enabled(
+                internal, enabled_groups):
             names.append(advertised)
     return names
 

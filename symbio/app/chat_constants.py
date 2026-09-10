@@ -45,8 +45,13 @@ _BROWSER_TOOLS = {
 }
 
 # Browser actions that can sensibly be retried with a different target.
+# browser_click_at belongs here even though its "different target" is a
+# different coordinate: a failed one has to set pending_browser_error, or the
+# retry nudge — the one that now says "call see_screen, then click what it
+# reports" — never fires for the tool that nudge points at.
 _BROWSER_ACTION_TOOLS = {
-    "browser_click", "browser_type", "browser_scroll", "browser_press",
+    "browser_click", "browser_click_at", "browser_type",
+    "browser_scroll", "browser_press",
 }
 
 # How many times one identical tool call may be attempted in a single turn.
@@ -109,6 +114,49 @@ def _message_fingerprint(message: dict) -> str:
     return hashlib.sha1(
         f"{message.get('role', '')}:{len(content)}:{content[:256]}".encode(
             "utf-8", "replace")).hexdigest()
+
+
+# How many of the user's OWN turns must survive any trimming. Not messages:
+# one browser round appends an assistant reply and an observation, so a
+# message count spends itself on page dumps and throws away the request that
+# prompted them. Reported 2026-09-10 as "it forgets what i said" — verified,
+# a question eight tool rounds back was dropped while eight page dumps were
+# kept, and the model was left working on evidence with no task attached.
+KEEP_RECENT_USER_TURNS = 5
+
+
+def is_real_user_turn(message: dict) -> bool:
+    """A turn the person typed, as opposed to one the system wrote for them.
+
+    Tool results are appended with the user role — that is how the model is
+    given them — so role alone counts a page dump as something the user said.
+    """
+    return (message.get("role") == "user"
+            and not str(message.get("content", "")).startswith(
+                "[System observation:"))
+
+
+def user_turn_floor(messages: list[dict],
+                    keep: int = KEEP_RECENT_USER_TURNS) -> int:
+    """Index of the oldest message that trimming must not cross.
+
+    Anchored on the keep-th most recent thing the person actually said, so
+    everything from that request onwards — the request, and the work done in
+    service of it — stays together.
+
+    Fewer than `keep` of them protects all of them, from the oldest. NONE of
+    them protects nothing: a history made entirely of tool traffic has no
+    request in it to lose, and returning a floor of 0 there would have frozen
+    trimming altogether rather than protecting anything.
+    """
+    seen, oldest = 0, None
+    for i in range(len(messages) - 1, -1, -1):
+        if is_real_user_turn(messages[i]):
+            seen += 1
+            oldest = i
+            if seen >= keep:
+                return i
+    return oldest if oldest is not None else len(messages)
 
 
 def _cache_nbytes(cache) -> int:

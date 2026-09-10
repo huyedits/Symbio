@@ -997,14 +997,26 @@ class BrowserSession:
         Returns [] on any failure — this enriches a look, it must never be the
         reason one fails.
         """
+        return self.controls_read(limit)[0]
+
+    def controls_read(self, limit: int = 25) -> tuple[list[dict], bool]:
+        """(controls, whether the page could be read at all).
+
+        [] means two different things and a caller acting on it has to know
+        which: no control matched, or the read never happened — the browser is
+        not open, the page navigated mid-call, a CSP blocked the evaluate. The
+        difference decides whether "I could not find it" may be reported to
+        the model as "it is NOT there", and see_screen was reporting a failed
+        read as proof of absence about controls it had simply never looked at.
+        """
         try:
             page = self._ensure_open()
             found = list(page.evaluate(self._CONTROLS_JS, limit) or [])
         except Exception:
-            return []
+            return [], False
         fields = [c for c in found if c.get("kind") == "field"]
         buttons = [c for c in found if c.get("kind") != "field"]
-        return (fields + buttons)[:limit]
+        return (fields + buttons)[:limit], True
 
     def focused_description(self) -> str:
         """What has keyboard focus right now, in words. '' if nothing does.

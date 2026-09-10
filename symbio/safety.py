@@ -686,8 +686,34 @@ def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any],
     if name in ("delegate_task", "brain_solve"):
         return {"risk_score": 1, "flags": ["delegate"]}
 
-    if name in ("browser_open", "browser_click", "browser_type", "browser_scroll", "browser_press"):
+    if name in ("browser_open", "browser_click", "browser_type",
+                "browser_scroll", "browser_press", "browser_click_at"):
         return {"risk_score": 1, "flags": ["browser_action"]}
+
+    # Driving the machine itself is not a browser action, and it is not free.
+    #
+    # A browser action is bounded by the page it happens on. desktop_type and
+    # desktop_press are bounded by nothing: aimed at a focused Terminal,
+    # desktop_type("rm -rf ~/adapters") followed by desktop_press("enter") is
+    # arbitrary shell execution. run_command with that same string is gated at
+    # 3/3 with intent escalation on top; scoring these 0 and asking nobody
+    # reopens that door beside the locked one — the same shape as the
+    # run_command-around-a-denied-browser_open hole, which is why refusals are
+    # enforced per action rather than per tool.
+    #
+    # Enter is the key that commits whatever was typed, so it is scored with
+    # the typing rather than with navigation.
+    if name == "desktop_type" or (
+            name == "desktop_press"
+            and str(params.get("key", "")).strip().lower()
+            in ("enter", "return", "\n")):
+        return {"risk_score": 3, "flags": ["desktop_input", "uncontained_target"]}
+    if name in ("desktop_click", "desktop_press"):
+        return {"risk_score": 2, "flags": ["desktop_input"]}
+    # Reading the screen is not acting on it, but it does pull whatever is on
+    # display — including any other window — into the transcript.
+    if name == "see_screen":
+        return {"risk_score": 1, "flags": ["screen_capture"]}
 
     return {"risk_score": 0, "flags": flags}
 
@@ -743,6 +769,10 @@ TOOL_BASELINE_FILE = constants.PROJECT_DIR / "tool_baseline.json"
 PROVENANCE_SENSITIVE = frozenset({
     "run_command", "terminal", "execute_code", "run_remote",
     "write_file", "edit_file", "patch", "config_set",
+    # Keystrokes and clicks at the desktop reach anything on it. They belong
+    # here for the same reason execute_code does, and especially so because
+    # see_screen puts attacker-controlled page text into the same turn.
+    "desktop_type", "desktop_press", "desktop_click",
 })
 
 
@@ -904,6 +934,56 @@ def assess_request_intent(
     return risk
 
 
+# C0 controls (minus tab), DEL, and the C1 range. Escape sequences start with
+# ESC, and a terminal obeys them wherever they appear — including inside the
+# text of a prompt asking whether to run the thing that contains them.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _visible(text: Any) -> str:
+    """Model-supplied text, safe to print into an approval prompt.
+
+    Escaped, not stripped. `\x1b[2A\x1b[2K` moves the cursor up two lines and
+    erases them, so a payload carrying it can delete the "[Security: risk
+    score 3/3] Run this?" header and the dangerous line above it before the
+    user answers — the approval is then for something they were never shown.
+    Deleting the bytes would hide it just as effectively; showing them as
+    \x1b makes the attempt itself visible, which is the only outcome that
+    keeps the prompt honest.
+    """
+    return _CONTROL_CHARS_RE.sub(
+        lambda m: "\\x%02x" % ord(m.group()), str(text if text is not None else ""))
+
+
+def _render_code(code: str, max_lines: int = 24, max_line: int = 160) -> str:
+    """Lay a script out so the person approving it can actually read it.
+
+    This used to be `code.replace("\\n", " ")[:200]` — every newline flattened
+    to a space and the result cut at 200 characters, mid-token. On a wrapped
+    terminal beside a spinner that renders as scrambled text, and the user is
+    asked to approve, at risk 3/3, something they cannot read. Anything past
+    the 200th character was invisible entirely, which is exactly where a
+    dangerous line sits in a script that opens with harmless setup.
+
+    So keep the line structure, indent it, and truncate long lines and long
+    scripts EXPLICITLY, saying how much is hidden. An approval prompt that
+    silently omits part of what it is approving is worse than no prompt,
+    because it looks like informed consent.
+    """
+    lines = str(code or "").splitlines() or [""]
+    shown = []
+    for line in lines[:max_lines]:
+        # Escape before measuring, so the truncation counts what will actually
+        # be printed rather than what was in the payload.
+        line = _visible(line)
+        if len(line) > max_line:
+            line = line[:max_line] + f"  ... (+{len(line) - max_line} chars)"
+        shown.append("  | " + line)
+    if len(lines) > max_lines:
+        shown.append(f"  | ... ({len(lines) - max_lines} more line(s) not shown)")
+    return "\n".join(shown)
+
+
 def maybe_confirm(
     name: str,
     params: dict[str, Any],
@@ -925,18 +1005,25 @@ def maybe_confirm(
         return True, None
 
     flags = ", ".join(risk.get("flags", [])) or "high-risk action"
-    prompt = f"[Security: risk score {score}/3] Allow tool '{name}'? Flags: {flags}."
+    prompt = f"[Security: risk score {score}/3] Allow tool '{_visible(name)}'? Flags: {flags}."
     if name == "run_command":
-        prompt = f"[Security: risk score {score}/3] Run this command?\n  $ {params.get('cmd', '')}\n  Flags: {flags}"
+        prompt = f"[Security: risk score {score}/3] Run this command?\n  $ {_visible(params.get('cmd', ''))}\n  Flags: {flags}"
     elif name == "run_remote":
-        prompt = f"[Security: risk score {score}/3] Run this on '{params.get('host')}'?\n  $ {params.get('command')}\n  Flags: {flags}"
+        prompt = f"[Security: risk score {score}/3] Run this on '{_visible(params.get('host'))}'?\n  $ {_visible(params.get('command'))}\n  Flags: {flags}"
     elif name == "execute_code":
-        code = str(params.get("code", "")).replace("\n", " ")[:200]
-        prompt = f"[Security: risk score {score}/3] Run this Python code?\n  {code}\n  Flags: {flags}"
+        prompt = (f"[Security: risk score {score}/3] Run this Python code?\n"
+                  f"{_render_code(params.get('code', ''))}\n  Flags: {flags}")
+    elif name in ("desktop_type", "desktop_press", "desktop_click"):
+        what = (f"type {params.get('text', '')!r}" if name == "desktop_type"
+                else f"press {params.get('key', '')!r}" if name == "desktop_press"
+                else f"click at ({params.get('x')}, {params.get('y')})")
+        prompt = (f"[Security: risk score {score}/3] Let me {what} on your "
+                  f"desktop? This goes to whatever window has focus, which may "
+                  f"not be the one you expect.\n  Flags: {flags}")
     elif name == "config_set":
-        prompt = f"[Security: risk score {score}/3] Change config '{params.get('key')}' to '{params.get('value')}'? Flags: {flags}"
+        prompt = f"[Security: risk score {score}/3] Change config '{_visible(params.get('key'))}' to '{_visible(params.get('value'))}'? Flags: {flags}"
     elif name == "add_golden_case":
-        prompt = f"[Security: risk score {score}/3] Add golden case '{params.get('id')}' to the regression set? Flags: {flags}"
+        prompt = f"[Security: risk score {score}/3] Add golden case '{_visible(params.get('id'))}' to the regression set? Flags: {flags}"
 
     allowed = _prompt_confirm(prompt, confirm_fn)
     return allowed, prompt

@@ -4,16 +4,7 @@ Three jobs in one module on purpose, because they are one thing seen from
 three sides: what the agent currently bets on (A), the material that teaches
 it to bet better (B), and the ordering that says which bet matters most when
 two disagree (C). Splitting them would mean three files sharing one schema
-and drifting apart.
-
-The failure this closes: a claim that is true-but-transient gets stored as
-true-always and is then applied at the moment it is most wrong. The worked
-case is a reactor's xenon-135 iodine pit. "The reactor can restart" is a true
-belief and a useless one — it is true around hour 48, false at hour 20, and
-the poison it is about peaks near hour 10. A store holding only
-`hypothesis + confidence + evidence` cannot tell those apart: it returns the
-hour-48 answer to an hour-20 question at full confidence, and the operator
-acts on it. Confidence answered "how sure", never "sure of what, and when".
+and drifting apart. 
 
 So every belief carries `timescale_s` and a `dynamics` shape, and
 `update_confidence` scores a prediction on *when* it landed, not merely
