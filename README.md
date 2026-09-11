@@ -9,7 +9,7 @@
 [![GitHub](https://img.shields.io/badge/GitHub-Symbio-black?logo=github)](https://github.com/huyedits/Symbio)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](#license)
 
-**[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)** · <a href="https://nicklaunches.com/products/symbio/?utm_source=github.com&utm_medium=badge&utm_campaign=featured" target="_blank" rel="noopener"><img src="https://nicklaunches.com/badges/featured-dark.png" alt="Symbio on Nick Launches" width="244" height="56" /></a>
+**[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)** 
 
 ---
 
@@ -1229,3 +1229,6 @@ Apache 2.0
 If Symbio is useful or interesting to you, **a GitHub star helps other people discover it.** :P
 
 If you build something with Symbio, open an issue or discussion and show me what it learned.
+
+## The BTW I am here badges:
+ - <a href="https://nicklaunches.com/products/symbio/?utm_source=github.com&utm_medium=badge&utm_campaign=featured" target="_blank" rel="noopener"><img src="https://nicklaunches.com/badges/featured-dark.png" alt="Symbio on Nick Launches" width="244" height="56" /></a>
