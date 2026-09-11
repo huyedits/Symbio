@@ -811,16 +811,36 @@ def _coerce_like(current: Any, raw: str) -> Any:
         if not isinstance(value, list):
             raise ValueError("Expected a JSON list")
         return value
+    if isinstance(current, dict):
+        # Whole-section writes (remote.hosts) take a JSON object mapping
+        # alias -> per-host details.
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("Expected a JSON object")
+        return value
     return raw
 
 
 def set_config_value(config: dict[str, Any], key: str, raw_value: str,
                      allow_sandbox: bool = False) -> str:
     """Set a dotted config key (e.g. agent.temperature), persist it to
-    config.json, and apply it to the running config. Returns a status message."""
+    config.json, and apply it to the running config. Returns a status message.
+
+    `allow_sandbox` marks the call as coming from the operator's /config set
+    (chat_commands passes True); the model's config_set tool passes False. The
+    sandbox. and remote.hosts sections are operator-only: sandbox. because it
+    shapes the denylist itself, remote.hosts because it grants the assistant
+    SSH trust on other machines. Both sections get a truthful refusal for the
+    tool path instead of an off-target "Unknown config key", so a
+    socially-engineered model stops retrying and cannot add a host by
+    rearranging the request."""
     key = key.strip()
     if key.startswith("sandbox.") and not allow_sandbox:
         return "sandbox.* settings can only be changed by the user via /config set."
+
+    if key == "remote.hosts" and not allow_sandbox:
+        return ("remote.hosts can only be changed by the user via /config set — "
+                "it grants the assistant SSH access to other machines.")
 
     # Resolve the dotted path against the live config to validate it exists.
     parts = key.split(".")
@@ -830,7 +850,12 @@ def set_config_value(config: dict[str, Any], key: str, raw_value: str,
             return f"Unknown config key: {key}"
         node = node[part]
     leaf = parts[-1]
-    if not isinstance(node, dict) or leaf not in node or isinstance(node[leaf], dict):
+    if not isinstance(node, dict) or leaf not in node:
+        return f"Unknown config key: {key}"
+    # remote.hosts is a dict section, but the operator sets it as a whole
+    # (alias -> details), so /config set remote.hosts '{"alias": {...}}'
+    # replaces the section instead of drowning in the dict-leaf refusal.
+    if isinstance(node[leaf], dict) and not (key == "remote.hosts" and allow_sandbox):
         return f"Unknown config key: {key}"
 
     try:

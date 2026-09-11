@@ -216,9 +216,13 @@ def run_remote(host: str, command: str, config: dict[str, Any], interactive: boo
 
     host_cfg = hosts.get(host)
     if host_cfg is None:
+        # Not a hint to add the host yourself: remote.hosts is operator-only
+        # (set_config_value refuses it for the config_set tool). Say so, or the
+        # model turns this error into a retry loop trying to self-configure it.
         return (
             False,
-            f"Host '{host}' is not configured. Add it to remote.hosts (e.g. via /config set remote.hosts '<json>').",
+            f"Host '{host}' is not configured. Ask your user to add it: "
+            f"/config set remote.hosts '<json>' (only the user can add hosts).",
         )
 
     hostname = host_cfg.get("hostname", host)
