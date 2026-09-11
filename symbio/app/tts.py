@@ -100,6 +100,18 @@ _ACCENTS = {
     "in": "en_IN", "indian": "en_IN",
     "za": "en_ZA", "south african": "en_ZA",
 }
+# When the exact accent is not installed, which one to reach for next. Not
+# linguistics — just that a male Australian request is better served by a
+# British voice than by an Indian one, and substituting alphabetically (which
+# is what this did first) produces exactly that jarring swap.
+_ACCENT_NEIGHBOURS = {
+    "en_AU": ("en_GB", "en_IE", "en_ZA", "en_US", "en_IN"),
+    "en_GB": ("en_IE", "en_AU", "en_ZA", "en_US", "en_IN"),
+    "en_IE": ("en_GB", "en_AU", "en_ZA", "en_US", "en_IN"),
+    "en_ZA": ("en_GB", "en_AU", "en_IE", "en_US", "en_IN"),
+    "en_US": ("en_GB", "en_AU", "en_IE", "en_ZA", "en_IN"),
+    "en_IN": ("en_GB", "en_US", "en_AU", "en_IE", "en_ZA"),
+}
 _ACCENT_NAMES = {
     "en_US": "American", "en_GB": "British", "en_AU": "Australian",
     "en_IE": "Irish", "en_IN": "Indian", "en_ZA": "South African",
@@ -113,7 +125,39 @@ _DEPTH_LOW = 34
 _DEPTH_MID = 50
 _DEPTH_HIGH = 66
 
+_LOCALE_RE = re.compile(r"[a-z]{2,3}[-_][A-Z]{2}")
+
 _voices_cache: list[tuple[str, str]] | None = None
+_all_voices_cache: list[tuple[str, str]] | None = None
+
+
+def all_voices() -> list[tuple[str, str]]:
+    """Every voice `say` knows, in any language, novelty ones included.
+
+    Separate from installed_voices() on purpose. That one is the shortlist this
+    code may CHOOSE from — English, real speech, known gender. This one is what
+    a person is ALLOWED to name: the gender table is a curated guess and will
+    always be missing somebody's newly-downloaded voice, and overriding an
+    explicit choice because a name is absent from it would be this code
+    second-guessing the only unambiguous signal it gets.
+    """
+    global _all_voices_cache
+    if _all_voices_cache is not None:
+        return _all_voices_cache
+    rows: list[tuple[str, str]] = []
+    if available():
+        try:
+            out = subprocess.run(["say", "-v", "?"], capture_output=True,
+                                 text=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            out = None
+        if out is not None and out.returncode == 0:
+            for line in out.stdout.splitlines():
+                name, locale = _parse_voice_line(line)
+                if name and (name, locale) not in rows:
+                    rows.append((name, locale))
+    _all_voices_cache = rows
+    return rows
 
 
 def installed_voices() -> list[tuple[str, str]]:
@@ -136,28 +180,79 @@ def installed_voices() -> list[tuple[str, str]]:
         _voices_cache = found
         return found
     for line in out.stdout.splitlines():
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        name, locale = parts[0], parts[1]
+        name, locale = _parse_voice_line(line)
         if not locale.startswith("en_"):
             continue
-        if name.lower() not in _VOICE_GENDER:
+        short = display_name(name).lower()
+        if short not in _VOICE_GENDER:
             continue
+        if any(display_name(seen).lower() == short and seen_locale == locale
+               for seen, seen_locale in found):
+            continue          # the same voice listed twice for one accent
         found.append((name, locale))
-    # Modern voices first, so every "first match" below is the best match.
-    found.sort(key=lambda v: (v[0].lower() in _LEGACY, v[0]))
+    # Order so that every "first match" below is the best match:
+    #   1. not a 1990s MacinTalk voice;
+    #   2. a dedicated voice for this locale (Samantha, Daniel, Karen, Moira,
+    #      Tessa) ahead of the multi-locale family that needs a qualifier
+    #      (Eddy, Flo, Sandy, Shelley, Grandma …). Those are real speech and
+    #      stay selectable, but they are characterful in a way a default
+    #      assistant voice should not be, and a locale-specific voice is the
+    #      safer thing to hand someone who only said "American female".
+    #   3. alphabetical, so the result is stable across machines.
+    found.sort(key=lambda v: (display_name(v[0]).lower() in _LEGACY,
+                              " (" in v[0],
+                              display_name(v[0])))
     _voices_cache = found
     return found
 
 
+def _parse_voice_line(line: str) -> tuple[str, str]:
+    """(name, locale) from one `say -v '?'` row, or ("", "").
+
+    The name is NOT the first word and the locale is NOT the second: on this
+    machine 114 of 184 rows are like `Eddy (English (UK))  en_GB`, and the
+    enhanced voices people install after being told their accent is missing are
+    like `Ava (Premium)  en_US`. So the locale is found by shape and the name is
+    everything before it.
+
+    The locale qualifier is KEPT, because it is part of the name `say` needs:
+    `say -v "Eddy (English (US))"` and `say -v Eddy` produce different audio
+    (different bytes, measured), so dropping it would quietly give someone the
+    wrong accent of the right voice. A quality tier is dropped, since Premium
+    and Enhanced are the same voice at different download sizes.
+    """
+    head = line.split("#", 1)[0]
+    parts = head.split()
+    for index, token in enumerate(parts):
+        if _LOCALE_RE.fullmatch(token):
+            name = " ".join(parts[:index]).strip()
+            for tier in (" (Premium)", " (Enhanced)"):
+                if name.endswith(tier):
+                    name = name[:-len(tier)]
+            return name, token
+    return "", ""
+
+
+def display_name(name: str) -> str:
+    """`Eddy (English (UK))` reads as `Eddy` in a list already grouped by
+    accent — the qualifier is only there so `say -v` gets the right one."""
+    return name.split(" (", 1)[0].strip()
+
+
 def voice_installed(name: str) -> bool:
+    """True for any voice `say` knows, by full name or short name.
+
+    Checked against the whole listing rather than the English shortlist: naming
+    a voice is unambiguous, and refusing an installed one because it is not in
+    this module's gender table would be refusing the user their own Mac.
+    """
     want = name.strip().lower()
-    return any(n.lower() == want for n, _ in installed_voices())
+    return any(want in (n.lower(), display_name(n).lower())
+               for n, _ in all_voices())
 
 
 def voice_gender(name: str) -> str:
-    return _VOICE_GENDER.get(name.strip().lower(), "")
+    return _VOICE_GENDER.get(display_name(name).strip().lower(), "")
 
 
 def accents_available() -> list[str]:
@@ -172,8 +267,10 @@ def choose_voice(config: dict[str, Any] | None) -> tuple[str, str]:
     something the user gets told about rather than something they wonder at."""
     cfg = (config or {}).get("tts", {})
     explicit = str(cfg.get("voice", "") or "").strip()
-    if explicit:
-        return explicit, ""
+    if explicit and voice_installed(explicit):
+        return _installed_name(explicit.lower()), ""
+    missing = (f"The configured voice {explicit!r} is not installed any more. "
+               if explicit else "")
     want_gender = str(cfg.get("gender", "") or "").strip().lower()
     if want_gender not in ("male", "female"):
         want_gender = ""
@@ -183,33 +280,73 @@ def choose_voice(config: dict[str, Any] | None) -> tuple[str, str]:
         return "", (f"No accent called {raw_accent!r}; try one of: "
                     + ", ".join(accents_available()))
     if not (want_gender or want_accent):
+        if missing:
+            # Returning nothing here would be silence with no reason given:
+            # `say -v Bogus` fails and the detached process discards the error.
+            fallback = default_pitch_voice()
+            return fallback, missing + (
+                f"Using {display_name(fallback)} instead." if fallback
+                else "Using the system voice.")
         return "", ""
 
     voices = installed_voices()
-    exact = [n for n, loc in voices
-             if (not want_gender or voice_gender(n) == want_gender)
-             and (not want_accent or loc == want_accent)]
+    locale_of = dict(voices)
+
+    def matching(gender: str = "", locale: str = "") -> list[str]:
+        return [n for n, loc in voices
+                if (not gender or voice_gender(n) == gender)
+                and (not locale or loc == locale)]
+
+    # No accent asked for: follow the machine's own region, so "female" on an
+    # Australian Mac is an Australian voice rather than whichever name happens
+    # to sort first.
+    if want_gender and not want_accent:
+        home = _system_locale()
+        for locale in (home, *_ACCENT_NEIGHBOURS.get(home, ())):
+            local = matching(want_gender, locale)
+            if local:
+                # No compromise note: an accent was never asked for, so there
+                # is nothing traded away — just the nearest voice to home.
+                return local[0], missing
+
+    exact = matching(want_gender, want_accent or "")
     if exact:
-        return exact[0], ""
+        return exact[0], missing
 
     # Gender wins over accent. A female voice with the wrong accent is closer
-    # to "a female British voice" than a male British one is, and picking the
-    # male voice silently is how you hand someone the opposite of their ask.
+    # to "a female British voice" than a male British one is, and silently
+    # handing back the male voice is handing back the opposite of the ask.
     if want_gender:
-        same_gender = [n for n, _ in voices if voice_gender(n) == want_gender]
-        if same_gender:
-            accent_name = _ACCENT_NAMES.get(want_accent or "", raw_accent)
-            return same_gender[0], (
-                f"No {want_gender} {accent_name} voice is installed — using "
-                f"{same_gender[0]} ({_ACCENT_NAMES.get(dict(voices)[same_gender[0]], '')}). "
-                "Install more in System Settings > Accessibility > Spoken Content.")
+        for neighbour in _ACCENT_NEIGHBOURS.get(want_accent or "", ()):
+            near = matching(want_gender, neighbour)
+            if near:
+                return near[0], missing + _compromise(
+                    want_gender, want_accent, raw_accent, near[0], neighbour)
+        any_gender = matching(want_gender)
+        if any_gender:
+            return any_gender[0], missing + _compromise(
+                want_gender, want_accent, raw_accent, any_gender[0],
+                locale_of[any_gender[0]])
     if want_accent:
-        same_accent = [n for n, loc in voices if loc == want_accent]
+        same_accent = matching("", want_accent)
         if same_accent:
-            return same_accent[0], (
+            return same_accent[0], missing + (
                 f"No {want_gender} voice with that accent is installed — using "
-                f"{same_accent[0]} ({voice_gender(same_accent[0])}).")
-    return "", "No matching voice is installed; using the system voice."
+                f"{display_name(same_accent[0])} "
+                f"({voice_gender(same_accent[0])}).")
+    fallback = default_pitch_voice()
+    return fallback, missing + (
+        f"No matching voice is installed; using {display_name(fallback)}."
+        if fallback else "No voice is installed; using the system voice.")
+
+
+def _compromise(want_gender: str, want_accent: str, raw_accent: str,
+                chosen: str, chosen_locale: str) -> str:
+    asked = _ACCENT_NAMES.get(want_accent or "", raw_accent)
+    got = _ACCENT_NAMES.get(chosen_locale, chosen_locale)
+    return (f"No {want_gender} {asked} voice is installed — using "
+            f"{display_name(chosen)} ({got}). Install more in System Settings "
+            "> Accessibility > Spoken Content.")
 
 
 def pick_voice(config: dict[str, Any] | None) -> str:
@@ -335,9 +472,23 @@ def parse_voice_words(words: list[str],
 
 
 def _installed_name(lowered: str) -> str:
-    """The installed voice's own capitalisation, given any casing."""
-    for name, _ in installed_voices():
+    """The name `say` wants, given whatever someone typed.
+
+    An exact match wins; otherwise a short name resolves to the first installed
+    variant, which is what `say -v Eddy` would have picked anyway.
+    """
+    voices = all_voices()
+    for name, _ in voices:
         if name.lower() == lowered:
+            return name
+    # A short name resolves to the English variant if there is one, since
+    # someone typing "eddy" at an English prompt did not mean the Finnish Eddy.
+    english = [n for n, loc in voices
+               if display_name(n).lower() == lowered and loc.startswith("en_")]
+    if english:
+        return english[0]
+    for name, _ in voices:
+        if display_name(name).lower() == lowered:
             return name
     return lowered
 

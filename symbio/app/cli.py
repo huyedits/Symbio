@@ -600,7 +600,7 @@ def _cmd_voice(config: dict[str, Any], args: argparse.Namespace) -> int:
             for name, locale in voices:
                 label = tts._ACCENT_NAMES.get(locale, locale)
                 by_accent.setdefault(label, []).append(
-                    f"{name} ({tts.voice_gender(name)})"
+                    f"{tts.display_name(name)} ({tts.voice_gender(name)})"
                     + ("  <- current" if name == current else ""))
             for label in sorted(by_accent):
                 print(f"{label}: {', '.join(by_accent[label])}")
@@ -639,7 +639,7 @@ def _cmd_voice(config: dict[str, Any], args: argparse.Namespace) -> int:
 
     name, note = tts.choose_voice(preview)
     wpm = tts.resolved_rate(preview)
-    print(f"Voice: {name or 'system default'}"
+    print(f"Voice: {tts.display_name(name) if name else 'system default'}"
           + (f" ({tts.voice_gender(name)}, "
              f"{tts._ACCENT_NAMES.get(dict(voices).get(name, ''), 'unknown accent')})"
              if name else "")
