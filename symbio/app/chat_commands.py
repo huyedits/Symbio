@@ -677,6 +677,9 @@ class CommandsMixin:
             else:
                 self.output_fn("  Usage: /config [show] | /config set <dotted.key> <value>")
 
+        elif cmd.startswith("/voice"):
+            self._cmd_voice(user_input[len("/voice"):].split())
+
         elif cmd.startswith("/cron"):
             self._cmd_cron(user_input)
 
@@ -1004,6 +1007,70 @@ class CommandsMixin:
         path = memory.save_note(title, body.strip())
         self.retriever.invalidate_cache()
         self.output_fn(f"  Saved: {path.name}")
+
+    def _cmd_voice(self, words: list[str]) -> None:
+        """Set the speaking voice from plain words, and hear it immediately.
+
+        `/voice` alone lists what is installed. `/voice female british deeper`
+        changes it, saves it, and speaks a sample in the new voice — hearing it
+        is the only way to judge it, and a setting you have to restart to hear
+        is a setting nobody tunes.
+        """
+        from symbio.app import tts
+
+        if not tts.available():
+            self.output_fn("  macOS `say` is not available, so there is no voice to set.")
+            return
+
+        cfg = self.config.setdefault("tts", {})
+        if not words:
+            voices = tts.installed_voices()
+            if not voices:
+                self.output_fn("  No English speech voices are installed.")
+                return
+            current, note = tts.choose_voice(self.config)
+            state = "on" if cfg.get("enabled") else "off"
+            self.output_fn(f"  Speaking is {state}. "
+                           f"Voice: {current or 'system default'}"
+                           f"   depth {cfg.get('depth', 0.5)}")
+            if note:
+                self.output_fn(f"  {note}")
+            by_accent: dict[str, list[str]] = {}
+            for name, locale in voices:
+                by_accent.setdefault(tts._ACCENT_NAMES.get(locale, locale), []).append(
+                    f"{name} ({tts.voice_gender(name)})")
+            for label in sorted(by_accent):
+                self.output_fn(f"    {label}: {', '.join(by_accent[label])}")
+            self.output_fn("  /voice on | off | female | male | british | deeper | "
+                           "faster | <name> | normal")
+            return
+
+        changes, unknown = tts.parse_voice_words(words, cfg)
+        if unknown:
+            self.output_fn(f"  Did not understand: {', '.join(unknown)}. "
+                           f"Accents: {', '.join(tts.accents_available())}.")
+        if not changes:
+            return
+
+        for key, value in changes.items():
+            msg = set_config_value(self.config, f"tts.{key}", str(value))
+            if msg.startswith(("Unknown", "Bad")):
+                self.output_fn(f"  {msg}")
+                return
+
+        name, note = tts.choose_voice(self.config)
+        wpm = tts.resolved_rate(self.config)
+        if not self.config.get("tts", {}).get("enabled"):
+            self.output_fn("  Saved. Speaking is off — /voice on turns it on.")
+            return
+        self.output_fn(f"  Voice: {name or 'system default'}"
+                       f"   depth {self.config['tts'].get('depth', 0.5)}"
+                       + (f"   {wpm} wpm" if wpm else ""))
+        if note:
+            self.output_fn(f"  {note}")
+        if not tts.say("This is how I sound now.", self.config):
+            reason = tts.why_silent(self.config) or "`say` could not be started"
+            self.output_fn(f"  (silent: {reason})")
 
     def _cmd_cron(self, user_input: str):
         import shlex

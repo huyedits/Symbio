@@ -122,6 +122,39 @@ def grade(task: dict, reply: str) -> tuple[bool, str]:
         shutil.rmtree(box, ignore_errors=True)
 
 
+ASK = ("You are administering a macOS server (BSD userland, not GNU). The "
+       "working directory already contains the files mentioned. Do this:\n\n"
+       "{task}\n\n"
+       "Reply with the shell commands only, in a ```bash block. No explanation.")
+
+
+def as_eval_cases():
+    """These tasks as EvalCase objects, so run_lora_benchmark drives them.
+
+    Worth the small adapter: the two-arm load, the report and the delta are
+    already written and already correct, and an ops eval that reimplemented
+    them would be a second thing to keep in step. All that differs is the
+    check — theirs reads the reply, this one runs it.
+    """
+    from symbio.app.eval import EvalCase
+
+    out = []
+    for task in TASKS:
+        ok, why = validate(task)
+        if not ok:
+            # A task whose check cannot be falsified or satisfied grades
+            # nothing, and silently including it would report the models
+            # failing at an authoring bug.
+            continue
+        out.append(EvalCase(
+            task["id"],
+            task["task"],
+            (lambda cfg, t=task: ASK.format(task=t["task"])),
+            (lambda display, tools, cfg, t=task: grade(t, display)[0]),
+        ))
+    return out
+
+
 SELF_MARK = """You were given this server task:
 
 {task}

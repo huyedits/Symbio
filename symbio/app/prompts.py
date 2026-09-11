@@ -518,7 +518,18 @@ def env_note() -> str:
                 "GUI apps have no CLI names like 'chrome'. "
                 "For browser automation (read/click/scroll/type on a page) use the "
                 "browser tools instead of shell open; see the tool catalog. "
-                "Use Google Chrome for all browser automation when possible.]")
+                "Use Google Chrome for all browser automation when possible. "
+                # Measured 2026-09-11: told only "a server", the 14B wrote
+                # `sed -i 's/a/b/' f`, which on BSD reads the expression as the
+                # backup suffix, errors, and leaves the file UNCHANGED — then
+                # reported the edit as done. Told "macOS (BSD userland)" in the
+                # prompt, the same model wrote `sed -i '' ...` correctly. The
+                # knowledge was already in the weights; only the platform was
+                # missing. Naming the three differences that actually bit is
+                # cheaper than teaching them.
+                "This is BSD userland, NOT GNU: in-place sed needs an empty "
+                "backup argument (sed -i '' 's/a/b/' file), find has no "
+                "-printf, and stat takes -f not -c.]")
     if system == "Windows":
         return "\n[Environment: Windows. Open apps or URLs with: start <target>.]"
     return f"\n[Environment: {system}. Open apps or URLs with: xdg-open <target>.]"

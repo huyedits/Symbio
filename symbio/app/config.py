@@ -12,6 +12,34 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model_name": "Qwen/Qwen3-0.6B",
     "assistant_name": "",
     "user_name": "",
+    # Speaking the reply aloud through macOS `say`, which needs nothing
+    # installed. Off by default: a machine that starts talking because someone
+    # updated is a machine someone mutes permanently. voice is any name from
+    # `say -v '?'`; rate is words per minute (175 is the system default).
+    "tts": {
+        "enabled": False,
+        "voice": "",
+        # Apple's Speaking Rate slider (Accessibility > Spoken Content), 0.0 to
+        # 1.0, with 0.5 on the macOS default of 175 wpm. macOS stores nothing
+        # until someone moves its own slider, so there is usually no system
+        # value to follow — this reproduces the control rather than reading it,
+        # and still defers to the system setting when one exists.
+        "rate_slider": 0.5,
+        # Raw words per minute. Set this and it wins over the slider: someone
+        # who typed 300 meant 300.
+        "rate": 0,
+        # Voice character. gender and accent are not settings `say` has — they
+        # are which installed voice gets picked, so what they can deliver
+        # depends on what is installed (`symb voices` lists it). Leave them
+        # blank and the system voice is used; set `voice` to override both.
+        "gender": "",
+        "accent": "",
+        # 0.0 highest to 1.0 deepest, 0.5 = the voice's own pitch. This one is
+        # a real parameter ([[pbas]]), unlike expression ([[pmod]]), which
+        # macOS accepts and ignores — so no expression control is offered.
+        "depth": 0.5,
+        "max_chars": 600,
+    },
     "lora": {
         "rank": 8,
         "dropout": 0.0,
