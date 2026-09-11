@@ -122,6 +122,67 @@ def grade(task: dict, reply: str) -> tuple[bool, str]:
         shutil.rmtree(box, ignore_errors=True)
 
 
+SELF_MARK = """You were given this server task:
+
+{task}
+
+You answered with these commands:
+
+{answer}
+
+Did your answer actually accomplish the task on a macOS server? Consider
+whether the commands would really work, not whether they look plausible.
+
+Reply with exactly one word: PASS or FAIL."""
+
+
+def self_mark(task: dict, reply: str, generate_fn) -> bool | None:
+    """What the model says about its own answer, or None if it was not asked.
+
+    Measured over 8 tasks before this was wired in: it agreed with the shell
+    6/8 and marked PASS on something that failed ZERO times. Both
+    disagreements were in the cautious direction, and one of them was better
+    than the shell's verdict — `-mtime +122` passes only because that
+    arbitrary day count happens to straddle the file dates, and the model said
+    FAIL where execution said PASS. Execution cannot see "right by accident";
+    this can.
+
+    Not a replacement for running it, for the reason the rest of this file
+    exists. That test was favourable — the model judged commands it had just
+    written, seconds earlier. Asked about its own actions in a live session
+    the same day, the same model reported a posted tweet as probably not sent
+    and a submitted form as unclicked.
+    """
+    if generate_fn is None:
+        return None
+    shown = commands_from(reply) or (reply or "").strip()
+    try:
+        verdict = (generate_fn(SELF_MARK.format(task=task["task"],
+                                                answer=shown[:400])) or "")
+    except Exception:
+        return None
+    return "PASS" in verdict.strip().upper()[:12]
+
+
+def assess(task: dict, reply: str, generate_fn=None) -> dict:
+    """Both verdicts, and whether they agree.
+
+    The shell decides; the self-mark is recorded beside it rather than
+    averaged into it, because a disagreement is the interesting part and an
+    aggregate would hide it. A self-marked FAIL on a shell PASS has twice now
+    meant the answer was right for the wrong reason.
+    """
+    passed, detail = grade(task, reply)
+    marked = self_mark(task, reply, generate_fn)
+    return {
+        "id": task.get("id"),
+        "passed": passed,
+        "detail": detail,
+        "self_mark": marked,
+        "agreed": None if marked is None else (marked == passed),
+    }
+
+
 TASKS = [
     {
         "id": "config_edit_in_place",
