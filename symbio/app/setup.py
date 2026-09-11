@@ -7,6 +7,8 @@ self-check so the first launch is as smooth as possible.
 
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 from typing import Any, Callable
 
@@ -167,6 +169,85 @@ def ensure_identity_defaults(config: dict[str, Any]) -> bool:
     return changed
 
 
+def _adapter_lock_step(config: dict[str, Any],
+                       input_fn: Callable[[str], str],
+                       output_fn: Callable[[str], Any]) -> None:
+    """Offer to make the adapter unreadable off this machine.
+
+    Opt-in and default NO, because it deletes the plaintext weights, and a
+    wizard that quietly encrypts hours of training because someone pressed
+    Enter would be the worst kind of default. Anyone who says no is told the
+    one command that does it later.
+
+    Nothing here is asked at all unless the tools are present: a setup step
+    whose first act is to tell you to install two things is a step that should
+    have checked first.
+    """
+    from symbio import adapter_crypto
+
+    # Only ever asked of someone who can answer. A scripted or piped wizard
+    # run has no one at the keyboard, and a question nobody answers must not
+    # consume an input that the next question was expecting — which is what it
+    # did: three scripted setup tests ran out of answers and died on the
+    # "Save this configuration?" prompt that followed. Silence is not consent
+    # to encrypt someone's weights, and it is not an answer to borrow either.
+    if not sys.stdin.isatty():
+        return
+
+    adapters = constants.ADAPTER_DIR
+    # Locked FIRST. A locked directory holds no *.safetensors — that is what
+    # locked means — so asking "is anything trained" before "is it already
+    # locked" reads an encrypted adapter as an absent one.
+    if adapter_crypto.is_locked(adapters):
+        output_fn(f"\n  Adapter is already locked to a key.")
+        return
+    if not any(adapters.glob("*.safetensors")):
+        return                       # nothing trained yet; nothing to lock
+
+    enclave = shutil.which("age-plugin-se") is not None
+    if not (adapter_crypto.age_available() and (enclave or shutil.which(
+            "age-plugin-yubikey"))):
+        return
+
+    output_fn("\n  Adapter lock (optional)")
+    output_fn("    Your trained adapter is readable by anything that can read")
+    output_fn("    the folder. Locking encrypts it to a key that cannot leave"
+              + (" this Mac," if enclave else " your security key,"))
+    output_fn("    so a copied folder, a backup or a stolen disk is useless.")
+    # Anything other than an explicit yes means no, INCLUDING a prompt that
+    # could not be answered at all — a scripted run that has no answer left, a
+    # closed stdin, a front-end driving the wizard non-interactively. _ask
+    # catches EOF and interrupt; a scripted input_fn raises StopIteration,
+    # which it does not. The default has to hold in every one of those cases,
+    # because the alternative is encrypting someone's weights on silence.
+    try:
+        wants_lock = _ask_yes_no("    Lock the adapter?", input_fn, default=False)
+    except Exception:
+        wants_lock = False
+    if not wants_lock:
+        output_fn("    Skipped. Later: python3 symbio/adapter_crypto.py setup")
+        return
+
+    identity = Path("~/.config/symbio/adapter_identity.txt").expanduser()
+    recipients = constants.PROJECT_DIR / adapter_crypto.RECIPIENTS
+    try:
+        wants_passcode = _ask_yes_no(
+            "    Ask for your login password at each load?", input_fn,
+            default=False)
+    except Exception:
+        wants_passcode = False
+    access = "passcode" if wants_passcode else "none"
+    if enclave:
+        code = adapter_crypto.setup_secure_enclave(identity, recipients,
+                                                   access=access)
+    else:
+        code = adapter_crypto.setup(identity, recipients)
+    if code == 0:
+        adapter_crypto.finish(adapters, identity, recipients)
+    else:
+        output_fn("    Left unlocked. Nothing was changed.")
+
+
 def run_setup_wizard(
     config: dict[str, Any],
     input_fn: Callable[[str], str] = input,
@@ -284,6 +365,8 @@ def run_setup_wizard(
         token_set = bool(config["telegram"].get("bot_token") or os.environ.get("SYMBIO_TELEGRAM_TOKEN"))
         output_fn(f"      Token set:      {'yes' if token_set else 'no'}")
         output_fn(f"      Allowed IDs:    {ids if ids else '(none yet)'}")
+
+    _adapter_lock_step(config, input_fn, output_fn)
 
     ok = _ask_yes_no("  Save this configuration?", input_fn, default=True)
     if not ok:

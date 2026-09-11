@@ -275,6 +275,147 @@ def _age_identities() -> str:
     return out.stdout.strip()
 
 
+def _looks_like_identity(path: Path) -> bool:
+    """Does this file hold an age identity, rather than merely exist?"""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(line.strip().upper().startswith("AGE-")
+               for line in text.splitlines())
+
+
+def _has_recipients(path: Path) -> bool:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(line.strip().startswith("age1") for line in text.splitlines())
+
+
+def setup_secure_enclave(identity_out: Path, recipients_out: Path,
+                         access: str = "passcode") -> int:
+    """The Apple Secure Enclave route: no PIN, no PUK, nothing that can block.
+
+    Here because the YubiKey route cost a blocked PIV PIN and a spent PUK try
+    before anything was encrypted. PIV has three separate credentials, its own
+    6-8 byte PIN rule that a shorter FIDO2 PIN cannot satisfy, and a lockout
+    that needs a factory reset of the applet to clear. The enclave has none of
+    that: the private key is generated inside this Mac and cannot leave it.
+
+    access="none" prompts for nothing and still means a locked adapter copied
+    to another machine, restored from a backup, or read off the SSD is
+    unreadable — the key is not in the file, it is in this Mac.
+    access="passcode" additionally asks for the login password at each load,
+    which also covers someone sitting at this Mac while it is unlocked.
+    """
+    say("Locking the adapter to this Mac's Secure Enclave\n")
+    have_plugin = shutil.which("age-plugin-se") is not None
+    say(f"{_found(age_available())}age")
+    say(f"{_found(have_plugin)}age-plugin-se")
+    if not (age_available() and have_plugin):
+        say("\n  Install both, then run this again:")
+        say("    brew install age age-plugin-se")
+        return 1
+
+    identity_out = Path(identity_out).expanduser()
+    identity_out.parent.mkdir(parents=True, exist_ok=True)
+    # Existence is not validity, which is the same mistake as the empty
+    # recipients file this whole guided setup exists to prevent — and it was
+    # made here too: a zero-byte identity left by an earlier failed redirect
+    # was reported as "identity already at ...", reused, and produced an empty
+    # recipients file that age then rejected two commands later.
+    if _looks_like_identity(identity_out):
+        say(f"{_found(True)}identity already at {identity_out}")
+    else:
+        if identity_out.exists():
+            say(f"  --  {identity_out} exists but holds no identity; replacing it")
+        result = subprocess.run(
+            ["age-plugin-se", "keygen", "--access-control", access,
+             "-o", str(identity_out)],
+            capture_output=True, text=True)
+        if result.returncode != 0:
+            say(f"  --  keygen failed: "
+                f"{(result.stderr or result.stdout).strip()}")
+            return 1
+        say(f"{_found(True)}identity: {identity_out}  (access control: {access})")
+
+    recipients_out = Path(recipients_out).expanduser()
+    recipients_out.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        ["age-plugin-se", "recipients", "-i", str(identity_out),
+         "-o", str(recipients_out)],
+        capture_output=True, text=True)
+    # Content, not existence: age-plugin-se exits 0 having written nothing
+    # when the identity it was given is empty, and the failure then surfaces
+    # from `age` at lock time as "no recipients found".
+    if result.returncode != 0 or not _has_recipients(recipients_out):
+        detail = (result.stderr or result.stdout).strip()
+        say(f"  --  could not derive recipients"
+            + (f": {detail}" if detail else " (the file came out empty)"))
+        return 1
+    say(f"{_found(True)}recipients: {recipients_out}")
+
+    if access != "none":
+        say(f"\n  Each adapter load will ask for your Mac login password.")
+        say(f"  That includes worker swaps and deep-sleep wakes, which happen")
+        say(f"  several times in a browser session. --access-control none")
+        say(f"  removes the prompt and still binds the adapter to this Mac.")
+    return 0
+
+
+def finish(folder: Path, identity_out: Path, recipients_out: Path,
+           set_config: bool = True) -> int:
+    """Back up, lock, and record where the identity lives — in one go.
+
+    Printing three more commands at the end of a setup is how a setup becomes
+    four commands again. The backup is taken HERE rather than suggested,
+    because locking deletes the plaintext and an adapter is hours of training:
+    the one step nobody should be trusted to remember is the one that makes
+    the rest reversible.
+    """
+    folder = Path(folder)
+    if not any(folder.glob("*.safetensors")):
+        say(f"\n  Nothing to lock in {folder} (no weights).")
+        return 0
+
+    backup = folder.with_name(folder.name + ".backup")
+    if backup.exists():
+        say(f"\n{_found(True)}backup already at {backup}")
+    else:
+        shutil.copytree(folder, backup)
+        say(f"\n{_found(True)}backup: {backup}")
+
+    if lock(folder, recipients_out, quiet=True) != 0:
+        say("      locking failed; the plaintext is untouched")
+        return 1
+    say(f"{_found(True)}locked {folder}")
+
+    if set_config:
+        # config.json directly, with stdlib json. Importing symbio.app.config
+        # for a one-line edit pulls the whole inference stack in behind it —
+        # it failed here on a missing fastmcp — and it would cost this module
+        # the property that makes it useful: nothing but the standard library,
+        # so it runs on a machine with no MLX and without loading the package.
+        config_file = Path(__file__).resolve().parent.parent / "config.json"
+        try:
+            import json
+
+            cfg = json.loads(config_file.read_text(encoding="utf-8")) \
+                if config_file.exists() else {}
+            cfg.setdefault("agent", {})["adapter_identity"] = str(identity_out)
+            config_file.write_text(json.dumps(cfg, indent=2) + "\n",
+                                   encoding="utf-8")
+            say(f"{_found(True)}agent.adapter_identity = {identity_out}")
+        except Exception as e:
+            say(f"  --  could not write {config_file.name} ({e}); set it yourself:")
+            say(f"      ./symb config set agent.adapter_identity {identity_out}")
+
+    say(f"\nDone. `./symb chat` will now unlock the adapter at load.")
+    say(f"If anything goes wrong: rm -rf {folder} && mv {backup} {folder}")
+    return 0
+
+
 def setup(identity_out: Path, recipients_out: Path, touch: str = "cached",
           slot: str = "", name: str = "symbio-adapters") -> int:
     """Walk the whole thing, checking each step instead of assuming it.
@@ -388,15 +529,52 @@ def main(argv: list[str] | None = None) -> int:
         description=_USAGE.splitlines()[0],
         epilog=_USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("action", choices=["setup", "status", "lock", "unlock"])
-    ap.add_argument("folder", nargs="?", default="adapters")
+    # Absolute, resolved from where this FILE lives, not from the caller's
+    # working directory. The default used to be the relative string
+    # "adapters", so `setup` run from the project root locked the real adapter
+    # while an identical command run from a scratch directory locked a test
+    # copy — the same command meaning two different things depending on cwd.
+    # That is how a live adapter got encrypted during testing. Anything else
+    # has to be named explicitly.
+    ap.add_argument("folder", nargs="?",
+                    default=str(Path(__file__).resolve().parent.parent / "adapters"))
     ap.add_argument("--recipients", default=RECIPIENTS)
     ap.add_argument("--identity", default=IDENTITY)
     ap.add_argument("--touch-policy", default="cached",
                     choices=["cached", "always", "never"])
     ap.add_argument("--slot", default="")
+    ap.add_argument("--yubikey", action="store_true",
+                    help="use a YubiKey's PIV applet instead of the Secure "
+                         "Enclave (three PINs, and it can lock you out)")
+    ap.add_argument("--no-lock", action="store_true",
+                    help="set up the key but stop before encrypting anything")
+    ap.add_argument("--secure-enclave", action="store_true",
+                    help="use this Mac's Secure Enclave instead of a YubiKey: "
+                         "no PIN, no PUK, nothing that can block")
+    ap.add_argument("--access-control", default="passcode",
+                    choices=["none", "passcode", "any-biometry-or-passcode"],
+                    help="secure-enclave only; 'none' binds the adapter to "
+                         "this Mac without prompting for anything")
     args = ap.parse_args(argv)
 
     if args.action == "setup":
+        # Secure Enclave is the default on a Mac, and the YubiKey route is now
+        # the one you opt into. Not a preference: PIV carries three separate
+        # credentials, requires a 6-8 byte PIN that a shorter FIDO2 PIN cannot
+        # satisfy, and blocks after three wrong tries — which is exactly how
+        # setting this up the first time ended, before a single byte was
+        # encrypted. The enclave has no PIN, no PUK and nothing that can block.
+        use_enclave = args.secure_enclave or (
+            not args.yubikey and sys.platform == "darwin"
+            and shutil.which("age-plugin-se") is not None)
+        identity = Path("~/.config/symbio/adapter_identity.txt").expanduser()
+        recipients = Path(__file__).resolve().parent.parent / RECIPIENTS
+        if use_enclave:
+            code = setup_secure_enclave(identity, recipients,
+                                        access=args.access_control)
+            if code != 0 or args.no_lock:
+                return code
+            return finish(Path(args.folder), identity, recipients)
         return setup(
             Path("~/.config/symbio/adapter_identity.txt").expanduser(),
             Path(RECIPIENTS).resolve(),

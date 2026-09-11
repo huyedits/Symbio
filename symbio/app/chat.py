@@ -85,7 +85,7 @@ from symbio.app.chat_ui import (  # noqa: F401  (re-exported; see above)
 )
 from symbio.app.chat_commands import CommandsMixin
 from symbio import backend
-from symbio.app import soul
+from symbio.app import soul, tts
 from symbio.app.chat_tools import ToolsMixin
 from symbio.app.chat_turn import AgentTurnMixin
 
@@ -2863,7 +2863,14 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
             # being lowercased, bulleted and re-indented. chat_style's own
             # docstring promises it only skins status lines; this is where
             # that promise is kept.
-            if not _is_assistant_reply(message):
+            if _is_assistant_reply(message):
+                # Speak the ANSWER and nothing else. This wrapper sees every
+                # status line, tool tag and observation too, and a voice
+                # reading "[Tool: browser_open]" aloud is worse than silence.
+                # The same prefix test that keeps the skin off the reply is
+                # what identifies it.
+                tts.say(message[len(assistant_prefix):], config)
+            else:
                 message = chat_style.style_line(message)
             if threading.current_thread() is _main_thread or not sys.stdin.isatty() or _readline is None:
                 print(message)

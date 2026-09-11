@@ -96,6 +96,18 @@ sessions/
 notes/
 training_data/
 adapters/
+# The archive the code writes role adapters into (ADAPTER_ARCHIVE_DIR, and
+# ADAPTER_ARCHIVE_DIR/workers/<role>), plus the loose historical adapters moved
+# under it. Every adapters.* form above is ignored and this one was not, so an
+# archived worker — real trained weights — would have been committable. That is
+# the case the 2026-08-25 history rewrite existed to undo.
+adapters_archive/
+# Where the loose historical adapters live. Deliberately NOT inside
+# adapters_archive/, whose top level the code reads as ROLE NAMES —
+# list_archived_adapters counted the two subdirectories put there as two
+# archived adapters, which is what "Archived adapters: 2" on an empty archive
+# was telling us.
+adapters_history/
 screenshots/
 sandbox/caine_tools.py
 sandbox/symbio_tools.py

@@ -76,6 +76,23 @@ def _build_parser() -> argparse.ArgumentParser:
     set_cmd.add_argument("value", help="New value (coerced to the current type)")
     config_parser.set_defaults(config_command="edit")
 
+    voice_parser = sub.add_parser(
+        "voice", help="Choose and preview the speaking voice (macOS TTS)")
+    voice_sub = voice_parser.add_subparsers(dest="voice_command")
+    voice_sub.add_parser("list", help="List the installed voices by accent")
+    for name, helptext in (("try", "Speak a sample without saving"),
+                           ("set", "Save these voice settings")):
+        vp = voice_sub.add_parser(name, help=helptext)
+        vp.add_argument("--gender", choices=["female", "male"])
+        vp.add_argument("--accent", help="us, british, australian, irish, indian, ...")
+        vp.add_argument("--voice", help="An exact name from `symb voice list`")
+        vp.add_argument("--depth", type=float,
+                        help="0.0 highest to 1.0 deepest (0.5 = the voice's own pitch)")
+        vp.add_argument("--rate", type=float,
+                        help="Speaking-rate slider, 0.0 slowest to 1.0 fastest")
+        vp.add_argument("--text", default="Hello — this is how I sound.",
+                        help="What to say in the sample")
+
     gateway_parser = sub.add_parser("gateway", help="Manage the Telegram gateway")
     gateway_sub = gateway_parser.add_subparsers(dest="gateway_command")
     gateway_sub.add_parser("start", help="Start the Telegram bot")
@@ -223,6 +240,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Max reply tokens per eval task (default 512)",
+    )
+    eval_lora_parser.add_argument(
+        "--ops",
+        action="store_true",
+        help="Use the server-operations set, graded by RUNNING the answer in a "
+             "sandbox and inspecting the files afterwards — catches a command "
+             "that looks right and does nothing, which a rubric cannot",
     )
     eval_lora_parser.add_argument(
         "--wildcards",
@@ -548,6 +572,101 @@ def _cmd_config(config: dict[str, Any], args: argparse.Namespace) -> int:
     else:
         print("Usage: symb config [show | edit | get <key> | set <key> <value>]")
         return 1
+    return 0
+
+
+def _cmd_voice(config: dict[str, Any], args: argparse.Namespace) -> int:
+    """Pick a voice by ear rather than by editing config.
+
+    The whole reason this exists: gender and accent are not `say` parameters,
+    they are which voice is installed, and that differs per machine. A config
+    key you cannot hear before committing to is a knob nobody turns.
+    """
+    from symbio.app import tts
+
+    if not tts.available():
+        print("macOS `say` is not available, so there is no voice to choose.")
+        return 1
+
+    voices = tts.installed_voices()
+    sub = getattr(args, "voice_command", None) or "list"
+
+    if sub == "list":
+        if not voices:
+            print("No English speech voices are installed.")
+        else:
+            current, note = tts.choose_voice(config)
+            by_accent: dict[str, list[str]] = {}
+            for name, locale in voices:
+                label = tts._ACCENT_NAMES.get(locale, locale)
+                by_accent.setdefault(label, []).append(
+                    f"{name} ({tts.voice_gender(name)})"
+                    + ("  <- current" if name == current else ""))
+            for label in sorted(by_accent):
+                print(f"{label}: {', '.join(by_accent[label])}")
+            if note:
+                print(f"\n{note}")
+            if not current:
+                print("\nNo voice chosen — using the system voice. "
+                      "Try: symb voice try --gender female --accent british")
+            print("\nDepth runs 0.0 (highest) to 1.0 (deepest). There is no "
+                  "expression control: macOS accepts [[pmod]] and ignores it.")
+        return 0
+
+    if sub not in ("try", "set"):
+        print("Usage: symb voice [list | try | set] [--gender G] [--accent A] "
+              "[--voice NAME] [--depth 0-1] [--rate 0-1]")
+        return 1
+
+    # Overlay the requested settings on the live config so `try` previews
+    # exactly what `set` would save.
+    overlay = dict(config.get("tts", {}))
+    for key in ("gender", "accent", "voice"):
+        value = getattr(args, key, None)
+        if value is not None:
+            overlay[key] = value
+    if args.depth is not None:
+        overlay["depth"] = max(0.0, min(1.0, args.depth))
+    if args.rate is not None:
+        overlay["rate_slider"] = max(0.0, min(1.0, args.rate))
+        overlay["rate"] = 0          # an explicit slider beats a stale raw wpm
+    if args.voice and not tts.voice_installed(args.voice):
+        print(f"No installed voice called {args.voice!r}. "
+              "Run `symb voice list` to see what is available.")
+        return 1
+    preview = dict(config)
+    preview["tts"] = dict(overlay, enabled=True)
+
+    name, note = tts.choose_voice(preview)
+    wpm = tts.resolved_rate(preview)
+    print(f"Voice: {name or 'system default'}"
+          + (f" ({tts.voice_gender(name)}, "
+             f"{tts._ACCENT_NAMES.get(dict(voices).get(name, ''), 'unknown accent')})"
+             if name else "")
+          + f"   depth {overlay.get('depth', 0.5)}"
+          + (f"   {wpm} wpm" if wpm else ""))
+    if note:
+        print(note)
+
+    if not tts.say(args.text, preview):
+        reason = tts.why_silent(preview) or "`say` could not be started"
+        print(f"(silent: {reason})")
+
+    if sub == "try":
+        print("\nNothing saved. Re-run with `set` instead of `try` to keep it.")
+        return 0
+
+    for key in ("voice", "gender", "accent", "depth", "rate_slider", "rate"):
+        if key in overlay and overlay[key] != config.get("tts", {}).get(key):
+            message = set_config_value(config, f"tts.{key}", str(overlay[key]))
+            if message.startswith(("Unknown", "Bad")):
+                print(message)
+                return 1
+    if not config.get("tts", {}).get("enabled"):
+        print("\nSaved. Speaking is still off — turn it on with: "
+              "symb config set tts.enabled true")
+    else:
+        print("\nSaved.")
     return 0
 
 
@@ -1053,7 +1172,14 @@ def main(argv: list[str] | None = None) -> int:
         from symbio.app.eval import run_lora_benchmark
 
         cases = None
-        if getattr(args, "wildcards", False):
+        if getattr(args, "ops", False):
+            from symbio.app import ops_eval
+
+            cases = ops_eval.as_eval_cases()
+            print(f"  [Eval] Using {len(cases)} server-operations case(s), "
+                  f"graded by RUNNING the answer in a sandbox and then "
+                  f"inspecting the files.")
+        elif getattr(args, "wildcards", False):
             from symbio.app.wildcards import DEEP_CASES, WILDCARD_CASES
 
             cases = WILDCARD_CASES + DEEP_CASES
@@ -1064,6 +1190,8 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(args, "wildcards", False):
             _print_category_rates(report_path)
         return 0
+    if command == "voice":
+        return _cmd_voice(config, args)
     if command == "gateway":
         sub = getattr(args, "gateway_command", None) or "start"
         if sub == "start":
