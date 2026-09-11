@@ -130,6 +130,42 @@ def _search_google_news(query: str, max_results: int, timeout: int = 15) -> list
     return results
 
 
+# An address is not a credential, so redact_secrets leaves it alone — correct
+# for a store on this disk, wrong for a query leaving the machine. A search is
+# handed to DuckDuckGo or Google, who keep it; the user's address is theirs to
+# give out, not this assistant's.
+_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+
+
+def outbound_query(query: str) -> tuple[str, str | None]:
+    """(query to send, refusal reason).
+
+    Everything else in this project redacts at WRITE boundaries — the corpus,
+    the session store, mistake notes — because a secret on disk becomes a
+    secret in the weights. Nothing redacted at the boundary that leaves the
+    machine entirely, which is the only one that cannot be undone: a key sent
+    to a search engine is disclosed the moment it is sent, and deleting it
+    here afterwards changes nothing.
+
+    A credential REFUSES rather than redacts. "Search for [redacted]" is not
+    the search anyone wanted, so sending it wastes the call and teaches the
+    model that its query went through; saying why lets it ask the question it
+    actually meant. An address is redacted instead, because the query around
+    it usually still means something without it.
+    """
+    from symbio.app.tooling import redact_secrets
+
+    if redact_secrets(query) != query:
+        return query, (
+            "That search was not sent: it contains something shaped like a "
+            "credential (an API key, token, password or auth header), and a "
+            "search query goes to a third party. Ask the question without the "
+            "secret in it."
+        )
+    scrubbed = _EMAIL_RE.sub("[an email address]", query)
+    return scrubbed, None
+
+
 def web_search(query: str, config: dict[str, Any], max_results: int | None = None) -> tuple[bool, str]:
     """Search the web without API keys. Backends in order: DuckDuckGo HTML
     (full web results, sometimes bot-challenged), DuckDuckGo instant-answer
@@ -137,6 +173,9 @@ def web_search(query: str, config: dict[str, Any], max_results: int | None = Non
     query = query.strip()
     if not query:
         return False, "Empty query."
+    query, refusal = outbound_query(query)
+    if refusal:
+        return False, refusal
     if max_results is None:
         max_results = int(config["web"]["search_results"])
 
