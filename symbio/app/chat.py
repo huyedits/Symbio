@@ -309,6 +309,12 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             _chrome_profile = _cfg_path(_bcfg.get("chrome_profile"))
             if _chrome_profile:
                 _kw["chrome_profile"] = _chrome_profile
+        # Domain allowlist, operator-owned (SENSITIVE_CONFIG_KEYS refuses the
+        # model's config_set on this key). Grown as far as the config asks —
+        # an absent key keeps the constructor call byte-identical.
+        _domains = _bcfg.get("allowed_domains")
+        if _domains:
+            _kw["allowed_domains"] = list(_domains)
         self.browser = BrowserSession(**_kw)
         # Worker models are loaded lazily on first delegated task — this
         # just holds the (empty) pool, no extra RAM until dispatch.enabled

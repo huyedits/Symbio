@@ -33,6 +33,12 @@ _DEFAULT_ALLOWLIST: frozenset[str] = frozenset({
     "example.com",
 })
 
+# The one URL that proves an HN story went live: the submit POST redirects the
+# browser to the new item page, and nothing else on HN looks like this. It is
+# the load-bearing signal in submit_form()'s verdict — hard-coded, never
+# model-supplied, so a page cannot forge a "CONFIRMED" by echoing text.
+_HN_ITEM_RE = re.compile(r"^https://news\.ycombinator\.com/item\?id=\d+/?$")
+
 
 def _domain(url: str) -> str | None:
     try:
@@ -123,11 +129,12 @@ def _confirm_domain(domain: str, ask_fn=None) -> bool:
 class BrowserSession:
     """Manages a single Playwright browser/page session."""
 
-    def __init__(self, confirm_fn=None, profile_dir=None, chrome_profile=None):
+    def __init__(self, confirm_fn=None, profile_dir=None, chrome_profile=None,
+                 allowed_domains=None):
         self._playwright: Any | None = None
         self._browser: Any | None = None
         self._page: Any | None = None
-        self._confirmed: set[str] = set(_DEFAULT_ALLOWLIST)
+        self._confirmed: set[str] = set(_DEFAULT_ALLOWLIST) | set(allowed_domains or [])
         self._confirm_fn = confirm_fn
         self._channel: str = ""
         self._last_url: str = ""
@@ -895,6 +902,99 @@ class BrowserSession:
             return f"Clicked at ({x}, {y})." + self._submit_note(page, pending)
         except Exception as e:
             return self._fail("click_at", e)
+
+    def submit_form(self, target: str = "", selector: str = "",
+                    expected_url: str = "") -> str:
+        """Click a form's submit control and MACHINE-VERIFY the submission.
+
+        Returns a verdict string the model cannot shape: a submit button does
+        not mean a submission, and this class has already caught the two ways
+        that mismatch hides ("Clicked" reports what the mouse did, never what
+        it achieved; a cleared field is also a discarded draft). So this reads
+        the page back AFTER the click and only ever says CONFIRMED when the
+        code can prove the browser landed on a URL that only exists once the
+        submission went through — for HN, the story page /item?id=N.
+
+        `target` is the submit control's visible text ("submit" on HN) and
+        `selector` a CSS selector for it; either is enough to click. When the
+        URL lands on `expected_url`'s prefix (e.g. an HN item page) that
+        confirms too, but only ever on operator-allowlisted domains — a page
+        could history.pushState a fake URL, so a lax prefix on an untrusted
+        site is not confirmation.
+
+        The three verdict heads below are a contract the app layer matches on:
+        "[Submit CONFIRMED", "[Submit NOT confirmed", "[Submit verification
+        could not run". The strings embed only the URL and mechanical field
+        state — never page prose — the same password-safe rule _submit_note
+        documents.
+        """
+        try:
+            page = self._ensure_open()
+        except Exception as e:
+            return f"Submit error: {e}"
+        try:
+            text, url_before = self._pending_state(page)
+            out = self._try_click(page, selector, target)
+            if out.startswith("Click failed"):
+                return out + (
+                    " Do NOT report this form as submitted — the click did not "
+                    "happen.")
+            try:
+                # Let the POST round-trip and its redirect land. click() waits
+                # 400 ms for a _submit_note; a real submit redirects cross-page
+                # and a slow server can take longer.
+                page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            url_after = page.url or ""
+            still = False
+            if text:
+                try:
+                    still = bool(page.evaluate(self._FIELD_STILL_HOLDS_JS, text))
+                except Exception:
+                    return (
+                        "[Submit verification could not run: the page cannot be "
+                        "read back after the click. Do NOT report the form as "
+                        "submitted.]")
+            confirmed = False
+            why = ""
+            if _HN_ITEM_RE.match(url_after):
+                confirmed = True
+                why = (
+                    f"the browser is now on an HN story page ({url_after}) — a "
+                    "URL that only exists once a story is live")
+            elif expected_url and url_after.startswith(expected_url):
+                confirmed = True
+                why = (
+                    f"the page landed on {url_after}, which starts with the "
+                    f"expected '{expected_url}'")
+            if confirmed:
+                return (
+                    f"[Submit CONFIRMED: {why}. This was observed by the code "
+                    "after the click — you may report the submission as done.]")
+            evidence = []
+            if not url_after or url_after == url_before:
+                evidence.append("the URL did not change")
+            else:
+                evidence.append(
+                    f"the URL is now {url_after}, which does not match "
+                    f"'{expected_url or 'an HN item page'}'")
+            if text:
+                if still:
+                    evidence.append("the field(s) that still hold the content "
+                                    "suggest the form has not been submitted")
+                else:
+                    evidence.append("the field(s) that held the content are "
+                                    "gone, which alone is not proof the form "
+                                    "went through")
+            return (
+                "[Submit NOT confirmed: " + "; ".join(evidence) +
+                ". The submission has NOT been proven live, so do NOT report it "
+                "as posted, submitted or published. Re-read the page; if it "
+                "shows an error or a repeated-submission warning, report that "
+                "instead.]")
+        except Exception as e:
+            return f"Submit error: {_short_error(e)}"
 
     # Everything the model needs to address a control exactly, read from the
     # DOM rather than from the pixels. Vision says what is on screen and what

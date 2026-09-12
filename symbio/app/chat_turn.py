@@ -21,7 +21,8 @@ from symbio.app import (
 from symbio.app.chat_constants import (
     _BROWSER_ACTION_TOOLS, _MAX_RATE_LIMIT_RETRIES, _MAX_RATE_LIMIT_WAIT,
     user_turn_floor,
-    _MAX_TOOL_RETRIES, _WEB_TOOLS, _claims_completion, _internal_to_hermes_name,
+    _MAX_TOOL_RETRIES, _WEB_TOOLS, _claims_completion, _claims_submission,
+    _internal_to_hermes_name,
 )
 from symbio.app.chat_text import (
     _EXPLICIT_SEARCH_RE, _MOOD_TAG_RE, _VALID_MOODS, _asks_for_action,
@@ -338,6 +339,9 @@ class AgentTurnMixin:
         browser_retry_nudged = False
         blank_retry_nudged = False
         claim_nudged = False
+        # True once submit_form returns its machine-verified CONFIRMED verdict
+        # this turn; a submission claim is then backed by code, not the model.
+        submit_confirmed = False
         last_observation = ""
         unparsed_tag_nudged = False
         echo_retry_nudged = False
@@ -902,27 +906,60 @@ class AgentTurnMixin:
                 # perfectly formed sentence backed by zero tool calls, zero
                 # fetches and no files. Push it to actually act; if it repeats
                 # the claim, say so in the open rather than pass it on.
-                if (not any_tool_ran and _is_substantive(display)
-                        and _claims_completion(display)):
+                #
+                # A submission claim ("posted/submitted/published") is sharper
+                # still: it can follow a TOOL that ran — a click that merely hit
+                # the submit button — so "some tool executed" is not evidence.
+                # It is trusted only when submit_form returned its
+                # machine-verified CONFIRMED verdict this turn, or submit_form
+                # is about to run (then the verdict, not the claim, decides).
+                submission_tool_pending = any(
+                    n == "submit_form" for n, _ in fresh_tools)
+                unverified_claim = (
+                    (_is_substantive(display)
+                     and _claims_submission(display)
+                     and not submit_confirmed
+                     and not submission_tool_pending)
+                    or (not any_tool_ran and _is_substantive(display)
+                        and _claims_completion(display))
+                )
+                if unverified_claim:
                     if not claim_nudged:
                         claim_nudged = True
-                        self.output_fn("  [Unverified] Reply claims completed work "
-                                       "but no tool ran; asking it to actually do it...")
-                        self.history.append({"role": "user", "content": (
-                            "[System observation: your reply states you already "
-                            "ran/fetched/saved something, but you emitted no tool "
-                            "call this turn, so nothing was executed and nothing "
-                            "was written. Do not describe results you have not "
-                            "produced. Either emit the tool call now and report "
-                            "what it actually returns, or say plainly that you "
-                            "have not done it and give the user the command to "
-                            "run.]"
-                        )})
+                        if _claims_submission(display) and not submit_confirmed:
+                            self.output_fn(
+                                "  [Unverified] Reply claims a submission but no "
+                                "machine-verified verdict exists; asking it to "
+                                "actually do it...")
+                            self.history.append({"role": "user", "content": (
+                                "[System observation: your reply states a story/ "
+                                "form was posted or submitted, but there is no "
+                                "machine-verified '[Submit CONFIRMED ...]' result "
+                                "this turn — a click alone does not prove it and "
+                                "your report of it is not trusted. Do not describe "
+                                "it as posted. If submit_form ran, report exactly "
+                                "what its verdict returned. Otherwise run "
+                                "submit_form now, or say plainly that it is not "
+                                "done.]"
+                            )})
+                        else:
+                            self.output_fn("  [Unverified] Reply claims completed work "
+                                           "but no tool ran; asking it to actually do it...")
+                            self.history.append({"role": "user", "content": (
+                                "[System observation: your reply states you already "
+                                "ran/fetched/saved something, but you emitted no tool "
+                                "call this turn, so nothing was executed and nothing "
+                                "was written. Do not describe results you have not "
+                                "produced. Either emit the tool call now and report "
+                                "what it actually returns, or say plainly that you "
+                                "have not done it and give the user the command to "
+                                "run.]"
+                            )})
                         self._trim_history()
                         continue
                     self.output_fn("  [Unverified] The model repeated a completion "
-                                   "claim with no tool call — treat the result "
-                                   "below as NOT performed.")
+                                   "or submission claim without proof — treat the "
+                                   "result below as NOT performed.")
 
                 # Don't let the model fill knowledge gaps by guessing: an
                 # unsure-sounding answer, or a hedged made-up figure for a
@@ -1041,6 +1078,38 @@ class AgentTurnMixin:
             # Only execute the first fresh tool per response. Multiple tools in
             # one reply cause bursts (e.g. five <search> tags at once) and can
             # overwhelm the model with parallel observations.
+            # A submission claim can also ride ALONGSIDE a tool call —
+            # "<click>submit</click> I posted it" is the exact shape of a click
+            # mistaken for proof. The claim guard above only sees tool-less
+            # rounds, so check it here, before the tool runs: whatever a click
+            # actually did, the claim is not verified until submit_form returns
+            # its CONFIRMED verdict, and the tool in this round is not the one
+            # that will provide it.
+            if (_is_substantive(display) and _claims_submission(display)
+                    and not submit_confirmed
+                    and not any(n == "submit_form" for n, _ in fresh_tools)):
+                if not claim_nudged:
+                    claim_nudged = True
+                    self.output_fn(
+                        "  [Unverified] Reply claims a submission but no "
+                        "machine-verified verdict exists; asking it to "
+                        "actually do it...")
+                    self.history.append({"role": "user", "content": (
+                        "[System observation: your reply states a story/ "
+                        "form was posted or submitted, but there is no "
+                        "machine-verified '[Submit CONFIRMED ...]' result "
+                        "this turn — a click alone does not prove it and "
+                        "your report of it is not trusted. Do not describe "
+                        "it as posted. If submit_form ran, report exactly "
+                        "what its verdict returned. Otherwise run "
+                        "submit_form now, or say plainly that it is not "
+                        "done.]"
+                    )})
+                    self._trim_history()
+                    continue
+                self.output_fn("  [Unverified] The model repeated a submission "
+                               "claim without proof — treat the result below "
+                               "as NOT performed.")
             name, params = fresh_tools[0]
             tool_key = json.dumps([name, params], sort_keys=True)
             executed_calls.add(tool_key)
@@ -1092,6 +1161,8 @@ class AgentTurnMixin:
                     observation = self._execute_tool(name, params)
                     if name == "browser_scroll":
                         scrolls_this_turn += 1
+                    if name == "submit_form" and "[Submit CONFIRMED" in observation:
+                        submit_confirmed = True
                 if learn.is_user_refusal(observation):
                     user_refused_this_turn = True
             local_telemetry.log_event(

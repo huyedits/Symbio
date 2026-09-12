@@ -328,6 +328,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # agent launches, or the launch fails.
         "profile_dir": None,
         "chrome_profile": None,
+        # Domains the agent may open without the per-domain confirmation.
+        # Operator-owned: set_config_value refuses this key for the model
+        # (see SENSITIVE_CONFIG_KEYS), so the model cannot grant itself a
+        # domain past the confirm gate. Add the sites it is authorised to act
+        # on, e.g. news.ycombinator.com for the autonomous-submit flow.
+        "allowed_domains": ["localhost", "127.0.0.1", "example.com"],
     },
     "web": {
         "search_results": 5,
@@ -532,6 +538,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Ask before a shell/filesystem/settings call on a turn where the user
         # requested no action at all. Escalates to a prompt, never a refusal.
         "intent_gate_enabled": True,
+        # Authorise submit_form to run with no human to prompt, e.g. from a
+        # scheduled job. Off by default: submitting on a public site is a real
+        # public act, so interactive runs always ask. This is the single
+        # explicit switch for unattended posting; the tool still runs its full
+        # verification and returns a machine-verified verdict either way.
+        "unattended_submit": False,
     },
     "dispatch": {
         # Off by default: MoA delegation loads and runs additional models

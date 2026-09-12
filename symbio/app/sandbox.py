@@ -134,6 +134,18 @@ def _blocked_binary(args: list[str], blocked: set[str]) -> str | None:
     return None
 
 
+# A remote command is always evaluated by the remote shell, so shell chaining
+# (&&, ||, ;, |, <, >, `, $(...)) means the program really run can be any
+# token, not just the first. Local run_sandboxed splits by shlex and stops at
+# the first token (+ wrappers), but the local no-shell path never reaches a
+# shell; the remote command always does. Only when chaining is present do we
+# widen to a full-token scan, so `ls && rm -rf /tmp/x` cannot slip past the
+# denylist the way a bare `ls` legitimately passes.
+def _remote_shell_chained(command: str) -> bool:
+    return any(tok in command for tok in ("&&", "||", ";", "|", "<", ">",
+                                          "`", "$("))
+
+
 def run_sandboxed(command: str, config: dict[str, Any], interactive: bool = True,
                   confirm_fn=None):
     command = command.strip()
@@ -230,6 +242,30 @@ def run_remote(host: str, command: str, config: dict[str, Any], interactive: boo
     port = host_cfg.get("port", 22)
     ssh_key = host_cfg.get("ssh_key")
     extra_opts = host_cfg.get("ssh_options", [])
+
+    # The remote machine's shell executes `command`, so it must face the same
+    # denylist the local sandbox enforces: `run_remote b 'sudo apt update'` is
+    # the same `sudo` the local path refuses, and `rm -rf /tmp/x` over SSH is
+    # still `rm`. ssh/scp stay on the list so the wrapper itself cannot smuggle
+    # a shell. A refusal is final — the command must not run anywhere.
+    try:
+        args = shlex.split(command)
+    except ValueError as e:
+        return False, f"Remote command parse error: {e}"
+    blocked = set(config.get("sandbox", {}).get("blocked_commands", []))
+    hit = _blocked_binary(args, blocked)
+    if hit is None and _remote_shell_chained(command):
+        for token in args:
+            name = os.path.basename(token)
+            if name in blocked:
+                hit = name
+                break
+    if hit is not None:
+        if not interactive or not _ask_command_permission(command, hit, ask_fn=confirm_fn):
+            return False, (
+                f"'{hit}' is blocked in sandbox for remote host '{host}' "
+                f"(user did not approve it)."
+            )
 
     ssh_args = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"]
     ssh_args.extend(extra_opts)
