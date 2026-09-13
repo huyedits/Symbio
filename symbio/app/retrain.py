@@ -53,9 +53,10 @@ def retrain_model(config: dict[str, Any], *, digest: bool = True, seed: bool = T
     # exactly the same object; it just arrives without the weights beside it.
     print("  [System] Loading tokenizer...")
     try:
-        from mlx_lm.tokenizer_utils import TokenizerWrapper
+        from symbio.mlx_gate import attr as _mlx
         from transformers import AutoTokenizer
-        tokenizer = TokenizerWrapper(AutoTokenizer.from_pretrained(model_name))
+        tokenizer = _mlx("mlx_lm.tokenizer_utils.TokenizerWrapper")(
+            AutoTokenizer.from_pretrained(model_name))
     except Exception as exc:
         print(f"  [System] Failed to load tokenizer: {exc}")
         return False

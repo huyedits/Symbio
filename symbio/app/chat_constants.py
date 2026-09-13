@@ -51,7 +51,7 @@ _BROWSER_TOOLS = {
 # reports" — never fires for the tool that nudge points at.
 _BROWSER_ACTION_TOOLS = {
     "browser_click", "browser_click_at", "browser_type",
-    "browser_scroll", "browser_press",
+    "browser_scroll", "browser_press", "submit_form",
 }
 
 # How many times one identical tool call may be attempted in a single turn.
@@ -72,7 +72,7 @@ _MAX_RATE_LIMIT_WAIT = 5.0
 _TELEGRAM_CONFIRM_TOOLS = frozenset({
     "execute_code", "run_command", "edit_file", "write_file", "digest_notes", "train_adapter",
     "schedule_job", "config_set", "delete_cron_job", "update_cron_job",
-    "delete_note",
+    "delete_note", "submit_form",
 })
 
 # Map internal tool names back to Hermes-style names for <tool_response> labels.
@@ -224,3 +224,30 @@ def _claims_completion(text: str) -> bool:
     if not text or _CLAIM_HEDGE.search(text):
         return False
     return bool(_COMPLETION_CLAIM.search(text))
+
+
+# "posted/submitted/published" are the completion claims the machine can now
+# verify. A submit/click alone never proves them, so they have their own guard
+# that demands a "[Submit CONFIRMED ...]" verdict in the turn, not merely that
+# some tool ran.
+_SUBMISSION_CLAIM = re.compile(
+    r"\b(?:"
+    r"I(?:'ve| have)\s+(?:just\s+|already\s+)?(?:posted|submitted|published)"
+    r"|I\s+(?:posted|submitted|published)"
+    r"|(?:has|have|had)\s+been\s+(?:posted|submitted|published)"
+    r"|successfully\s+(?:posted|submitted|published)"
+    r")\b",
+    re.I)
+
+
+def _claims_submission(text: str) -> bool:
+    """Did this reply assert a submission/publication actually happened?
+
+    Tighter than the general completion claim on purpose: a model that clicked
+    a submit button is exactly as likely to report "posted" as one that never
+    got that far, and both are untrusted until submit_form's machine verdict
+    confirms publication.
+    """
+    if not text or _CLAIM_HEDGE.search(text):
+        return False
+    return bool(_SUBMISSION_CLAIM.search(text))

@@ -50,6 +50,7 @@ SENSITIVE_CONFIG_KEYS: set[str] = {
     "sandbox.shell_allow_localhost",
     "sandbox.shell_allow_remote_hosts",
     "browser.enabled",
+    "browser.allowed_domains",
     "rag.enabled",
     "rag.sources",
     "rag.top_k",
@@ -685,6 +686,15 @@ def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any],
 
     if name in ("delegate_task", "brain_solve"):
         return {"risk_score": 1, "flags": ["delegate"]}
+
+    if name == "submit_form":
+        # Submitting a form posts to a public site — a real public act, scored
+        # to require explicit approval. The operator may authorise unattended
+        # posting (scheduled/headless) via the sensitive safety.unattended_submit
+        # key; the tool still runs its full machine-verified verdict either way.
+        if _safety_cfg(config).get("unattended_submit"):
+            return {"risk_score": 0, "flags": ["form_submit", "unattended_authorized"]}
+        return {"risk_score": 3, "flags": ["form_submit", "public_act"]}
 
     if name in ("browser_open", "browser_click", "browser_type",
                 "browser_scroll", "browser_press", "browser_click_at"):

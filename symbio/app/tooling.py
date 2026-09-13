@@ -25,6 +25,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_scroll": "browser",
     "browser_press": "browser",
     "browser_close": "browser",
+    "submit_form": "browser",
     "browser_get_text": "browser",
     # Looking is grouped with the browser, not with desktop control: seeing the
     # page the assistant already drives is the same capability as reading it,
@@ -211,6 +212,19 @@ _TOOLS: list[dict[str, Any]] = [
                 "y": {"type": "integer", "description": "Vertical pixel coordinate from see_screen."},
             },
             "required": ["x", "y"],
+        },
+    },
+    {
+        "name": "submit_form",
+        "description": "Click the submit control of the form currently composed in the open browser, wait, and return a MACHINE-VERIFIED verdict. Use AFTER the form on the page is fully filled in — e.g. after browser_open on an HN submitlink URL, or browser_type into the fields. The verdict is CONFIRMED only when the page actually lands on a URL you can prove is the result page; otherwise it is NOT confirmed and the form may not have been submitted — report exactly what the verdict said and never claim a post was made without a CONFIRMED verdict. For Hacker News, pass expected_url='https://news.ycombinator.com/item?id='.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Visible text of the submit control, e.g. 'submit' for HN."},
+                "selector": {"type": "string", "description": "Optional CSS selector for the submit control, e.g. 'input[type=submit]'."},
+                "expected_url": {"type": "string", "description": "URL prefix the page must land on after a successful submit. For HN: 'https://news.ycombinator.com/item?id='."},
+            },
+            "required": ["target"],
         },
     },
     {

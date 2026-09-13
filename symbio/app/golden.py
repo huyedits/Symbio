@@ -28,7 +28,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-from mlx_lm.sample_utils import make_sampler
+from symbio.mlx_gate import attr as _mlx
+
+
+def make_sampler(*args, **kwargs):
+    """Engine sampler factory, resolved lazily so importing this module (and
+    with it `symbio.app`) never needs the engine installed."""
+    return _mlx("mlx_lm.sample_utils.make_sampler")(*args, **kwargs)
+
 
 from symbio import constants
 from symbio.app import prompts, tooling, training

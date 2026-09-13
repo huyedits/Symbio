@@ -19,8 +19,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
-from mlx_lm import generate, load
-from mlx_lm.sample_utils import make_sampler
+from symbio.mlx_gate import attr as _mlx
+
+
+def load(*args, **kwargs):
+    """Engine model loader, resolved lazily (see mlx_gate)."""
+    return _mlx("mlx_lm.load")(*args, **kwargs)
+
+
+def generate(*args, **kwargs):
+    """Engine generate, resolved lazily (see mlx_gate)."""
+    return _mlx("mlx_lm.generate.generate")(*args, **kwargs)
+
+
+def make_sampler(*args, **kwargs):
+    """Engine sampler factory, resolved lazily (see mlx_gate)."""
+    return _mlx("mlx_lm.sample_utils.make_sampler")(*args, **kwargs)
+
 
 from symbio import constants
 from symbio.app import prompts, tooling, training
@@ -289,7 +304,8 @@ def _unload_model(model):
     del model
     gc.collect()
     try:
-        import mlx.core as mx
+        from symbio.mlx_gate import attr as _mlx
+        mx = _mlx("mlx.core")
         mx.clear_cache()
     except Exception:
         pass

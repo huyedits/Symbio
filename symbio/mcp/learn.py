@@ -60,8 +60,7 @@ async def _validate_adapter(
 
     Returns (passed, pass_count, total).
     """
-    from mlx_lm import generate
-    from mlx_lm.sample_utils import make_sampler
+    from symbio.mlx_gate import attr as _mlx
 
     passed = 0
     total = len(examples)
@@ -75,11 +74,11 @@ async def _validate_adapter(
             enable_thinking=THINKING_ENABLED,
         )
         try:
-            output = generate(
+            output = _mlx("mlx_lm.generate.generate")(
                 model,
                 tokenizer,
                 prompt=input_text,
-                sampler=make_sampler(temp=0.2, top_p=0.9),
+                sampler=_mlx("mlx_lm.sample_utils.make_sampler")(temp=0.2, top_p=0.9),
                 max_tokens=256,
                 verbose=False,
             ).strip()
@@ -117,9 +116,9 @@ async def auto_finetune(skill_tag: str, db_path: Path | None = None) -> dict[str
     # current best checkpoint, not an old adapter).
     print("  [MCP Learn] Loading base model...")
     try:
-        from mlx_lm import load
+        from symbio.mlx_gate import attr as _mlx
 
-        model, tokenizer = load(config["model_name"])
+        model, tokenizer = _mlx("mlx_lm.load")(config["model_name"])
     except Exception as exc:
         return {"ok": False, "error": f"failed to load model: {exc}"}
 
@@ -152,9 +151,9 @@ async def auto_finetune(skill_tag: str, db_path: Path | None = None) -> dict[str
     # 5. Validate the new adapter.
     print("  [MCP Learn] Validating new adapter...")
     try:
-        from mlx_lm import load
+        from symbio.mlx_gate import attr as _mlx
 
-        new_model, new_tokenizer = load(config["model_name"], adapter_path=str(constants.ADAPTER_DIR))
+        new_model, new_tokenizer = _mlx("mlx_lm.load")(config["model_name"], adapter_path=str(constants.ADAPTER_DIR))
         valid, passed, total = await _validate_adapter(new_model, new_tokenizer, examples, system_prompt)
     except Exception as exc:
         valid = False

@@ -18,7 +18,19 @@ import time
 import uuid
 from typing import Any
 
-from mlx_lm import generate, load
+from symbio.mlx_gate import attr as _mlx
+
+
+def generate(*args, **kwargs):
+    """Engine generate, resolved lazily so importing this front-end never
+    needs the engine installed."""
+    return _mlx("mlx_lm.generate.generate")(*args, **kwargs)
+
+
+def load(*args, **kwargs):
+    """Engine model loader, resolved lazily (see mlx_gate)."""
+    return _mlx("mlx_lm.load")(*args, **kwargs)
+
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (

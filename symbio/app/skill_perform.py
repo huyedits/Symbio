@@ -510,7 +510,8 @@ def run_perform_set(
     decides whether a fine-tune is kept, and a sampler that scores the same
     adapter differently run to run turns that decision into a coin flip.
     """
-    from mlx_lm.sample_utils import make_sampler
+    from symbio.mlx_gate import attr as _mlx
+    make_sampler = _mlx("mlx_lm.sample_utils.make_sampler")
 
     del sampler
     sampler = make_sampler(temp=0.0)

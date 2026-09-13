@@ -1031,14 +1031,14 @@ class CommandsMixin:
             current, note = tts.choose_voice(self.config)
             state = "on" if cfg.get("enabled") else "off"
             self.output_fn(f"  Speaking is {state}. "
-                           f"Voice: {current or 'system default'}"
+                           f"Voice: {tts.display_name(current) or 'system default'}"
                            f"   depth {cfg.get('depth', 0.5)}")
             if note:
                 self.output_fn(f"  {note}")
             by_accent: dict[str, list[str]] = {}
             for name, locale in voices:
                 by_accent.setdefault(tts._ACCENT_NAMES.get(locale, locale), []).append(
-                    f"{name} ({tts.voice_gender(name)})")
+                    f"{tts.display_name(name)} ({tts.voice_gender(name)})")
             for label in sorted(by_accent):
                 self.output_fn(f"    {label}: {', '.join(by_accent[label])}")
             self.output_fn("  /voice on | off | female | male | british | deeper | "
@@ -1063,7 +1063,7 @@ class CommandsMixin:
         if not self.config.get("tts", {}).get("enabled"):
             self.output_fn("  Saved. Speaking is off — /voice on turns it on.")
             return
-        self.output_fn(f"  Voice: {name or 'system default'}"
+        self.output_fn(f"  Voice: {tts.display_name(name) or 'system default'}"
                        f"   depth {self.config['tts'].get('depth', 0.5)}"
                        + (f"   {wpm} wpm" if wpm else ""))
         if note:

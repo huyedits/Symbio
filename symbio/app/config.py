@@ -147,6 +147,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # turning quantisation on roughly quadruples the affordable context
         # without touching this number.
         "kv_budget_mb": 4000,
+        # Quantising the KV cache (4-bit) quarters the per-token cost, so the
+        # same kv_budget_mb buys roughly four times the context. Off by
+        # default: some models lose measurable quality below 8 bits, and the
+        # cache's signature must include the setting or a warm cache is reused
+        # against different bytes. These mirror config.example.json.
+        "kv_bits": None,
+        "kv_group_size": 64,
+        "quantized_kv_start": 0,
         # "auto" derives the prompt cap from kv_budget_mb; an integer sets it
         # in tokens directly; 0 switches the cap off entirely (which is what
         # every version before 2026-09-07 did).
@@ -328,6 +336,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # agent launches, or the launch fails.
         "profile_dir": None,
         "chrome_profile": None,
+        # Domains the agent may open without the per-domain confirmation.
+        # Operator-owned: set_config_value refuses this key for the model
+        # (see SENSITIVE_CONFIG_KEYS), so the model cannot grant itself a
+        # domain past the confirm gate. Add the sites it is authorised to act
+        # on, e.g. news.ycombinator.com for the autonomous-submit flow.
+        "allowed_domains": ["localhost", "127.0.0.1", "example.com"],
     },
     "web": {
         "search_results": 5,
@@ -532,6 +546,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Ask before a shell/filesystem/settings call on a turn where the user
         # requested no action at all. Escalates to a prompt, never a refusal.
         "intent_gate_enabled": True,
+        # Authorise submit_form to run with no human to prompt, e.g. from a
+        # scheduled job. Off by default: submitting on a public site is a real
+        # public act, so interactive runs always ask. This is the single
+        # explicit switch for unattended posting; the tool still runs its full
+        # verification and returns a machine-verified verdict either way.
+        "unattended_submit": False,
     },
     "dispatch": {
         # Off by default: MoA delegation loads and runs additional models
@@ -709,7 +729,8 @@ def apply_gpu_limits(config: dict[str, Any]) -> None:
     """
     gpu = config.get("gpu", {})
     try:
-        import mlx.core as mx
+        from symbio.mlx_gate import attr as _mlx
+        mx = _mlx("mlx.core")
     except Exception:
         return
 
@@ -811,16 +832,36 @@ def _coerce_like(current: Any, raw: str) -> Any:
         if not isinstance(value, list):
             raise ValueError("Expected a JSON list")
         return value
+    if isinstance(current, dict):
+        # Whole-section writes (remote.hosts) take a JSON object mapping
+        # alias -> per-host details.
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("Expected a JSON object")
+        return value
     return raw
 
 
 def set_config_value(config: dict[str, Any], key: str, raw_value: str,
                      allow_sandbox: bool = False) -> str:
     """Set a dotted config key (e.g. agent.temperature), persist it to
-    config.json, and apply it to the running config. Returns a status message."""
+    config.json, and apply it to the running config. Returns a status message.
+
+    `allow_sandbox` marks the call as coming from the operator's /config set
+    (chat_commands passes True); the model's config_set tool passes False. The
+    sandbox. and remote.hosts sections are operator-only: sandbox. because it
+    shapes the denylist itself, remote.hosts because it grants the assistant
+    SSH trust on other machines. Both sections get a truthful refusal for the
+    tool path instead of an off-target "Unknown config key", so a
+    socially-engineered model stops retrying and cannot add a host by
+    rearranging the request."""
     key = key.strip()
     if key.startswith("sandbox.") and not allow_sandbox:
         return "sandbox.* settings can only be changed by the user via /config set."
+
+    if key == "remote.hosts" and not allow_sandbox:
+        return ("remote.hosts can only be changed by the user via /config set — "
+                "it grants the assistant SSH access to other machines.")
 
     # Resolve the dotted path against the live config to validate it exists.
     parts = key.split(".")
@@ -830,7 +871,12 @@ def set_config_value(config: dict[str, Any], key: str, raw_value: str,
             return f"Unknown config key: {key}"
         node = node[part]
     leaf = parts[-1]
-    if not isinstance(node, dict) or leaf not in node or isinstance(node[leaf], dict):
+    if not isinstance(node, dict) or leaf not in node:
+        return f"Unknown config key: {key}"
+    # remote.hosts is a dict section, but the operator sets it as a whole
+    # (alias -> details), so /config set remote.hosts '{"alias": {...}}'
+    # replaces the section instead of drowning in the dict-leaf refusal.
+    if isinstance(node[leaf], dict) and not (key == "remote.hosts" and allow_sandbox):
         return f"Unknown config key: {key}"
 
     try:

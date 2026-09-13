@@ -42,6 +42,24 @@
     "max_context_tokens": 1500,
     "sources": ["notes", "sessions"]
   },
+  "browser": {
+    "enabled": false,
+    "persistent_profile": true,
+    "profile_dir": null,
+    "chrome_profile": null,
+    "allowed_domains": [
+      "localhost",
+      "127.0.0.1",
+      "example.com",
+      "news.ycombinator.com"
+    ]
+  },
+  "safety": {
+    "enabled": true,
+    "require_confirm_score": 3,
+    "log_score": 2,
+    "unattended_submit": false
+  },
   "training_planner": {
     "enabled": true,
     "min_turns": 200,

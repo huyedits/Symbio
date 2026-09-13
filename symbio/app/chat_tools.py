@@ -1067,6 +1067,10 @@ class ToolsMixin:
             "browser_scroll": lambda: self.browser.scroll(params.get("direction", "down")),
             "browser_press": lambda: self.browser.press(params.get("key", "")),
             "browser_close": lambda: self.browser.close(),
+            "submit_form": lambda: self.browser.submit_form(
+                target=str(params.get("target", "")),
+                selector=str(params.get("selector", "") or ""),
+                expected_url=str(params.get("expected_url", "") or "")),
         }
 
         if name in browser_action_tools:
@@ -1100,6 +1104,17 @@ class ToolsMixin:
                     "Press failed: missing 'key'. "
                     "Retry now with <press>down</press>. "
                     "Do not explain the failure — just emit the corrected press tag."
+                )
+            if name == "submit_form" and not params.get("target") and not params.get("selector"):
+                return (
+                    "Submit failed: missing 'target'. Pass the submit button's "
+                    "visible text (usually 'submit' for HN) or a CSS selector, "
+                    "plus 'expected_url' = the URL the page should land on "
+                    "after a successful submit (for HN: "
+                    "https://news.ycombinator.com/item?id=), e.g. "
+                    "<tool_call>{\"name\": \"submit_form\", \"arguments\": "
+                    "{\"target\": \"submit\", \"expected_url\": "
+                    "\"https://news.ycombinator.com/item?id=\"}}</tool_call>."
                 )
             def _act() -> str:
                 """Run the action, turning a raised 'not open' into the same
@@ -1432,4 +1447,7 @@ class ToolsMixin:
                 "⚠️  Start a FULL adapter rebuild? This will DELETE the current LoRA "
                 "adapter and retrain from scratch. This cannot be undone."
             )
+        if name == "submit_form":
+            return (f"Submit the form on the live page? target='{params.get('target')}' "
+                    f"expected to land on '{params.get('expected_url')}'.")
         return f"Allow tool '{name}'?"

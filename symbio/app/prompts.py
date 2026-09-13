@@ -262,7 +262,8 @@ Shell:
   <tool_call>{{"name": "terminal", "arguments": {{"cmd": "ls *.log | head"}}}}</tool_call>.
 - For non-interactive SSH to a configured host, use
   <tool_call>{{"name": "run_remote", "arguments": {{"host": "myserver", "command": "uptime"}}}}</tool_call>.
-  Add hosts with /config set remote.hosts '<json>'.
+  Hosts are added by the USER with /config set remote.hosts '<json>' — you
+  cannot add one yourself.
 <!-- /section -->
 <!-- section: files priority=3 -->
 Files:

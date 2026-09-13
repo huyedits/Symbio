@@ -7,10 +7,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mlx_lm import generate, load
-from mlx_lm.sample_utils import make_sampler
-
 from symbio.config import load_config
+from symbio.mlx_gate import attr as _mlx
+
+
+def load(*args, **kwargs):
+    """Engine model loader, resolved lazily (see mlx_gate)."""
+    return _mlx("mlx_lm.load")(*args, **kwargs)
+
+
+def generate(*args, **kwargs):
+    """Engine generate, resolved lazily (see mlx_gate)."""
+    return _mlx("mlx_lm.generate.generate")(*args, **kwargs)
+
+
+def make_sampler(*args, **kwargs):
+    """Engine sampler factory, resolved lazily (see mlx_gate)."""
+    return _mlx("mlx_lm.sample_utils.make_sampler")(*args, **kwargs)
 
 
 NEUTRAL_SYSTEM_PROMPT = (

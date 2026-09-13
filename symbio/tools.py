@@ -919,8 +919,8 @@ def _tool_train_adapter(agent: AIAgent, _args: dict[str, Any]) -> str:
     trained = run_training(agent.config)
     if trained:
         try:
-            from mlx_lm import load
-            agent.model, agent.tokenizer = load(
+            from symbio.mlx_gate import attr as _mlx
+            agent.model, agent.tokenizer = _mlx("mlx_lm.load")(
                 agent.config["model_name"], adapter_path=str(ADAPTER_DIR)
             )
             agent.adapter_loaded = True

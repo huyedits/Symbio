@@ -147,11 +147,22 @@ POLICY_MARKER = "<!-- security policy: security.md -->"
 # Files nothing at runtime may write. security.md.default is in here too: it is
 # what a fresh install is seeded from, so a write there is a write to every
 # future policy.
-PROTECTED_FILENAMES = frozenset({"security.md", "security.md.default"})
+#
+# soul.md is the layer that shapes what the model IS, not just what it refuses
+# to run (the security policy does that). It is updated only through the
+# dedicated soul store (soul.reflect, driven by /soul and conversation), never
+# through the free-form file/shell tools — so those tools get the same blanket
+# refusal for it that they get for the policy. The internal soul writer does
+# not route through this chokepoint, so the legitimate path is unaffected.
+PROTECTED_FILENAMES = frozenset({
+    "security.md", "security.md.default",
+    "soul.md", "soul.md.default",
+})
 
 
 def _protected_paths() -> tuple:
-    return (constants.SECURITY_FILE, constants.SECURITY_DEFAULT_FILE)
+    return (constants.SECURITY_FILE, constants.SECURITY_DEFAULT_FILE,
+            constants.SOUL_FILE)
 
 
 def is_protected_path(path) -> bool:
