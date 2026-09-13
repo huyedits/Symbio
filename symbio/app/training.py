@@ -58,7 +58,8 @@ def release_model() -> None:
     """
     gc.collect()
     try:
-        import mlx.core as mx
+        from symbio.mlx_gate import attr as _mlx
+        mx = _mlx("mlx.core")
 
         mx.clear_cache()
     except Exception:

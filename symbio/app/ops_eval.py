@@ -22,15 +22,34 @@ Three stages, and the middle one is the one that matters:
 
 Nothing is string-matched. The verdict is the state of the filesystem
 afterwards, which is the only thing that cannot be argued with.
+
+Boundary caveat: FORBIDDEN + a scrubbed env is a guard-rail, not a jail. The
+box is just a fresh cwd under the system temp dir, so an absolute system path
+is refused only while it matches FORBIDDEN, and a determined script could
+still read a world-readable file. This eval grades operator tasks honestly —
+it is not a place to let an untrusted model run arbitrary code on a host you
+keep on. A real sandbox-exec / container boundary would be the honest end
+state; until then the refusal list errs toward the blunt side.
 """
 import json, re, shutil, subprocess, tempfile
 from pathlib import Path
 
 # Anything that reaches outside the scratch directory or needs privileges.
+# Two escape families, blocked as words before the shell sees them:
+#   * interpreters and re-spawned shells (python3, ruby, bash, ...) turn a
+#     "shell command" into something the refusal list can no longer see;
+#   * network clients and the home/system roots (/Users/, /etc/, ...) are how
+#     a boxed script touches the real machine. /dev is deliberately allowed
+#     (the shipped tasks source test data from /dev/zero).
 FORBIDDEN = re.compile(
-    r"\b(sudo|useradd|userdel|groupadd|mkfs|shutdown|reboot|halt|launchctl|"
-    r"systemctl|dd\s+if=|curl|wget|pip\s+install|apt|apt-get|brew\s+install|"
-    r"chown\s+root|killall|pkill|pgrep)\b|rm\s+-rf\s+/|:\(\)\{")
+    r"\b(sudo|su|useradd|userdel|groupadd|mkfs|shutdown|reboot|halt|launchctl|"
+    r"systemctl|crontab|dd\s+if=|curl|wget|ftp|(?<!\\)\bnc\b|ncat|socat|telnet|"
+    r"ssh|scp|sftp|rsync|ping|pip\s+install|pip3\s+install|apt|apt-get|"
+    r"brew\s+install|chown\s+root|killall|pkill|pgrep|mount|umount|chroot|"
+    r"osascript|open)\b"
+    r"|rm\s+-rf\s+/|:\(\)\{"
+    r"|/(Users|home|root|etc|var|private|opt|tmp|usr|Library|Applications)/"
+    r"|\b(python3?|ruby|perl|php|node|nodejs|deno|bash|zsh|ksh|csh|tcsh|fish)\b")
 
 TIMEOUT = 20
 
@@ -40,9 +59,19 @@ def safe(script: str) -> bool:
 
 
 def run(script: str, cwd: Path) -> tuple[int, str]:
+    # The cheap half of the boundary: HOME/TMPDIR point at the box so `~`,
+    # $HOME and any user config stay out of reach, and a tool not installed
+    # to /usr/bin:/bin is simply not there. The interpreter /usr/bin/python3
+    # IS on that PATH on macOS, so interpreters stay on FORBIDDEN instead of
+    # being handled here — this is hardening, not a sandbox.
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(cwd),
+        "TMPDIR": str(cwd),
+    }
     try:
         p = subprocess.run(["/bin/sh", "-c", script], cwd=cwd, timeout=TIMEOUT,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=env)
         return p.returncode, (p.stdout + p.stderr)[-400:]
     except subprocess.TimeoutExpired:
         return 124, "timed out"

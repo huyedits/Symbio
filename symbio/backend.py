@@ -201,11 +201,12 @@ def generate(model: Any, tokenizer: Any, prompt: str, max_tokens: int = 256,
     call site does not need to know which backend it is talking to.
     """
     if not is_cuda(config):
-        from mlx_lm.generate import generate as _mlx_generate
+        from symbio.mlx_gate import attr as _mlx
 
-        return _mlx_generate(model, tokenizer, prompt=prompt,
-                             max_tokens=max_tokens, sampler=sampler,
-                             verbose=verbose, **kwargs)
+        return _mlx("mlx_lm.generate.generate")(
+            model, tokenizer, prompt=prompt,
+            max_tokens=max_tokens, sampler=sampler,
+            verbose=verbose, **kwargs)
 
     torch = _require_torch()
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
@@ -245,10 +246,11 @@ def stream_generate(model: Any, tokenizer: Any, prompt: str,
     `.text` attribute so the streaming call sites are identical on both.
     """
     if not is_cuda(config):
-        from mlx_lm.generate import stream_generate as _mlx_stream
+        from symbio.mlx_gate import attr as _mlx
 
-        yield from _mlx_stream(model, tokenizer, prompt=prompt,
-                               max_tokens=max_tokens, sampler=sampler, **kwargs)
+        yield from _mlx("mlx_lm.generate.stream_generate")(
+            model, tokenizer, prompt=prompt,
+            max_tokens=max_tokens, sampler=sampler, **kwargs)
         return
 
     torch = _require_torch()
@@ -377,7 +379,8 @@ def clear_cache(config: dict[str, Any] | None = None) -> None:
     """Hand freed memory back to the allocator."""
     if not is_cuda(config):
         try:
-            import mlx.core as mx
+            from symbio.mlx_gate import attr as _mlx
+            mx = _mlx("mlx.core")
 
             mx.clear_cache()
         except Exception:

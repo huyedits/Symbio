@@ -13,27 +13,32 @@ from typing import Any
 
 # The engine is an optional extra (see pyproject: `mlx` ships macOS-arm64
 # wheels and no sdist, so requiring it makes `pip install symbio-cli` fail
-# outright on Linux). That trade is only worth making if the failure that
-# replaces it is legible: without this, `symb --help` on a bare install printed
-# a five-line traceback ending in "No module named 'mlx_lm'", which tells the
-# reader nothing about what to do. Measured 2026-08-27 by installing from PyPI
-# without the extra.
-try:
-    from mlx_lm import load, stream_generate
-    from mlx_lm.sample_utils import make_logits_processors, make_sampler
-except ModuleNotFoundError as exc:  # pragma: no cover - import-time guard
-    if exc.name not in ("mlx_lm", "mlx"):
-        raise
-    raise ModuleNotFoundError(
-        "Symbio's inference engine is not installed.\n"
-        "\n"
-        "  On Apple Silicon:  pip install 'symbio-cli[mlx]'\n"
-        "\n"
-        "MLX runs on macOS with an M-series chip only — it publishes no Linux "
-        "or Windows wheels — so on other platforms symbio-cli installs but "
-        "cannot run a model yet. A CUDA backend is in progress: "
-        "https://github.com/huyedits/Symbio"
-    ) from exc
+# outright on Linux). These four resolve the engine lazily, at use-time, so
+# `import symbio` succeeds on a bare install and the only failure a user sees
+# is the install hint in symbio.mlx_gate — the same words this module used to
+# raise at import time. Measured 2026-08-27 by installing from PyPI without
+# the extra.
+from symbio.mlx_gate import attr as _mlx
+
+
+def load(*args, **kwargs):
+    """Load a model through the MLX engine (resolved on first use)."""
+    return _mlx("mlx_lm.load")(*args, **kwargs)
+
+
+def stream_generate(*args, **kwargs):
+    """Stream a reply through the MLX engine (resolved on first use)."""
+    return _mlx("mlx_lm.stream_generate")(*args, **kwargs)
+
+
+def make_sampler(*args, **kwargs):
+    """Sampler factory from the MLX engine (resolved on first use)."""
+    return _mlx("mlx_lm.sample_utils.make_sampler")(*args, **kwargs)
+
+
+def make_logits_processors(*args, **kwargs):
+    """Logits-processor factory from the MLX engine (resolved on first use)."""
+    return _mlx("mlx_lm.sample_utils.make_logits_processors")(*args, **kwargs)
 
 from symbio.chat import build_system_prompt
 from symbio.config import can_run_lora, detect_model_type
@@ -211,8 +216,8 @@ class AIAgent:
         self.draft_model = None
         draft_name = config["agent"].get("draft_model")
         if draft_name:
-            from mlx_lm import load as _mlx_load
-            self.draft_model, _ = _mlx_load(draft_name)
+            from symbio.mlx_gate import attr as _mlx_gate
+            self.draft_model, _ = _mlx_gate("mlx_lm.load")(draft_name)
 
         # Near-greedy sampling on a small overfit model degenerates into
         # repetition loops on out-of-distribution input; penalize repeats.

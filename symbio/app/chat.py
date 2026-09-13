@@ -15,16 +15,55 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import mlx.core as mx
-import mlx.nn as nn
-from symbio.app.modelload import load
-from mlx_lm.generate import generate, generate_step, stream_generate
-from mlx_lm.models.cache import (
-    can_trim_prompt_cache, load_prompt_cache, make_prompt_cache,
-    save_prompt_cache, trim_prompt_cache,
-)
-from mlx_lm.sample_utils import make_logits_processors, make_sampler
+from symbio.mlx_gate import attr as _mlx
 
+# The MLX engine is resolved lazily (via mlx_gate) at use-time so that
+# importing this module — and with it `symbio.app` and the CLI/desktop — never
+# needs the engine installed. The compat patches in mlx_compat are applied by
+# the gate's prepare hook before the first engine import.
+def _mx():
+    """The mlx.core module, resolved on first use."""
+    return _mlx("mlx.core")
+
+
+def _nn():
+    """The mlx.nn module, resolved on first use."""
+    return _mlx("mlx.nn")
+
+
+def generate_step(*args, **kwargs):
+    return _mlx("mlx_lm.generate.generate_step")(*args, **kwargs)
+
+
+def make_prompt_cache(*args, **kwargs):
+    return _mlx("mlx_lm.models.cache.make_prompt_cache")(*args, **kwargs)
+
+
+def save_prompt_cache(*args, **kwargs):
+    return _mlx("mlx_lm.models.cache.save_prompt_cache")(*args, **kwargs)
+
+
+def load_prompt_cache(*args, **kwargs):
+    return _mlx("mlx_lm.models.cache.load_prompt_cache")(*args, **kwargs)
+
+
+def can_trim_prompt_cache(*args, **kwargs):
+    return _mlx("mlx_lm.models.cache.can_trim_prompt_cache")(*args, **kwargs)
+
+
+def trim_prompt_cache(*args, **kwargs):
+    return _mlx("mlx_lm.models.cache.trim_prompt_cache")(*args, **kwargs)
+
+
+def make_logits_processors(*args, **kwargs):
+    return _mlx("mlx_lm.sample_utils.make_logits_processors")(*args, **kwargs)
+
+
+def make_sampler(*args, **kwargs):
+    return _mlx("mlx_lm.sample_utils.make_sampler")(*args, **kwargs)
+
+
+from symbio.app.modelload import load
 from symbio.rag import Retriever
 from symbio import constants
 from symbio.config import _adapter_matches_model, adapter_weights_present
@@ -477,7 +516,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         self.tokenizer = None
         gc.collect()
         try:
-            mx.clear_cache()
+            _mx().clear_cache()
         except Exception:
             pass
 
@@ -863,7 +902,12 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         """
         if backend.is_cuda(self.config):
             return False
-        return self.stream_fn in (stream_generate, backend.stream_generate)
+        # Is the active stream function the MLX one? backend.stream_generate is
+        # the canonical engine stream generator on MLX (and the CUDA one
+        # otherwise), so identity against it is the whole test — the old
+        # module-level `stream_generate` import this compared to is now a lazy
+        # wrapper, and comparing to the backend is equivalent and lazy-safe.
+        return self.stream_fn is backend.stream_generate
 
     def _new_prompt_cache(self):
         """An empty cache in the layout the generation path expects.
@@ -1111,7 +1155,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         """
         kv_kw = self._kv_quant_kwargs()
         model_cache = make_prompt_cache(self.model)
-        for _ in generate_step(mx.array(ids), self.model, max_tokens=0,
+        for _ in generate_step(_mx().array(ids), self.model, max_tokens=0,
                                sampler=self.sampler, prompt_cache=model_cache,
                                **kv_kw):
             pass
@@ -1119,7 +1163,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if draft is None:
             return model_cache
         draft_cache = make_prompt_cache(draft)
-        for _ in generate_step(mx.array(ids), draft, max_tokens=0,
+        for _ in generate_step(_mx().array(ids), draft, max_tokens=0,
                                sampler=self.sampler, prompt_cache=draft_cache,
                                **kv_kw):
             pass
@@ -1143,7 +1187,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             return
         if self.model is None or self.tokenizer is None:
             return
-        if not isinstance(self.model, nn.Module):
+        if not isinstance(self.model, _nn().Module):
             return
         agent_cfg = self.config.get("agent", {})
         if not agent_cfg.get("prompt_cache_enabled", True):
@@ -1457,7 +1501,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # share. Only an unreadable file or a stale signature is worth a
         # discard, and both are handled above.
         try:
-            mx.eval([c.state for c in cache])
+            _mx().eval([c.state for c in cache])
         except Exception as e:
             self._log_info(f"Prompt cache unusable in this process, keeping "
                            f"the file and prefilling instead: {e}")
@@ -1529,7 +1573,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         unload_model_during_training frees it again before the worker trains.
         """
         def _teach(prompt: str, max_tokens: int = 700) -> str:
-            from mlx_lm import generate
+            from symbio.mlx_gate import attr as _mlx
             from symbio.app import eval as eval_mod, tooling
 
             self._ensure_model_loaded()
@@ -1542,7 +1586,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # Greedy: seed data has no business being a dice roll, and a
             # temperature sample here is one bad draw away from teaching the
             # worker something malformed it will then repeat forever.
-            raw = generate(
+            raw = _mlx("mlx_lm.generate.generate")(
                 self.model, self.tokenizer, prompt=rendered,
                 sampler=eval_mod._make_sampler(
                     {**self.config,
@@ -2007,7 +2051,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
     def _soul_generate(self, prompt: str) -> str:
         """One short, greedy completion for the reflection pass."""
-        from mlx_lm import generate as _generate
+        from symbio.mlx_gate import attr as _mlx
 
         from symbio.app import eval as eval_mod
 
@@ -2015,7 +2059,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         rendered = self.tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=False, add_generation_prompt=True, enable_thinking=False)
-        return _generate(
+        return _mlx("mlx_lm.generate.generate")(
             self.model, self.tokenizer, prompt=rendered,
             sampler=eval_mod._make_sampler(
                 {**self.config,
@@ -2579,14 +2623,14 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         it annotates. Categories already in use are offered so the vocabulary
         converges instead of every mistake coining a synonym."""
         def _classify_fn(prompt: str) -> str:
-            from mlx_lm import generate
+            from symbio.mlx_gate import attr as _mlx
             from symbio.app import eval as eval_mod, tooling
             if self.model is None or self.tokenizer is None:
                 raise RuntimeError("no model resident to classify a mistake")
             rendered = self.tokenizer.apply_chat_template(
                 [{"role": "user", "content": prompt}],
                 tokenize=False, add_generation_prompt=True, enable_thinking=False)
-            raw = generate(
+            raw = _mlx("mlx_lm.generate.generate")(
                 self.model, self.tokenizer, prompt=rendered,
                 sampler=eval_mod._make_sampler(
                     {**self.config,

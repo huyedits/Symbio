@@ -583,7 +583,8 @@ def _unload(model):
     del model
     gc.collect()
     try:
-        import mlx.core as mx
+        from symbio.mlx_gate import attr as _mlx
+        mx = _mlx("mlx.core")
         mx.clear_cache()
     except Exception:
         pass
@@ -663,9 +664,9 @@ def run_skill_eval(
     """
     config = config or {}
     if generate_fn is None or load_fn is None:
-        from mlx_lm import generate as _gen, load as _load
-        generate_fn = generate_fn or _gen
-        load_fn = load_fn or _load
+        from symbio.mlx_gate import attr as _mlx
+        generate_fn = generate_fn or _mlx("mlx_lm.generate.generate")
+        load_fn = load_fn or _mlx("mlx_lm.load")
 
     entry = resolve_skill(role_or_name)
     if entry is None:

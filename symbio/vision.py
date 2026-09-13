@@ -128,7 +128,8 @@ def is_loaded() -> bool:
 def available() -> bool:
     """Is the vision stack importable at all? Cheap; does not load weights."""
     try:
-        import mlx_vlm  # noqa: F401
+        from symbio.mlx_gate import require as _require
+        _require("mlx_vlm")
     except Exception:
         return False
     return True
@@ -149,7 +150,15 @@ def load(name: str = "") -> tuple[Any, Any]:
         if _MODEL is not None:
             _release_locked()
         try:
-            from mlx_vlm import load as vlm_load
+            from symbio.mlx_gate import attr as _vlm
+            vlm_load = _vlm("mlx_vlm.load")
+        except ModuleNotFoundError as e:
+            # The gate already folded a missing engine into the install hint;
+            # keep the tailored vision message, which adds what to install.
+            raise VisionUnavailable(
+                "mlx-vlm is not installed. Install it with "
+                "`pip install mlx-vlm` to give the assistant vision."
+            ) from e
         except Exception as e:  # pragma: no cover - import-time environment
             raise VisionUnavailable(
                 f"mlx-vlm is not installed ({e}). Install it with "
@@ -212,7 +221,8 @@ def _release_locked():
     _LOADED_NAME = ""
     gc.collect()
     try:
-        import mlx.core as mx
+        from symbio.mlx_gate import attr as _mlx
+        mx = _mlx("mlx.core")
 
         mx.clear_cache()
     except Exception:
@@ -236,8 +246,9 @@ def release() -> bool:
 
 def _generate(image_path: str, question: str, max_tokens: int, name: str) -> str:
     model, processor = load(name)
-    from mlx_vlm import generate as vlm_generate
-    from mlx_vlm.prompt_utils import apply_chat_template
+    from symbio.mlx_gate import attr as _vlm
+    vlm_generate = _vlm("mlx_vlm.generate")
+    apply_chat_template = _vlm("mlx_vlm.prompt_utils.apply_chat_template")
 
     with _quiet():
         prompt = apply_chat_template(processor, model.config, question, num_images=1)

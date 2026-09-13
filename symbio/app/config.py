@@ -147,6 +147,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # turning quantisation on roughly quadruples the affordable context
         # without touching this number.
         "kv_budget_mb": 4000,
+        # Quantising the KV cache (4-bit) quarters the per-token cost, so the
+        # same kv_budget_mb buys roughly four times the context. Off by
+        # default: some models lose measurable quality below 8 bits, and the
+        # cache's signature must include the setting or a warm cache is reused
+        # against different bytes. These mirror config.example.json.
+        "kv_bits": None,
+        "kv_group_size": 64,
+        "quantized_kv_start": 0,
         # "auto" derives the prompt cap from kv_budget_mb; an integer sets it
         # in tokens directly; 0 switches the cap off entirely (which is what
         # every version before 2026-09-07 did).
@@ -721,7 +729,8 @@ def apply_gpu_limits(config: dict[str, Any]) -> None:
     """
     gpu = config.get("gpu", {})
     try:
-        import mlx.core as mx
+        from symbio.mlx_gate import attr as _mlx
+        mx = _mlx("mlx.core")
     except Exception:
         return
 

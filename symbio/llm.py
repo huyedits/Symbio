@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from mlx_lm import load
 
 from symbio.config import can_run_lora, detect_model_type
 from symbio.constants import (
@@ -23,7 +22,14 @@ from symbio.constants import (
     TRAIN_FILE,
     VALID_FILE,
 )
+from symbio.mlx_gate import attr as _mlx
 from symbio.utils import clean_response
+
+
+def load(*args, **kwargs):
+    """Load a model through the MLX engine, resolving it on first use so that
+    importing this module never needs the engine installed (see mlx_gate)."""
+    return _mlx("mlx_lm.load")(*args, **kwargs)
 
 
 def append_training_text(text: str):

@@ -238,7 +238,7 @@ def _check_model_load(config: dict[str, Any], tokenizer: Any = None) -> _CheckRe
     already answered: the startup self-check runs *after* the model loaded, so
     "can this model load" had been proved a moment earlier.
     """
-    from mlx_lm import load
+    from symbio.mlx_gate import attr as _mlx
 
     model_name = config.get("model_name", "")
     if not model_name:
@@ -246,7 +246,7 @@ def _check_model_load(config: dict[str, Any], tokenizer: Any = None) -> _CheckRe
     try:
         if tokenizer is None:
             # Load in lazy mode to keep the check fast; only validate tokenizer access.
-            _, tokenizer = load(model_name, lazy=True)
+            _, tokenizer = _mlx("mlx_lm.load")(model_name, lazy=True)
         tokenizer.encode("hello")
         return _CheckResult("model_load", True, message=f"Model '{model_name}' loadable.")
     except Exception as exc:

@@ -94,7 +94,12 @@ def _load_with_backend(args: tuple, kwargs: dict, config: dict | None):
                             adapter_path=kwargs.pop("adapter_path", None),
                             config=config)
 
-    from mlx_lm import load as _mlx_load
+    from symbio.mlx_gate import attr as _g
+
+    # Resolving through the gate applies mlx_compat's patches (gemma4_unified
+    # remap, speculative-decode fix) before the first engine import, which
+    # this direct loader is often that first import for.
+    _mlx_load = _g("mlx_lm.load")
 
     # Mistral tokenizers ship a pre-tokenizer regex that mis-splits some
     # Unicode (transformers warns and asks for fix_mistral_regex=True on load).

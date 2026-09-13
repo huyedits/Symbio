@@ -21,9 +21,23 @@ import time
 from pathlib import Path
 from typing import Any
 
-from mlx_lm import generate
 from symbio.app.modelload import load
-from mlx_lm.sample_utils import make_logits_processors, make_sampler
+from symbio.mlx_gate import attr as _mlx
+
+
+def generate(*args, **kwargs):
+    """Engine generate, resolved lazily so importing this module (and with it
+    `symbio.app`, pulled in by the CLI/desktop) never needs the engine."""
+    return _mlx("mlx_lm.generate.generate")(*args, **kwargs)
+
+
+def make_logits_processors(*args, **kwargs):
+    return _mlx("mlx_lm.sample_utils.make_logits_processors")(*args, **kwargs)
+
+
+def make_sampler(*args, **kwargs):
+    return _mlx("mlx_lm.sample_utils.make_sampler")(*args, **kwargs)
+
 
 from symbio import constants
 from symbio.app import golden, pending, tooling, training
@@ -181,8 +195,9 @@ def _adapter_fits_model(model: Any, adapter_file: Path) -> bool:
     Refusing the swap costs one full load; getting it wrong costs correctness.
     """
     try:
-        import mlx.core as mx
-        from mlx.utils import tree_flatten
+        from symbio.mlx_gate import attr as _mlx
+        mx = _mlx("mlx.core")
+        tree_flatten = _mlx("mlx.utils.tree_flatten")
 
         weights = mx.load(str(adapter_file))
         if not weights:

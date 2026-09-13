@@ -718,10 +718,10 @@ def _cmd_skill(config: dict[str, Any], args: argparse.Namespace) -> int:
         return 0
 
     if sub == "new":
-        from mlx_lm import load
+        from symbio.mlx_gate import attr as _mlx
 
         print(f"Loading tokenizer for {config['model_name']}...")
-        _, tokenizer = load(config["model_name"])
+        _, tokenizer = _mlx("mlx_lm.load")(config["model_name"])
         result = memory.save_skill(
             args.name,
             args.steps,
@@ -891,8 +891,7 @@ def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
     """
     from pathlib import Path
 
-    from mlx_lm import generate as mlx_generate, load as mlx_load
-    from mlx_lm.sample_utils import make_sampler
+    from symbio.mlx_gate import attr as _mlx
     from tag_rag import TagIndex
 
     from symbio import constants
@@ -917,9 +916,9 @@ def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
     adapter_dir = constants.ADAPTER_DIR
     try:
         if adapter_dir.exists() and (adapter_dir / "adapter_config.json").exists():
-            model, tokenizer = mlx_load(config["model_name"], adapter_path=str(adapter_dir))
+            model, tokenizer = _mlx("mlx_lm.load")(config["model_name"], adapter_path=str(adapter_dir))
         else:
-            model, tokenizer = mlx_load(config["model_name"])
+            model, tokenizer = _mlx("mlx_lm.load")(config["model_name"])
     except Exception as e:
         print(f"Failed to load model {config['model_name']}: {e}")
         return 1
@@ -937,9 +936,9 @@ def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
             messages, tokenize=False, add_generation_prompt=True,
             enable_thinking=THINKING_ENABLED,
         )
-        sampler = make_sampler(temp=0.1, top_p=0.9)
+        sampler = _mlx("mlx_lm.sample_utils.make_sampler")(temp=0.1, top_p=0.9)
         try:
-            text = mlx_generate(
+            text = _mlx("mlx_lm.generate.generate")(
                 model, tokenizer, prompt=prompt_text, sampler=sampler,
                 max_tokens=2048, verbose=False,
             )
@@ -1133,11 +1132,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if sub == "build":
             from symbio.app import mcp_tools
-            from mlx_lm import load
+            from symbio.mlx_gate import attr as _mlx
 
             desc = args.desc or args.name
             print(f"Loading tokenizer for {config['model_name']}...")
-            _, tokenizer = load(config["model_name"])
+            _, tokenizer = _mlx("mlx_lm.load")(config["model_name"])
             result = mcp_tools.build_mcp_tool(
                 args.name,
                 desc,

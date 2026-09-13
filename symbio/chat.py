@@ -5,7 +5,7 @@ import sys
 from datetime import datetime
 from typing import Any
 
-from mlx_lm import load
+from symbio.mlx_gate import attr as _mlx
 
 from symbio.config import (
     _adapter_matches_model,
@@ -28,6 +28,13 @@ from symbio.llm import (
     seed_training_data,
 )
 from symbio.utils import clean_response, ensure_seed_notes, save_note, strip_generation_artifacts
+
+
+def load(*args, **kwargs):
+    """Load a model through the MLX engine, resolving it on first use so that
+    importing this module never needs the engine installed (see mlx_gate)."""
+    return _mlx("mlx_lm.load")(*args, **kwargs)
+
 
 # --- Logger ---
 chat_logger = logging.getLogger("chat")
