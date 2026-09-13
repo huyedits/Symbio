@@ -97,7 +97,7 @@ dev = [
 # of `symbio/computer.py` (half the size, months behind) that nothing imported.
 
 [tool.setuptools.packages.find]
-include = ["symbio*"]
+include = ["symbio*", "symbio_desktop*"]
 
 [tool.pytest.ini_options]
 # Only test_*.py, NOT pytest's default "*_test.py" as well.

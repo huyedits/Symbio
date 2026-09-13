@@ -2205,7 +2205,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if err:
             self.output_fn(f"  [Train] Model reload failed: {err}")
 
-    def _train_unloaded(self, iters: int | None = None) -> bool:
+    def _train_unloaded(self, iters: int | None = None,
+                        sample_weights: list[float] | None = None) -> bool:
         """Run LoRA training with our own copy of the weights evicted first.
 
         `mlx_lm lora` runs as a child process and is a second, independent
@@ -2218,6 +2219,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         On success the model is left unloaded, because every caller reloads
         the freshly trained adapter anyway. On a skipped run, a failure, or
         an exception, the previous model is restored before returning.
+
+        `sample_weights` passes a per-corpus-line weight vector to the trainer
+        (see training.run_training): the batch trainer (maybe_train_on_mistakes
+        via _guarded_train) feeds it curriculum.plan's weights for this round.
         """
         # Both branches end the same way: a trainer child process has exited,
         # and whoever called this reloads the adapter immediately afterwards.
@@ -2225,8 +2230,18 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # the child's bulk Metal teardown, which is the sequence that panics
         # the driver — so the wait goes here, once, rather than at each of the
         # several places that reload.
+        #
+        # sample_weights is only passed when present, so the unweighted path
+        # keeps its exact historical call shape (trainers stubbed as
+        # run_training(config, iters=...) in the suite still bind).
+        def _run():
+            if sample_weights is None:
+                return training.run_training(self.config, iters=iters)
+            return training.run_training(self.config, iters=iters,
+                                         sample_weights=sample_weights)
+
         if not self.config.get("gpu", {}).get("unload_model_during_training", True):
-            trained = training.run_training(self.config, iters=iters)
+            trained = _run()
             training.settle_after_trainer_exit(self.config, status_fn=self.output_fn)
             return trained
 
@@ -2234,14 +2249,16 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         self._unload_model()
         trained = False
         try:
-            trained = training.run_training(self.config, iters=iters)
+            trained = _run()
             return trained
         finally:
             training.settle_after_trainer_exit(self.config, status_fn=self.output_fn)
             if not trained:
                 self._restore_model()
 
-    def _guarded_train(self, config: dict[str, Any] | None = None, iters: int | None = None) -> bool:
+    def _guarded_train(self, config: dict[str, Any] | None = None,
+                       iters: int | None = None,
+                       sample_weights: list[float] | None = None) -> bool:
         """Run LoRA training, reload the adapter, then check it against the
         golden set (a fixed battery of prompts covering identity and
         tool-tag formatting — see symbio.app.golden). A regression, a case
@@ -2253,7 +2270,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
         `config` is accepted (and ignored) so this method can be passed
         directly to learn.maybe_train_on_mistakes, which expects a
-        `train_fn(config, iters=...)` signature."""
+        `train_fn(config, iters=...)` signature. `sample_weights` is the
+        per-corpus-line weight vector from the batch trainer's curriculum
+        plan, passed straight through to run_training."""
         learn_cfg = self.config.get("learn", {})
         golden_on = learn_cfg.get("golden_set_enabled", True)
 
@@ -2296,7 +2315,14 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             backup_dir=str(backup_dir) if backup_dir else None)
 
         try:
-            trained = self._train_unloaded(iters=iters)
+            # sample_weights is only passed when present (same rule as the
+            # _train_unloaded closure): stubs and old trainers bound as
+            # _train_unloaded(iters=...) in the suite must keep binding.
+            if sample_weights is None:
+                trained = self._train_unloaded(iters=iters)
+            else:
+                trained = self._train_unloaded(iters=iters,
+                                               sample_weights=sample_weights)
             local_telemetry.log_event("train", iters=iters, ok=bool(trained))
             if not trained or not adapter_weights_present():
                 # Covers the "trained but no adapter on disk" case, which
@@ -2590,7 +2616,30 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
         learn.maybe_train_on_mistakes(
             self.config, self.tokenizer, self.system_prompt,
-            train_fn=self._guarded_train, check_fn=self._golden_check)
+            train_fn=self._guarded_train, check_fn=self._golden_check,
+            eval_fn=self._eval_battery_result)
+
+    def _eval_battery_result(self):
+        """Run the held-out eval battery against the live model.
+
+        Returns an EvalResult for curriculum.plan to weight the mistake batch
+        by, or None when it cannot run — model not resident, battery disabled,
+        generation error. Every None is read by the caller (and by the plan
+        step after it) as "fall back to linear boost", never as a crash.
+        Called lazily by maybe_train_on_mistakes, only once a retrain is
+        actually going to run, so a 9-case battery is spent at most once per
+        real training round instead of on every turn that saves a note.
+        """
+        if self.model is None:
+            return None
+        try:
+            from symbio.app.eval import run_eval_set
+            return run_eval_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config)
+        except Exception as e:
+            self.output_fn(f"  [Learn] Eval battery failed to run: {e}")
+            return None
 
     def _golden_check(self) -> tuple[int, int] | None:
         """Run the golden battery against the live model and return

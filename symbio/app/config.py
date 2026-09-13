@@ -479,6 +479,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # it. A model that passes keeps its weights and the notes are
         # archived. Set False to go straight to training as before.
         "mistake_pretrain_check": True,
+        # Weight the mistake batch by what the held-out eval says is weak
+        # (curriculum.plan) instead of the linear boost path: each note is
+        # written once and repeated at train time via sample_weights, with
+        # iterations scaled to the weighted corpus. Only fires when the live
+        # call site can run an eval battery.
+        "curriculum_weighting": True,
         "batch_train_iters": 25,
         "iters_per_severity": 5,
         "max_batch_train_iters": 100,

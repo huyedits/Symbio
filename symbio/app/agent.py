@@ -1,4 +1,19 @@
-"""AIAgent class for Symbio."""
+"""AIAgent class for Symbio, living in the app tree.
+
+This is the single home of the autonomous single-turn agent loop. It used to
+be `symbio/agent.py` (legacy, 2026-09) while the live brain lived in
+`symbio/app/chat.py` as `ChatSession` — two representations, and `import
+symbio` handed out the months-behind one via `symbio/__init__.py`. Moved on
+2026-09-13 so the top-level re-export resolves here, and the legacy module is
+gone.
+
+The class keeps its old single-turn interface (`run(user_input) ->
+{"text": ...}`) because the legacy learn tests and dev scripts drive it that
+way; `ChatSession` remains the interactive CLI brain. The system prompt is
+built by `symbio.app.prompts.build_system_prompt` with the real `config`, so
+both representations now speak the same prompt (tool catalog, worker roster,
+standing memory included).
+"""
 
 from __future__ import annotations
 
@@ -40,12 +55,12 @@ def make_logits_processors(*args, **kwargs):
     """Logits-processor factory from the MLX engine (resolved on first use)."""
     return _mlx("mlx_lm.sample_utils.make_logits_processors")(*args, **kwargs)
 
-from symbio.chat import build_system_prompt
+from symbio.app.prompts import build_system_prompt
+from symbio.app.training import THINKING_ENABLED
 from symbio.config import can_run_lora, detect_model_type
 from symbio.constants import ADAPTER_DIR, DEFAULT_CONFIG, LOG_DIR, PROJECT_DIR
 from symbio.learn import _is_system_observation
 from symbio.llm import run_training, save_history_pairs
-from symbio.app.training import THINKING_ENABLED
 from symbio.store import SessionStore
 from symbio.tools import (
     build_tool_registry,
@@ -202,7 +217,7 @@ class AIAgent:
         self.adapter_loaded = adapter_loaded
         self.tools = build_tool_registry(self)
         self.system_prompt = build_system_prompt(
-            config["assistant_name"], config["user_name"], self.tools
+            config["assistant_name"], config["user_name"], config
         )
         self.history: list[dict[str, str]] = []
         self.sampler = make_sampler(
@@ -292,7 +307,7 @@ class AIAgent:
     def update_identity(self, assistant_name: str, user_name: str):
         self.config["assistant_name"] = assistant_name
         self.config["user_name"] = user_name
-        self.system_prompt = build_system_prompt(assistant_name, user_name, self.tools)
+        self.system_prompt = build_system_prompt(assistant_name, user_name, self.config)
 
     def _persist_turn(self, role: str, content: str):
         entry = {

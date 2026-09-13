@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 from symbio import constants, safety
 from symbio.app import belief, curriculum, memory, training
-from symbio.app.tooling import redact_secrets, strip_tool_tags
+from symbio.app.tooling import redact_secrets
 
 
 # Phrases that signal the model is answering from a gap in its knowledge.
@@ -608,8 +608,14 @@ def find_correction_sample(history: list[dict[str, str]], config: dict[str, Any]
     if correct_idx is None:
         return None
 
-    wrong_answer = strip_tool_tags(history[wrong_idx].get("content", ""))
-    correct_answer = strip_tool_tags(history[correct_idx].get("content", ""))
+    wrong_answer = history[wrong_idx].get("content", "")
+    correct_answer = history[correct_idx].get("content", "")
+    # Tool tags are deliberately KEPT in both. A correction often teaches HOW
+    # to answer — which tool to call, with which arguments — and stripping
+    # <tool_call> here threw away exactly the one lesson the mistake loop can
+    # never teach otherwise: every correction that reached the corpus was
+    # plain prose. save_mistake_note does the sanitising that matters
+    # (secret redaction, line flattening) on the way to disk.
     if not wrong_answer.strip() or not correct_answer.strip():
         return None
     correct_answer = ground_corrected_answer(
@@ -641,6 +647,15 @@ _GROUNDING_STOPWORDS = frozenset("""
 _SENTENCE_SPLIT_RE = re.compile(
     r"(?<=[.!?])\s+|,\s+|\s+[—–-]\s+|;\s+")
 
+# The model's one wrapped tool form: <tool_call>{"name": ..., "arguments":
+# {...}}</tool_call>. A bare {"name": ...} block is not a correction target —
+# there is nothing to correct about text the model wrote without the wrapper.
+# Match the open tag loosely so a truncated call (open tag, no close) can
+# still be recognised as an action rather than cut away as invented prose.
+_TOOL_CALL_BLOCK_RE = re.compile(
+    r"<tool_call\b[^>]*>(?:.*?</tool_call>)?" ,
+    re.DOTALL)
+
 
 def _content_words(text: str) -> set[str]:
     words = re.sub(r"[^\w\s]", " ", text.lower()).split()
@@ -666,8 +681,37 @@ def ground_corrected_answer(answer: str, correction: str, question: str) -> str:
     than split and rejoined, so a kept list keeps its commas. Returns "" when
     even the opening segment is ungrounded, which drops the sample instead of
     teaching it.
+
+    A `<tool_call>` block is an action, not an assertion: it is never cut, and
+    it survives grounding intact. A correction that teaches which tool to call
+    would otherwise be deleted wholesale — tool-call words are rarely in the
+    correction's own vocabulary — which is how the tool format became the one
+    lesson the mistake loop could never teach.
     """
+    blocks = list(_TOOL_CALL_BLOCK_RE.finditer(answer))
+    if not blocks:
+        return _ground_prose_answer(answer, _content_words(correction)
+                                    | _content_words(question), correction)
     allowed = _content_words(correction) | _content_words(question)
+    parts: list[str] = []
+    pos = 0
+    for m in blocks:
+        parts.append(_ground_prose_run(answer[pos:m.start()], allowed))
+        parts.append(m.group(0))
+        pos = m.end()
+    parts.append(_ground_prose_run(answer[pos:], allowed))
+    text = " ".join(p for p in parts if p.strip()).strip()
+    # The tool call itself satisfies the closing check: it is the corrected
+    # action, not an acknowledgement, so "Okay. <tool...>" drops the okay and
+    # keeps the call. But a stray tool call about nothing in the correction is
+    # still not an answer, and must not be trained as one.
+    if not (_content_words(text) & _content_words(correction)):
+        return ""
+    return text
+
+
+def _ground_prose_answer(answer: str, allowed: set[str], correction: str) -> str:
+    """The pure-prose case: the historical ground_corrected_answer body."""
     cut = None
     pos = 0
     for sep in list(_SENTENCE_SPLIT_RE.finditer(answer)) + [None]:
@@ -690,6 +734,24 @@ def ground_corrected_answer(answer: str, correction: str, question: str) -> str:
     if not (_content_words(text) & _content_words(correction)):
         return ""
     return text
+
+
+def _ground_prose_run(text: str, allowed: set[str]) -> str:
+    """Keep the opening prose of `text` while it stays inside the correction's
+    vocabulary; drop the first inventing segment and everything after it. Used
+    per prose run around tool-call blocks, which are kept whole."""
+    cut = None
+    pos = 0
+    for sep in list(_SENTENCE_SPLIT_RE.finditer(text)) + [None]:
+        end = sep.start() if sep is not None else len(text)
+        if _content_words(text[pos:end]) - allowed:
+            cut = pos
+            break
+        if sep is None:
+            break
+        pos = sep.end()
+    out = text if cut is None else text[:cut]
+    return out.rstrip(" ,;:-—–")
 
 
 _CORRECTION_LABEL_RE = re.compile(
@@ -1229,8 +1291,39 @@ def digest_mistakes_adaptively(tokenizer, system_prompt: str, eval_result,
     return len(planned), written
 
 
+def _digest_planned_to_training(tokenizer, system_prompt: str, eval_result,
+                                config: dict[str, Any], boost: int = 1,
+                                cases=None) -> tuple[int, list[float]] | None:
+    """Digest pending mistakes by the held-out plan, writing each note once.
+
+    Returns (before_line_count, note_weights): how many corpus lines existed
+    before the digest, and the per-note weight curriculum.plan assigned, one
+    per note just written. The caller prepends 1.0s for the pre-existing
+    lines to build the full sample_weights vector that run_training's
+    weighted_corpus expands — writing one copy here and letting the trainer
+    weight it keeps the plan's emphasis out of the permanent corpus, and puts
+    it where run_training's iters-scaling can see exactly what the plan
+    produced.
+
+    Returns None when no pending note parses into a query/answer pair; nothing
+    is written and nothing is archived.
+    """
+    planned = adaptive_training_plan(eval_result, config, cases=cases, boost=boost)
+    if not planned:
+        return None
+    before = training.count_samples()
+    note_weights: list[float] = []
+    for item in planned:
+        training.append_chat_pair(item["query"], item["answer"],
+                                  tokenizer, system_prompt)
+        note_weights.append(float(item["repeats"]))
+    print(curriculum.summarise(planned))
+    archive_mistake_notes()
+    return before, note_weights
+
+
 def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: str,
-                            train_fn=None, check_fn=None) -> bool:
+                            train_fn=None, check_fn=None, eval_fn=None) -> bool:
     """If enough mistake notes have accumulated, digest them and run a short
     LoRA pass. Returns True when training completed (caller reloads model).
     `train_fn(config, iters=...)` defaults to training.run_training; pass a
@@ -1244,7 +1337,19 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
     cycle on it, and a model that answers all of them is left alone. Without
     it a run of browser failures — a page that had not settled, nothing
     focused — fires a full LoRA pass mid-conversation, which is how a 16 GB
-    machine ends up with two model copies resident and dies."""
+    machine ends up with two model copies resident and dies.
+
+    `eval_fn()` optionally returns an EvalResult (symbio.app.eval.run_eval_set)
+    from the held-out battery. When one is available and
+    learn.curriculum_weighting is on, the digest weights come from
+    curriculum.plan instead of the linear boost path: each note is written
+    once and weighted at train time (see _digest_planned_to_training), with
+    run_training scaling the iterations to the weighted corpus. eval_fn is
+    invoked lazily — only once the batch has crossed the threshold and a
+    retrain is actually going to run — so the battery is not spent on every
+    turn that saves a note. A battery that raises, or a plan that raises (e.g.
+    a HeldOutViolation), falls back to the linear path with a printed notice.
+    """
     train_fn = train_fn or training.run_training
     learn_cfg = config.get("learn", {})
     if not learn_cfg.get("enabled", True):
@@ -1285,26 +1390,69 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
 
     print(f"\n  [Learn] {count} mistake note(s) reached. Digesting into training data...")
     boost = max(1, int(learn_cfg.get("boost_factor", 3)))
-    digested, total_severity = digest_mistakes_to_training(tokenizer, system_prompt, boost=boost)
-    print(f"  [Learn] Digested {digested} mistake note(s) "
-          f"(boost={boost}, total severity={total_severity}).")
+
+    # Curriculum weighting, when an eval battery is available. The plan decides
+    # each note's repeat count from what the held-out eval says is weak and
+    # the note's age; the notes are written once and weighted at train time.
+    # Any failure here changes the weights down to the linear path, loudly —
+    # a plan that stops must not go on in silence (the leak assert_held_out
+    # catches is exactly the kind of failure that wants announcing, even while
+    # the session keeps its training schedule).
+    sample_weights = None
+    digested = 0
+    total_severity = 0
+    if eval_fn is not None and learn_cfg.get("curriculum_weighting", True):
+        try:
+            eval_result = eval_fn()
+        except Exception as e:
+            print(f"  [Learn] Curriculum eval battery could not run ({e}); "
+                  f"training with linear boost weights.")
+            eval_result = None
+        if eval_result is not None:
+            try:
+                planned = _digest_planned_to_training(
+                    tokenizer, system_prompt, eval_result, config, boost=boost)
+            except Exception as e:
+                print(f"  [Learn] Curriculum plan failed ({e}); "
+                      f"training with linear boost weights.")
+                planned = None
+            if planned is not None:
+                before, note_weights = planned
+                sample_weights = [1.0] * before + note_weights
+                digested = len(note_weights)
+                print(f"  [Learn] Digested {digested} mistake note(s) weighted "
+                      f"by the held-out eval; iterations scale to corpus size.")
+    if sample_weights is None:
+        digested, total_severity = digest_mistakes_to_training(
+            tokenizer, system_prompt, boost=boost)
+        print(f"  [Learn] Digested {digested} mistake note(s) "
+              f"(boost={boost}, total severity={total_severity}).")
 
     if not learn_cfg.get("auto_train", True):
         print("  [Learn] Auto-train is disabled. Run /train to fine-tune now.")
         return False
 
-    # Scale iterations with severity above the mild baseline: an all-mild
-    # batch trains at exactly batch_train_iters; each severity point beyond
-    # that adds iters_per_severity, capped so a harsh backlog can't run away.
     base_iters = int(learn_cfg.get("batch_train_iters", 25))
-    per_severity = int(learn_cfg.get("iters_per_severity", 5))
-    cap = max(base_iters, int(learn_cfg.get("max_batch_train_iters", 100)))
-    iters = min(cap, base_iters + per_severity * max(0, total_severity - digested))
-    if iters != base_iters:
-        print(f"  [Learn] Severity {total_severity} across {digested} note(s) "
-              f"scales training from {base_iters} to {iters} iters.")
-    print(f"  [Learn] Running LoRA update ({iters} iters)...")
-    trained = train_fn(config, iters=iters)
+    if sample_weights is not None:
+        # The plan's repeats already encode severity, and run_training scales
+        # the budget to the weighted corpus — the severity-based scaling in the
+        # else branch would double-count the same material.
+        iters = base_iters
+        print(f"  [Learn] Running curriculum-weighted LoRA update "
+              f"({base_iters} iters, scaled to the weighted corpus)...")
+        trained = train_fn(config, iters=iters, sample_weights=sample_weights)
+    else:
+        # Scale iterations with severity above the mild baseline: an all-mild
+        # batch trains at exactly batch_train_iters; each severity point beyond
+        # that adds iters_per_severity, capped so a harsh backlog can't run away.
+        per_severity = int(learn_cfg.get("iters_per_severity", 5))
+        cap = max(base_iters, int(learn_cfg.get("max_batch_train_iters", 100)))
+        iters = min(cap, base_iters + per_severity * max(0, total_severity - digested))
+        if iters != base_iters:
+            print(f"  [Learn] Severity {total_severity} across {digested} note(s) "
+                  f"scales training from {base_iters} to {iters} iters.")
+        print(f"  [Learn] Running LoRA update ({iters} iters)...")
+        trained = train_fn(config, iters=iters)
     if not trained:
         print("  [Learn] Training did not complete; the digested samples remain "
               "in training data for the next run.")

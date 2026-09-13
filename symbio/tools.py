@@ -42,7 +42,7 @@ from symbio.store import SessionStore
 from symbio.utils import _project_path, _safe_note_filename, _truncated, save_note
 
 if TYPE_CHECKING:
-    from symbio.agent import AIAgent
+    from symbio.app.agent import AIAgent
 
 
 logger = logging.getLogger("chat")

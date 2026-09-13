@@ -27,7 +27,7 @@ from symbio.app.training import (
     restore_adapter,
     run_training,
 )
-from symbio.chat import build_system_prompt
+from symbio.app.prompts import build_training_system_prompt
 from symbio.mcp.memory import MemoryStore
 from symbio.mcp.models import MemoryEntry
 from symbio.mcp.ollama_client import validate_local_output
@@ -106,10 +106,10 @@ async def auto_finetune(skill_tag: str, db_path: Path | None = None) -> dict[str
     if not examples:
         return {"ok": False, "error": "no examples found"}
 
-    system_prompt = build_system_prompt(
+    system_prompt = build_training_system_prompt(
         config.get("assistant_name") or "Assistant",
         config.get("user_name") or "User",
-        [],
+        config,
     )
 
     # 1. Load the base model + tokenizer (without adapter so we train from the

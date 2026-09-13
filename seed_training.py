@@ -6,7 +6,8 @@ from typing import Any
 
 from mlx_lm import load
 
-from symbio import build_system_prompt, clean_response, load_config
+from symbio import clean_response, load_config
+from symbio.app.prompts import build_training_system_prompt
 
 PROJECT_DIR = Path(__file__).parent.resolve()
 DATA_DIR = PROJECT_DIR / "training_data"
@@ -54,7 +55,7 @@ def main():
     config = prompt_if_missing(config)
     print(f"Loading {config['model_name']} tokenizer...")
     _, tokenizer = load(config["model_name"])
-    system_prompt = build_system_prompt(config["assistant_name"], config["user_name"], [])
+    system_prompt = build_training_system_prompt(config["assistant_name"], config["user_name"], config)
 
     assistant = config["assistant_name"]
     user = config["user_name"]

@@ -1861,6 +1861,32 @@ def weighted_corpus(train_file: Path, weights: list[float] | None):
         backup.unlink(missing_ok=True)
 
 
+def scaled_weighted_iters(config: dict[str, Any], base_iters: int | None,
+                          weights: list[float]) -> int | None:
+    """Scale an iteration budget to a weighted corpus's expanded size.
+
+    weighted_corpus writes sample i round(w_i) times, so a weighted run reads
+    `stretch = mean(round(w_i))` copies for every original line. A fixed step
+    budget against that corpus gives every sample — the boosted ones included —
+    1/stretch of the updates it would otherwise get, which quietly turns
+    "repeat the lesson" into "dilute the corpus". Stretch the budget by the
+    same factor, then cap it so a heavily weighted backlog cannot monopolise a
+    retrain. `iters` is kept as a floor the way iters_for_corpus keeps
+    lora.iters: the scaled budget is never allowed to drop below the base.
+
+    Returns the budget unchanged when `base_iters` is None (the trainer's own
+    schedule takes over).
+    """
+    if base_iters is None:
+        return None
+    stretch = (sum(max(1, int(round(float(w)))) for w in weights)
+               / max(1, len(weights)))
+    scaled = math.ceil(base_iters * stretch)
+    cap = max(base_iters, int(config.get("learn", {}).get(
+        "max_batch_train_iters", 100)))
+    return min(cap, scaled)
+
+
 def run_training(config: dict[str, Any], iters: int | None = None,
                  role: str | None = None, model_name: str | None = None,
                  resume: bool = False,
@@ -1872,6 +1898,10 @@ def run_training(config: dict[str, Any], iters: int | None = None,
     was — the unweighted path does not change shape to accommodate the
     weighted one.
 
+    Weights first, then the budget: the step count is scaled to the expanded
+    corpus BEFORE the trainer sees it (see scaled_weighted_iters), so repeated
+    samples cost the same per copy as an unweighted corpus would.
+
     The validation split is taken BEFORE expanding, so a heavily weighted
     sample cannot end up duplicated into valid.jsonl and be validated against
     itself. ensure_validation_split returns early when valid.jsonl already
@@ -1880,6 +1910,12 @@ def run_training(config: dict[str, Any], iters: int | None = None,
     if sample_weights is None:
         return _run_training(config, iters, role, model_name, resume)
     ensure_validation_split(role=role)
+    if iters is not None:
+        scaled = scaled_weighted_iters(config, iters, sample_weights)
+        if scaled != iters:
+            print(f"  [Train] Iterations {iters} scaled to {scaled} for the "
+                  f"weighted {len(sample_weights)}-sample corpus.")
+            iters = scaled
     with weighted_corpus(_train_file_for(role), sample_weights):
         return _run_training(config, iters, role, model_name, resume)
 

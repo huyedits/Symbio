@@ -120,7 +120,6 @@ telemetry/
 # Throwaway one-off scripts (tool-use seeding, manual training runner).
 seed_tools.py
 train_runner.py
-test_*.py
 
 # Scratch copies conftest.py points the runtime at during a pytest run. They
 # are removed on a clean exit; ignoring them keeps an interrupted run from
@@ -151,13 +150,11 @@ skill_eval_*.json
 .pytest-training-backup/
 eval_*.json
 
-# Tests and scratch scaffolding: kept locally, not published.
+# Scratch scripts: kept locally, not published. The pytest suite (root
+# test_*.py, conftest.py, tests/, tests_mcp/) IS tracked — see the suite-wide
+# isolation in conftest.py, which redirects every real store to scratch dirs.
 # Every pattern is root-anchored on purpose — an unanchored `_*.py` would
 # also match symbio/__init__.py and quietly untrack the package.
-/test_*.py
-/conftest.py
-/tests/
-/tests_mcp/
 /_*.py
 /eval_routing.py
 /eval_toolcall.py

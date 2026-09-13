@@ -1197,7 +1197,8 @@ class AgentTurnMixin:
                 self.output_fn(f"  [Learn] Tool mistake captured: {path.name}")
                 learn.maybe_train_on_mistakes(
                     self.config, self.tokenizer, self.system_prompt,
-                    train_fn=self._guarded_train, check_fn=self._golden_check)
+                    train_fn=self._guarded_train, check_fn=self._golden_check,
+                    eval_fn=self._eval_battery_result)
             pending_tool_error = (
                 f"[System observation: {observation}]" if learn.sounds_like_tool_error(observation)
                 else None
