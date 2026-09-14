@@ -43,29 +43,38 @@ TRANSCRIPT = HERE / "attempts.jsonl"
 
 # Names deliberately disjoint from eval_aws.CASES, so a sample can never be an
 # eval answer wearing a different hat.
-BUCKETS = ["telemetry-raw", "invoice-dumps", "nightly-backups", "media-cache",
-           "audit-trail", "customer-exports", "build-artifacts", "sensor-feed"]
-KEYS = ["2026/jan/data.json", "logs/app.log", "exports/users.csv",
-        "snapshots/db.dump", "raw/frame-001.bin"]
+CONTAINERS = ["telemetry-raw", "invoice-dumps", "nightly-backups", "media-cache",
+              "audit-trail", "customer-exports", "build-artifacts", "sensor-feed"]
+PATHS = ["2026/jan/data.json", "logs/app.log", "exports/users.csv",
+         "snapshots/db.dump", "raw/frame-001.bin"]
 LOCALS = ["report.pdf", "config.yaml", "dump.sql", "notes.txt"]
-ROLES = ["ci-runner", "log-shipper", "backup-agent", "metrics-reader",
-         "queue-consumer", "image-builder"]
-TAGS = [("Team", "payments"), ("Tier", "canary"), ("Owner", "sre"),
-        ("Stage", "beta"), ("Cost", "shared")]
-INSTANCES = {
-    "i-0aa11bb": {"state": "running", "tags": {"Env": "staging", "Name": "api-1"}},
-    "i-0cc22dd": {"state": "stopped", "tags": {"Env": "staging", "Name": "api-2"}},
-    "i-0ee33ff": {"state": "running", "tags": {"Env": "sandbox", "Name": "worker-1"}},
+IDENTITIES = ["ci-runner", "log-shipper", "backup-agent", "metrics-reader",
+              "queue-consumer", "image-builder"]
+LABELS = [("Team", "payments"), ("Tier", "canary"), ("Owner", "sre"),
+          ("Stage", "beta"), ("Cost", "shared")]
+REGION = "ap-1"          # the battery uses eu-2; region is part of what must be learned
+NODES = {
+    "n-1aa": {"region": REGION, "status": "up", "labels": {"Env": "staging"}},
+    "n-2bb": {"region": REGION, "status": "halted", "labels": {"Env": "staging"}},
+    "n-3cc": {"region": REGION, "status": "up", "labels": {"Env": "sandbox"}},
 }
 
 
-def _instances():
-    return json.loads(json.dumps(INSTANCES))
+def _nodes():
+    return json.loads(json.dumps(NODES))
+
+
+def _ck(name, region=REGION):
+    return f"{region}|{name}"
+
+
+def _seed(containers=None, identities=None):
+    return {"containers": containers or {}, "nodes": _nodes(),
+            "identities": identities or {}}
 
 
 def make_tasks(rng: random.Random, n: int) -> list[eval_aws.Case]:
     """Tasks over the environment's surface. Tasks only — never answers."""
-    tasks: list[eval_aws.Case] = []
     makers = []
 
     def maker(fn):
@@ -73,100 +82,122 @@ def make_tasks(rng: random.Random, n: int) -> list[eval_aws.Case]:
         return fn
 
     @maker
-    def _mb(r):
-        b = r.choice(BUCKETS)
+    def _new(r):
+        c = r.choice(CONTAINERS)
         return eval_aws.Case(
-            f"mb_{b}", f"Create an S3 bucket named {b}.",
-            {"buckets": {}, "instances": _instances(), "roles": {}},
-            lambda code, out, st, b=b: code == 0 and b in st["buckets"])
+            f"new_{c}", f"In region {REGION}, create a container named {c}.",
+            _seed(),
+            lambda code, out, st, c=c: code == 0 and _ck(c) in st["containers"])
 
     @maker
-    def _upload(r):
-        b, k, f = r.choice(BUCKETS), r.choice(KEYS), r.choice(LOCALS)
+    def _put(r):
+        c, k, f = r.choice(CONTAINERS), r.choice(PATHS), r.choice(LOCALS)
         return eval_aws.Case(
-            f"up_{b}", f"Upload the local file {f} into the bucket {b} at the "
-                       f"key {k}.",
-            {"buckets": {b: {}}, "instances": _instances(), "roles": {}},
-            lambda code, out, st, b=b, k=k: code == 0 and k in st["buckets"].get(b, {}))
+            f"put_{c}", f"In region {REGION}, store the local file {f} in the "
+                        f"container {c} at the path {k}.",
+            _seed(containers={_ck(c): {}}),
+            lambda code, out, st, c=c, k=k: code == 0
+            and k in st["containers"].get(_ck(c), {}))
 
     @maker
-    def _rm(r):
-        b, k = r.choice(BUCKETS), r.choice(KEYS)
+    def _drop(r):
+        c, k = r.choice(CONTAINERS), r.choice(PATHS)
         return eval_aws.Case(
-            f"rm_{b}", f"Delete the object {k} from the bucket {b}.",
-            {"buckets": {b: {k: "x"}}, "instances": _instances(), "roles": {}},
-            lambda code, out, st, b=b, k=k: code == 0 and k not in st["buckets"].get(b, {}))
+            f"drop_{c}", f"In region {REGION}, delete the path {k} from the "
+                         f"container {c}.",
+            _seed(containers={_ck(c): {k: "x"}}),
+            lambda code, out, st, c=c, k=k: code == 0
+            and k not in st["containers"].get(_ck(c), {}))
 
     @maker
-    def _ls(r):
-        b, k = r.choice(BUCKETS), r.choice(KEYS)
+    def _list(r):
+        c, k = r.choice(CONTAINERS), r.choice(PATHS)
         return eval_aws.Case(
-            f"ls_{b}", f"Show me what is stored in the bucket {b}.",
-            {"buckets": {b: {k: "x"}}, "instances": _instances(), "roles": {}},
+            f"list_{c}", f"In region {REGION}, show what is inside the container {c}.",
+            _seed(containers={_ck(c): {k: "x"}}),
             lambda code, out, st, k=k: code == 0 and k in out)
 
     @maker
-    def _rb(r):
-        b = r.choice(BUCKETS)
+    def _dropc(r):
+        c = r.choice(CONTAINERS)
         return eval_aws.Case(
-            f"rb_{b}", f"Remove the bucket {b}; it is already empty.",
-            {"buckets": {b: {}}, "instances": _instances(), "roles": {}},
-            lambda code, out, st, b=b: code == 0 and b not in st["buckets"])
+            f"dropc_{c}", f"In region {REGION}, remove the container {c}; it is empty.",
+            _seed(containers={_ck(c): {}}),
+            lambda code, out, st, c=c: code == 0 and _ck(c) not in st["containers"])
 
     @maker
-    def _filter(r):
+    def _where(r):
         env = r.choice(["staging", "sandbox"])
-        keep = [i for i, d in INSTANCES.items() if d["tags"]["Env"] == env]
-        drop = [i for i in INSTANCES if i not in keep]
+        keep = [n for n, d in NODES.items() if d["labels"]["Env"] == env]
+        drop = [n for n in NODES if n not in keep]
         return eval_aws.Case(
-            f"filter_{env}", f"Which EC2 instances are tagged Env={env}?",
-            {"buckets": {}, "instances": _instances(), "roles": {}},
+            f"where_{env}", f"In region {REGION}, which compute nodes carry the "
+                            f"label Env={env}?",
+            _seed(),
             lambda code, out, st, keep=keep, drop=drop: code == 0
             and all(i in out for i in keep) and not any(i in out for i in drop))
 
     @maker
     def _power(r):
-        iid = r.choice(list(INSTANCES))
-        want = "stopped" if INSTANCES[iid]["state"] == "running" else "running"
-        verb = "Stop" if want == "stopped" else "Start"
+        node = r.choice(list(NODES))
+        want = "halted" if NODES[node]["status"] == "up" else "up"
+        verb = "shut down" if want == "halted" else "bring back up"
         return eval_aws.Case(
-            f"power_{iid}", f"{verb} the EC2 instance {iid}.",
-            {"buckets": {}, "instances": _instances(), "roles": {}},
-            lambda code, out, st, iid=iid, want=want: code == 0
-            and st["instances"][iid]["state"] == want)
+            f"power_{node}", f"In region {REGION}, {verb} the compute node {node}.",
+            _seed(),
+            lambda code, out, st, node=node, want=want: code == 0
+            and st["nodes"][node]["status"] == want)
 
     @maker
-    def _tag(r):
-        iid = r.choice(list(INSTANCES))
-        k, v = r.choice(TAGS)
+    def _label(r):
+        node = r.choice(list(NODES))
+        k, v = r.choice(LABELS)
         return eval_aws.Case(
-            f"tag_{iid}", f"Tag the EC2 instance {iid} with {k}={v}.",
-            {"buckets": {}, "instances": _instances(), "roles": {}},
-            lambda code, out, st, iid=iid, k=k, v=v: code == 0
-            and st["instances"][iid]["tags"].get(k) == v)
+            f"label_{node}", f"In region {REGION}, put the label {k}={v} on the "
+                             f"compute node {node}.",
+            _seed(),
+            lambda code, out, st, node=node, k=k, v=v: code == 0
+            and st["nodes"][node]["labels"].get(k) == v)
 
     @maker
-    def _role(r):
-        name = r.choice(ROLES)
+    def _identity(r):
+        name = r.choice(IDENTITIES)
         return eval_aws.Case(
-            f"role_{name}", f"Create an IAM role called {name}.",
-            {"buckets": {}, "instances": _instances(), "roles": {}},
-            lambda code, out, st, name=name: code == 0 and name in st["roles"])
+            f"ident_{name}", f"In region {REGION}, create an identity called {name}.",
+            _seed(),
+            lambda code, out, st, name=name: code == 0 and name in st["identities"])
 
     @maker
-    def _delrole(r):
-        name = r.choice(ROLES)
+    def _dropid(r):
+        name = r.choice(IDENTITIES)
         return eval_aws.Case(
-            f"delrole_{name}", f"Remove the IAM role {name}.",
-            {"buckets": {}, "instances": _instances(), "roles": {name: {}}},
-            lambda code, out, st, name=name: code == 0 and name not in st["roles"])
+            f"dropid_{name}", f"In region {REGION}, remove the identity {name}.",
+            _seed(identities={name: {"region": REGION}}),
+            lambda code, out, st, name=name: code == 0 and name not in st["identities"])
 
-    for i in range(n):
-        tasks.append(makers[i % len(makers)](rng))
-    return tasks
+    @maker
+    def _duplicate(r):
+        a, b = r.sample(CONTAINERS, 2)
+        k, k2 = r.choice(PATHS), r.choice(PATHS)
+        return eval_aws.Case(
+            f"dup_{a}", f"In region {REGION}, copy the path {k} from the "
+                        f"container {a} into the container {b} at the path {k2}.",
+            _seed(containers={_ck(a): {k: "x"}, _ck(b): {}}),
+            lambda code, out, st, b=b, k2=k2: code == 0
+            and k2 in st["containers"].get(_ck(b), {}))
+
+    @maker
+    def _listc(r):
+        a, b = r.sample(CONTAINERS, 2)
+        return eval_aws.Case(
+            f"listc_{a}", f"In region {REGION}, list the containers.",
+            _seed(containers={_ck(a): {}, _ck(b): {}}),
+            lambda code, out, st, a=a: code == 0 and a in out)
+
+    return [makers[i % len(makers)](rng) for i in range(n)]
 
 
-def attempt(model, tokenizer, generate_fn, case, history, max_tokens=48):
+def attempt(model, tokenizer, generate_fn, case, history, max_tokens=64):
     """One attempt at one task, given whatever errors came before."""
     from mlx_lm.sample_utils import make_sampler
 
@@ -197,7 +228,7 @@ def attempt(model, tokenizer, generate_fn, case, history, max_tokens=48):
     return command, False, (out or "the command ran but did not achieve the task")
 
 
-def teach(model, tokenizer, generate_fn, tasks, tries: int = 4):
+def teach(model, tokenizer, generate_fn, tasks, tries: int = 6):
     """Run the loop. Returns the samples the model earned by execution."""
     samples, transcript = [], []
     solved = 0

@@ -27,19 +27,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import awsim
 
-INSTANCES = {
-    "i-0abc123": {"state": "running", "tags": {"Env": "prod", "Name": "web-1"}},
-    "i-0def456": {"state": "stopped", "tags": {"Env": "dev", "Name": "batch-1"}},
-    "i-0ghi789": {"state": "running", "tags": {"Env": "prod", "Name": "web-2"}},
+NODES = {
+    "n-4kq": {"region": "eu-2", "status": "up", "labels": {"Env": "prod", "Tier": "web"}},
+    "n-7wz": {"region": "eu-2", "status": "halted", "labels": {"Env": "dev"}},
+    "n-9tm": {"region": "eu-2", "status": "up", "labels": {"Env": "prod", "Tier": "db"}},
 }
 
 
-def _seed(buckets=None, instances=True, roles=None):
-    return {
-        "buckets": buckets or {},
-        "instances": dict(INSTANCES) if instances else {},
-        "roles": roles or {},
-    }
+def _seed(containers=None, identities=None):
+    import json as _json
+    return {"containers": containers or {},
+            "nodes": _json.loads(_json.dumps(NODES)),
+            "identities": identities or {}}
 
 
 class Case:
@@ -47,90 +46,82 @@ class Case:
         self.id, self.ask, self.seed, self.verify = cid, ask, seed, verify
 
 
+def _ck(name, region="eu-2"):
+    return f"{region}|{name}"
+
+
 CASES: list[Case] = [
-    Case("s3_make_bucket",
-         "Create an S3 bucket called quarterly-reports.",
+    Case("new_container",
+         "In region eu-2, create a container called quarterly-reports.",
          _seed(),
-         lambda code, out, st: code == 0 and "quarterly-reports" in st["buckets"]),
-    Case("s3_upload",
-         "Upload the local file summary.csv to the bucket quarterly-reports "
-         "under the key q3/summary.csv.",
-         _seed(buckets={"quarterly-reports": {}}),
+         lambda code, out, st: code == 0 and _ck("quarterly-reports") in st["containers"]),
+    Case("put_object",
+         "In region eu-2, store the local file summary.csv into the container "
+         "quarterly-reports at the path q3/summary.csv.",
+         _seed(containers={_ck("quarterly-reports"): {}}),
          lambda code, out, st: code == 0
-         and "q3/summary.csv" in st["buckets"].get("quarterly-reports", {})),
-    Case("s3_list_bucket",
-         "List everything stored in the bucket quarterly-reports.",
-         _seed(buckets={"quarterly-reports": {"q3/summary.csv": "x"}}),
+         and "q3/summary.csv" in st["containers"].get(_ck("quarterly-reports"), {})),
+    Case("list_container",
+         "In region eu-2, show me what is inside the container quarterly-reports.",
+         _seed(containers={_ck("quarterly-reports"): {"q3/summary.csv": "x"}}),
          lambda code, out, st: code == 0 and "q3/summary.csv" in out),
-    Case("s3_remove_object",
-         "Delete the object q3/summary.csv from the bucket quarterly-reports.",
-         _seed(buckets={"quarterly-reports": {"q3/summary.csv": "x"}}),
+    Case("drop_path",
+         "In region eu-2, delete q3/summary.csv from the container quarterly-reports.",
+         _seed(containers={_ck("quarterly-reports"): {"q3/summary.csv": "x"}}),
          lambda code, out, st: code == 0
-         and "q3/summary.csv" not in st["buckets"].get("quarterly-reports", {})),
-    Case("s3_remove_bucket",
-         "Remove the empty bucket old-logs.",
-         _seed(buckets={"old-logs": {}}),
-         lambda code, out, st: code == 0 and "old-logs" not in st["buckets"]),
-    Case("s3_copy_between",
-         "Copy s3://quarterly-reports/q3/summary.csv to "
-         "s3://archive/2026/summary.csv.",
-         _seed(buckets={"quarterly-reports": {"q3/summary.csv": "x"},
-                        "archive": {}}),
+         and "q3/summary.csv" not in st["containers"].get(_ck("quarterly-reports"), {})),
+    Case("drop_container",
+         "In region eu-2, remove the empty container old-logs.",
+         _seed(containers={_ck("old-logs"): {}}),
+         lambda code, out, st: code == 0 and _ck("old-logs") not in st["containers"]),
+    Case("duplicate",
+         "In region eu-2, copy the path q3/summary.csv from the container "
+         "quarterly-reports into the container archive at the path 2026/summary.csv.",
+         _seed(containers={_ck("quarterly-reports"): {"q3/summary.csv": "x"},
+                           _ck("archive"): {}}),
          lambda code, out, st: code == 0
-         and "2026/summary.csv" in st["buckets"].get("archive", {})),
-    Case("ec2_filter_by_tag",
-         "Show me the EC2 instances tagged Env=prod.",
+         and "2026/summary.csv" in st["containers"].get(_ck("archive"), {})),
+    Case("list_containers",
+         "In region eu-2, list the containers.",
+         _seed(containers={_ck("quarterly-reports"): {}, _ck("archive"): {}}),
+         lambda code, out, st: code == 0 and "archive" in out),
+    Case("filter_nodes",
+         "In region eu-2, which compute nodes carry the label Env=prod?",
          _seed(),
-         lambda code, out, st: code == 0 and "i-0abc123" in out
-         and "i-0def456" not in out),
-    Case("ec2_stop_instance",
-         "Stop the EC2 instance i-0abc123.",
+         lambda code, out, st: code == 0 and "n-4kq" in out and "n-7wz" not in out),
+    Case("halt_node",
+         "In region eu-2, shut down the compute node n-4kq.",
+         _seed(),
+         lambda code, out, st: code == 0 and st["nodes"]["n-4kq"]["status"] == "halted"),
+    Case("resume_node",
+         "In region eu-2, bring the compute node n-7wz back up.",
+         _seed(),
+         lambda code, out, st: code == 0 and st["nodes"]["n-7wz"]["status"] == "up"),
+    Case("label_node",
+         "In region eu-2, put the label Owner=platform on the compute node n-7wz.",
          _seed(),
          lambda code, out, st: code == 0
-         and st["instances"]["i-0abc123"]["state"] == "stopped"),
-    Case("ec2_start_instance",
-         "Start the EC2 instance i-0def456.",
+         and st["nodes"]["n-7wz"]["labels"].get("Owner") == "platform"),
+    Case("new_identity",
+         "In region eu-2, create an identity named deployment-bot.",
          _seed(),
-         lambda code, out, st: code == 0
-         and st["instances"]["i-0def456"]["state"] == "running"),
-    Case("ec2_tag_instance",
-         "Tag the EC2 instance i-0def456 with Owner=platform.",
-         _seed(),
-         lambda code, out, st: code == 0
-         and st["instances"]["i-0def456"]["tags"].get("Owner") == "platform"),
-    Case("iam_create_role",
-         "Create an IAM role named deployment-bot.",
-         _seed(),
-         lambda code, out, st: code == 0 and "deployment-bot" in st["roles"]),
-    Case("iam_list_roles",
-         "List the IAM roles.",
-         _seed(roles={"deployment-bot": {"description": ""}}),
-         lambda code, out, st: code == 0 and "deployment-bot" in out),
-    Case("iam_delete_role",
-         "Delete the IAM role stale-role.",
-         _seed(roles={"stale-role": {"description": ""}}),
-         lambda code, out, st: code == 0 and "stale-role" not in st["roles"]),
+         lambda code, out, st: code == 0 and "deployment-bot" in st["identities"]),
+    Case("drop_identity",
+         "In region eu-2, remove the identity stale-role.",
+         _seed(identities={"stale-role": {"region": "eu-2"}}),
+         lambda code, out, st: code == 0 and "stale-role" not in st["identities"]),
 ]
 
+# Deliberately says nothing about the syntax. Listing the verbs and options
+# here would turn the battery into a copying exercise, which is exactly what
+# the first version of this environment accidentally measured — the model
+# scored 13/13 before any training because it was reciting the real AWS CLI.
+# What the model knows about awsim has to come from its own failed attempts.
 SYSTEM = (
-    "You drive a command-line tool called awsim, which mimics the AWS CLI and "
-    "is STRICT: option names, S3 URIs and filter syntax must be exact.\n"
-    "Reply with the single command and nothing else. Do not explain it.\n"
-    "Services and operations available:\n"
-    "  awsim s3 ls [s3://bucket[/prefix]]\n"
-    "  awsim s3 mb s3://bucket\n"
-    "  awsim s3 rb s3://bucket\n"
-    "  awsim s3 cp <source> <destination>\n"
-    "  awsim s3 rm s3://bucket/key\n"
-    "  awsim ec2 describe-instances [--filters Name=tag:<Tag>,Values=<v>] "
-    "[--instance-ids <id>[,<id>]]\n"
-    "  awsim ec2 start-instances --instance-ids <id>[,<id>]\n"
-    "  awsim ec2 stop-instances --instance-ids <id>[,<id>]\n"
-    "  awsim ec2 create-tags --resources <id> --tags Key=<K>,Value=<V>\n"
-    "  awsim iam create-role --role-name <name> [--description <text>]\n"
-    "  awsim iam list-roles\n"
-    "  awsim iam delete-role --role-name <name>\n"
+    "You drive a command-line tool called awsim. Reply with the single "
+    "command to run and nothing else — no explanation, no code fence."
 )
+
 
 # The command out of whatever wrapping the model put round it — a fenced block,
 # a <cmd> tag, a tool call, or bare prose. Anchored on the tool's own name so a
@@ -165,7 +156,7 @@ def grade(reply: str, case: Case) -> tuple[bool, str]:
     return ok, f"{command}  -> [{code}] {out.splitlines()[0] if out else ''}"
 
 
-def run_battery(model, tokenizer, generate_fn, max_tokens: int = 48,
+def run_battery(model, tokenizer, generate_fn, max_tokens: int = 64,
                 verbose: bool = True) -> tuple[int, list[tuple[str, bool, str]]]:
     from mlx_lm.sample_utils import make_sampler
 
@@ -195,19 +186,19 @@ if __name__ == "__main__":
     # Self-check: the reference answers must all pass, or the battery is
     # grading something other than what it claims to.
     REFERENCE = {
-        "s3_make_bucket": "awsim s3 mb s3://quarterly-reports",
-        "s3_upload": "awsim s3 cp summary.csv s3://quarterly-reports/q3/summary.csv",
-        "s3_list_bucket": "awsim s3 ls s3://quarterly-reports",
-        "s3_remove_object": "awsim s3 rm s3://quarterly-reports/q3/summary.csv",
-        "s3_remove_bucket": "awsim s3 rb s3://old-logs",
-        "s3_copy_between": "awsim s3 cp s3://quarterly-reports/q3/summary.csv s3://archive/2026/summary.csv",
-        "ec2_filter_by_tag": "awsim ec2 describe-instances --filters Name=tag:Env,Values=prod",
-        "ec2_stop_instance": "awsim ec2 stop-instances --instance-ids i-0abc123",
-        "ec2_start_instance": "awsim ec2 start-instances --instance-ids i-0def456",
-        "ec2_tag_instance": "awsim ec2 create-tags --resources i-0def456 --tags Key=Owner,Value=platform",
-        "iam_create_role": "awsim iam create-role --role-name deployment-bot",
-        "iam_list_roles": "awsim iam list-roles",
-        "iam_delete_role": "awsim iam delete-role --role-name stale-role",
+        "new_container": "awsim store new-container --name quarterly-reports --region eu-2",
+        "put_object": "awsim store put --container quarterly-reports --path q3/summary.csv --from summary.csv --region eu-2",
+        "list_container": "awsim store list --container quarterly-reports --region eu-2",
+        "drop_path": "awsim store drop --container quarterly-reports --path q3/summary.csv --region eu-2",
+        "drop_container": "awsim store drop-container --name old-logs --region eu-2",
+        "duplicate": "awsim store duplicate --from-container quarterly-reports --from-path q3/summary.csv --to-container archive --to-path 2026/summary.csv --region eu-2",
+        "list_containers": "awsim store list-containers --region eu-2",
+        "filter_nodes": "awsim compute list-nodes --where tag/Env:prod --region eu-2",
+        "halt_node": "awsim compute halt --node n-4kq --region eu-2",
+        "resume_node": "awsim compute resume --node n-7wz --region eu-2",
+        "label_node": "awsim compute label --node n-7wz --label Owner:platform --region eu-2",
+        "new_identity": "awsim access new-identity --identity deployment-bot --region eu-2",
+        "drop_identity": "awsim access drop-identity --identity stale-role --region eu-2",
     }
     bad = 0
     for case in CASES:

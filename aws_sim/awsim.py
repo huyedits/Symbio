@@ -1,23 +1,33 @@
 #!/usr/bin/env python3
-"""A deliberately rigid mock of a small AWS CLI surface.
+"""A rigid cloud CLI that is deliberately NOT the AWS CLI.
 
-This exists to be LEARNED, so everything about it is chosen to make learning
-measurable rather than to be forgiving:
+The first version of this file mimicked AWS, and the experiment said so
+immediately: the 14B scored 13/13 on the held-out battery before a single step
+of training, and solved 60 of 60 self-teaching tasks on the first attempt. It
+was not learning anything. It was reciting `aws s3 mb` from pretraining.
 
-  * Exact syntax or nothing. `--role-name` is not `--rolename`, `s3://b/k` is
-    not `s3:/b/k`, and a missing required flag is an error naming the flag. A
-    forgiving environment teaches nothing, because every near-miss is
-    reinforced as success.
-  * Stateful. `mb` then `ls` shows the bucket; `rb` on a non-empty bucket
-    fails the way the real one does. So a command can be graded on what it DID
-    to the world, not on whether its text looked plausible.
-  * Deterministic. Same state plus same command gives the same bytes, so a
-    checkpoint that scores better really is better and not luckier.
-  * Every error is a precise, actionable sentence. The point of a rigid
-    environment is that being wrong is informative.
+So every surface here is chosen to be internally consistent and externally
+unfamiliar. Pretrained knowledge does not just fail to help, it actively
+misleads:
 
-State lives in one JSON file so a run can be reset between graded attempts.
-Nothing here talks to AWS, has credentials, or touches the network.
+    aws  s3  mb s3://bucket              awsim store new-container
+                                             --name bucket --region ...
+    aws  ec2 describe-instances              awsim compute list-nodes
+         --filters Name=tag:Env,Values=prod      --where tag/Env:prod --region ...
+    aws  iam create-role --role-name R        awsim access new-identity
+                                             --identity R --region ...
+
+Nothing is guessable. `--region` is required on every single command, there is
+no URI scheme, tags are `Key:Value` and filters are `tag/Key:Value`.
+
+The one way in is FAILURE. Every error names exactly what was allowed at that
+point — the services, the verbs of a service, the options of a verb — so a
+model that probes can reconstruct the whole API from its own mistakes in a
+handful of attempts. That is the channel this environment teaches through, and
+it is the only one: there is no help text in the system prompt.
+
+State is one JSON file so a run can be reset between graded attempts. Nothing
+here talks to a cloud, has credentials, or touches the network.
 """
 
 from __future__ import annotations
@@ -29,14 +39,42 @@ from pathlib import Path
 
 STATE_FILE = Path(__file__).resolve().parent / "state.json"
 
-_EMPTY = {"buckets": {}, "instances": {}, "roles": {}}
+_EMPTY = {"containers": {}, "nodes": {}, "identities": {}}
 
-_S3_URI = re.compile(r"^s3://(?P<bucket>[a-z0-9][a-z0-9.-]{1,61}[a-z0-9])(?:/(?P<key>.*))?$")
-_BUCKET_NAME = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+REGIONS = ("ap-1", "eu-2", "us-3")
+_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}[a-z0-9]$")
 
 
 class CommandError(Exception):
-    """A rigid, specific failure. The message is the teaching signal."""
+    """A rigid, specific failure. The message is the entire teaching signal."""
+
+
+# Every verb of every service, rendered for an error. Appended whenever a
+# service or a verb is not recognised.
+#
+# The first version listed only the CURRENT service's verbs, and the traces
+# showed exactly what that costs: asked to create a container, the model tried
+# `awsim create-container`, was told the three services, guessed `compute`,
+# and was then told compute's four verbs — none of which make containers. It
+# never tried `store`. Every message was locally accurate and kept it inside
+# the wrong service, and the run finished with 0 samples for new-container,
+# duplicate and list-containers — the exact three cases the trained model then
+# failed forever.
+#
+# Rigid is about refusing wrong input, not about rationing information. A
+# model that is lost gets the whole map.
+def verb_map() -> str:
+    return " | ".join(
+        f"{service}: {', '.join(sorted(verbs))}"
+        for service, verbs in sorted(VERBS.items()))
+
+
+VERBS = {
+    "store": {"new-container", "drop-container", "list-containers", "put",
+              "list", "drop", "duplicate"},
+    "compute": {"list-nodes", "halt", "resume", "label"},
+    "access": {"new-identity", "list-identities", "drop-identity"},
+}
 
 
 def load_state() -> dict:
@@ -64,34 +102,30 @@ def reset_state(seed: dict | None = None) -> dict:
     return state
 
 
-# ----------------------------------------------------------------- argument parsing
+def _flags(args: list[str], verb: str, *, allowed: set[str],
+           required: set[str]) -> dict:
+    """Parse `--flag value` pairs strictly, and explain every refusal fully.
 
-def _flags(args: list[str], *, allowed: set[str], required: set[str],
-           boolean: set[str] = frozenset()) -> dict:
-    """Parse `--flag value` pairs strictly.
-
-    Strictly means: an unknown flag is an error that names it and lists what
-    was allowed, a flag without its value is an error, and a positional
-    argument where a flag belongs is an error. Real CLIs do this, and a mock
-    that shrugs teaches a syntax that will not work anywhere else.
+    The listing in each message is not decoration. It is how a model that has
+    never seen this API discovers it: one wrong option returns the complete
+    set of right ones.
     """
+    allowed = allowed | {"region"}
+    required = required | {"region"}
     out: dict[str, str] = {}
     i = 0
     while i < len(args):
         token = args[i]
         if not token.startswith("--"):
             raise CommandError(
-                f"Unexpected argument '{token}'. Options must be written as "
-                f"--flag value. Allowed here: {', '.join(sorted(allowed))}.")
+                f"'{verb}' takes no positional arguments; got '{token}'. "
+                f"Every value is passed as --option value. Options for "
+                f"'{verb}': {', '.join('--' + a for a in sorted(allowed))}.")
         name = token[2:]
         if name not in allowed:
             raise CommandError(
-                f"Unknown option '--{name}'. Allowed here: "
+                f"'{verb}' has no option '--{name}'. Options for '{verb}': "
                 f"{', '.join('--' + a for a in sorted(allowed))}.")
-        if name in boolean:
-            out[name] = "true"
-            i += 1
-            continue
         if i + 1 >= len(args) or args[i + 1].startswith("--"):
             raise CommandError(f"Option '--{name}' requires a value.")
         out[name] = args[i + 1]
@@ -99,213 +133,200 @@ def _flags(args: list[str], *, allowed: set[str], required: set[str],
     missing = sorted(required - set(out))
     if missing:
         raise CommandError(
-            "Missing required option(s): "
-            + ", ".join("--" + m for m in missing) + ".")
+            f"'{verb}' is missing required option(s): "
+            f"{', '.join('--' + m for m in missing)}. Every command needs "
+            f"--region (one of {', '.join(REGIONS)}).")
+    if out["region"] not in REGIONS:
+        raise CommandError(
+            f"Unknown region '{out['region']}'. Valid regions: "
+            f"{', '.join(REGIONS)}.")
     return out
 
 
-def _parse_s3_uri(uri: str) -> tuple[str, str]:
-    match = _S3_URI.match(uri)
-    if not match:
+def _ckey(region: str, name: str) -> str:
+    """A container's key. A plain separator rather than a stringified tuple:
+    the first draft read those back with eval(), which is a habit that costs
+    nothing until the day the data is not your own."""
+    return f"{region}|{name}"
+
+
+# ------------------------------------------------------------------- store
+
+def _store(args, state):
+    verbs = VERBS["store"]
+    if not args or args[0] not in verbs:
+        # Parenthesised, unlike the first draft: without them the ternary bound
+        # so that the verb listing was appended to the "needs a verb" branch
+        # ONLY, and a model that guessed a wrong verb — the overwhelmingly
+        # common case — got "Unknown store verb 'mb'" with no hint of what the
+        # right ones were. That is the discovery channel, and it was closed for
+        # exactly the case it exists to serve.
         raise CommandError(
-            f"'{uri}' is not a valid S3 URI. Expected s3://bucket/key, with a "
-            f"lowercase bucket name of 3-63 characters.")
-    return match.group("bucket"), match.group("key") or ""
+            (f"Unknown store verb {args[0]!r} " if args else "store needs a verb ")
+            + f"— every verb, by service: {verb_map()}")
+    verb, rest = args[0], args[1:]
 
+    if verb == "new-container":
+        f = _flags(rest, verb, allowed={"name"}, required={"name"})
+        if not _NAME.match(f["name"]):
+            raise CommandError(f"InvalidName: '{f['name']}' is not a valid container name.")
+        key = _ckey(f["region"], f["name"])
+        if key in state["containers"]:
+            raise CommandError(f"ContainerExists: {f['name']} in {f['region']}")
+        state["containers"][key] = {}
+        return f"container created: {f['name']} ({f['region']})"
 
-# ------------------------------------------------------------------------- s3
+    if verb == "list-containers":
+        f = _flags(rest, verb, allowed=set(), required=set())
+        names = sorted(k.split("|", 1)[1] for k in state["containers"]
+                       if k.split("|", 1)[0] == f["region"])
+        return "\n".join(names) or "(none)"
 
-def _s3(args: list[str], state: dict) -> str:
-    if not args:
-        raise CommandError("Usage: awsim s3 <ls|mb|rb|cp|rm> ...")
-    op, rest = args[0], args[1:]
-
-    if op == "ls":
-        if not rest:
-            return "\n".join(sorted(state["buckets"])) or "(no buckets)"
-        bucket, prefix = _parse_s3_uri(rest[0])
-        if bucket not in state["buckets"]:
-            raise CommandError(f"NoSuchBucket: {bucket}")
-        keys = sorted(k for k in state["buckets"][bucket] if k.startswith(prefix))
-        return "\n".join(keys) or "(empty)"
-
-    if op == "mb":
-        if not rest:
-            raise CommandError("Usage: awsim s3 mb s3://bucket")
-        bucket, key = _parse_s3_uri(rest[0])
-        if key:
-            raise CommandError("mb takes a bucket, not a key: use s3://bucket")
-        if not _BUCKET_NAME.match(bucket):
-            raise CommandError(f"InvalidBucketName: {bucket}")
-        if bucket in state["buckets"]:
-            raise CommandError(f"BucketAlreadyExists: {bucket}")
-        state["buckets"][bucket] = {}
-        return f"make_bucket: {bucket}"
-
-    if op == "rb":
-        if not rest:
-            raise CommandError("Usage: awsim s3 rb s3://bucket")
-        bucket, _key = _parse_s3_uri(rest[0])
-        if bucket not in state["buckets"]:
-            raise CommandError(f"NoSuchBucket: {bucket}")
-        if state["buckets"][bucket]:
+    if verb == "drop-container":
+        f = _flags(rest, verb, allowed={"name"}, required={"name"})
+        key = _ckey(f["region"], f["name"])
+        if key not in state["containers"]:
+            raise CommandError(f"NoSuchContainer: {f['name']} in {f['region']}")
+        if state["containers"][key]:
             raise CommandError(
-                f"BucketNotEmpty: {bucket} still holds "
-                f"{len(state['buckets'][bucket])} object(s). Remove them first.")
-        del state["buckets"][bucket]
-        return f"remove_bucket: {bucket}"
+                f"ContainerNotEmpty: {f['name']} holds "
+                f"{len(state['containers'][key])} item(s); drop them first.")
+        del state["containers"][key]
+        return f"container dropped: {f['name']}"
 
-    if op == "cp":
-        if len(rest) < 2:
-            raise CommandError("Usage: awsim s3 cp <source> <destination>")
-        source, destination = rest[0], rest[1]
-        if source.startswith("s3://") and destination.startswith("s3://"):
-            sb, sk = _parse_s3_uri(source)
-            db, dk = _parse_s3_uri(destination)
-            if sb not in state["buckets"]:
-                raise CommandError(f"NoSuchBucket: {sb}")
-            if sk not in state["buckets"][sb]:
-                raise CommandError(f"NoSuchKey: {sk}")
-            if db not in state["buckets"]:
-                raise CommandError(f"NoSuchBucket: {db}")
-            if not dk:
-                raise CommandError("A destination key is required: s3://bucket/key")
-            state["buckets"][db][dk] = state["buckets"][sb][sk]
-            return f"copy: {source} to {destination}"
-        if destination.startswith("s3://"):
-            db, dk = _parse_s3_uri(destination)
-            if db not in state["buckets"]:
-                raise CommandError(f"NoSuchBucket: {db}")
-            if not dk:
-                raise CommandError("A destination key is required: s3://bucket/key")
-            state["buckets"][db][dk] = f"<contents of {source}>"
-            return f"upload: {source} to {destination}"
+    if verb == "put":
+        f = _flags(rest, verb, allowed={"container", "path", "from"},
+                   required={"container", "path", "from"})
+        key = _ckey(f["region"], f["container"])
+        if key not in state["containers"]:
+            raise CommandError(f"NoSuchContainer: {f['container']} in {f['region']}")
+        state["containers"][key][f["path"]] = f"<{f['from']}>"
+        return f"stored: {f['path']} in {f['container']}"
+
+    if verb == "list":
+        f = _flags(rest, verb, allowed={"container"}, required={"container"})
+        key = _ckey(f["region"], f["container"])
+        if key not in state["containers"]:
+            raise CommandError(f"NoSuchContainer: {f['container']} in {f['region']}")
+        return "\n".join(sorted(state["containers"][key])) or "(empty)"
+
+    if verb == "drop":
+        f = _flags(rest, verb, allowed={"container", "path"},
+                   required={"container", "path"})
+        key = _ckey(f["region"], f["container"])
+        if key not in state["containers"]:
+            raise CommandError(f"NoSuchContainer: {f['container']} in {f['region']}")
+        if f["path"] not in state["containers"][key]:
+            raise CommandError(f"NoSuchPath: {f['path']}")
+        del state["containers"][key][f["path"]]
+        return f"dropped: {f['path']}"
+
+    if verb == "duplicate":
+        f = _flags(rest, verb,
+                   allowed={"from-container", "from-path", "to-container", "to-path"},
+                   required={"from-container", "from-path", "to-container", "to-path"})
+        src = _ckey(f["region"], f["from-container"])
+        dst = _ckey(f["region"], f["to-container"])
+        if src not in state["containers"]:
+            raise CommandError(f"NoSuchContainer: {f['from-container']}")
+        if f["from-path"] not in state["containers"][src]:
+            raise CommandError(f"NoSuchPath: {f['from-path']}")
+        if dst not in state["containers"]:
+            raise CommandError(f"NoSuchContainer: {f['to-container']}")
+        state["containers"][dst][f["to-path"]] = state["containers"][src][f["from-path"]]
+        return f"duplicated to {f['to-container']}/{f['to-path']}"
+    raise CommandError(f"Unhandled store verb {verb!r}")
+
+
+# ----------------------------------------------------------------- compute
+
+def _compute(args, state):
+    verbs = VERBS["compute"]
+    if not args or args[0] not in verbs:
         raise CommandError(
-            "Downloads are not simulated. One side must be an s3:// URI.")
+            (f"Unknown compute verb {args[0]!r} " if args else "compute needs a verb ")
+            + f"— every verb, by service: {verb_map()}")
+    verb, rest = args[0], args[1:]
 
-    if op == "rm":
-        if not rest:
-            raise CommandError("Usage: awsim s3 rm s3://bucket/key")
-        bucket, key = _parse_s3_uri(rest[0])
-        if bucket not in state["buckets"]:
-            raise CommandError(f"NoSuchBucket: {bucket}")
-        if not key:
-            raise CommandError("rm needs a key: s3://bucket/key")
-        if key not in state["buckets"][bucket]:
-            raise CommandError(f"NoSuchKey: {key}")
-        del state["buckets"][bucket][key]
-        return f"delete: s3://{bucket}/{key}"
-
-    raise CommandError(f"Unknown s3 operation '{op}'. Use ls, mb, rb, cp or rm.")
-
-
-# ------------------------------------------------------------------------ ec2
-
-def _ec2(args: list[str], state: dict) -> str:
-    if not args:
-        raise CommandError(
-            "Usage: awsim ec2 <describe-instances|start-instances|"
-            "stop-instances|create-tags> ...")
-    op, rest = args[0], args[1:]
-
-    if op == "describe-instances":
-        flags = _flags(rest, allowed={"filters", "instance-ids"}, required=set())
-        rows = list(state["instances"].items())
-        if "instance-ids" in flags:
-            wanted = set(flags["instance-ids"].split(","))
-            rows = [(i, d) for i, d in rows if i in wanted]
-        if "filters" in flags:
-            spec = flags["filters"]
-            m = re.fullmatch(r"Name=tag:(?P<tag>[\w:-]+),Values=(?P<values>.+)", spec)
+    if verb == "list-nodes":
+        f = _flags(rest, verb, allowed={"where"}, required=set())
+        rows = [(n, d) for n, d in state["nodes"].items()
+                if d["region"] == f["region"]]
+        if "where" in f:
+            m = re.fullmatch(r"tag/(?P<k>[\w-]+):(?P<v>[\w-]+)", f["where"])
             if not m:
                 raise CommandError(
-                    "--filters must be written exactly as "
-                    "Name=tag:<TagName>,Values=<v1>[,<v2>...]")
-            tag, values = m.group("tag"), set(m.group("values").split(","))
-            rows = [(i, d) for i, d in rows if d.get("tags", {}).get(tag) in values]
-        payload = {"Reservations": [
-            {"Instances": [{"InstanceId": i, "State": {"Name": d["state"]},
-                            "Tags": [{"Key": k, "Value": v}
-                                     for k, v in sorted(d.get("tags", {}).items())]}]}
-            for i, d in sorted(rows)]}
-        return json.dumps(payload, indent=2)
+                    "--where must be written as tag/<Key>:<Value>, "
+                    "for example tag/Env:prod.")
+            rows = [(n, d) for n, d in rows
+                    if d.get("labels", {}).get(m.group("k")) == m.group("v")]
+        return json.dumps({"nodes": [
+            {"node": n, "status": d["status"],
+             "labels": d.get("labels", {})} for n, d in sorted(rows)]}, indent=2)
 
-    if op in ("start-instances", "stop-instances"):
-        flags = _flags(rest, allowed={"instance-ids"}, required={"instance-ids"})
-        target = "running" if op == "start-instances" else "stopped"
-        changed = []
-        for instance_id in flags["instance-ids"].split(","):
-            if instance_id not in state["instances"]:
-                raise CommandError(f"InvalidInstanceID.NotFound: {instance_id}")
-            state["instances"][instance_id]["state"] = target
-            changed.append(instance_id)
-        return json.dumps({"Instances": [
-            {"InstanceId": i, "CurrentState": {"Name": target}} for i in changed]},
-            indent=2)
+    if verb in ("halt", "resume"):
+        f = _flags(rest, verb, allowed={"node"}, required={"node"})
+        if f["node"] not in state["nodes"]:
+            raise CommandError(f"NoSuchNode: {f['node']}")
+        state["nodes"][f["node"]]["status"] = "halted" if verb == "halt" else "up"
+        return f"{f['node']} is now {state['nodes'][f['node']]['status']}"
 
-    if op == "create-tags":
-        flags = _flags(rest, allowed={"resources", "tags"},
-                       required={"resources", "tags"})
-        m = re.fullmatch(r"Key=(?P<k>[\w:-]+),Value=(?P<v>.*)", flags["tags"])
+    if verb == "label":
+        f = _flags(rest, verb, allowed={"node", "label"},
+                   required={"node", "label"})
+        m = re.fullmatch(r"(?P<k>[\w-]+):(?P<v>[\w-]+)", f["label"])
         if not m:
             raise CommandError(
-                "--tags must be written exactly as Key=<Name>,Value=<Value>")
-        for instance_id in flags["resources"].split(","):
-            if instance_id not in state["instances"]:
-                raise CommandError(f"InvalidInstanceID.NotFound: {instance_id}")
-            state["instances"][instance_id].setdefault("tags", {})[m.group("k")] = m.group("v")
-        return ""
-
-    raise CommandError(f"Unknown ec2 operation '{op}'.")
+                "--label must be written as <Key>:<Value>, for example Owner:sre.")
+        if f["node"] not in state["nodes"]:
+            raise CommandError(f"NoSuchNode: {f['node']}")
+        state["nodes"][f["node"]].setdefault("labels", {})[m.group("k")] = m.group("v")
+        return f"labelled {f['node']} {m.group('k')}:{m.group('v')}"
+    raise CommandError(f"Unhandled compute verb {verb!r}")
 
 
-# ------------------------------------------------------------------------ iam
+# ------------------------------------------------------------------ access
 
-def _iam(args: list[str], state: dict) -> str:
-    if not args:
-        raise CommandError("Usage: awsim iam <create-role|list-roles|delete-role> ...")
-    op, rest = args[0], args[1:]
+def _access(args, state):
+    verbs = VERBS["access"]
+    if not args or args[0] not in verbs:
+        raise CommandError(
+            (f"Unknown access verb {args[0]!r} " if args else "access needs a verb ")
+            + f"— every verb, by service: {verb_map()}")
+    verb, rest = args[0], args[1:]
 
-    if op == "create-role":
-        flags = _flags(rest, allowed={"role-name", "description"},
-                       required={"role-name"})
-        name = flags["role-name"]
-        if not re.fullmatch(r"[\w+=,.@-]{1,64}", name):
-            raise CommandError(f"ValidationError: invalid role name '{name}'")
-        if name in state["roles"]:
-            raise CommandError(f"EntityAlreadyExists: role {name} already exists")
-        state["roles"][name] = {"description": flags.get("description", "")}
-        return json.dumps({"Role": {"RoleName": name, "Arn":
-                                    f"arn:aws:iam::000000000000:role/{name}"}},
-                          indent=2)
+    if verb == "new-identity":
+        f = _flags(rest, verb, allowed={"identity"}, required={"identity"})
+        if f["identity"] in state["identities"]:
+            raise CommandError(f"IdentityExists: {f['identity']}")
+        state["identities"][f["identity"]] = {"region": f["region"]}
+        return f"identity created: {f['identity']}"
 
-    if op == "list-roles":
-        _flags(rest, allowed=set(), required=set())
-        return json.dumps({"Roles": [
-            {"RoleName": n, "Arn": f"arn:aws:iam::000000000000:role/{n}"}
-            for n in sorted(state["roles"])]}, indent=2)
+    if verb == "list-identities":
+        _flags(rest, verb, allowed=set(), required=set())
+        return "\n".join(sorted(state["identities"])) or "(none)"
 
-    if op == "delete-role":
-        flags = _flags(rest, allowed={"role-name"}, required={"role-name"})
-        if flags["role-name"] not in state["roles"]:
-            raise CommandError(f"NoSuchEntity: role {flags['role-name']} not found")
-        del state["roles"][flags["role-name"]]
-        return ""
-
-    raise CommandError(f"Unknown iam operation '{op}'.")
+    if verb == "drop-identity":
+        f = _flags(rest, verb, allowed={"identity"}, required={"identity"})
+        if f["identity"] not in state["identities"]:
+            raise CommandError(f"NoSuchIdentity: {f['identity']}")
+        del state["identities"][f["identity"]]
+        return f"identity dropped: {f['identity']}"
+    raise CommandError(f"Unhandled access verb {verb!r}")
 
 
-SERVICES = {"s3": _s3, "ec2": _ec2, "iam": _iam}
+SERVICES = {"store": _store, "compute": _compute, "access": _access}
 
 
 def run(argv: list[str]) -> tuple[int, str]:
-    """Execute one command. Returns (exit_code, output)."""
     if not argv:
-        return 2, "Usage: awsim <s3|ec2|iam> <operation> [options]"
+        return 2, (f"awsim needs a service. Services: "
+                   f"{', '.join(sorted(SERVICES))}. "
+                   f"Usage: awsim <service> <verb> --option value ...")
     service, rest = argv[0], argv[1:]
     if service not in SERVICES:
-        return 2, (f"Unknown service '{service}'. "
-                   f"Available: {', '.join(sorted(SERVICES))}.")
+        return 2, (f"error: Unknown service '{service}'. "
+                   f"Every verb, by service: {verb_map()}")
     state = load_state()
     try:
         output = SERVICES[service](rest, state)
