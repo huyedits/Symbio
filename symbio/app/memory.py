@@ -614,4 +614,14 @@ def curated_memory_block(config: dict[str, Any]) -> str:
     soul_text = soul.soul_block(config).strip()
     if soul_text:
         parts.append(soul_text)
+    # The constitution rides last, because it is the one block here that is
+    # read as INSTRUCTIONS rather than as facts — what the user prefers, in
+    # the imperative — and the closest thing to the turn is the thing acted
+    # on. Still wrapped untrusted, for the same reason the soul store is: it
+    # is inferred from conversation, and conversation includes whatever a page
+    # said. See app/constitution.py.
+    from symbio.app import constitution
+    const_text = constitution.block(config).strip()
+    if const_text:
+        parts.append(const_text)
     return ("\n\n" + "\n\n".join(parts)) if parts else ""

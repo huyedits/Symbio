@@ -414,7 +414,25 @@ def _project_paths_in(cmd: str) -> list[str]:
         #
         # At least two components must survive, so this never resolves a bare
         # filename that several directories could satisfy.
+        #
+        # EXCEPT when the single component is a real entry at the project root.
+        # That is not ambiguous — the root either contains `puzzle/` or it does
+        # not — and excluding it left this guard dead for the most common
+        # orientation move there is. Live 2026-09-14: `read_file
+        # puzzle/step1.txt` succeeded, the model then ran `ls puzzle/` to find
+        # the next file, was told "No such file or directory" with no
+        # explanation, and spent the rest of the turn guessing filenames. The
+        # guard existed, was correct, and never ran: len(parts) - 1 == 0.
         parts = [q for q in rel.split("/") if q not in ("", ".")]
+        if len(parts) == 1:
+            try:
+                candidate = (_c.PROJECT_DIR / parts[0]).resolve()
+                candidate.relative_to(_c.PROJECT_DIR.resolve())
+                if candidate.exists() and parts[0] not in found:
+                    found.append(parts[0])
+            except (ValueError, OSError):
+                pass
+            continue
         for start in range(len(parts) - 1):
             suffix = "/".join(parts[start:])
             try:

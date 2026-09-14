@@ -663,6 +663,30 @@ Training is **not automatically restarted after a crash**. This prevents a machi
 
 Symbio can interact with the local machine through several tool groups.
 
+Each tool is one markdown file in `tools/`, seeded on first run and yours to
+edit afterwards:
+
+```markdown
+---
+name: browser_click
+family: browser
+group: browser
+---
+
+Click an element in the open browser, identified by its visible text.
+
+```json
+{"type":"object","properties":{"target":{"type":"string"}},"required":["target"]}
+```
+```
+
+The system prompt does not carry all of those schemas. It carries the *index* —
+the families, the tool names in each, one line on what the family is for — and
+the model asks for the arguments it needs with `tool_docs`. That is about 1,300
+tokens instead of 5,100, on every turn, which on a 14B is room to think in.
+`/tools` shows the same index you are showing the model; `/tools browser` prints
+the schemas. `agent.tool_catalog: "full"` puts every schema back inline.
+
 ### Files
 
 Read, write, search and patch files within the project environment.
@@ -761,6 +785,93 @@ For example, actions involving:
 can require an explicit approval before execution.
 
 > **Important:** saying `No` rejects the action for the entire turn. Symbio will not retry the same action through another tool.
+
+### The constitution
+
+The longer you use it, the more it works out how *you* want to be worked with —
+and writes it down where you can see it and change it:
+
+```text
+$ /constitution
+Held — this is in every prompt:
+  answers_vs_control: answers  Give the result first. Do not narrate the steps
+                               or offer a menu of options unless they ask for
+                               one. (4 for/0 against, since 2026-09-10)
+    from: told me twice to just do it; asked for the number only
+  act_vs_confirm: act          Take the ordinary reversible step without
+                               asking. (yours, since 2026-09-14)
+```
+
+It holds **one stance per question**, not a pile of observations. That is the
+whole design: `soul.md` collects what it saw each turn and only appends, so it
+ends up holding "wants to approve everything" and "wants no confirmations" at
+the same time, forever. An axis can only hold one, so new evidence either
+reinforces the stance or argues against it, and an axis flips only once the
+other side outweighs it — dated, so you can see when you changed.
+
+The questions it holds a stance on (`/constitution axes`): answers vs control,
+act vs confirm, brief vs complete, speed vs caution, do vs teach, blunt vs
+cushioned, show vs summarize, code vs prose.
+
+* `/constitution set <axis> <pole>` — your own word. Inference never
+  overwrites it; it can only record that the evidence disagrees.
+* `/constitution clear <axis>` — drop it.
+* `/constitution revise` — fold in what has been observed since last time.
+* It is `constitution.md`. Edit it by hand if you'd rather.
+
+Everything *inferred* goes back to the model wrapped as untrusted data, like
+every other store derived from conversation — so a web page cannot install a
+preference by being read, written down, and read back as yours.
+
+### Never giving up easily
+
+When a turn keeps failing, the harness does not repeat "try something else". It
+escalates, and what it attacks moves inward:
+
+```text
+1  the call        use the error you just got
+2  the approach    that is the same attempt; here is what you have not tried
+3  the assumptions name what this rests on and test the weakest one
+4  the evidence    you may be wrong about what you SAW; go and re-read it
+5  the method      solve it as if that tool didn't exist
+6  the problem     you may be solving the wrong problem
+```
+
+A repeated call is refused without running — a repeat is not another attempt —
+and the refusal comes back as the next rung. The ladder never runs out: what
+ends a turn is the round budget, which counts work actually attempted, never
+the harness running out of things to say. Every rung still leaves an honest way
+out ("here is what blocked me"), because pressure with no acceptable answer but
+success is pressure to fabricate one.
+
+Tune with `agent.min_distinct_attempts` and `agent.max_persistence_challenges`.
+
+### Your own slash commands
+
+A command is a file in `commands/` whose body is a prompt:
+
+```markdown
+---
+name: standup
+description: What moved and what is blocked
+---
+
+Read my notes from the last two days$ARGUMENTS, then give me three lines:
+what moved, what is blocked, what I should start with today.
+```
+
+Type `/standup` and that body becomes your next message, with `$ARGUMENTS`
+replaced by whatever you typed after the name (`$1`, `$2`, … take the words).
+
+* `/` on its own prints every command, yours first
+* `/` then Tab completes against them
+* `/commands new <name> | [description] | <prompt>` saves one without leaving the chat
+* `/commands show <name>`, `/commands rm <name>`
+* a mistyped command suggests the nearest real one
+
+The assistant can write one too, with the `save_command` tool, when it notices
+you asking for the same shape of thing repeatedly. Commands it wrote are marked
+in the listing — and saving one never runs it; only you do, by typing the name.
 
 ### Telegram commands
 

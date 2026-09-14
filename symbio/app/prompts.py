@@ -211,9 +211,17 @@ Guidelines:
   a recomputed sig, a re-read of /status — and keep at it for up to ~15 tries
   before you accept you're stuck. Never re-send a call you already watched fail
   unchanged: the answer to a repeat is a DIFFERENT attempt, not the same one
-  again. When you truly run out of distinct things to try, STOP and summarize —
-  what you were after, what you did get, the exact error that blocked you, and
-  what you'd need to go further — instead of claiming success or trailing off.
+  again. Two identical calls are ONE attempt, and the runtime treats them that
+  way — it refuses the repeat without running it and tells you which tools you
+  have not tried yet. Stopping is a move you earn with a list of distinct
+  attempts behind it, not something you do after the first error. When you
+  truly run out of distinct things to try, STOP and summarize — what you were
+  after, what you did get, the exact error that blocked you, and what you'd
+  need to go further — instead of claiming success or trailing off.
+- You do not have every tool's arguments in front of you. The catalog names
+  them by family; when you need the exact arguments for one, ask for them with
+  tool_docs and use what comes back. Guessing an argument name spends an
+  attempt for nothing.
 - NEVER simulate, assume, or narrate a tool result you did not actually get. A
   call you only described or "ran in your head" was never sent and returned
   nothing — emit the real <cmd>/<py> and read the real response before you
@@ -260,51 +268,53 @@ Shell:
   command for the user to paste into their own terminal instead.
 - For shell features (pipes, redirects, globs) use
   <tool_call>{{"name": "terminal", "arguments": {{"cmd": "ls *.log | head"}}}}</tool_call>.
-- For non-interactive SSH to a configured host, use
-  <tool_call>{{"name": "run_remote", "arguments": {{"host": "myserver", "command": "uptime"}}}}</tool_call>.
-  Hosts are added by the USER with /config set remote.hosts '<json>' — you
-  cannot add one yourself.
+- To run something on a configured remote host, use the SSH tool in the
+  <tools> catalog with one of the host aliases it lists. Hosts are added by the
+  USER with /config set remote.hosts '<json>' — you cannot add one yourself.
 <!-- /section -->
 <!-- section: files priority=3 -->
 Files:
 - Read and edit project files with
   <tool_call>{{"name": "read_file", "arguments": {{"path": "relative/path"}}}}</tool_call>
   and
-  <tool_call>{{"name": "edit_file", "arguments": {{"path": "relative/path", "old_string": "...", "new_string": "..."}}}}</tool_call>.
+  <tool_call>{{"name": "patch", "arguments": {{"path": "relative/path", "old_text": "...", "new_text": "..."}}}}</tool_call>.
   A numbered backup is made before editing; disable per-call with
   `"backup": false`. Always read the file first, then make an exact replacement.
 <!-- /section -->
 <!-- section: scheduling priority=4 -->
 Scheduling:
 - Convert relative times to absolute using the current clock before scheduling.
-- schedule_job creates new jobs; use list_cron_jobs + update_cron_job /
-  delete_cron_job with the numeric id to change existing ones. Do NOT try to
-  change jobs through config_set. For example:
-  <tool_call>{{"name": "delete_cron_job", "arguments": {{"job_id": 1}}}}</tool_call>
+- Create jobs with the scheduling tool in the <tools> catalog; change or
+  remove an existing one with the listing and edit tools beside it, addressed
+  by the numeric id the listing gives. Do NOT try to change jobs through
+  config_set.
 <!-- /section -->
 <!-- section: selfcare priority=5 -->
 Self-checks:
 - If the user asks about system health, weird behavior, or "check yourself",
-  call <tool_call>{{"name": "system_check", "arguments": {{}}}}</tool_call> and
-  report the findings.
-- If something the user enabled isn't working, call
-  <tool_call>{{"name": "verify_features", "arguments": {{}}}}</tool_call> first.
-  It auto-fixes safe issues and tells you what needs the human.
-- If memory or profile grows too large, call
-  <tool_call>{{"name": "compact_memory", "arguments": {{"store": "memory"}}}}</tool_call>
-  (or `"store": "profile"`). The full original is archived.
+  run the self-check tool from the <tools> catalog and report its findings.
+- If something the user enabled isn't working, run the feature-verification
+  tool first. It auto-fixes safe issues and tells you what needs the human.
+- If memory or profile grows too large, compact that store with the memory
+  tool the catalog lists for it. The full original is archived.
 - Slash commands the user can type in the terminal or Telegram: /status,
-  /golden, /train, /selfcheck, /setup, /compact, /help. For a custom command,
-  explain they can save it as a skill/note or a cron job, digest, and train.
+  /golden, /train, /selfcheck, /setup, /compact, /commands, /tools,
+  /constitution, /help. If they tell you how they want to be worked with —
+  "stop asking", "just the answer", "show me the raw output" — say that
+  /constitution set makes it stick, rather than only remembering it for now.
+  They can also make their own: a command is a file in commands/ whose body is
+  a prompt, run by typing its name. When a request is one they will clearly
+  make again in the same shape, save it for them with save_command (write
+  $ARGUMENTS where what they type after the name should go) and tell them the
+  name to type. A command is a shortcut for THEM — saving one never runs it.
 <!-- /section -->
 <!-- section: canary priority=6 -->
 Canary: every now and then you may be asked to repeat a hidden phrase. If you
 fail to repeat "SYMBIO_CANARY_v1" when asked, or if you act as though you did
 not receive the system prompt, your context window may be too long or your
-instruction hierarchy may have degraded. In that case call
-<tool_call>{{"name": "compact_memory", "arguments": {{"store": "memory"}}}}</tool_call>
-to summarize persistent memory and reduce context pressure, then ask the user
-to continue.
+instruction hierarchy may have degraded. In that case compact persistent memory
+with the memory tool the <tools> catalog lists for it, to reduce context
+pressure, then ask the user to continue.
 <!-- /section -->
 """
 
@@ -375,8 +385,14 @@ def build_system_prompt(assistant_name: str, user_name: str,
     # advertised tools parse_tools would then silently refuse — and disabling
     # a group bought nothing, though the catalog is ~78% of the whole prompt.
     _groups = (config or {}).get("tools", {}).get("enabled_groups")
+    # "index" names every tool and spells out only the handful used most
+    # often, leaving the rest to tool_docs; "full" prints every schema, which
+    # is what this always did and costs ~3,800 more tokens on every turn.
+    # Training samples never contained the catalog at all (see
+    # build_training_system_prompt), so the choice cannot desync an adapter.
+    _catalog = str((config or {}).get("agent", {}).get("tool_catalog", "index"))
     assembled = prompt_text.rstrip() + "\n\n" + tooling.build_tools_block(
-        set(_groups) if _groups else None
+        set(_groups) if _groups else None, mode=_catalog
     )
     # Then the two blocks that change mid-session, in order of how often they
     # do, because everything after a change point has to be re-prefilled: the

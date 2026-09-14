@@ -9,6 +9,9 @@ import json
 import re
 from typing import Any
 
+from symbio import constants
+from symbio.app import tool_docs
+
 # Map each parsed tool name to the user-facing group used for enable/disable menus.
 _TOOL_GROUPS: dict[str, str] = {
     "write_note": "notes",
@@ -65,7 +68,133 @@ _TOOL_GROUPS: dict[str, str] = {
     "verify_features": "system",
     "run_remote": "terminal",
     "add_golden_case": "config",
+    # The meta tool that hands out the other tools' schemas. "core" is not a
+    # group a user can switch off: an install with it disabled would be shown
+    # an index it could never expand.
+    "tool_docs": "core",
+    "save_command": "notes",
 }
+
+# Groups that exist so a tool can be advertised, not so it can be gated.
+_ALWAYS_ENABLED_GROUPS = frozenset({"core"})
+
+# Which toolset a tool belongs to, for the per-family round budget in
+# chat_turn. Groups (above) answer "may the user reach this?"; families answer
+# "is this another go at the same idea?" — and they are not the same question.
+# read_file, edit_file and run_command all sit in the "terminal" group because
+# one permission covers them, but a turn that has read six files has not tried
+# the shell at all.
+#
+# The budget this feeds exists because one global round count is spent
+# first-come-first-served: a browser sequence that clicks, scrolls, re-reads
+# and clicks again will consume all fifteen rounds before the model ever gets
+# to the search or the script that would have answered the question. Capping
+# per family leaves rounds behind for a different approach, which is the only
+# kind of retry worth having.
+_TOOL_FAMILIES: dict[str, str] = {
+    "read_file": "file",
+    "edit_file": "file",
+    "write_file": "file",
+    "run_command": "shell",
+    "run_remote": "shell",
+    "execute_code": "code",
+    "web_search": "web",
+    "read_page": "web",
+    "fetch_html": "web",
+    "browser_open": "browser",
+    "browser_get_text": "browser",
+    "browser_click": "browser",
+    "browser_click_at": "browser",
+    "browser_type": "browser",
+    "browser_scroll": "browser",
+    "browser_press": "browser",
+    "browser_close": "browser",
+    "submit_form": "browser",
+    "see_screen": "browser",
+    "desktop_click": "desktop",
+    "desktop_type": "desktop",
+    "desktop_press": "desktop",
+    "write_note": "memory",
+    "delete_note": "memory",
+    "save_skill": "memory",
+    "save_command": "memory",
+    "save_memory": "memory",
+    "compact_memory": "memory",
+    "set_standing_instruction": "memory",
+    "config_show": "admin",
+    "config_set": "admin",
+    "digest_notes": "admin",
+    "train_adapter": "admin",
+    "retrain_adapter": "admin",
+    "schedule_job": "admin",
+    "list_cron_jobs": "admin",
+    "delete_cron_job": "admin",
+    "update_cron_job": "admin",
+    "delegate_task": "admin",
+    "brain_solve": "admin",
+    "system_check": "admin",
+    "verify_features": "admin",
+    "add_golden_case": "admin",
+    "tool_docs": "core",
+}
+
+# Every family, in the order a listing should show them: the ones that do work
+# first, the ones that record or administer it last.
+TOOL_FAMILY_ORDER: tuple[str, ...] = (
+    "file", "code", "shell", "web", "browser", "desktop", "memory", "admin",
+)
+
+
+def tool_family(name: str) -> str:
+    """The family `name` belongs to; "other" for anything unmapped (MCP tools,
+    a name the model invented). "other" is deliberately one bucket rather than
+    per-tool: an unknown name should not get its own private round budget."""
+    return _TOOL_FAMILIES.get(_HERMES_NAME_MAP.get(name, name), "other")
+
+
+def family_tools(family: str, groups: set[str] | None = None) -> list[str]:
+    """The reachable tools in one family, in catalog order."""
+    return [
+        name for name in _TOOL_FAMILIES
+        if _TOOL_FAMILIES[name] == family and tool_group_enabled(name, groups)
+    ]
+
+
+# What may be offered as "another way to get this done". Deliberately not
+# every family: "memory" and "admin" are how the assistant records or
+# administers work, never how it obtains an answer, and a model that has just
+# failed at something should not be handed retrain_adapter or delete_cron_job
+# as the next thing to try. "core" is tool_docs, which the prompt already
+# points at continuously.
+_SUGGESTIBLE_FAMILIES: tuple[str, ...] = (
+    "file", "code", "shell", "web", "browser", "desktop",
+)
+
+
+def untried_tools(tried: set[str], groups: set[str] | None = None,
+                  limit: int = 8) -> list[str]:
+    """Reachable tools this turn has not called yet, other families first.
+
+    This is what a refusal hands back. Telling a model "you already tried that"
+    and nothing else leaves it with one move — try it again, differently worded
+    — which is how a turn spends fifteen rounds on one idea. Naming what has
+    NOT been tried turns the refusal into the list of remaining approaches, and
+    the families it has already worked through sort last so the first suggestion
+    is never more of the same.
+    """
+    used_families = {tool_family(t) for t in tried}
+    canonical = {_HERMES_NAME_MAP.get(t, t) for t in tried}
+    ranked: list[str] = []
+    for family in _SUGGESTIBLE_FAMILIES:
+        if family in used_families:
+            continue
+        ranked.extend(n for n in family_tools(family, groups) if n not in canonical)
+    for family in _SUGGESTIBLE_FAMILIES:
+        if family not in used_families:
+            continue
+        ranked.extend(n for n in family_tools(family, groups) if n not in canonical)
+    return ranked[:limit]
+
 
 # Hermes-style tool registry: JSON schemas for the system prompt <tools> block.
 _TOOLS: list[dict[str, Any]] = [
@@ -582,6 +711,45 @@ _TOOLS: list[dict[str, Any]] = [
             "required": ["id", "description", "prompt", "requirements"],
         },
     },
+    {
+        "name": "tool_docs",
+        "description": (
+            "Get the exact arguments of the tools you do not have in front of you. "
+            "The catalog in your system prompt lists tool NAMES by family; this "
+            "returns the full JSON schema for a whole family ('file', 'code', "
+            "'shell', 'web', 'browser', 'desktop', 'memory', 'admin') or for "
+            "specific tools by name. Call it before using anything whose "
+            "arguments you are not certain of — one round spent asking beats an "
+            "attempt spent on a guessed argument name."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "family": {"type": "string", "description": "A tool family, e.g. 'browser'."},
+                "names": {"type": "string", "description": "Specific tool names, comma-separated."},
+            },
+        },
+    },
+    {
+        "name": "save_command",
+        "description": (
+            "Save a reusable slash command the user can then run by typing "
+            "/<name> in the chat. The body is a prompt template that becomes "
+            "their next message; write $ARGUMENTS where whatever they type "
+            "after the command name should be substituted. Use it when a "
+            "request is one they will clearly make again in the same shape "
+            "('every morning, summarize my notes and check the calendar')."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Command name, lowercase, no slash, e.g. 'standup'."},
+                "description": {"type": "string", "description": "One line shown in the command list."},
+                "body": {"type": "string", "description": "The prompt template. $ARGUMENTS is replaced with the user's arguments."},
+            },
+            "required": ["name", "body"],
+        },
+    },
 ]
 
 # Hermes name -> internal name (most are already the same).
@@ -603,6 +771,14 @@ _HERMES_NAME_MAP: dict[str, str] = {
     "raw_html": "fetch_html",
     "html": "fetch_html",
     "fetch": "read_page",
+    # The agent stack (symbio/tools.py) calls these "patch" and "web_extract",
+    # and the shared prompt and few-shot examples have to name ONE spelling for
+    # both. They name the agent stack's, because that registry resolves by
+    # exact name and has no alias table to teach; this one does, so the cost of
+    # agreeing lands here, in two lines, instead of in a prompt that is wrong
+    # for whichever stack it is not written for.
+    "patch": "edit_file",
+    "web_extract": "read_page",
     "browse": "browser_open",
     "open": "browser_open",
     "navigate": "browser_open",
@@ -656,6 +832,22 @@ _ARG_ALIASES: dict[str, dict[str, str]] = {
     "delegate_task": {"role": "role", "worker": "role", "agent": "role", "to": "role",
                       "task": "task", "prompt": "task", "instruction": "task", "query": "task"},
     "write_note": {"title": "title", "body": "body", "content": "body", "text": "body", "note": "body", "value": "body", "subject": "title"},
+    # old_text/new_text is what `patch` takes in the agent stack and what a
+    # model that has seen either stack will reach for. A rename here is free;
+    # the alternative is an edit that silently finds no match because the only
+    # thing wrong with it was the key's name.
+    "edit_file": {"path": "path", "file": "path", "old_string": "old_string",
+                  "old_text": "old_string", "old": "old_string",
+                  "new_string": "new_string", "new_text": "new_string",
+                  "new": "new_string", "replacement": "new_string",
+                  "backup": "backup"},
+    "read_file": {"path": "path", "file": "path", "filename": "path",
+                  "offset": "offset", "limit": "limit"},
+    "write_file": {"path": "path", "file": "path", "filename": "path",
+                   "content": "content", "text": "content", "body": "content",
+                   "data": "content", "backup": "backup"},
+    "execute_code": {"code": "code", "script": "code", "source": "code",
+                     "python": "code", "program": "code"},
 }
 
 
@@ -940,6 +1132,8 @@ def tool_group_enabled(name: str, groups: set[str] | None) -> bool:
     """Is `name` reachable with `groups` turned on? Unknown tools are allowed
     through here; the dispatcher decides what to do with a name it lacks."""
     group = tool_group(name)
+    if group in _ALWAYS_ENABLED_GROUPS:
+        return True
     if group is None or groups is None:
         return True
     if isinstance(group, tuple):
@@ -947,12 +1141,95 @@ def tool_group_enabled(name: str, groups: set[str] | None) -> bool:
     return group in groups
 
 
-def build_tools_block(groups: set[str] | None = None) -> str:
-    """Return the Hermes-style <tools> JSON block for the system prompt.
+# Tools whose full schema stays inline even in index mode: the ones an
+# ordinary turn reaches for without deliberating. Making these cost a
+# tool_docs round would trade ~2,200 prompt tokens for a round-trip on every
+# routine request, which is the wrong side of that trade.
+_CORE_SCHEMA_TOOLS = frozenset({
+    "terminal", "web_search", "execute_code", "read_file", "edit_file",
+    "browser_open", "write_note", "tool_docs",
+    # These two are here for their DESCRIPTIONS, not their frequency.
+    # browser_press's says that many web apps submit with cmd+enter and that
+    # plain enter posts nothing — a correction the model cannot know it needs
+    # until it has already pressed the wrong key. see_screen's is what the
+    # click/type failure messages tell it to call; a recovery path that starts
+    # with a schema lookup is a recovery path spent at the worst moment.
+    "browser_press", "see_screen",
+})
+
+# What the last sync read off disk, and the directory signature it was read
+# at. Re-globbing every turn is cheap; re-parsing 40 files every turn is not,
+# and the answer only changes when a file does.
+_disk_signature: tuple | None = None
+
+
+def _disk_state() -> tuple:
+    try:
+        return tuple(sorted(
+            (p.name, p.stat().st_mtime_ns, p.stat().st_size)
+            for p in constants.TOOLS_DIR.glob("*.md")))
+    except Exception:
+        return ()
+
+
+def sync_tool_files(seed: bool = True) -> None:
+    """Fold tools/*.md into the live catalog, seeding the directory first.
+
+    A file whose name matches a built-in tool REPLACES its description and
+    schema — that is what makes the directory editable — and a file with a new
+    name adds a tool. Adding one here does not make it runnable on its own: a
+    name the dispatcher does not know still comes back as an unknown tool. It
+    makes it describable, which is the half that used to need a code change.
+    """
+    global _disk_signature
+    state = _disk_state()
+    # Seed when the directory is missing (a fresh install) and also when it
+    # holds fewer files than there are built-in tools — which is what a tool
+    # added in code since the last seed looks like. Without the second case a
+    # new built-in would never get a file, and the directory would quietly
+    # stop being the place tools are defined. ensure_seeded never overwrites,
+    # so this cannot walk on an edit.
+    if seed and (len(state) < len(_TOOLS)
+                 or not (constants.TOOLS_DIR / "README").exists()):
+        tool_docs.ensure_seeded(_TOOLS, _TOOL_FAMILIES, _TOOL_GROUPS,
+                                _HERMES_NAME_MAP)
+        state = _disk_state()
+    if state == _disk_signature:
+        return
+    _disk_signature = state
+    by_name = {t["name"]: t for t in _TOOLS}
+    for parsed in tool_docs.load_tool_files():
+        name = parsed["name"]
+        schema = {"name": name, "description": parsed["description"],
+                  "parameters": parsed["parameters"]}
+        internal = _HERMES_NAME_MAP.get(name, name)
+        if parsed["_family"]:
+            _TOOL_FAMILIES.setdefault(internal, parsed["_family"])
+        if name in by_name:
+            by_name[name].update(schema)
+            continue
+        # A NEW tool file needs a group, or the catalog filter — which drops
+        # anything whose group is unknown — would leave it defined and never
+        # advertised. Writing the file is the opt-in, so one without a group
+        # of its own lands in "core", which is not gateable. A file that names
+        # a group is gated by it like any built-in.
+        _TOOL_GROUPS.setdefault(internal, parsed["_group"] or "core")
+        _TOOLS.append(schema)
+
+
+def build_tools_block(groups: set[str] | None = None,
+                      mode: str = "index") -> str:
+    """Return the <tools> block for the system prompt.
+
+    mode="index" (the default) prints the families, the tool names in each and
+    the schemas of the handful used most often, and leaves the rest to be
+    fetched with tool_docs. mode="full" prints every schema, which is what
+    every version before this did — `/config set agent.tool_catalog full`
+    restores it.
 
     If `groups` is given, only tools whose group is in the set are included.
-    The JSON is emitted compactly (no indentation) to keep prompt length down.
     """
+    sync_tool_files()
     tools = _TOOLS
     if groups is not None:
         # Through the Hermes map, not the catalog name directly: the shell
@@ -964,6 +1241,8 @@ def build_tools_block(groups: set[str] | None = None) -> str:
                      _HERMES_NAME_MAP.get(t["name"], t["name"]), groups)
                  and tool_group(
                      _HERMES_NAME_MAP.get(t["name"], t["name"])) is not None]
+    if mode == "index":
+        return tool_docs.index_block(tools, tool_family, _CORE_SCHEMA_TOOLS)
     return "<tools>" + json.dumps(tools, ensure_ascii=False, separators=(",", ":")) + "</tools>"
 
 

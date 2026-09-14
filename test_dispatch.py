@@ -224,11 +224,28 @@ def test_parse_delegate_tag_respects_enabled_groups():
 # ---- the catalog the model is shown and the parser that answers it ----
 
 def _catalog_names(prompt: str) -> set[str]:
-    """The tool names inside the <tools> block of a built system prompt."""
-    import json
+    """The tool names inside the <tools> block of a built system prompt.
 
-    block = prompt[prompt.rfind("<tools>") + len("<tools>"):]
-    return {t["name"] for t in json.loads(block.split("</tools>")[0])}
+    The block comes in two shapes now (agent.tool_catalog): "full" is the JSON
+    array of every schema, "index" is families with their names listed and the
+    few most-used schemas inline. Both are read here, because what these tests
+    are actually asking — "is this tool advertised to the model?" — is the same
+    question either way, and the answer must not depend on the format.
+    """
+    import json
+    import re
+
+    block = prompt[prompt.rfind("<tools>") + len("<tools>"):].split("</tools>")[0]
+    stripped = block.strip()
+    if stripped.startswith("["):
+        return {t["name"] for t in json.loads(stripped)}
+    names: set[str] = set()
+    for line in block.splitlines():
+        if re.fullmatch(r" {4}[a-z_]+(, [a-z_]+)*", line):
+            names |= {n.strip() for n in line.split(",")}
+        elif line.strip().startswith("["):
+            names |= {t["name"] for t in json.loads(line.strip())}
+    return names
 
 
 def test_the_catalog_only_advertises_groups_this_install_has_on():

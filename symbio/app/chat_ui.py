@@ -9,7 +9,9 @@ never means opening the file that decides what happens.
 import json
 import logging
 import os
+import shutil
 import sys
+import textwrap
 import threading
 import time
 from datetime import datetime
@@ -51,6 +53,71 @@ def _make_chat_logger() -> logging.Logger:
 # xterm-256 stops around the hue circle. Skipping pure blue (21) keeps every
 # glyph legible on a dark terminal.
 _RAINBOW_COLORS: tuple[int, ...] = (196, 202, 220, 46, 51, 33, 129)
+
+
+def term_width(default: int = 80) -> int:
+    """How wide the terminal is right now, clamped to something readable.
+
+    Read per call, not cached: a window resized mid-session is the common case
+    and a cached width is wrong for the rest of the session. The floor keeps a
+    very narrow window from producing one-word-per-line columns; the ceiling
+    keeps a maximized window from producing lines too long to scan. A pipe or
+    a front-end with no terminal reports nothing, and gets the default.
+    """
+    try:
+        columns = shutil.get_terminal_size((default, 24)).columns
+    except Exception:
+        columns = default
+    return max(40, min(int(columns or default), 110))
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """textwrap with the two defaults that are wrong for this content.
+
+    break_long_words splits a path or a URL across lines, which makes it
+    uncopyable; break_on_hyphens turns "/skill-adapters" into "/skill-" and
+    "adapters", which reads as two commands, neither of which exists. A token
+    longer than the window overhangs instead, and the terminal soft-wraps it.
+    """
+    return textwrap.wrap(text, width, break_long_words=False,
+                         break_on_hyphens=False)
+
+
+def two_column(label: str, text: str, indent: int = 4, gap: int = 2,
+               width: int | None = None) -> list[str]:
+    """A label and its description, laid out for the width there actually is.
+
+    Wide enough, and it is the familiar two columns with the description
+    wrapped under itself. Too narrow for both — the label alone would leave
+    fewer than ~24 columns for the text — and the description drops to its own
+    indented line instead of being squeezed into a gutter. Returns lines so the
+    caller keeps control of its own output_fn.
+    """
+    width = width or term_width()
+    pad = " " * indent
+    label_width = len(label)
+    text = " ".join((text or "").split())
+    if not text:
+        return [f"{pad}{label}"]
+    if label_width + gap + 24 <= width - indent:
+        column = label_width + gap
+        body = _wrap(text, max(20, width - indent - column)) or [""]
+        first = f"{pad}{label}{' ' * gap}{body[0]}"
+        rest = [f"{pad}{' ' * column}{line}" for line in body[1:]]
+        return [first] + rest
+    lines = [f"{pad}{label}"]
+    lines += [f"{pad}  {line}"
+              for line in _wrap(text, max(20, width - indent - 2))]
+    return lines
+
+
+def wrapped_list(items, indent: int = 4, width: int | None = None) -> list[str]:
+    """A comma-separated list broken to fit, e.g. a family's tool names."""
+    width = width or term_width()
+    pad = " " * indent
+    joined = ", ".join(items)
+    return [f"{pad}{line}"
+            for line in _wrap(joined, max(20, width - indent))] or [pad]
 
 
 def rainbow(text: str) -> str:
@@ -231,16 +298,39 @@ def adapter_status_value(config: dict[str, Any], adapter_loaded: bool) -> str:
 def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int,
                  output_fn=print):
     note_count = len(list(constants.NOTES_DIR.glob("*.md")))
-    output_fn("\n" + "=" * 50)
+    # Everything below is sized to the window. The command list used to be
+    # four hand-maintained strings well over 200 characters each, which on
+    # anything but a maximized terminal wrapped into an unreadable block — and
+    # drifted out of date every time a command was added. It comes from the one
+    # table now (chat_constants.BUILTIN_COMMANDS) and is wrapped to fit.
+    from symbio.app.chat_constants import BUILTIN_COMMAND_NAMES
+
+    width = term_width()
+    output_fn("\n" + "=" * width)
     output_fn(f"  {config['assistant_name'].upper()} — PERSONAL CHAT-FINETUNE CLI")
-    output_fn(f"   Model  : {config['model_name']}")
-    output_fn(f"   User   : {config['user_name']}")
-    output_fn(f"   LoRA   : {adapter_status_value(config, adapter_loaded)}")
-    output_fn(f"   Data   : {dataset_size:,} bytes")
-    output_fn(f"   Notes  : {note_count}")
-    output_fn("-" * 50)
-    output_fn("Commands: /quit  /save  /train  /retrain  /train_worker  /resume  /golden [audit|prune]  /security  /learn  /forget_last  /status  /think  /backup  /restore-adapter  /prune  /selfcheck  /setup  /compact  /standing  /voice  /help")
-    output_fn("         /run <cmd>  /note [title]  /notes  /index-notes [--force]  /auto-index on|off  /new-skill <name> | <steps>  /skills  /skill-adapters  /digest  /cron  /config  /archive  /restore")
-    output_fn("         /build-mcp <name> | <description>  /mcp-tools  /hosts  /telemetry on|off  /feedback <text>")
-    output_fn("  (Caine can also use <note>, <cmd>, <py>, <digest />, <train />, <cron> by itself)")
-    output_fn("-" * 50)
+    for label, value in (
+            ("Model ", config["model_name"]),
+            ("User  ", config["user_name"]),
+            ("LoRA  ", adapter_status_value(config, adapter_loaded)),
+            ("Data  ", f"{dataset_size:,} bytes"),
+            ("Notes ", str(note_count)),
+    ):
+        # The model name is a full snapshot path and is the one line here that
+        # reliably overflows a narrow window.
+        for line in two_column(f"{label} :", str(value), indent=3, gap=1,
+                               width=width):
+            output_fn(line)
+    output_fn("-" * width)
+    for i, line in enumerate(wrapped_list(
+            [f"/{n}" for n in BUILTIN_COMMAND_NAMES], indent=10, width=width)):
+        output_fn(("Commands:" + line[9:]) if i == 0 else line)
+    for line in two_column(
+            "", "Type / on its own for the whole menu, with what each one "
+                "does, or / and Tab to complete.", indent=2, gap=0, width=width):
+        output_fn(line)
+    for line in two_column(
+            "", f"{config['assistant_name']} can also use <note>, <cmd>, <py>, "
+                f"<digest />, <train />, <cron> by itself.",
+            indent=2, gap=0, width=width):
+        output_fn(line)
+    output_fn("-" * width)

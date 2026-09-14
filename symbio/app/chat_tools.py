@@ -741,6 +741,46 @@ class ToolsMixin:
         return computer.desktop_click_in_image(*coords, image_size=size)
 
     def _dispatch_tool(self, name: str, params: dict[str, Any]) -> str:
+        if name == "tool_docs":
+            # The other half of the index catalog: the prompt names the tools,
+            # this hands over the arguments. Filtered by the same enabled
+            # groups the index was built from, so a tool the user switched off
+            # cannot be looked up and then called.
+            from symbio.app import tool_docs as _tool_docs
+
+            tooling.sync_tool_files()
+            groups = getattr(self, "enabled_groups", None)
+            schemas = [
+                t for t in tooling.tool_schemas()
+                if tooling.tool_group_enabled(
+                    tooling._HERMES_NAME_MAP.get(t["name"], t["name"]), groups)]
+            return _tool_docs.docs_for(
+                schemas, tooling.tool_family,
+                family=str(params.get("family", "")),
+                names=str(params.get("names", "")))
+
+        if name == "save_command":
+            from symbio.app import commands as _commands
+
+            try:
+                path = _commands.save_command(
+                    str(params.get("name", "")),
+                    str(params.get("body", "")),
+                    description=str(params.get("description", "")),
+                    # Recorded, not hidden: the user should be able to see at a
+                    # glance which of their commands they did not write.
+                    author="assistant")
+            except Exception as e:
+                # ValueError for a name or body the store refuses, anything
+                # else for a disk that would not take the file. Both are the
+                # same thing to the model: it did not get saved, and here is
+                # why.
+                return f"Could not save that command: {e}"
+            return (f"Saved /{path.stem}. The user can run it by typing "
+                    f"/{path.stem}; it is a file at "
+                    f"{_commands.display_path(path)} that they can edit or "
+                    f"delete.")
+
         if name == "write_note":
             # Same idiom as the browser actions below: name the missing field
             # and say what to do about it. params["body"] raised a bare

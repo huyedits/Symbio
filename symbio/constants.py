@@ -25,6 +25,14 @@ MISTAKES_ARCHIVE_DIR = MISTAKES_DIR / "archive"
 # digested mistake notes are archived. Subdirectory, so excluded from the
 # non-recursive *.md globs that feed RAG and digestion.
 NOTES_ARCHIVE_DIR = NOTES_DIR / "archive"
+# One markdown file per tool: frontmatter (name, family, group) plus the
+# description and JSON schema the model is shown. Seeded from the in-code
+# catalog on first run (see symbio/app/tool_docs.py) so adding a tool is a
+# file you drop in here, not a list you edit in Python.
+TOOLS_DIR = PROJECT_DIR / "tools"
+# One markdown file per user-defined slash command, the way prompt.md is one
+# file for the prompt. See symbio/app/commands.py.
+COMMANDS_DIR = PROJECT_DIR / "commands"
 SANDBOX_DIR = PROJECT_DIR / "sandbox"
 SCREENSHOTS_DIR = PROJECT_DIR / "screenshots"
 DIGEST_MANIFEST = DATA_DIR / "digest_manifest.json"
@@ -48,6 +56,12 @@ PROFILE_FILE = PROJECT_DIR / "user_profile.md"
 # "wants the least possible friction" is neither — it is a reading of the
 # relationship, and it decides how a turn should go. See symbio/app/soul.py.
 SOUL_FILE = PROJECT_DIR / "soul.md"
+# The consolidation of those observations into one stance per recurring
+# tradeoff — "wants the answer, not the wheel", "acts first, asks after". The
+# soul store is append-only and episodic, so it ends up holding both sides of
+# the same question at once; this holds exactly one, with the evidence and the
+# count behind it, and a flip is dated and visible. See app/constitution.py.
+CONSTITUTION_FILE = PROJECT_DIR / "constitution.md"
 # A persistent Chrome profile for the agent's browser. Holds session
 # cookies, so it is gitignored and never leaves the machine.
 BROWSER_PROFILE_DIR = PROJECT_DIR / "browser_profile"

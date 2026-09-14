@@ -56,8 +56,23 @@ def sounds_unsure(text: str) -> bool:
 # something like "database error fixes" or "how to fix blocked drains"
 # would otherwise falsely look like a failure just because the
 # user-controlled query text happens to contain that word.
+# The file tools phrase their failures differently from everything else, and
+# none of those phrasings matched: "File not found: x.txt" starts with neither
+# "failed" nor "could not", contains no "error:", and so read as a SUCCESS to
+# every caller of sounds_like_tool_error. Live 2026-09-14, driving a four-step
+# puzzle: the model made seven read_file calls on names that did not exist and
+# the harness counted zero failures — so failures_this_turn never moved, the
+# persistence ladder never climbed, the repeat-refusal never armed, and no
+# mistake note was captured. The most common failure there is was invisible to
+# the machinery built to react to failure.
+#
+# Anchored at the status line's start, like everything else here: a successful
+# web_search whose CONTENT mentions "file not found" must never read as a
+# failed call.
 _TOOL_ERROR_RE = re.compile(
-    r"^(?:failed|could not|no worker configured|browser \w+ (?:error|blocked))"
+    r"^(?:failed|could not|no worker configured|browser \w+ (?:error|blocked)"
+    r"|file not found|no such file|invalid path|unknown tool"
+    r"|no note matches|no tool matched)"
     r"|\b(?:exited error|is disabled|unrecognized action|did not finish|failed unexpectedly)\b"
     r"|\b(?:error|failed|blocked)[:.]",
     re.IGNORECASE,

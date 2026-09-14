@@ -1497,8 +1497,17 @@ def test_a_persistently_failing_tool_call_still_stops():
             session.run()
     finally:
         chat.BrowserSession = real_browser
-    # Bounded by the retry cap and max_tool_rounds, not spinning to max_rounds.
-    assert len(session.prompts_seen) <= chat._MAX_TOOL_RETRIES + 2, \
+    # The invariant is about EXECUTIONS, not rounds: the same failing call runs
+    # at most _MAX_TOOL_RETRIES times, however long the turn then spends
+    # arguing with itself about what to try instead.
+    ran = sum(1 for p in session.prompts_seen if p.count("Browser click error") == 1)
+    assert ran <= chat._MAX_TOOL_RETRIES, ran
+    # The turn still ends, and what ends it is the ROUND BUDGET — the thing
+    # that counts work attempted — never the harness running out of things to
+    # say. The persistence ladder deliberately does not exhaust (see
+    # app/persistence.py), so a bound tied to the number of nudges would be a
+    # bound on how hard it is willing to try.
+    assert len(session.prompts_seen) <= config["agent"]["max_tool_rounds"] + 1, \
         len(session.prompts_seen)
     print("test_a_persistently_failing_tool_call_still_stops passed")
 

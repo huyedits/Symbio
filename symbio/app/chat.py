@@ -2105,6 +2105,48 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                     self._indexing_now = False
             for kind, line in written:
                 self._log_info(f"Soul [{kind}]: {line}")
+            self._maybe_revise_constitution()
+
+    def _maybe_revise_constitution(self) -> None:
+        """Fold accumulated observations into one stance per question.
+
+        Runs on the soul worker's thread, right after its pass, and under the
+        same lock — a second generation running beside the first is the double
+        residency that hard-freezes this box, and consolidation is the least
+        urgent thing in the session.
+
+        Not every pass: `memory.constitution_revise_every` observations have to
+        have piled up first. Consolidating after every single observation is
+        just the soul store again with extra steps — the point of this layer is
+        that it sees several turns at once and can weigh them against each
+        other."""
+        from symbio.app import constitution
+
+        cfg = self.config.get("memory", {})
+        if not cfg.get("constitution_enabled", True):
+            return
+        try:
+            every = max(1, int(cfg.get("constitution_revise_every", 3)))
+        except (TypeError, ValueError):
+            every = 3
+        if len(constitution.pending_observations(self.config)) < every:
+            return
+        while self._indexing_now and not self._index_stop.is_set():
+            time.sleep(0.5)
+        if self._index_stop.is_set():
+            return
+        with self._index_lock:
+            self._indexing_now = True
+            try:
+                changes = constitution.revise(
+                    self.config, self._soul_generate, min_new=every)
+            except Exception as e:
+                self._log_info(f"Constitution pass failed: {e!r}")
+                changes = []
+            finally:
+                self._indexing_now = False
+        for change in changes:
+            self._log_info(f"Constitution: {change}")
 
     def _background_index_worker(self) -> None:
         """Daemon thread that periodically reindexes notes when idle.
@@ -2255,6 +2297,104 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             training.settle_after_trainer_exit(self.config, status_fn=self.output_fn)
             if not trained:
                 self._restore_model()
+
+    def _repair_regression(self, regressions: list[str], backup_dir,
+                           learn_cfg: dict) -> bool:
+        """Find which LoRA modules caused `regressions` and switch them off.
+
+        Returns True when the adapter was repaired AND the full battery passes
+        again — the caller then keeps it instead of rolling back a run that may
+        have improved fifteen modules and broken one.
+
+        The search runs entirely on the RESIDENT model (adapter_attrib.
+        switched_off), because the alternative — write an ablated adapter,
+        reload the 14B, evaluate — costs minutes per subset and a dozen subsets
+        per attribution. Only the surviving repair is ever written to disk.
+        """
+        from symbio.app import adapter_attrib, golden, training
+
+        if not learn_cfg.get("golden_repair_on_regression", True):
+            return False
+        if self.model is None:
+            return False
+        live = adapter_attrib.live_lora_modules(self.model)
+        if not live:
+            return False
+        candidates = sorted(
+            live, key=lambda n: (next((int(p) for p in n.split(".") if p.isdigit()), -1), n))
+
+        by_id = {c.id: c for c in golden.all_golden_cases()}
+        cases = [by_id[i] for i in regressions if i in by_id]
+        if not cases:
+            return False
+
+        self.output_fn(
+            f"  [Repair] Attributing {len(cases)} regression(s) across "
+            f"{len(candidates)} LoRA module(s)...")
+
+        def _restores(dropped) -> bool:
+            """Do the regressed cases pass with `dropped` switched off?"""
+            try:
+                with adapter_attrib.switched_off(self.model, dropped):
+                    result = golden.run_golden_set(
+                        self.model, self.tokenizer, self.generate_fn,
+                        self.sampler, self.system_prompt, self.config,
+                        self.enabled_groups, cases=cases)
+            except Exception as exc:
+                self._log_info(f"Repair evaluation failed: {exc!r}")
+                return False
+            return not (set(regressions) - result.passing)
+
+        culprits, spent = adapter_attrib.bisect_blame(candidates, _restores)
+        if not culprits:
+            self.output_fn(
+                f"  [Repair] Not attributable after {spent} evaluation(s): "
+                f"switching the whole adapter off does not bring these cases "
+                f"back, so something other than this training round moved "
+                f"them.")
+            return False
+        self.output_fn(
+            f"  [Repair] {len(culprits)} module(s) implicated in {spent} "
+            f"evaluation(s): {', '.join(culprits)}")
+
+        # The regressed cases coming back is necessary, not sufficient:
+        # switching a module off can cost something elsewhere, and an adapter
+        # that trades one regression for another is not repaired. So the FULL
+        # battery decides, with the repair actually applied.
+        with adapter_attrib.switched_off(self.model, culprits):
+            full = golden.run_golden_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config, self.enabled_groups)
+            if full.failing:
+                self.output_fn(
+                    f"  [Repair] {len(full.failing)} case(s) still failing with "
+                    f"those switched off; rolling back instead.")
+                return False
+            # Persist the repair while it is proven: the same ablation, written
+            # into the adapter file, so a restart serves what was just graded.
+            file_names = adapter_attrib.modules(constants.ADAPTER_DIR)
+            mapped = adapter_attrib.match_file_names(culprits, file_names)
+            missing = [c for c in culprits if c not in mapped]
+            if missing:
+                self.output_fn(
+                    f"  [Repair] Could not locate {', '.join(missing)} in the "
+                    f"adapter file; rolling back rather than keeping a repair "
+                    f"that would not survive a restart.")
+                return False
+            adapter_attrib.write_ablated(
+                constants.ADAPTER_DIR, constants.ADAPTER_DIR, mapped.values())
+
+        adapter_attrib.record_quarantine(
+            constants.ADAPTER_DIR, culprits, regressions,
+            datetime.now().strftime("%Y-%m-%d %H:%M"))
+        self.output_fn(
+            "  [Repair] Battery clean with those module(s) off — keeping the "
+            "adapter and quarantining them.")
+        self._last_train_note = (
+            f"Training regressed on {len(regressions)} check(s), traced to "
+            f"{', '.join(culprits)}; those modules were switched off and the "
+            f"rest of the adapter kept.")
+        return True
 
     def _guarded_train(self, config: dict[str, Any] | None = None,
                        iters: int | None = None,
@@ -2433,6 +2573,12 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 self.output_fn(
                     f"  [Golden] Regression: {len(regressions)} case(s) newly "
                     f"failing ({', '.join(regressions)}).")
+                # Before throwing the whole adapter away, ask WHICH PART broke
+                # it. LoRA is additive per module, so switching one off is an
+                # experiment rather than a guess — and a run that improved
+                # fifteen modules and broke one should not lose all sixteen.
+                if self._repair_regression(regressions, backup_dir, learn_cfg):
+                    return True
                 rolled_back = False
                 if not learn_cfg.get("golden_rollback_on_regression", True):
                     self.output_fn("  [Golden] Rollback disabled in config; keeping the regressed adapter.")
@@ -2905,6 +3051,60 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                     self._guarded_train()
 
 
+def _install_command_completion(session) -> bool:
+    """Make "/" complete against the commands that actually exist.
+
+    This is the terminal's half of the slash-command idea: a name is only
+    worth having if it can be recalled, and recall in a terminal is Tab. The
+    completer is rebuilt from the session on every keystroke rather than
+    captured once, so a command saved during the session — by the user or by
+    the assistant through save_command — is completable immediately.
+
+    readline is a standard-library module but not a guaranteed one (a stripped
+    Python, a non-tty front-end), and completion is a convenience: a failure
+    here costs Tab, never the session.
+    """
+    try:
+        import readline
+    except Exception:
+        return False
+    if not sys.stdin.isatty():
+        return False
+
+    def _complete(text: str, state: int):
+        try:
+            buffer = readline.get_line_buffer()
+            if not buffer.lstrip().startswith("/"):
+                return None
+            # Only the command word completes; arguments are free text.
+            if buffer.lstrip()[1:].find(" ") >= 0 and text != buffer.lstrip():
+                return None
+            typed = text.lstrip("/").lower()
+            matches = [f"/{n}" for n in session.command_names()
+                       if n.startswith(typed)]
+            return matches[state] if state < len(matches) else None
+        except Exception:
+            return None
+
+    try:
+        readline.set_completer(_complete)
+        # Slashes and hyphens are part of a command name, not delimiters, or
+        # "/new-skill" completes as if "skill" were its own word.
+        readline.set_completer_delims(" \t\n")
+        # libedit (the macOS system Python) speaks a different dialect of the
+        # same config language; bind for both rather than picking one.
+        if "libedit" in (getattr(readline, "__doc__", "") or ""):
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+            # One Tab on an ambiguous prefix shows the candidates instead of
+            # waiting for a second — the menu is the point.
+            readline.parse_and_bind("set show-all-if-ambiguous on")
+    except Exception:
+        return False
+    return True
+
+
 def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
               adapter_loaded: bool | None = None,
               generate_fn=None, stream_fn=None,
@@ -2992,6 +3192,7 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
         input_fn=input_fn, output_fn=output_fn, confirm_fn=confirm_fn,
         owner="cli",
     )
+    _install_command_completion(session)
     # When the CLI itself runs, load and warm the model before showing the
     # banner or interactive prompt. Tests that inject a model or generation
     # functions skip this so they remain lightweight.

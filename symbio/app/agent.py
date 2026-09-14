@@ -255,7 +255,13 @@ class AIAgent:
         return openai_tool_schemas(self.tools)
 
     def _tool_few_shots(self) -> list[dict[str, str]]:
-        return tool_few_shots(self.config)
+        """The worked examples, rotated to the family this agent last worked in.
+
+        Nothing here inspects the user's message: the family comes from the
+        tool the model itself last chose. With none chosen yet the full block
+        comes back, which is what every caller got before."""
+        return tool_few_shots(
+            self.config, family=getattr(self, "_last_tool_family", None))
 
     def _tool_metadata(self, name: str) -> dict[str, Any]:
         return tool_metadata(name, self.tools, self)
@@ -264,6 +270,12 @@ class AIAgent:
         return execute_tools(self, tools)
 
     def _run_single_tool(self, name: str, params: dict[str, Any]) -> str:
+        # Remember the family so the next turn's examples follow what this
+        # agent is actually doing. Recorded on the attempt, not the result: a
+        # failed browser call still says the work is browser work.
+        from symbio.app.tooling import tool_family
+
+        self._last_tool_family = tool_family(name)
         return run_single_tool(self, name, params)
 
     def _generate_stream(self, prompt: str, printer: _StreamPrinter | None) -> str:

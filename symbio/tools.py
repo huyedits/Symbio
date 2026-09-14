@@ -450,7 +450,16 @@ def openai_tool_schemas(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return schemas
 
 
-def tool_few_shots(config: dict[str, Any]) -> list[dict[str, str]]:
+# The families a worked-example block can be rotated to. Same names the tool
+# index uses (symbio/app/tool_docs.py), so "the family the model last worked
+# in" and "the family it can ask for schemas about" are one vocabulary.
+FEW_SHOT_FAMILIES: tuple[str, ...] = (
+    "file", "code", "shell", "web", "browser", "desktop", "memory",
+)
+
+
+def tool_few_shots(config: dict[str, Any],
+                   family: str | None = None) -> list[dict[str, str]]:
     """Minimal tool-use examples in Hermes JSON-in-<tool_call> format.
 
     The examples MUST match the format the runtime actually parses: parse_tools
@@ -458,7 +467,27 @@ def tool_few_shots(config: dict[str, Any]) -> list[dict[str, str]]:
     <tool_call> — never legacy short tags like <browse>/<click>/<search>. The
     system prompt (app/prompts.py) teaches the same JSON format, so the few-shots
     reinforce it instead of contradicting it. Keep every emitted tool name and
-    argument key aligned with the registry schema so a parsed call resolves.
+    argument key aligned with the registry schema so a parsed call resolves —
+    test_prompt_tool_names.py fails the build if one does not, in EITHER stack.
+
+    `family` rotates the block: the universals plus that family's examples,
+    instead of the fixed set. Without one — the first turn of a session, or a
+    conversation that has used no tools yet — the full set comes back, which is
+    exactly what this always returned.
+
+    Rotating buys breadth. The fixed block was four browser examples, a search
+    and a note, so a file or code request was answered by a model that had just
+    been shown six ways to drive a page.
+
+    WHO chooses the family matters as much as the rotation. The obvious
+    implementation is a keyword table over the user's message — and it is the
+    wrong one: a bag of words deciding what a sentence is about, in front of a
+    model whose entire job is understanding sentences, gets "read config.json"
+    and "read the news" wrong in opposite directions and shows the model the
+    wrong toolset with confidence. So nothing here reads the user's text. The
+    caller passes the family the MODEL itself last worked in — the tool it
+    actually chose, last turn — and the model can also ask for any family's
+    schemas outright with tool_docs. The classifier is the model.
 
     Greetings -> prose (no tool). The greeting is placed LAST so ambiguous input
     (e.g. "hi") defaults to the final example (small models copy the last few-shot).
@@ -480,23 +509,88 @@ def tool_few_shots(config: dict[str, Any]) -> list[dict[str, str]]:
                 + "Wikipedia" + chr(10) + "The Free Encyclopedia" + chr(10)
                 + "English 6,000,000+ articles")
     E = " <end>"
+
+    def _pair(user, name, args, said):
+        return [
+            {"role": "user", "content": user},
+            {"role": "assistant",
+             "content": _tc(name, args) + chr(10) + said + E},
+        ]
+
+    browser = (
+        _pair("open chrome to the apple website", "browser_open",
+              {"url": "https://www.apple.com"}, "Opening Apple.com in the browser.")
+        + _pair("click the continue button", "browser_click",
+                {"text": "Continue"}, "Clicking the Continue button.")
+        + _pair("press the enter key", "browser_press",
+                {"key": "Enter"}, "Pressing Enter.")
+        + _pair("scroll down the page", "browser_scroll",
+                {"direction": "down"}, "Scrolling down.")
+    )
+    web = (
+        _pair("what's the weather in sydney", "web_search",
+              {"query": "current weather Sydney"}, "Looking up the weather for you.")
+        + _pair("read the webpage at https://example.com", "web_extract",
+                {"url": "https://example.com"}, "Reading that page for you.")
+    )
+    shell = _pair("how much free disk space do I have", "terminal",
+                  {"cmd": "df -h"}, "Checking disk space.")
+    memory = _pair(f"remember that {uname} likes coffee", "note",
+                   {"action": "add", "target": "note", "title": "User Preference",
+                    "content": f"{uname} likes coffee."}, "Noted.")
+    files = (
+        _pair("what's in config.json", "read_file",
+              {"path": "config.json"}, "Reading config.json.")
+        + _pair("change the temperature to 0.4 in config.json", "patch",
+                {"path": "config.json", "old_text": '"temperature": 0.6',
+                 "new_text": '"temperature": 0.4'},
+                "Editing config.json.")
+        + _pair("save those steps to notes/setup.md", "write_file",
+                {"path": "notes/setup.md", "content": "1. Install.\n2. Run.\n"},
+                "Wrote notes/setup.md.")
+    )
+    code = (
+        _pair("how many seconds are in 37 days", "execute_code",
+              {"code": "print(37 * 24 * 60 * 60)"}, "Working it out.")
+        + _pair("decode aGVsbG8= for me", "execute_code",
+                {"code": "import base64\nprint(base64.b64decode('aGVsbG8=').decode())"},
+                "Decoding that.")
+    )
+    desktop = (
+        # The coordinates are in the USER's line on purpose. An example where
+        # they appear from nowhere teaches the model to invent them, and a
+        # confident wrong coordinate is the whole failure mode of driving a
+        # screen — real ones come from looking first.
+        _pair("click at 1200, 12 on my screen", "desktop_click",
+              {"x": 1200, "y": 12}, "Clicking there.")
+        + _pair("type my email address there", "desktop_type",
+                {"text": "me@example.com"}, "Typing it in.")
+        + _pair("hit escape", "desktop_press", {"key": "esc"}, "Pressing Escape.")
+    )
+    by_family = {
+        "file": files, "code": code, "shell": shell, "web": web,
+        "browser": browser, "desktop": desktop, "memory": memory,
+    }
+
+    # The universals lead EVERY variant, hinted or not, and that ordering is
+    # load-bearing rather than cosmetic. The prompt cache is a prefix: it is
+    # prefilled (chat.py) against the no-hint block, and a turn keeps whatever
+    # it shares with that prefix from the first differing token onwards. With
+    # the universals first, a rotated turn still reuses the system prompt plus
+    # these four messages and re-prefills only its own family block — a few
+    # hundred tokens against a ~6k prefix. Lead with a family instead and every
+    # hinted turn re-prefills the whole few-shot region.
+    universals = shell + web[:2]
+    if family not in by_family:
+        # No hint, or nothing matched: every example, the same eight the block
+        # has always carried. An unclassified turn must never see less.
+        rotating = universals + browser + web[2:] + memory
+    else:
+        rotating = universals + [m for m in by_family[family]
+                                 if m not in universals]
+
     return [
-        {"role": "user", "content": "open chrome to the apple website"},
-        {"role": "assistant", "content": _tc("browser_open", {"url": "https://www.apple.com"}) + chr(10) + "Opening Apple.com in the browser." + E},
-        {"role": "user", "content": "what's the weather in sydney"},
-        {"role": "assistant", "content": _tc("web_search", {"query": "current weather Sydney"}) + chr(10) + "Looking up the weather for you." + E},
-        {"role": "user", "content": f"remember that {uname} likes coffee"},
-        {"role": "assistant", "content": _tc("note", {"action": "add", "target": "note", "title": "User Preference", "content": f"{uname} likes coffee."}) + chr(10) + 'Noted.' + E},
-        {"role": "user", "content": "how much free disk space do I have"},
-        {"role": "assistant", "content": _tc("terminal", {"cmd": "df -h"}) + chr(10) + "Checking disk space." + E},
-        {"role": "user", "content": "click the continue button"},
-        {"role": "assistant", "content": _tc("browser_click", {"text": "Continue"}) + chr(10) + "Clicking the Continue button." + E},
-        {"role": "user", "content": "press the enter key"},
-        {"role": "assistant", "content": _tc("browser_press", {"key": "Enter"}) + chr(10) + "Pressing Enter." + E},
-        {"role": "user", "content": "scroll down the page"},
-        {"role": "assistant", "content": _tc("browser_scroll", {"direction": "down"}) + chr(10) + "Scrolling down." + E},
-        {"role": "user", "content": "read the webpage at https://example.com"},
-        {"role": "assistant", "content": _tc("web_extract", {"url": "https://example.com"}) + chr(10) + "Reading that page for you." + E},
+        *rotating,
         # Post-observation pattern: after a tool runs, the result comes back as a
         # [System observation: ...] + <tool_response>...</tool_response> user turn.
         # Answer with ONE short prose summary and STOP — do not fire another tool
