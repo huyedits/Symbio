@@ -21,9 +21,9 @@ is what made the control test possible.
 prompt.md is gitignored — it is yours, and every install's copy differs — so
 this cannot ship as a normal commit. Hence a patcher.
 
-    python3 patch_prompt.py            # apply
-    python3 patch_prompt.py --dry-run  # show what would change
-    python3 patch_prompt.py --revert   # take them back out
+    python3 scripts/patch_prompt.py            # apply
+    python3 scripts/patch_prompt.py --dry-run  # show what would change
+    python3 scripts/patch_prompt.py --revert   # take them back out
 
 Safe to run twice: it detects its own marker and does nothing.
 

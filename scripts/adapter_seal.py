@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Weld an adapter to the training data it came from, and prove it later.
 
-    python3 adapter_seal.py seal    Adapter_skills/brew_tea_150_WORKER
-    python3 adapter_seal.py verify  Adapter_skills/brew_tea_150_WORKER
-    python3 adapter_seal.py seal-all
-    python3 adapter_seal.py verify-all
-    python3 adapter_seal.py challenge Adapter_skills/brew_tea_150_WORKER
-    python3 adapter_seal.py respond   Adapter_skills/... --nonce HEX
+    python3 scripts/adapter_seal.py seal    Adapter_skills/brew_tea_150_WORKER
+    python3 scripts/adapter_seal.py verify  Adapter_skills/brew_tea_150_WORKER
+    python3 scripts/adapter_seal.py seal-all
+    python3 scripts/adapter_seal.py verify-all
+    python3 scripts/adapter_seal.py challenge Adapter_skills/brew_tea_150_WORKER
+    python3 scripts/adapter_seal.py respond   Adapter_skills/... --nonce HEX
 
 HOW IT WORKS
 
@@ -40,8 +40,8 @@ sitting next to each other when you said so.
 
 SIGNING THE ROOT (and why it is the part that matters)
 
-    python3 adapter_seal.py sign-root --key ~/.ssh/id_ed25519_sk.pub
-    python3 adapter_seal.py verify-signature --identity you@example.com
+    python3 scripts/adapter_seal.py sign-root --key ~/.ssh/id_ed25519_sk.pub
+    python3 scripts/adapter_seal.py verify-signature --identity you@example.com
 
     Every check below this line reads files that live in the same directory
     tree as the adapters. Whoever can rewrite an adapter can rewrite its seal,
@@ -781,7 +781,7 @@ def main() -> int:
     if args.action in ("seal-all", "verify-all"):
         folders = _folders(Path(args.root))
         if not folders:
-            print("Nothing in Adapter_skills/. Run archive_adapters.py first.")
+            print("Nothing in Adapter_skills/. Run scripts/archive_adapters.py first.")
             return 1
         root_doc = load_root_doc(Path(args.root))
         fn = (seal if args.action == "seal-all"

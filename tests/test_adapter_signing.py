@@ -11,11 +11,17 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
 import adapter_seal as seal_mod
 from symbio import adapter_integrity, constants
+
+# Same reason as in test_adapter_integrity: the fixture below redirects
+# constants.PROJECT_DIR, so the real checker's path is taken from the module
+# that was actually imported.
+REAL_SEAL = Path(seal_mod.__file__).resolve()
 
 
 pytestmark = pytest.mark.skipif(
@@ -32,10 +38,11 @@ def signed(tmp_path, monkeypatch):
     is the touch prompt.
     """
     monkeypatch.setattr(constants, "PROJECT_DIR", tmp_path)
-    # adapter_integrity loads its checker from PROJECT_DIR/adapter_seal.py, so
+    # adapter_integrity loads its checker from PROJECT_DIR/scripts/adapter_seal.py, so
     # the redirected project needs one — and the module cache has to be reset
     # or a previous test's copy answers for this one.
-    shutil.copy("adapter_seal.py", tmp_path / "adapter_seal.py")
+    (tmp_path / "scripts").mkdir(exist_ok=True)
+    shutil.copy(REAL_SEAL, tmp_path / "scripts" / "adapter_seal.py")
     adapter_integrity._seal_module = None
     adapter_integrity._seal_tried = False
     adapter_integrity._disk_policy = None

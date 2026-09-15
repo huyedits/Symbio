@@ -620,7 +620,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     # One rule for both of these, the same one style_line follows: colour on
     # means the new look, colour off means EXACTLY the legacy text. Anything
     # that reads this output rather than looking at it — the pty harnesses in
-    # verify_transcript_fixes.py, the Telegram bridge, a piped log — waits on
+    # tests/verify_transcript_fixes.py, the Telegram bridge, a piped log — waits on
     # the literal "Huy     : " prompt, so a styled one hangs it forever. Off a
     # terminal, or under NO_COLOR / SYMBIO_NO_COLOR, nothing changes at all.
     def assistant_prefix(self) -> str:

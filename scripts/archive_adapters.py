@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Collect every adapter into one readable folder, with its data and metadata.
 
-    python3 archive_adapters.py                 # build Adapter_skills/
-    python3 archive_adapters.py --dry-run       # show what it would write
-    python3 archive_adapters.py --list          # what is in there now
-    python3 archive_adapters.py --restore NAME  # rebuild a loadable adapter dir
+    python3 scripts/archive_adapters.py                 # build Adapter_skills/
+    python3 scripts/archive_adapters.py --dry-run       # show what it would write
+    python3 scripts/archive_adapters.py --list          # what is in there now
+    python3 scripts/archive_adapters.py --restore NAME  # rebuild a loadable adapter dir
 
 Layout produced:
 
@@ -155,7 +155,7 @@ def build(dry_run: bool = False) -> int:
             "restore_hint": (
                 "Copy the .safetensors back as 'adapters.safetensors' beside "
                 "adapter_config.json — mlx_lm loads that exact filename. "
-                f"Or: python3 archive_adapters.py --restore {folder.name}"),
+                f"Or: python3 scripts/archive_adapters.py --restore {folder.name}"),
         }, indent=2) + "\n", encoding="utf-8")
 
     print(f"\n{'Would copy' if dry_run else 'Copied'} {total_bytes / 1e6:.0f} MB. "

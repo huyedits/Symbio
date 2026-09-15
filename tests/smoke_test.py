@@ -6,7 +6,7 @@ from mlx_lm import load
 from symbio.config import _adapter_matches_model, adapter_weights_present
 from symbio import AIAgent, DEFAULT_CONFIG, load_config, parse_tools
 
-PROJECT_DIR = Path(__file__).parent.resolve()
+PROJECT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = PROJECT_DIR / "config.json"
 ADAPTER_DIR = PROJECT_DIR / "adapters"
 

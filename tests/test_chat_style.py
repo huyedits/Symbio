@@ -104,7 +104,7 @@ def test_the_prompts_are_plain_without_colour():
 
 
 def test_the_session_keeps_the_parseable_prompt_for_scripted_runs(monkeypatch, tmp_path):
-    """verify_transcript_fixes.py and the drive harnesses wait for the literal
+    """tests/verify_transcript_fixes.py and the drive harnesses wait for the literal
     "Huy     : " prompt. A styled prompt handed to a scripted front-end would
     hang them forever."""
     from symbio import constants

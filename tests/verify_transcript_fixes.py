@@ -38,7 +38,7 @@ import threading
 import time
 from pathlib import Path
 
-PROJECT_DIR = Path(__file__).parent.resolve()
+PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 # The reply the model actually produced on the "its colemak" turn: 25 <cmd>
 # tags and then a truncated 26th. The stripper held that trailing '<' waiting

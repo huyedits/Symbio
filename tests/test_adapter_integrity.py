@@ -11,14 +11,18 @@ import pytest
 from symbio import constants
 from symbio.app import modelload
 
+# Resolved at import, before any fixture redirects constants.PROJECT_DIR at a
+# tmp_path: this is the checker these tests copy into the fake project.
+REAL_SEAL = constants.PROJECT_DIR / "scripts" / "adapter_seal.py"
+
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     """A project root with a live adapter directory in it."""
     monkeypatch.setattr(constants, "PROJECT_DIR", tmp_path)
     monkeypatch.setattr(constants, "CONFIG_FILE", tmp_path / "config.json")
-    real = __import__("pathlib").Path("adapter_seal.py").resolve()
-    (tmp_path / "adapter_seal.py").write_bytes(real.read_bytes())
+    (tmp_path / "scripts").mkdir(exist_ok=True)
+    (tmp_path / "scripts" / "adapter_seal.py").write_bytes(REAL_SEAL.read_bytes())
     live = tmp_path / "adapters"
     live.mkdir()
     (live / "adapters.safetensors").write_bytes(b"WEIGHTS" * 16)
@@ -138,7 +142,7 @@ def test_a_missing_checker_is_a_missing_feature_not_an_error(project):
     from symbio import adapter_integrity as ai
     _seal(project)
     _tamper(project)
-    (project / "adapter_seal.py").unlink()
+    (project / "scripts" / "adapter_seal.py").unlink()
     ai._seal_module, ai._seal_tried = None, False
 
     ai.enforce(project / "adapters", {"agent": {"verify_adapters": "refuse"}},

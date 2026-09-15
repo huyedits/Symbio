@@ -144,6 +144,20 @@ telemetry/
 seed_tools.py
 train_runner.py
 
+# Where those one-offs now live. Ignored as a whole directory, not by name:
+# every pattern that used to cover them was root-anchored (`/_*.py`,
+# `/diag_*.txt`) precisely so it could not reach into the package, so moving
+# the files one level down would have quietly made them committable — which
+# for a corpus-regenerating script is the per-user-data leak the 2026-08-25
+# history rewrite existed to undo.
+/scratch/
+
+# Superseded copies of the per-user files above: config.json.bak.*,
+# prompt.md.bak.*, security.md.bak.*, and the adapters.testbak.* directories
+# an interrupted pytest run leaves behind. Each is per-user for the same
+# reason its live original is, so the directory is ignored as a whole.
+/backups/
+
 # Scratch copies conftest.py points the runtime at during a pytest run. They
 # are removed on a clean exit; ignoring them keeps an interrupted run from
 # leaving the working tree dirty.
@@ -182,6 +196,16 @@ eval_*.json
 /eval_routing.py
 /eval_toolcall.py
 /diag_*.txt
+
+# The same scripts after the root cleanup moved them into bench/ and tests/.
+# Commit 48b27a8 ("Keep the tests local; stop publishing them") untracked them
+# on purpose, and every pattern above is root-anchored, so the move alone
+# would have quietly published them again.
+bench/_*.py
+bench/eval_routing.py
+bench/eval_toolcall.py
+bench/trial_agent_models.py
+tests/_*.py
 
 # Locally quantised model weights — gigabytes, and GitHub caps files at 100 MB.
 models/

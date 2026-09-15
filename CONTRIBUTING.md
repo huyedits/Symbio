@@ -29,24 +29,50 @@ The project uses MLX for inference and LoRA fine-tuning, so the default path wor
 
 ## Running tests
 
-Fast unit tests (no model loading):
+The whole suite lives in `tests/` and runs under pytest:
 
 ```bash
-venv/bin/python test_learn.py
+venv/bin/python -m pytest -q
+```
+
+A single fast file (no model loading):
+
+```bash
+venv/bin/python -m pytest tests/test_learn.py -q
 ```
 
 End-to-end tests load the configured MLX model and may run short LoRA updates. They require the model downloaded and enough memory:
 
 ```bash
-venv/bin/python smoke_test.py
-venv/bin/python test_dynamic_names.py
-venv/bin/python test_learn_e2e.py
-venv/bin/python test_auto_learn_e2e.py
-venv/bin/python test_deferred_learn.py
-venv/bin/python test_threshold_training.py
+venv/bin/python tests/smoke_test.py
+venv/bin/python -m pytest tests/test_dynamic_names.py tests/test_learn_e2e.py \
+    tests/test_auto_learn_e2e.py tests/test_deferred_learn.py \
+    tests/test_threshold_training.py -q
 ```
 
 The smoke test is the canonical integration check. Run it after any refactor or rebrand change.
+
+## Repository layout
+
+Top level holds the package, the entry points, and the per-user runtime state
+the agent writes as it runs (`config.json`, `prompt.md`, `adapters/`, `notes/`,
+`sessions/`, `training_data/`, …). Everything else is grouped:
+
+- `symbio/` — the package. `main.py` and `symb` are the entry points.
+- `tests/` — the pytest suite, plus `smoke_test.py`.
+- `scripts/` — standalone maintenance tools run by hand: `adapter_seal.py`,
+  `archive_adapters.py`, `patch_prompt.py`, `seed_training.py`,
+  `switch_model.py`, `memory_monitor.py`.
+- `bench/` — benchmark harnesses and their recorded results.
+- `docs/` — long-form documentation.
+- `logs/`, `scratch/`, `backups/` — local only, all three gitignored: run
+  output, one-off experiment scripts, and superseded copies of the per-user
+  files above.
+
+`set_keyboard_layout.py` stays at the top level on purpose: its absolute path
+is baked into a trained worker's system prompt in
+`symbio/app/worker_models.json`, so moving it would break that skill for
+anyone whose adapter was trained against it.
 
 ## Architecture overview
 

@@ -13,7 +13,7 @@ from mlx_lm import load
 
 from symbio import AIAgent, load_config, save_config, ADAPTER_DIR, NOTES_DIR, maybe_update_names_from_message
 
-PROJECT_DIR = Path(__file__).parent.resolve()
+PROJECT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = PROJECT_DIR / "config.json"
 
 # Remember original names so we can restore them.

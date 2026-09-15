@@ -20,8 +20,9 @@ import tracemalloc
 from contextlib import contextmanager
 from pathlib import Path
 
-# Project root
-sys.path.insert(0, str(Path(__file__).parent))
+# Project root first, then this directory for the shared test fixtures.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(1, str(Path(__file__).resolve().parent))
 
 from symbio import constants
 from symbio.app import chat, sandbox, sessions, tooling, training, web

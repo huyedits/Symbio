@@ -422,7 +422,7 @@ def worker_roster_block() -> str:
     menu. Every trained skill adapter sat behind a routing decision it could
     not make.
 
-    eval_routing.py scored the headmaster 94% on exactly this task, but its
+    bench/eval_routing.py scored the headmaster 94% on exactly this task, but its
     build_user() pastes the whole catalog into every prompt, so it measured a
     model CHOOSING FROM A LIST against a deployment that had no list. Same
     shape as grounding an API call: the knowledge has to be in the prompt, not
