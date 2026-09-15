@@ -143,6 +143,24 @@ def _flags(args: list[str], verb: str, *, allowed: set[str],
     return out
 
 
+def _require_node(state: dict, node: str, region: str) -> None:
+    """A node exists only in its own region.
+
+    Without this `--region` was required and then IGNORED for every compute
+    and access verb — decorative on 7 of 14 verbs. It let a cold-start trial
+    pass a battery case asking for eu-2 with `--region ap-1` memorised from its
+    training samples, which is precisely the false pass the differing regions
+    were supposed to make impossible.
+    """
+    known = state["nodes"].get(node)
+    if known is None:
+        raise CommandError(f"NoSuchNode: {node}")
+    if known.get("region") != region:
+        raise CommandError(
+            f"NoSuchNode: {node} is not in {region}. It is in "
+            f"{known.get('region')}.")
+
+
 def _ckey(region: str, name: str) -> str:
     """A container's key. A plain separator rather than a stringified tuple:
     the first draft read those back with eval(), which is a habit that costs
@@ -266,8 +284,7 @@ def _compute(args, state):
 
     if verb in ("halt", "resume"):
         f = _flags(rest, verb, allowed={"node"}, required={"node"})
-        if f["node"] not in state["nodes"]:
-            raise CommandError(f"NoSuchNode: {f['node']}")
+        _require_node(state, f["node"], f["region"])
         state["nodes"][f["node"]]["status"] = "halted" if verb == "halt" else "up"
         return f"{f['node']} is now {state['nodes'][f['node']]['status']}"
 
@@ -278,8 +295,7 @@ def _compute(args, state):
         if not m:
             raise CommandError(
                 "--label must be written as <Key>:<Value>, for example Owner:sre.")
-        if f["node"] not in state["nodes"]:
-            raise CommandError(f"NoSuchNode: {f['node']}")
+        _require_node(state, f["node"], f["region"])
         state["nodes"][f["node"]].setdefault("labels", {})[m.group("k")] = m.group("v")
         return f"labelled {f['node']} {m.group('k')}:{m.group('v')}"
     raise CommandError(f"Unhandled compute verb {verb!r}")
@@ -303,13 +319,17 @@ def _access(args, state):
         return f"identity created: {f['identity']}"
 
     if verb == "list-identities":
-        _flags(rest, verb, allowed=set(), required=set())
-        return "\n".join(sorted(state["identities"])) or "(none)"
+        f = _flags(rest, verb, allowed=set(), required=set())
+        return "\n".join(sorted(
+            n for n, d in state["identities"].items()
+            if d.get("region") == f["region"])) or "(none)"
 
     if verb == "drop-identity":
         f = _flags(rest, verb, allowed={"identity"}, required={"identity"})
-        if f["identity"] not in state["identities"]:
-            raise CommandError(f"NoSuchIdentity: {f['identity']}")
+        known = state["identities"].get(f["identity"])
+        if known is None or known.get("region") != f["region"]:
+            raise CommandError(
+                f"NoSuchIdentity: {f['identity']} in {f['region']}")
         del state["identities"][f["identity"]]
         return f"identity dropped: {f['identity']}"
     raise CommandError(f"Unhandled access verb {verb!r}")
@@ -325,7 +345,22 @@ def run(argv: list[str]) -> tuple[int, str]:
                    f"Usage: awsim <service> <verb> --option value ...")
     service, rest = argv[0], argv[1:]
     if service not in SERVICES:
-        return 2, (f"error: Unknown service '{service}'. "
+        # Name the FORM, not just the content, when the first word looks like a
+        # flag. Measured 2026-09-15: a model locked onto a different CLI shape
+        # (`awsim -r ap-1 -c bucket --delete`, then `--service store`, then
+        # `-s store`) and spent all six attempts permuting its own convention.
+        # Every error had already handed it the full verb map — it had the
+        # answer six times and could not use it, because from inside that frame
+        # "Unknown service '-r'" reads as "your --service VALUE is wrong", not
+        # "the service is a positional word". The map describes what exists;
+        # this describes the shape it goes in.
+        shape = ""
+        if service.startswith("-"):
+            shape = (" The service is the FIRST WORD and is not a flag: write "
+                     "`awsim <service> <verb> --option value`, for example "
+                     "`awsim store list-containers --region ap-1`. There are no "
+                     "single-letter options.")
+        return 2, (f"error: Unknown service '{service}'.{shape} "
                    f"Every verb, by service: {verb_map()}")
     state = load_state()
     try:

@@ -194,38 +194,104 @@ def make_tasks(rng: random.Random, n: int) -> list[eval_aws.Case]:
             _seed(containers={_ck(a): {}, _ck(b): {}}),
             lambda code, out, st, a=a: code == 0 and a in out)
 
+    @maker
+    def _chain_create_put(r):
+        c, k, f = r.choice(CONTAINERS), r.choice(PATHS), r.choice(LOCALS)
+        return eval_aws.Case(
+            f"chain_cp_{c}", f"In region {REGION}, create a container called {c} "
+                             f"and then store the local file {f} in it at {k}.",
+            _seed(),
+            lambda code, out, st, c=c, k=k: code == 0
+            and k in st["containers"].get(_ck(c), {}))
+
+    @maker
+    def _chain_move(r):
+        a, b = r.sample(CONTAINERS, 2)
+        k = r.choice(PATHS)
+        return eval_aws.Case(
+            f"chain_mv_{a}", f"In region {REGION}, move the path {k} out of the "
+                             f"container {a} and into {b} at the same path — it "
+                             f"must not be left behind.",
+            _seed(containers={_ck(a): {k: "x"}, _ck(b): {}}),
+            lambda code, out, st, a=a, b=b, k=k: code == 0
+            and k in st["containers"].get(_ck(b), {})
+            and k not in st["containers"].get(_ck(a), {}))
+
+    @maker
+    def _chain_purge(r):
+        c, k = r.choice(CONTAINERS), r.choice(PATHS)
+        return eval_aws.Case(
+            f"chain_purge_{c}", f"In region {REGION}, get rid of the container "
+                                f"{c} entirely. It still holds {k}.",
+            _seed(containers={_ck(c): {k: "x"}}),
+            lambda code, out, st, c=c: code == 0 and _ck(c) not in st["containers"])
+
+    @maker
+    def _chain_drain(r):
+        node = r.choice(list(NODES))
+        k, v = r.choice(LABELS)
+        return eval_aws.Case(
+            f"chain_drain_{node}", f"In region {REGION}, take the compute node "
+                                   f"{node} out of service: shut it down and "
+                                   f"label it {k}={v}.",
+            _seed(),
+            lambda code, out, st, node=node, k=k, v=v: code == 0
+            and st["nodes"][node]["status"] == "halted"
+            and st["nodes"][node]["labels"].get(k) == v)
+
+    @maker
+    def _chain_swap(r):
+        old_id, new_id = r.sample(IDENTITIES, 2)
+        return eval_aws.Case(
+            f"chain_swap_{old_id}", f"In region {REGION}, replace the identity "
+                                    f"{old_id} with one called {new_id} — the "
+                                    f"old one must be gone afterwards.",
+            _seed(identities={old_id: {"region": REGION}}),
+            lambda code, out, st, o=old_id, n=new_id: code == 0
+            and n in st["identities"] and o not in st["identities"])
+
     return [makers[i % len(makers)](rng) for i in range(n)]
 
 
-def attempt(model, tokenizer, generate_fn, case, history, max_tokens=64):
-    """One attempt at one task, given whatever errors came before."""
+def attempt(model, tokenizer, generate_fn, case, history, max_tokens=160):
+    """One attempt at one task, given whatever errors came before.
+
+    Graded by eval_aws.grade — the SAME executor the battery uses. Teaching
+    against a different one is how a corpus quietly drifts away from what is
+    actually measured.
+    """
     from mlx_lm.sample_utils import make_sampler
 
     messages = [{"role": "system", "content": eval_aws.SYSTEM},
                 {"role": "user", "content": case.ask}]
+    # Deliberately NOT the persistence ladder from symbio/app/persistence.py,
+    # and the reason is a measured boundary on that ladder rather than a
+    # dismissal of it. Wired in here on 2026-09-15, discovery fell from 72/85
+    # to 44/85. The traces say why: at rung three the ladder tells the model to
+    # stop attempting and test an assumption in one call — correct in a chat
+    # turn, where an investigative call IS progress and shares a budget with
+    # action. Here an attempt is graded solely on final state, so a diagnostic
+    # scores as a failure and burns one of six tries. One task reached
+    # "ContainerNotEmpty: drop them first" on try three and spent tries four,
+    # five and six running list-containers.
+    #
+    # The ladder assumes investigation and action share a budget. A loop that
+    # scores only achievement punishes exactly the behaviour it asks for.
     for command, error in history:
         messages.append({"role": "assistant", "content": command})
         messages.append({"role": "user", "content":
-                         f"That failed: {error}\nTry again. Command only."})
+                         f"That failed: {error}\nTry again. Commands only."})
     prompt = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True,
         enable_thinking=False)
     reply = generate_fn(model, tokenizer, prompt=prompt,
                         sampler=make_sampler(temp=0.0 if not history else 0.7),
                         max_tokens=max_tokens, verbose=False)
-    command = eval_aws.extract_command(reply)
-    if not command:
+    commands = eval_aws.extract_commands(reply)
+    if not commands:
         return "", False, "no awsim command in the reply"
-    awsim.reset_state(case.seed)
-    code, out = awsim.run(command.split()[1:])
-    state = awsim.load_state()
-    try:
-        ok = bool(case.verify(code, out, state))
-    except Exception as exc:
-        return command, False, f"harness error: {exc}"
-    if ok:
-        return command, True, out
-    return command, False, (out or "the command ran but did not achieve the task")
+    ok, detail = eval_aws.grade(reply, case)
+    return "\n".join(commands), ok, detail
 
 
 def teach(model, tokenizer, generate_fn, tasks, tries: int = 6):

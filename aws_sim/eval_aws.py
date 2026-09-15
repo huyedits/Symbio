@@ -112,14 +112,67 @@ CASES: list[Case] = [
          lambda code, out, st: code == 0 and "stale-role" not in st["identities"]),
 ]
 
+# Chained cases: the answer is a SEQUENCE, and step two depends on step one
+# having happened. These are the cases a single-command benchmark cannot ask —
+# ordering, carried state, and a precondition the model has to create itself.
+# Marked by id prefix so single-step and chained scores can be reported apart.
+CHAIN_CASES: list[Case] = [
+    Case("chain_create_then_put",
+         "In region eu-2, create a container called release-notes and then "
+         "store the local file v2.md in it at the path drafts/v2.md.",
+         _seed(),
+         lambda code, out, st: code == 0
+         and "drafts/v2.md" in st["containers"].get(_ck("release-notes"), {})),
+    Case("chain_move",
+         "In region eu-2, move the path q3/summary.csv out of the container "
+         "quarterly-reports and into the container archive at the same path — "
+         "it must not be left behind.",
+         _seed(containers={_ck("quarterly-reports"): {"q3/summary.csv": "x"},
+                           _ck("archive"): {}}),
+         lambda code, out, st: code == 0
+         and "q3/summary.csv" in st["containers"].get(_ck("archive"), {})
+         and "q3/summary.csv" not in st["containers"].get(_ck("quarterly-reports"), {})),
+    Case("chain_empty_then_drop",
+         "In region eu-2, get rid of the container scratch-space entirely. It "
+         "still has the path tmp/a.bin in it.",
+         _seed(containers={_ck("scratch-space"): {"tmp/a.bin": "x"}}),
+         lambda code, out, st: code == 0
+         and _ck("scratch-space") not in st["containers"]),
+    Case("chain_halt_then_label",
+         "In region eu-2, take the compute node n-4kq out of service: shut it "
+         "down and label it Status:drained.",
+         _seed(),
+         lambda code, out, st: code == 0
+         and st["nodes"]["n-4kq"]["status"] == "halted"
+         and st["nodes"]["n-4kq"]["labels"].get("Status") == "drained"),
+    Case("chain_replace_identity",
+         "In region eu-2, replace the identity old-runner with one called "
+         "new-runner — the old one must be gone afterwards.",
+         _seed(identities={"old-runner": {"region": "eu-2"}}),
+         lambda code, out, st: code == 0
+         and "new-runner" in st["identities"]
+         and "old-runner" not in st["identities"]),
+    Case("chain_three_step",
+         "In region eu-2, create a container called nightly, store the local "
+         "file run.log in it at logs/run.log, and then copy that path into the "
+         "container archive at nightly/run.log.",
+         _seed(containers={_ck("archive"): {}}),
+         lambda code, out, st: code == 0
+         and "logs/run.log" in st["containers"].get(_ck("nightly"), {})
+         and "nightly/run.log" in st["containers"].get(_ck("archive"), {})),
+]
+
+ALL_CASES = CASES + CHAIN_CASES
+
 # Deliberately says nothing about the syntax. Listing the verbs and options
 # here would turn the battery into a copying exercise, which is exactly what
 # the first version of this environment accidentally measured — the model
 # scored 13/13 before any training because it was reciting the real AWS CLI.
 # What the model knows about awsim has to come from its own failed attempts.
 SYSTEM = (
-    "You drive a command-line tool called awsim. Reply with the single "
-    "command to run and nothing else — no explanation, no code fence."
+    "You drive a command-line tool called awsim. Reply with the command or "
+    "commands to run, ONE PER LINE, in the order they should run, and nothing "
+    "else — no explanation, no code fence."
 )
 
 
@@ -129,40 +182,65 @@ SYSTEM = (
 _COMMAND_RE = re.compile(r"(?:^|[\s`\"'>\](}])(awsim\s+[^\n`\"']+)")
 
 
-def extract_command(reply: str) -> str:
-    """The awsim command a reply is proposing, or ""."""
+def extract_commands(reply: str) -> list[str]:
+    """Every awsim command a reply proposes, in order.
+
+    A chained task needs all of them: "create the container, then put the file
+    in it" is two commands whose ORDER is the answer. Grading only the first
+    would mark a correct two-step plan as a failure, and grading them as a set
+    would let a model that got the order backwards pass.
+    """
     text = (reply or "").replace("\\\n", " ")
-    match = _COMMAND_RE.search(text)
-    if not match:
-        return ""
-    command = match.group(1).strip().rstrip("`\"';.")
-    # A model that emitted several lines gets its first command graded.
-    return command.split("\n")[0].strip()
+    out = []
+    for match in _COMMAND_RE.finditer(text):
+        command = match.group(1).strip().rstrip("`\"';.").split("\n")[0].strip()
+        if command:
+            out.append(command)
+    return out
+
+
+def extract_command(reply: str) -> str:
+    """The first command a reply proposes, or "". Kept for single-step callers."""
+    found = extract_commands(reply)
+    return found[0] if found else ""
 
 
 def grade(reply: str, case: Case) -> tuple[bool, str]:
-    """Run what the reply proposes against a freshly seeded simulator."""
-    command = extract_command(reply)
-    if not command:
+    """Run everything the reply proposes, in order, against ONE seeded state.
+
+    The state is seeded once and then carried across the commands, because a
+    chain is only a chain if step two sees what step one did. Execution stops
+    at the first failure — a plan whose second command is wrong has not
+    achieved the task, whatever the third would have done.
+    """
+    commands = extract_commands(reply)
+    if not commands:
         return False, "(no awsim command in the reply)"
     awsim.reset_state(case.seed)
+    trail, code, out = [], 0, ""
     try:
-        args = command.split()[1:]
-        code, out = awsim.run(args)
+        for command in commands:
+            code, out = awsim.run(command.split()[1:])
+            trail.append(f"[{code}] {command}")
+            if code != 0:
+                break
         state = awsim.load_state()
         ok = bool(case.verify(code, out, state))
     except Exception as exc:
-        return False, f"{command}  -> harness error: {exc}"
-    return ok, f"{command}  -> [{code}] {out.splitlines()[0] if out else ''}"
+        return False, f"{' ; '.join(trail)}  -> harness error: {exc}"
+    detail = " ; ".join(trail)
+    if not ok and out:
+        detail += f"  -> {out.splitlines()[0]}"
+    return ok, detail
 
 
-def run_battery(model, tokenizer, generate_fn, max_tokens: int = 64,
-                verbose: bool = True) -> tuple[int, list[tuple[str, bool, str]]]:
+def run_battery(model, tokenizer, generate_fn, max_tokens: int = 160,
+                verbose: bool = True, cases=None) -> tuple[int, list[tuple[str, bool, str]]]:
     from mlx_lm.sample_utils import make_sampler
 
     sampler = make_sampler(temp=0.0)
     rows = []
-    for case in CASES:
+    for case in (cases if cases is not None else ALL_CASES):
         messages = [{"role": "system", "content": SYSTEM},
                     {"role": "user", "content": case.ask}]
         prompt = tokenizer.apply_chat_template(
@@ -200,10 +278,40 @@ if __name__ == "__main__":
         "new_identity": "awsim access new-identity --identity deployment-bot --region eu-2",
         "drop_identity": "awsim access drop-identity --identity stale-role --region eu-2",
     }
+    R = "--region eu-2"
+    REFERENCE.update({
+        "chain_create_then_put":
+            f"awsim store new-container --name release-notes {R}\n"
+            f"awsim store put --container release-notes --path drafts/v2.md "
+            f"--from v2.md {R}",
+        "chain_move":
+            f"awsim store duplicate --from-container quarterly-reports "
+            f"--from-path q3/summary.csv --to-container archive "
+            f"--to-path q3/summary.csv {R}\n"
+            f"awsim store drop --container quarterly-reports "
+            f"--path q3/summary.csv {R}",
+        "chain_empty_then_drop":
+            f"awsim store drop --container scratch-space --path tmp/a.bin {R}\n"
+            f"awsim store drop-container --name scratch-space {R}",
+        "chain_halt_then_label":
+            f"awsim compute halt --node n-4kq {R}\n"
+            f"awsim compute label --node n-4kq --label Status:drained {R}",
+        "chain_replace_identity":
+            f"awsim access new-identity --identity new-runner {R}\n"
+            f"awsim access drop-identity --identity old-runner {R}",
+        "chain_three_step":
+            f"awsim store new-container --name nightly {R}\n"
+            f"awsim store put --container nightly --path logs/run.log "
+            f"--from run.log {R}\n"
+            f"awsim store duplicate --from-container nightly "
+            f"--from-path logs/run.log --to-container archive "
+            f"--to-path nightly/run.log {R}",
+    })
     bad = 0
-    for case in CASES:
+    for case in ALL_CASES:
         ok, detail = grade(REFERENCE[case.id], case)
         print(f"  {'ok  ' if ok else 'BAD '} {case.id:20} {detail[:92]}")
         bad += not ok
-    print(f"\n{len(CASES) - bad}/{len(CASES)} reference answers pass")
+    print(f"\n{len(ALL_CASES) - bad}/{len(ALL_CASES)} reference answers pass "
+          f"({len(CASES)} single-step, {len(CHAIN_CASES)} chained)")
     raise SystemExit(1 if bad else 0)

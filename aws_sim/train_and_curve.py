@@ -115,9 +115,12 @@ def score_curve(model_name: str) -> list[dict]:
           flush=True)
     model, tokenizer = load(model_name)
 
-    base, _rows = eval_aws.run_battery(model, tokenizer, generate_fn, verbose=False)
-    print(f"  iter      0 (base, no adapter): {base}/{len(eval_aws.CASES)}", flush=True)
-    curve = [{"iter": 0, "score": base, "of": len(eval_aws.CASES)}]
+    base, base_rows = eval_aws.run_battery(model, tokenizer, generate_fn,
+                                           verbose=False)
+    print(f"  iter      0 (base, no adapter): {base}/{len(base_rows)}", flush=True)
+    curve = [{"iter": 0, "score": base, "of": len(base_rows),
+              "failing": [cid for cid, ok, _ in base_rows if not ok],
+              "emitted": {cid: d for cid, ok, d in base_rows if not ok}}]
 
     # Attach LoRA exactly as TRAINING attached it, by reading the config the
     # training run wrote rather than assuming. The first version of this
@@ -148,10 +151,19 @@ def score_curve(model_name: str) -> list[dict]:
         model.eval()
         score, rows = eval_aws.run_battery(model, tokenizer, generate_fn,
                                            verbose=False)
+        # Keep WHAT IT EMITTED, not just which cases failed. The per-case
+        # failing set already makes acquisition distinct rather than inferred
+        # — and reading it showed acquisition is not monotonic: drop_container
+        # was acquired, lost, reacquired, lost and reacquired again across one
+        # run while the aggregate score rose the whole time. But a boolean
+        # cannot say WHY a case was lost, and for a chain it cannot even say
+        # whether step one was right. The emission can.
         curve.append({"iter": iteration, "score": score,
-                      "of": len(eval_aws.CASES),
-                      "failing": [cid for cid, ok, _ in rows if not ok]})
-        print(f"  iter {iteration:6}: {score}/{len(eval_aws.CASES)}", flush=True)
+                      "of": len(rows),
+                      "failing": [cid for cid, ok, _ in rows if not ok],
+                      "emitted": {cid: detail for cid, ok, detail in rows
+                                  if not ok}})
+        print(f"  iter {iteration:6}: {score}/{len(rows)}", flush=True)
     return curve
 
 
