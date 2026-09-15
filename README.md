@@ -780,7 +780,7 @@ can require an explicit approval before execution.
 
 ---
 
-#CLI
+# CLI
 ```bash
 symbio # start chat
 symbio config                # Show configuration
