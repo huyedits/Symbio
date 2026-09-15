@@ -73,6 +73,7 @@ _TOOL_GROUPS: dict[str, str] = {
     # an index it could never expand.
     "tool_docs": "core",
     "save_command": "notes",
+    "realign": "train",
 }
 
 # Groups that exist so a tool can be advertised, not so it can be gated.
@@ -135,6 +136,7 @@ _TOOL_FAMILIES: dict[str, str] = {
     "system_check": "admin",
     "verify_features": "admin",
     "add_golden_case": "admin",
+    "realign": "admin",
     "tool_docs": "core",
 }
 
@@ -727,6 +729,29 @@ _TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "family": {"type": "string", "description": "A tool family, e.g. 'browser'."},
                 "names": {"type": "string", "description": "Specific tool names, comma-separated."},
+            },
+        },
+    },
+    {
+        "name": "realign",
+        "description": (
+            "Examine your own fine-tuned weights against the golden set, find "
+            "which LoRA modules are responsible for anything failing, and "
+            "report the gentlest damping that would fix it. Diagnostic by "
+            "default: pass apply=true to actually change the weights, which "
+            "asks the user first. A change is only ever kept if the WHOLE "
+            "battery improves, so this cannot be used to weaken a check — "
+            "including the refusal checks. Use it when you are asked to "
+            "examine yourself, or when you have reason to think your own "
+            "training has gone wrong."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "apply": {
+                    "type": "boolean",
+                    "description": "Write the damping. Default false (report only).",
+                },
             },
         },
     },

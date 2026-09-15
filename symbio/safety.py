@@ -778,7 +778,7 @@ TOOL_BASELINE_FILE = constants.PROJECT_DIR / "tool_baseline.json"
 # a shell, the filesystem, another machine, or the assistant's own settings.
 PROVENANCE_SENSITIVE = frozenset({
     "run_command", "terminal", "execute_code", "run_remote",
-    "write_file", "edit_file", "patch", "config_set",
+    "write_file", "edit_file", "patch", "config_set", "realign",
     # Keystrokes and clicks at the desktop reach anything on it. They belong
     # here for the same reason execute_code does, and especially so because
     # see_screen puts attacker-controlled page text into the same turn.

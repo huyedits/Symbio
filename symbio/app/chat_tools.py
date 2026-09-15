@@ -759,6 +759,16 @@ class ToolsMixin:
                 family=str(params.get("family", "")),
                 names=str(params.get("names", "")))
 
+        if name == "realign":
+            # Diagnostic unless explicitly told otherwise. The model examining
+            # itself is useful; the model rewriting its own weights on its own
+            # initiative is not something an injected instruction should be
+            # able to reach, so applying goes through the confirmation gate —
+            # and the whole-battery check underneath refuses any damping that
+            # does not IMPROVE the battery, refusal cases included.
+            apply = str(params.get("apply", "")).strip().lower() in ("true", "1", "yes")
+            return self.realign(dry_run=not apply)
+
         if name == "save_command":
             from symbio.app import commands as _commands
 

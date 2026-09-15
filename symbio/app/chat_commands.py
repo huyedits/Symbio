@@ -330,6 +330,12 @@ class CommandsMixin:
             "/constitution clear <axis>.")
 
     def _realign_command(self, rest: str) -> None:
+        """The slash command: run the shared core and print what it says."""
+        dry = "--dry-run" in rest or "dry" in rest.split()
+        for line in self.realign(dry_run=dry).splitlines():
+            self.output_fn("  " + line)
+
+    def realign(self, dry_run: bool = True) -> str:
         """/realign — look at itself, find which LoRA modules are misaligned,
         and damp them.
 
@@ -345,29 +351,31 @@ class CommandsMixin:
         """
         from symbio.app import adapter_attrib, golden
 
-        dry = "--dry-run" in rest or "dry" in rest.split()
+        report: list[str] = []
+
+        def say(line):
+            report.append(line)
+
+        dry = dry_run
         if self.model is None:
-            self.output_fn("  [Realign] No model resident.")
-            return
+            say("[Realign] No model resident.")
+            return "\n".join(report)
         live = adapter_attrib.live_lora_modules(self.model)
         if not live:
-            self.output_fn(
-                "  [Realign] No adapter is loaded — there are no learned "
+            say("[Realign] No adapter is loaded — there are no learned "
                 "weights to adjust. Nothing to do.")
-            return
+            return "\n".join(report)
 
-        self.output_fn("  [Realign] Looking at myself against the golden set...")
+        say("[Realign] Looking at myself against the golden set...")
         before = golden.run_golden_set(
             self.model, self.tokenizer, self.generate_fn, self.sampler,
             self.system_prompt, self.config, self.enabled_groups)
         failing = sorted(before.failing)
         if not failing:
-            self.output_fn(
-                f"  [Realign] {before.pass_count}/{before.total} passing — "
+            say(f"[Realign] {before.pass_count}/{before.total} passing — "
                 f"nothing is misaligned. Leaving the weights alone.")
-            return
-        self.output_fn(
-            f"  [Realign] {len(failing)} case(s) failing: {', '.join(failing)}")
+            return "\n".join(report)
+        say(f"[Realign] {len(failing)} case(s) failing: {', '.join(failing)}")
 
         by_id = {c.id: c for c in golden.all_golden_cases()}
         cases = [by_id[i] for i in failing if i in by_id]
@@ -385,14 +393,12 @@ class CommandsMixin:
 
         culprits, spent = adapter_attrib.bisect_blame(candidates, _restores)
         if not culprits:
-            self.output_fn(
-                f"  [Realign] Not attributable to any module after {spent} "
+            say(f"[Realign] Not attributable to any module after {spent} "
                 f"evaluation(s): switching the whole adapter off does not fix "
                 f"these, so the weights are not what is misaligned. Look at "
                 f"the prompt, the notes or the cases themselves.")
-            return
-        self.output_fn(
-            f"  [Realign] traced to {len(culprits)} module(s) in {spent} "
+            return "\n".join(report)
+        say(f"[Realign] traced to {len(culprits)} module(s) in {spent} "
             f"evaluation(s): {', '.join(culprits)}")
 
         def _clear():
@@ -405,17 +411,15 @@ class CommandsMixin:
         factors, tried = adapter_attrib.minimal_damping(
             self.model, culprits, _clear)
         if not factors:
-            self.output_fn(
-                "  [Realign] No damping level clears it, including switching "
+            say("[Realign] No damping level clears it, including switching "
                 "them off entirely. Not touching the weights.")
-            return
+            return "\n".join(report)
         level = next(iter(factors.values()))
-        self.output_fn(
-            f"  [Realign] gentlest fix is scaling them to {level:g} "
+        say(f"[Realign] gentlest fix is scaling them to {level:g} "
             f"({tried} level(s) tried)"
             + (" — dry run, nothing written." if dry else ""))
         if dry:
-            return
+            return "\n".join(report)
 
         # Cases coming back is necessary, not sufficient: damping can cost
         # something elsewhere, so the WHOLE battery decides.
@@ -424,27 +428,25 @@ class CommandsMixin:
                 self.model, self.tokenizer, self.generate_fn, self.sampler,
                 self.system_prompt, self.config, self.enabled_groups)
         if after.pass_count <= before.pass_count:
-            self.output_fn(
-                f"  [Realign] That damping fixes the failures but leaves the "
+            say(f"[Realign] That damping fixes the failures but leaves the "
                 f"battery at {after.pass_count}/{after.total} versus "
                 f"{before.pass_count}/{before.total}. Not worth it — leaving "
                 f"the weights alone.")
-            return
+            return "\n".join(report)
         if not self._yes_no(
                 f"  Scale {len(culprits)} module(s) to {level:g}? The battery "
                 f"goes {before.pass_count}/{before.total} -> "
                 f"{after.pass_count}/{after.total}. [y/N] "):
-            self.output_fn("  [Realign] Left the weights alone.")
-            return
+            say("[Realign] Left the weights alone.")
+            return "\n".join(report)
 
         file_names = adapter_attrib.modules(constants.ADAPTER_DIR)
         mapped = adapter_attrib.match_file_names(culprits, file_names)
         if len(mapped) != len(culprits):
-            self.output_fn(
-                "  [Realign] Could not locate every module in the adapter "
+            say("[Realign] Could not locate every module in the adapter "
                 "file; refusing to write a change that would not survive a "
                 "restart.")
-            return
+            return "\n".join(report)
         adapter_attrib.write_scaled(
             constants.ADAPTER_DIR, constants.ADAPTER_DIR,
             {mapped[n]: level for n in culprits})
@@ -452,9 +454,9 @@ class CommandsMixin:
             constants.ADAPTER_DIR, culprits, failing,
             datetime.now().strftime("%Y-%m-%d %H:%M"))
         err = self._reload_model()
-        self.output_fn(
-            f"  [Realign] Scaled to {level:g} and reloaded."
+        say(f"[Realign] Scaled to {level:g} and reloaded."
             if not err else f"  [Realign] Written, but reload failed: {err}")
+        return "\n".join(report)
 
     def _tools_command(self, rest: str) -> None:
         """/tools — the same index the model is given, plus schemas on request."""

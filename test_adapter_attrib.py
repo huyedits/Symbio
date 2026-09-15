@@ -8,6 +8,7 @@ and differs only where intended, and the search finds a culprit set whose
 removal actually works.
 """
 
+import inspect
 import json
 from pathlib import Path
 
@@ -322,3 +323,57 @@ def test_zero_is_still_on_the_ladder():
     """Some misalignments are not a matter of degree."""
     assert A.DAMPING_LEVELS[-1] == 0.0
     assert A.DAMPING_LEVELS == tuple(sorted(A.DAMPING_LEVELS, reverse=True))
+
+
+# ------------------------------------------- the model invoking it on itself
+
+def test_realign_is_diagnostic_unless_explicitly_told_otherwise():
+    """The model examining itself is useful. The model rewriting its own
+    weights on its own initiative is not something an injected instruction
+    should be able to reach, so the default is report-only."""
+    import inspect
+
+    from symbio.app import chat
+
+    src = inspect.getsource(chat.ChatSession._dispatch_tool)
+    block = src[src.index('if name == "realign"'):]
+    block = block[:block.index("if name ==", 10)]
+    assert 'params.get("apply", "")' in block
+    assert "dry_run=not apply" in block
+
+
+def test_applying_realign_needs_confirmation_off_a_terminal():
+    from symbio.app.chat_constants import _TELEGRAM_CONFIRM_TOOLS
+
+    assert "realign" in _TELEGRAM_CONFIRM_TOOLS
+
+
+def test_realign_is_risk_scored_like_the_other_write_verbs():
+    from symbio import safety
+
+    from symbio.safety import __file__ as path
+
+    text = open(path, encoding="utf-8").read()
+    assert '"realign"' in text, "realign must be scored as a write, not a read"
+
+
+def test_realign_declines_when_there_is_nothing_to_adjust():
+    from symbio.app import chat
+    from symbio.app import config as app_config
+
+    session = chat.ChatSession.__new__(chat.ChatSession)
+    session.config = app_config.load_config()
+    session.model = None
+    assert "No model resident" in session.realign(dry_run=True)
+
+
+def test_the_tool_says_it_cannot_weaken_a_check():
+    """The safety property is the whole-battery gate, and the model should be
+    told about it — an agent that believes it can damp its own refusals may
+    try, and an agent that knows it cannot will not waste a turn."""
+    from symbio.app import tooling
+
+    spec = next(t for t in tooling._TOOLS if t["name"] == "realign")
+    described = spec["description"].lower()
+    assert "whole battery" in described
+    assert "refusal" in described
