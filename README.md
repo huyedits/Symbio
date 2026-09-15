@@ -516,10 +516,23 @@ lost gets the whole map.
 | `compute halt`    | 3 | passed |
 | `store duplicate` | 3 | passed |
 
-So the unit is not "60 examples", it is **a few examples per thing you want it
-to learn**. Note the caveat those numbers carry: they were learned *inside* a
-corpus that had already taught the shared grammar, so three examples of
-`compute resume` only had to teach which verb, not the syntax around it.
+Those numbers tempted an obvious rule — "about three examples per capability" —
+and **the rule did not survive being tested forward.** Over-sampling two starved
+shapes to feed them deliberately, 1 of 4 predictions held: two chained shapes
+passed on a SINGLE example each, and one failed with thirteen. Reading what it
+emitted showed the thirteen-example failure had learned the verb perfectly and
+misread an ambiguous task (the target path began with another container's name).
+
+What the rule really was: a description fitted after the fact, which held only
+because the under-sampled shapes were also the hardest ones — sample count and
+difficulty moved together across three runs and separated the moment they were
+pulled apart.
+
+The better hypothesis, and it is untested: **compositionality**. "Shut it down
+and label it" is two verbs it already knows, sequenced — one example teaches the
+sequencing. "Get rid of the container, it still holds a path" needs a
+precondition nobody stated, and that is genuinely new. Treat any
+per-capability sample figure here as unestablished.
 
 ## A warning worth more than the results
 

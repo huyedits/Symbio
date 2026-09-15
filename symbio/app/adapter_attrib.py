@@ -81,15 +81,18 @@ def modules(adapter_dir: Path) -> list[str]:
     return sorted(names, key=_sort_key)
 
 
-def write_ablated(src_dir: Path, dst_dir: Path, drop: Iterable[str]) -> int:
-    """Copy an adapter with `drop`'s modules switched off. Returns how many.
+def write_scaled(src_dir: Path, dst_dir: Path, factors: dict) -> int:
+    """Copy an adapter with each named module's contribution multiplied.
 
-    Everything else in the directory comes along — adapter_config.json above
-    all, because the loader reads it and a weights file without one is not an
-    adapter.
+    Zeroing is the special case factor=0.0. Scaling matters because a module
+    that caused a regression is rarely ONLY wrong: it carries whatever else
+    that training round taught it, and switching it off discards the good with
+    the bad. Halving its contribution is often enough to clear the failure
+    while keeping most of what it learned — and it is the smallest change that
+    does, which is the one to prefer when the evidence is a handful of sampled
+    generations.
     """
     src_dir, dst_dir = Path(src_dir), Path(dst_dir)
-    drop = set(drop)
     dst_dir.mkdir(parents=True, exist_ok=True)
     for item in src_dir.iterdir():
         if item.is_file() and item.name != ADAPTER_FILE:
@@ -98,14 +101,24 @@ def write_ablated(src_dir: Path, dst_dir: Path, drop: Iterable[str]) -> int:
     from safetensors.numpy import save_file
 
     weights = load_weights(src_dir)
-    zeroed = set()
+    touched = set()
     for key, tensor in weights.items():
         stem = key.rsplit(".", 1)[0]
-        if stem in drop and key.rsplit(".", 1)[-1] in _B_SUFFIXES:
-            weights[key] = tensor * 0
-            zeroed.add(stem)
+        if stem in factors and key.rsplit(".", 1)[-1] in _B_SUFFIXES:
+            weights[key] = tensor * float(factors[stem])
+            touched.add(stem)
     save_file(weights, str(_weights_path(dst_dir)))
-    return len(zeroed)
+    return len(touched)
+
+
+def write_ablated(src_dir: Path, dst_dir: Path, drop: Iterable[str]) -> int:
+    """Copy an adapter with `drop`'s modules switched off. Returns how many.
+
+    Everything else in the directory comes along — adapter_config.json above
+    all, because the loader reads it and a weights file without one is not an
+    adapter.
+    """
+    return write_scaled(src_dir, dst_dir, {name: 0.0 for name in drop})
 
 
 def bisect_blame(candidates: Sequence[str],
@@ -215,6 +228,33 @@ def live_lora_modules(model) -> dict:
     return found
 
 
+class scaled:
+    """Context manager: multiply these modules' lora_b, then restore exactly.
+
+    Restoration is unconditional — an evaluation that raises must not leave the
+    resident model quietly carrying a damped adapter for the rest of the
+    session, which would be a far worse bug than the misalignment being chased.
+    """
+
+    def __init__(self, model, factors: dict):
+        self.modules = live_lora_modules(model)
+        self.factors = {n: float(f) for n, f in factors.items() if n in self.modules}
+        self.saved: dict[str, object] = {}
+
+    def __enter__(self):
+        for name, factor in self.factors.items():
+            module = self.modules[name]
+            self.saved[name] = module.lora_b
+            self.modules[name].lora_b = module.lora_b * factor
+        return self
+
+    def __exit__(self, *exc):
+        for name, original in self.saved.items():
+            self.modules[name].lora_b = original
+        self.saved.clear()
+        return False
+
+
 class switched_off:
     """Context manager: zero these modules' lora_b, then restore them exactly.
 
@@ -261,6 +301,38 @@ def match_file_names(live_names: Iterable[str],
                 out[live] = candidate
                 break
     return out
+
+
+# The damping levels tried, strongest contribution first. The search stops at
+# the FIRST one that clears the failure, so a module keeps as much of what it
+# learned as the evidence allows — and 0.0 is still in the list, because some
+# misalignments are not a matter of degree.
+DAMPING_LEVELS: tuple[float, ...] = (0.75, 0.5, 0.25, 0.0)
+
+
+def minimal_damping(model, culprits: Sequence[str],
+                    check: Callable[[], bool],
+                    levels: Sequence[float] = DAMPING_LEVELS
+                    ) -> tuple[dict, int]:
+    """The gentlest scaling of `culprits` that makes `check` pass.
+
+    `check()` re-runs whatever failed, with the damping already applied. It
+    returns (factors, evaluations). An empty dict means no level worked, not
+    even switching the modules off entirely — which says the adapter is not
+    what misaligned, and is a different answer from "needs more damping".
+
+    Gentlest-first is the point. Attribution says WHICH modules; this says HOW
+    FAR, and the smallest change that clears a failure is the one least likely
+    to be fitting noise in a handful of sampled generations.
+    """
+    spent = 0
+    for level in levels:
+        factors = {name: float(level) for name in culprits}
+        with scaled(model, factors):
+            spent += 1
+            if check():
+                return factors, spent
+    return {}, spent
 
 
 # ------------------------------------------------------------- the quarantine

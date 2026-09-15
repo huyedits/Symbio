@@ -341,6 +341,8 @@ BUILTIN_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("think", "[none|low|medium|flurry|max]", "How hard the model reasons before answering"),
     ("commands", "[new|rm|show] ...", "Your own slash commands, saved in commands/"),
     ("tools", "[family]", "What tools exist, and their exact arguments"),
+    ("realign", "[--dry-run]",
+     "Find which learned weights are misaligned, and damp them"),
     ("constitution", "[set|clear|axes|revise]",
      "What I've concluded about how you want to be worked with"),
     ("run", "<command>", "Run a shell command yourself"),

@@ -251,3 +251,74 @@ def test_an_unwalkable_model_declines_instead_of_raising():
             raise RuntimeError("not really a model")
 
     assert A.live_lora_modules(Hostile()) == {}
+
+
+# ------------------------------------------------- damping, not just ablation
+
+def test_scaling_multiplies_only_lora_b_of_the_named_modules(tmp_path):
+    src = _fake_adapter(tmp_path / "src")
+    mods = A.modules(src)
+    assert A.write_scaled(src, tmp_path / "out", {mods[0]: 0.5}) == 1
+    after = A.load_weights(tmp_path / "out")
+    assert np.allclose(after[f"{mods[0]}.lora_b"], 0.5)
+    assert np.allclose(after[f"{mods[0]}.lora_a"], 1.0), "the A side is untouched"
+    assert np.allclose(after[f"{mods[1]}.lora_b"], 1.0), "other modules untouched"
+
+
+def test_ablation_is_the_zero_case_of_scaling(tmp_path):
+    """One code path, so the two can never disagree about what 'off' means."""
+    src = _fake_adapter(tmp_path / "src")
+    mods = A.modules(src)
+    A.write_ablated(src, tmp_path / "a", [mods[0]])
+    A.write_scaled(src, tmp_path / "b", {mods[0]: 0.0})
+    a, b = A.load_weights(tmp_path / "a"), A.load_weights(tmp_path / "b")
+    assert all(np.array_equal(a[k], b[k]) for k in a)
+
+
+def test_damping_prefers_the_gentlest_level_that_works():
+    """A module that misbehaves is rarely ONLY wrong. The smallest change that
+    clears a failure keeps the most of what it learned, and is least likely to
+    be fitting noise in a handful of sampled generations."""
+    mlx_nn = pytest.importorskip("mlx.nn")
+    mx = pytest.importorskip("mlx.core")
+    from mlx_lm.tuner.lora import LoRALinear
+
+    class Tiny(mlx_nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = LoRALinear.from_base(mlx_nn.Linear(8, 8), r=2)
+
+    model = Tiny()
+    mods = A.live_lora_modules(model)
+    name = next(iter(mods))
+    mods[name].lora_b = mx.ones_like(mods[name].lora_b)
+    base = float(mx.sum(mods[name].lora_b))
+
+    # Clears at 0.5 or below; 0.75 is not enough.
+    factors, spent = A.minimal_damping(
+        model, [name], lambda: float(mx.sum(mods[name].lora_b)) <= base * 0.5 + 1e-6)
+    assert factors == {name: 0.5}, factors
+    assert spent == 2, "should stop at the first level that works"
+    assert float(mx.sum(mods[name].lora_b)) == base, "restored exactly"
+
+
+def test_damping_reports_when_nothing_helps():
+    """Not even switching it off: that says the adapter is not what misaligned,
+    which is a different answer from 'needs more damping'."""
+    mlx_nn = pytest.importorskip("mlx.nn")
+    from mlx_lm.tuner.lora import LoRALinear
+
+    class Tiny(mlx_nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = LoRALinear.from_base(mlx_nn.Linear(8, 8), r=2)
+
+    factors, spent = A.minimal_damping(Tiny(), ["q_proj"], lambda: False)
+    assert factors == {}
+    assert spent == len(A.DAMPING_LEVELS)
+
+
+def test_zero_is_still_on_the_ladder():
+    """Some misalignments are not a matter of degree."""
+    assert A.DAMPING_LEVELS[-1] == 0.0
+    assert A.DAMPING_LEVELS == tuple(sorted(A.DAMPING_LEVELS, reverse=True))

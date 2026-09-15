@@ -329,6 +329,133 @@ class CommandsMixin:
             "  Correct any of it with /constitution set <axis> <pole>, or "
             "/constitution clear <axis>.")
 
+    def _realign_command(self, rest: str) -> None:
+        """/realign — look at itself, find which LoRA modules are misaligned,
+        and damp them.
+
+        Attribution already existed but could only be reached by a training
+        rollback: the adapter had to regress DURING a run for anything to look
+        at it. An adapter can be misaligned without a run having just happened
+        — it was trained days ago, or the failure only shows on a case the
+        battery has since gained. This is that path, on demand.
+
+        Damping rather than switching off, and gentlest-first: a module that
+        misbehaves is rarely only wrong, and 0.75 that clears the failure keeps
+        more of what it learned than 0.0 that also clears it.
+        """
+        from symbio.app import adapter_attrib, golden
+
+        dry = "--dry-run" in rest or "dry" in rest.split()
+        if self.model is None:
+            self.output_fn("  [Realign] No model resident.")
+            return
+        live = adapter_attrib.live_lora_modules(self.model)
+        if not live:
+            self.output_fn(
+                "  [Realign] No adapter is loaded — there are no learned "
+                "weights to adjust. Nothing to do.")
+            return
+
+        self.output_fn("  [Realign] Looking at myself against the golden set...")
+        before = golden.run_golden_set(
+            self.model, self.tokenizer, self.generate_fn, self.sampler,
+            self.system_prompt, self.config, self.enabled_groups)
+        failing = sorted(before.failing)
+        if not failing:
+            self.output_fn(
+                f"  [Realign] {before.pass_count}/{before.total} passing — "
+                f"nothing is misaligned. Leaving the weights alone.")
+            return
+        self.output_fn(
+            f"  [Realign] {len(failing)} case(s) failing: {', '.join(failing)}")
+
+        by_id = {c.id: c for c in golden.all_golden_cases()}
+        cases = [by_id[i] for i in failing if i in by_id]
+        candidates = sorted(live, key=lambda n: (
+            next((int(p) for p in n.split(".") if p.isdigit()), -1), n))
+
+        def _restores(dropped):
+            with adapter_attrib.scaled(
+                    self.model, {n: 0.0 for n in dropped}):
+                res = golden.run_golden_set(
+                    self.model, self.tokenizer, self.generate_fn, self.sampler,
+                    self.system_prompt, self.config, self.enabled_groups,
+                    cases=cases)
+            return not (set(failing) - res.passing)
+
+        culprits, spent = adapter_attrib.bisect_blame(candidates, _restores)
+        if not culprits:
+            self.output_fn(
+                f"  [Realign] Not attributable to any module after {spent} "
+                f"evaluation(s): switching the whole adapter off does not fix "
+                f"these, so the weights are not what is misaligned. Look at "
+                f"the prompt, the notes or the cases themselves.")
+            return
+        self.output_fn(
+            f"  [Realign] traced to {len(culprits)} module(s) in {spent} "
+            f"evaluation(s): {', '.join(culprits)}")
+
+        def _clear():
+            res = golden.run_golden_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config, self.enabled_groups,
+                cases=cases)
+            return not (set(failing) - res.passing)
+
+        factors, tried = adapter_attrib.minimal_damping(
+            self.model, culprits, _clear)
+        if not factors:
+            self.output_fn(
+                "  [Realign] No damping level clears it, including switching "
+                "them off entirely. Not touching the weights.")
+            return
+        level = next(iter(factors.values()))
+        self.output_fn(
+            f"  [Realign] gentlest fix is scaling them to {level:g} "
+            f"({tried} level(s) tried)"
+            + (" — dry run, nothing written." if dry else ""))
+        if dry:
+            return
+
+        # Cases coming back is necessary, not sufficient: damping can cost
+        # something elsewhere, so the WHOLE battery decides.
+        with adapter_attrib.scaled(self.model, factors):
+            after = golden.run_golden_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config, self.enabled_groups)
+        if after.pass_count <= before.pass_count:
+            self.output_fn(
+                f"  [Realign] That damping fixes the failures but leaves the "
+                f"battery at {after.pass_count}/{after.total} versus "
+                f"{before.pass_count}/{before.total}. Not worth it — leaving "
+                f"the weights alone.")
+            return
+        if not self._yes_no(
+                f"  Scale {len(culprits)} module(s) to {level:g}? The battery "
+                f"goes {before.pass_count}/{before.total} -> "
+                f"{after.pass_count}/{after.total}. [y/N] "):
+            self.output_fn("  [Realign] Left the weights alone.")
+            return
+
+        file_names = adapter_attrib.modules(constants.ADAPTER_DIR)
+        mapped = adapter_attrib.match_file_names(culprits, file_names)
+        if len(mapped) != len(culprits):
+            self.output_fn(
+                "  [Realign] Could not locate every module in the adapter "
+                "file; refusing to write a change that would not survive a "
+                "restart.")
+            return
+        adapter_attrib.write_scaled(
+            constants.ADAPTER_DIR, constants.ADAPTER_DIR,
+            {mapped[n]: level for n in culprits})
+        adapter_attrib.record_quarantine(
+            constants.ADAPTER_DIR, culprits, failing,
+            datetime.now().strftime("%Y-%m-%d %H:%M"))
+        err = self._reload_model()
+        self.output_fn(
+            f"  [Realign] Scaled to {level:g} and reloaded."
+            if not err else f"  [Realign] Written, but reload failed: {err}")
+
     def _tools_command(self, rest: str) -> None:
         """/tools — the same index the model is given, plus schemas on request."""
         from symbio.app import tool_docs as _tool_docs
@@ -1119,6 +1246,9 @@ class CommandsMixin:
 
         elif cmd.startswith("/tools"):
             self._tools_command(user_input[len("/tools"):])
+
+        elif cmd.startswith("/realign"):
+            self._realign_command(user_input[len("/realign"):])
 
         elif cmd.startswith("/constitution"):
             self._constitution_command(user_input[len("/constitution"):])

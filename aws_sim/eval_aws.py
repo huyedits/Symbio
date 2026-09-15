@@ -153,13 +153,20 @@ CHAIN_CASES: list[Case] = [
          and "new-runner" in st["identities"]
          and "old-runner" not in st["identities"]),
     Case("chain_three_step",
+         # The target path must not begin with the OTHER container's name.
+         # It did ("into the container archive at nightly/run.log", where
+         # nightly is also a container in the same sentence) and the model
+         # split it as container=nightly, path=run.log — emitting all three
+         # commands, each exiting 0, having learned the verb perfectly from 13
+         # samples and simply misread the question. A case that can be misread
+         # is not measuring what it claims to.
          "In region eu-2, create a container called nightly, store the local "
-         "file run.log in it at logs/run.log, and then copy that path into the "
-         "container archive at nightly/run.log.",
+         "file run.log in it at logs/run.log, and then copy that same path "
+         "into the container archive, saving it there at backup/run.log.",
          _seed(containers={_ck("archive"): {}}),
          lambda code, out, st: code == 0
          and "logs/run.log" in st["containers"].get(_ck("nightly"), {})
-         and "nightly/run.log" in st["containers"].get(_ck("archive"), {})),
+         and "backup/run.log" in st["containers"].get(_ck("archive"), {})),
 ]
 
 ALL_CASES = CASES + CHAIN_CASES
@@ -305,7 +312,7 @@ if __name__ == "__main__":
             f"--from run.log {R}\n"
             f"awsim store duplicate --from-container nightly "
             f"--from-path logs/run.log --to-container archive "
-            f"--to-path nightly/run.log {R}",
+            f"--to-path backup/run.log {R}",
     })
     bad = 0
     for case in ALL_CASES:
