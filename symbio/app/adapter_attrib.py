@@ -335,6 +335,94 @@ def minimal_damping(model, culprits: Sequence[str],
     return {}, spent
 
 
+# ------------------------------------------------ reading the weights directly
+#
+# Ablation answers "which modules, if removed, fix the battery" — exactly, and
+# at the cost of a battery run per subset. This answers a cheaper, narrower
+# question: for ONE prompt, how much does each module push the next token
+# toward the wrong answer rather than the right one.
+#
+# It is not a semantic read. Nothing labels a matrix "believes it is Zephyr",
+# and the magnitudes alone are a poor guide — measured on a real adapter, the
+# largest and smallest module updates were only 5.6x apart across 56 modules,
+# with all eight rank directions carrying weight. Size tells you where the
+# gradient went, not what went wrong.
+#
+# Grounding it in a LOGIT DIFFERENCE is what makes it informative: a module
+# whose removal widens the margin for the right token is implicated in
+# preferring the wrong one, and that is a behavioural claim rather than a
+# geometric one. One short forward pass per module, against a battery run per
+# subset — cheap enough to RANK the candidates before bisecting them.
+
+
+def logit_attribution(model, tokenizer, prompt: str, prefer: str, against: str,
+                      modules_to_test: Sequence[str] | None = None
+                      ) -> list[tuple[str, float]]:
+    """Per-module contribution to preferring `against` over `prefer`.
+
+    Returns (module, delta) sorted most-implicated first, where delta is how
+    much the margin for `prefer` IMPROVES when that module is switched off:
+
+        delta = (logit[prefer] - logit[against])  with the module OFF
+              - (logit[prefer] - logit[against])  with it ON
+
+    So delta > 0 means switching the module off HELPS the right answer — it was
+    pushing the wrong way, and it is a candidate for damping. delta < 0 means
+    the module is helping, and damping it would remove learning that works.
+
+    The sign is spelled out because it is genuinely easy to invert: writing
+    tests for this, a planted fault pointed the wrong way three times running,
+    once because intervening layers flipped the injected direction and once
+    because swapping the two token ids renames them without moving the module.
+    Check a base-versus-off pair directly before trusting a derived number.
+    """
+    import mlx.core as mx
+
+    live = live_lora_modules(model)
+    names = list(modules_to_test if modules_to_test is not None else live)
+    ids = mx.array([tokenizer.encode(prompt)])
+
+    def first_token(word: str) -> int:
+        # Leading space: mid-sentence tokenisation differs from start-of-text,
+        # and the answer is always being continued rather than begun.
+        encoded = tokenizer.encode(" " + word.strip())
+        return encoded[-1] if len(encoded) == 1 else encoded[1 if len(encoded) > 1 else 0]
+
+    good, bad = first_token(prefer), first_token(against)
+
+    def margin() -> float:
+        logits = model(ids)[:, -1, :]
+        return float(logits[0, good] - logits[0, bad])
+
+    base = margin()
+    out: list[tuple[str, float]] = []
+    for name in names:
+        if name not in live:
+            continue
+        with scaled(model, {name: 0.0}):
+            out.append((name, margin() - base))
+    out.sort(key=lambda pair: -pair[1])
+    return out
+
+
+def rank_candidates(model, tokenizer, prompt: str, prefer: str, against: str,
+                    candidates: Sequence[str]) -> list[str]:
+    """`candidates` reordered most-suspicious first, for bisect_blame.
+
+    Ordering matters to a delta-debugging search: it splits the list in half,
+    so a culprit sitting in the first chunk is found in fewer evaluations than
+    one spread across the split. Layer order is arbitrary with respect to
+    blame; this is not.
+    """
+    try:
+        ranked = logit_attribution(model, tokenizer, prompt, prefer, against,
+                                   candidates)
+    except Exception:
+        return list(candidates)
+    ordered = [name for name, _ in ranked]
+    return ordered + [c for c in candidates if c not in ordered]
+
+
 # ------------------------------------------------------------- the quarantine
 
 QUARANTINE_FILE = "quarantine.json"

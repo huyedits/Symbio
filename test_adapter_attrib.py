@@ -377,3 +377,115 @@ def test_the_tool_says_it_cannot_weaken_a_check():
     described = spec["description"].lower()
     assert "whole battery" in described
     assert "refusal" in described
+
+
+# ------------------------------------- reading the weights against a behaviour
+
+def _wired_head(bad=7, good=9, dim=16, vocab=32, push=2.0, toward="bad"):
+    """A one-layer model whose single LoRA module genuinely prefers `bad`.
+
+    One layer on purpose. An earlier version of this test chained three, and
+    the intervening layers transform the activations — so the sign of the
+    injected direction depended on whether sum(x) happened to be positive at
+    that depth, and the planted fault pointed the other way on random init.
+    The test looked like a broken function for three rounds.
+    """
+    mlx_nn = pytest.importorskip("mlx.nn")
+    mx = pytest.importorskip("mlx.core")
+    from mlx_lm.tuner.lora import LoRALinear
+
+    class Head(mlx_nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p = LoRALinear.from_base(mlx_nn.Linear(dim, dim), r=4)
+            self.out = mlx_nn.Linear(dim, vocab)
+
+        def __call__(self, ids):
+            return self.out(self.p(mx.ones((1, ids.shape[1], dim))))
+
+    model = Head()
+    mods = A.live_lora_modules(model)
+    # Which token the module is wired to prefer. Flip the DIRECTION, never the
+    # ids: swapping bad/good only renames them, leaving the module pointing at
+    # the same token — which is how this test passed for the wrong reason once.
+    target, other = (bad, good) if toward == "bad" else (good, bad)
+    direction = model.out.weight[target] - model.out.weight[other]
+    b = mx.zeros_like(mods["p"].lora_b); b[0] = direction * push
+    a = mx.zeros_like(mods["p"].lora_a); a[:, 0] = 1.0
+    mods["p"].lora_b, mods["p"].lora_a = b, a
+
+    class Tok:
+        def encode(self, s):
+            return [1, bad] if "bad" in s else ([1, good] if "good" in s else [1, 2, 3])
+
+    return model, Tok()
+
+
+def test_logit_attribution_finds_the_module_that_prefers_the_wrong_token():
+    model, tok = _wired_head()
+    ranked = A.logit_attribution(model, tok, "who are you",
+                                 prefer="good", against="bad")
+    assert ranked[0][0] == "p"
+    assert ranked[0][1] > 0, "removal should IMPROVE the margin for the right token"
+
+
+def test_a_module_pushing_the_right_way_is_not_implicated():
+    """Sign matters: a module helping the correct answer must not be blamed,
+    or damping would remove the learning that is working."""
+    model, tok = _wired_head(toward="good")   # wired toward the RIGHT token
+    ranked = A.logit_attribution(model, tok, "who are you",
+                                 prefer="good", against="bad")
+    assert ranked[0][1] < 0
+
+
+def test_ranking_survives_a_model_it_cannot_read():
+    """It reorders a bisection; it must never be able to break one."""
+    assert A.rank_candidates(object(), None, "p", "a", "b", ["x", "y"]) == ["x", "y"]
+
+
+def test_ranking_keeps_every_candidate():
+    model, tok = _wired_head()
+    order = A.rank_candidates(model, tok, "who are you", "good", "bad",
+                              ["p", "unknown_module"])
+    assert sorted(order) == ["p", "unknown_module"]
+
+
+# ------------------------------------ the attributes the repair paths rely on
+
+def test_golden_result_exposes_everything_the_repair_paths_read():
+    """_repair_regression and _realign read these off a GoldenResult. Both used
+    `.failing`, which did not exist, and both would have raised AttributeError
+    on their first REAL invocation — while every test passed, because they all
+    short-circuit before a battery is ever run. Naming the attributes here is
+    the cheapest way to make that kind of gap fail loudly instead of in the
+    middle of a rollback."""
+    from symbio.app.golden import GoldenResult
+
+    result = GoldenResult(results={"a": True, "b": False}, replies={})
+    for attribute in ("passing", "failing", "pass_count", "total"):
+        assert hasattr(result, attribute), attribute
+    assert result.passing == {"a"}
+    assert result.failing == {"b"}
+    assert result.passing | result.failing == set(result.results)
+    assert not (result.passing & result.failing)
+
+
+def test_the_repair_paths_only_use_attributes_that_exist():
+    """Read the source of both self-repair paths and check every GoldenResult
+    attribute they touch is real. A static check, because the dynamic one needs
+    a resident 14B and a genuine regression — which is exactly why this bug
+    survived being 'tested'."""
+    import re
+
+    from symbio.app.golden import GoldenResult
+
+    known = {a for a in dir(GoldenResult) if not a.startswith("_")}
+    for path, names in (("symbio/app/chat.py", ("before", "after", "full", "res")),
+                        ("symbio/app/chat_commands.py", ("before", "after", "res"))):
+        text = Path(path).read_text(encoding="utf-8")
+        for var in names:
+            for attribute in set(re.findall(rf"\b{var}\.([a-z_]+)\b", text)):
+                if attribute in ("append", "get", "splitlines", "strip", "items",
+                                 "keys", "values", "format", "join", "lower"):
+                    continue
+                assert attribute in known, f"{path}: {var}.{attribute} is not on GoldenResult"
