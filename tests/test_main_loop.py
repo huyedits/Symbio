@@ -2598,3 +2598,83 @@ def test_every_cache_drop_says_why(tmp_path, monkeypatch):
     b._drop_prompt_cache("reason", tell_user=True)
     assert b._prompt_cache is None
     print("test_every_cache_drop_says_why passed")
+
+
+def test_unmet_targets_only_counts_what_the_user_typed():
+    from symbio.app.chat_constants import request_targets, unmet_targets
+
+    # Paths, URLs and quoted literals are targets; ordinary prose is not.
+    assert request_targets("read notes/plan.md and post to "
+                           "https://example.com/api, call it `final`") == [
+        "https://example.com/api", "notes/plan.md", "final"]
+    assert request_targets("what is the weather today") == []
+    # A path and its own tail are one target, not two.
+    assert request_targets("edit symbio/app/chat.py") == ["symbio/app/chat.py"]
+
+    # Met: the observation names the file.
+    assert unmet_targets("read notes/plan.md", ["wrote notes/plan.md ok"]) == []
+    # Met however the URL was normalized on the way out.
+    assert unmet_targets("fetch https://example.com/api/x",
+                         ["GET example.com/api/x -> 200"]) == []
+    # Unmet: one of two files was never touched.
+    assert unmet_targets("rename a.py and b.py", ["renamed a.py"]) == ["b.py"]
+    # No observations at all is the no-tool case, which other gates own.
+    assert unmet_targets("read notes/plan.md", []) == []
+    print("test_unmet_targets_only_counts_what_the_user_typed passed")
+
+
+def test_agent_loop_continues_after_a_partial_success():
+    """One clean tool call is not a finished turn.
+
+    The persistence ladder fires on a tool ERROR and the claim guard on a
+    reply with no tool behind it, so a turn that succeeds at half the request
+    and writes a plausible paragraph used to fall straight out of the loop
+    with most of its rounds unspent.
+    """
+    session = ScriptedSession(
+        user_inputs=["update a.py and b.py", "/quit", "n"],
+        model_replies=[
+            "<cmd>echo a.py</cmd>",
+            "The file a.py now carries the change you asked for.",
+            "<cmd>echo b.py</cmd>",
+            "Both a.py and b.py now carry the change.",
+        ],
+    )
+    session.run()
+
+    assert len(session.prompts_seen) == 4, len(session.prompts_seen)
+    third = session.prompts_seen[2]
+    assert "no tool output this turn mentions it" in third, third
+    assert "b.py" in third, third
+    print("test_agent_loop_continues_after_a_partial_success passed")
+
+
+def test_agent_loop_does_not_challenge_a_covered_request():
+    """The gate must cost nothing on a turn that did what was asked."""
+    session = ScriptedSession(
+        user_inputs=["update a.py", "/quit", "n"],
+        model_replies=[
+            "<cmd>echo a.py</cmd>",
+            "The file a.py now carries the change you asked for.",
+        ],
+    )
+    session.run()
+
+    assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+    print("test_agent_loop_does_not_challenge_a_covered_request passed")
+
+
+def test_continuation_challenge_fires_once_per_turn():
+    """A model that ignores the challenge is not asked a second time."""
+    session = ScriptedSession(
+        user_inputs=["update a.py and b.py", "/quit", "n"],
+        model_replies=[
+            "<cmd>echo a.py</cmd>",
+            "The file a.py now carries the change you asked for.",
+            "I still think a.py was the only file that needed changing.",
+        ],
+    )
+    session.run()
+
+    assert len(session.prompts_seen) == 3, len(session.prompts_seen)
+    print("test_continuation_challenge_fires_once_per_turn passed")

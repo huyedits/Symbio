@@ -274,6 +274,102 @@ def unverified_tokens(reply: str, observations: list[str],
     return out
 
 
+# What the user's own message names as a thing to be acted on: a URL, a path,
+# a filename, or a literal they quoted. These are the targets a turn can be
+# measured against, because the user wrote them down.
+_TARGET_URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
+# A path has at least one separator with a real segment on each side, matched
+# whole: `notes/plan.md`, `./x/y`, `~/Downloads/agi`. Anchored on a segment
+# start so it cannot bite the `//example.com/api` out of the middle of a URL —
+# URLs are masked out before this runs, but the shape should stand alone.
+_TARGET_PATH_RE = re.compile(r"(?<![\w/])[~.]?[\w.\-]*(?:/[\w.\-]+)+/?")
+_TARGET_FILE_RE = re.compile(
+    r"\b[\w.\-]+\.(?:py|js|ts|jsx|tsx|json|md|txt|csv|tsv|ya?ml|toml|ini|cfg|"
+    r"sh|zsh|html|css|sql|log|pdf|png|jpe?g|gif|svg|zip|tar|gz)\b", re.I)
+_TARGET_QUOTED_RE = re.compile(r"[`\"']([^`\"'\n]{3,60})[`\"']")
+
+
+def request_targets(user_text: str, limit: int = 6) -> list[str]:
+    """The concrete things the user's message named.
+
+    Only shapes the user had to type deliberately: a URL, a path, a filename
+    with a real extension, or something they put in quotes or backticks.
+    Ordinary prose contributes nothing, which is the point — a target list
+    built from nouns would flag every conversational turn.
+    """
+    text = user_text or ""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _take(token: str) -> bool:
+        token = token.strip().strip(".,;:!?)]}")
+        if len(token) < 3:
+            return False
+        low = token.lower()
+        if low in seen:
+            return False
+        # `notes/plan.md` and `plan.md` are one target, not two: the file
+        # pattern re-matches the tail of every path the path pattern took.
+        if any(existing.lower().endswith("/" + low) for existing in out):
+            return False
+        seen.add(low)
+        out.append(token)
+        return len(out) >= limit
+
+    # URLs first, then masked out: a bare path regex run over an unmasked URL
+    # pulls `//example.com/api` out of the middle of one and reports it as a
+    # second, separate target that no observation will ever match.
+    for match in _TARGET_URL_RE.finditer(text):
+        if _take(match.group(0)):
+            return out
+    text = _TARGET_URL_RE.sub(" ", text)
+
+    for pattern in (_TARGET_PATH_RE, _TARGET_FILE_RE, _TARGET_QUOTED_RE):
+        for match in pattern.finditer(text):
+            token = (match.group(1) if pattern is _TARGET_QUOTED_RE
+                     else match.group(0))
+            if _take(token):
+                return out
+    return out
+
+
+def unmet_targets(user_text: str, observations: list[str],
+                  limit: int = 3) -> list[str]:
+    """Targets the user named that no tool output this turn mentions.
+
+    The success-side counterpart to the persistence ladder. That ladder reacts
+    to a tool ERROR, and `unverified_tokens` reacts to a value invented in the
+    model's head — so a turn whose one tool call SUCCEEDS and whose reply
+    invents nothing passes every gate and stops, however little of the request
+    it covered. One call, one clean result, a paragraph, done.
+
+    Provenance again, not correctness: whether the work is finished is not
+    checkable here, but "the user named this file and nothing this turn read
+    or wrote it" is. A URL matches on its host and path, so a redirect or a
+    trailing slash does not read as untouched.
+    """
+    haystack = "\n".join(observations).lower()
+    if not haystack:
+        return []
+    out: list[str] = []
+    for target in request_targets(user_text):
+        low = target.lower()
+        if low in haystack:
+            continue
+        # A URL is met when its host+path shows up, however it was normalized.
+        stripped = re.sub(r"^https?://(?:www\.)?", "", low).rstrip("/")
+        if stripped and stripped in haystack:
+            continue
+        # A path is met when the file at the end of it was touched.
+        tail = stripped.rsplit("/", 1)[-1]
+        if tail and len(tail) >= 4 and tail in haystack:
+            continue
+        out.append(target)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _claims_completion(text: str) -> bool:
     """Does this reply assert it already performed an action?
 

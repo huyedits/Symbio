@@ -20,7 +20,7 @@ from symbio.app import (
     learn, local_telemetry, memory, prompts, skills, tooling, training, web,
 )
 from symbio.app.chat_constants import (
-    unverified_tokens,
+    unmet_targets, unverified_tokens,
     _BROWSER_ACTION_TOOLS, _MAX_RATE_LIMIT_RETRIES, _MAX_RATE_LIMIT_WAIT,
     user_turn_floor,
     _MAX_TOOL_RETRIES, _WEB_TOOLS, _claims_completion, _claims_submission,
@@ -417,6 +417,7 @@ class AgentTurnMixin:
         last_observation = ""
         unparsed_tag_nudged = False
         echo_retry_nudged = False
+        continuation_challenged = False
         thinking_cut_retried = False
         # The round index used to select thinking (think=round_num > 0);
         # agent.thinking_level owns that now, so nothing reads the counter.
@@ -1280,6 +1281,54 @@ class AgentTurnMixin:
                     )})
                     self._trim_history()
                     continue
+
+                # Stopping after a SUCCESS, with the request only part-done.
+                #
+                # Every other gate in this block reacts to something going
+                # wrong: the persistence ladder to a tool error, the claim
+                # guard to work asserted without a call, the provenance check
+                # to a value invented in the model's head. A turn that makes
+                # one clean tool call, invents nothing and writes a plausible
+                # paragraph trips none of them, so it falls straight out of
+                # the loop with thirteen rounds unspent. That is the shape of
+                # "one tool call per turn, then hands it back" — not a missing
+                # loop, a loop with no reason to take a second lap.
+                #
+                # The check is again provenance, not completeness: whether the
+                # work is done is not decidable here, but "the user named this
+                # file/URL and no tool output this turn mentions it" is. Only
+                # targets the user typed deliberately count, so a
+                # conversational turn names none and this never fires.
+                if (not continuation_challenged
+                        and any_tool_ran
+                        and not user_refused_this_turn
+                        and challenges_used < self._challenge_budget()
+                        and observations_this_turn
+                        and not (last_observation
+                                 and learn.sounds_like_tool_error(last_observation))
+                        and _is_substantive(display)):
+                    missed = unmet_targets(user_input, observations_this_turn)
+                    if missed:
+                        continuation_challenged = True
+                        challenges_used += 1
+                        named = ", ".join(missed)
+                        self.output_fn(
+                            f"  [Continue] {named} — named in the request, "
+                            f"touched by no tool this turn; asking it to "
+                            f"finish.")
+                        self.history.append({"role": "user", "content": (
+                            f"[System observation: your tool calls this turn "
+                            f"succeeded, but the request also named {named}, "
+                            f"and no tool output this turn mentions it — so "
+                            f"that part has not been done. You have rounds "
+                            f"left. Do it now with the tool that fits, and "
+                            f"report exactly what it returns. If it genuinely "
+                            f"cannot be done, or you already covered it under "
+                            f"another name, say which — plainly, in one "
+                            f"line.]"
+                        )})
+                        self._trim_history()
+                        continue
                 break
 
             # Only execute the first fresh tool per response. Multiple tools in
