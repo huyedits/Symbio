@@ -460,6 +460,91 @@ Example:
 
 ---
 
+# How much does it take to learn something new?
+
+Measured on 2026-09-15, Qwen3-14B on an M-series Mac, against `aws_sim/` — a
+deliberately **counter-familiar** cloud CLI built so that pretrained knowledge
+actively misleads (`store`/`compute`/`access`, `--region` required on every
+command, no URI scheme, `Key:Value` labels, `tag/Key:Value` filters). The
+system prompt says nothing about the syntax. The base model scores **0/13**.
+
+Nothing in the corpus is hand-written. The model attempts a task, the simulator
+**runs** what it emits, and the pair is kept only if the world changed the way
+the task asked. A model that never gets a command right earns exactly zero
+samples.
+
+## The curve: 51 checkpoints, held-out battery, single-shot
+
+| iteration | 0 | 20 | 40 | 60 | 80 | **100** | 140 | 160–1000 |
+| --------- | -: | -: | -: | -: | -: | ------: | --: | -------: |
+| score     | 0/13 | 3/13 | 9/13 | 11/13 | 12/13 | **13/13** | 12/13 | 13/13 ×43 |
+
+**Perfect score at iteration 100 of 1000.** The other 900 iterations — 90% of
+the compute, 23 of the 25.7 minutes — changed nothing. Training cost 1.5s per
+iteration at 8.4 GB peak.
+
+## The ceiling is what it DISCOVERED, not how long it trained
+
+Three runs, same model, same loop. Only the environment changed:
+
+| errors the environment gives | tasks solved | verbs earned | peak score |
+| ---------------------------- | -----------: | -----------: | ---------: |
+| the current service's verbs  |        39/60 |           10 |     10/13  |
+| every service's verbs        |        59/60 |           11 |        —   |
+| + full task coverage         |    **70/72** |       **13** | **13/13**  |
+
+It passed exactly the verbs it had earned samples for and generalised to
+**none** it had not. Earned 10 → scored 10. Earned 13 → scored 13.
+
+Why the error text mattered so much: asked to create a container, the model
+tried `awsim create-container`, was told the three services, guessed `compute`,
+and was then told compute's four verbs — none of which make containers. It
+never tried `store`. Every message was locally accurate and kept it inside the
+wrong service. Returning the **whole verb map** on any unknown service or verb
+took discovery from 39/60 to 59/60 and cut the time by 40%.
+
+Rigid means refusing wrong input, not rationing information. A model that is
+lost gets the whole map.
+
+## How many examples per capability
+
+60 training examples (plus 10 held out) covered 13 verbs — roughly 2–6 each:
+
+| verb | examples | result |
+| ---- | -------: | ------ |
+| `compute resume`  | 2 | passed |
+| `compute halt`    | 3 | passed |
+| `store duplicate` | 3 | passed |
+
+So the unit is not "60 examples", it is **a few examples per thing you want it
+to learn**. Note the caveat those numbers carry: they were learned *inside* a
+corpus that had already taught the shared grammar, so three examples of
+`compute resume` only had to teach which verb, not the syntax around it.
+
+## A warning worth more than the results
+
+The first version of this benchmark **mimicked the real AWS CLI**, and the
+model scored 13/13 before a single step of training. It was reciting `aws s3
+mb` from pretraining. A benchmark a model already knows measures recall and
+reports it as learning.
+
+And when the curve first read 0/13 at every checkpoint while the training loss
+said 0.055, that was the **evaluation**, not the model: `mlx_lm lora` has no
+`--keys` flag and trains q/k/v/o plus all three MLP projections (112 tensors at
+8 layers), so an eval that attaches only `q_proj`/`v_proj` loads 32 and
+`load_weights(strict=False)` drops the other 80 in silence. A silent partial
+load is indistinguishable from a model that learned nothing. The harness now
+reads the training run's own `adapter_config.json` and refuses to score a
+checkpoint whose tensors have nowhere to land.
+
+Reproduce with:
+
+```bash
+python aws_sim/self_teach.py 72        # model earns its own corpus
+python aws_sim/train_and_curve.py 1000 20   # train, then score 50 checkpoints
+python aws_sim/train_and_curve.py --score-only   # re-score without retraining
+```
+
 # Mixture of Agents
 
 Symbio can optionally use a **Mixture of Agents (MoA)** architecture.

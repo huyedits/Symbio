@@ -73,7 +73,8 @@ def _seed(containers=None, identities=None):
             "identities": identities or {}}
 
 
-def make_tasks(rng: random.Random, n: int) -> list[eval_aws.Case]:
+def make_tasks(rng: random.Random, n: int, focus=None,
+               extra: int = 0) -> list[eval_aws.Case]:
     """Tasks over the environment's surface. Tasks only — never answers."""
     makers = []
 
@@ -250,7 +251,29 @@ def make_tasks(rng: random.Random, n: int) -> list[eval_aws.Case]:
             lambda code, out, st, o=old_id, n=new_id: code == 0
             and n in st["identities"] and o not in st["identities"])
 
-    return [makers[i % len(makers)](rng) for i in range(n)]
+    @maker
+    def _chain_three(r):
+        a, b = r.sample(CONTAINERS, 2)
+        k, k2, f = r.choice(PATHS), r.choice(PATHS), r.choice(LOCALS)
+        return eval_aws.Case(
+            f"chain_three_{a}",
+            f"In region {REGION}, create a container called {a}, store the local "
+            f"file {f} in it at {k}, and then copy that path into the container "
+            f"{b} at {k2}.",
+            _seed(containers={_ck(b): {}}),
+            lambda code, out, st, a=a, b=b, k=k, k2=k2: code == 0
+            and k in st["containers"].get(_ck(a), {})
+            and k2 in st["containers"].get(_ck(b), {}))
+
+    tasks = [makers[i % len(makers)](rng) for i in range(n)]
+    if focus:
+        # Over-sample named shapes. Used to TEST the sample-count law
+        # predictively: the law says a case passes once it has earned roughly
+        # four samples, so feeding a starved shape more tasks should flip it.
+        wanted = [m for m in makers if m.__name__.lstrip("_") in focus]
+        for i in range(extra):
+            tasks.append(wanted[i % len(wanted)](rng))
+    return tasks
 
 
 def attempt(model, tokenizer, generate_fn, case, history, max_tokens=160):
@@ -342,7 +365,9 @@ def main():
     before, _rows = eval_aws.run_battery(model, tokenizer, generate_fn)
     print(f"base model: {before}/{len(eval_aws.CASES)}")
 
-    tasks = make_tasks(random.Random(11), count)
+    focus = sys.argv[2].split(",") if len(sys.argv) > 2 else None
+    extra = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+    tasks = make_tasks(random.Random(11), count, focus=focus, extra=extra)
     print(f"\n--- self-teaching over {len(tasks)} generated tasks ---", flush=True)
     t0 = time.time()
     samples, transcript, solved = teach(model, tokenizer, generate_fn, tasks)
