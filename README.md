@@ -8,7 +8,47 @@
 [![GitHub](https://img.shields.io/badge/GitHub-Symbio-black?logo=github)](https://github.com/huyedits/Symbio)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](#license)
 
-**[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)**
+**[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Does it work?](#does-it-work-a-cli-it-has-never-seen)** · **[Roadmap](#roadmap)**
+
+---
+
+## Contents
+
+**Start here**
+[What is Symbio?](#what-is-symbio) ·
+[Does it work?](#does-it-work-a-cli-it-has-never-seen) ·
+[Features](#features) ·
+[Demo](#demo) ·
+[Quick start](#quick-start)
+
+**How it learns**
+[The learning loop](#how-it-learns) ·
+[Learning from tool mistakes](#learning-from-tool-mistakes) ·
+[Skills](#skills) ·
+[Proving a skill is in the weights](#proving-a-skill-is-actually-in-the-weights) ·
+[Five-skill evaluation](#five-skill-evaluation) ·
+[How much does it take to learn something new?](#how-much-does-it-take-to-learn-something-new) ·
+[Mixture of Agents](#mixture-of-agents) ·
+[Training safety](#training-safety) ·
+[LoRA fine-tuning](#lora-fine-tuning)
+
+**Using it**
+[Tools](#tools) ·
+[Telegram](#telegram) ·
+[CLI](#cli) ·
+[Slash commands](#slash-commands) ·
+[Configuration](#configuration) ·
+[Security](#security)
+
+**Reference**
+[Architecture](#architecture) ·
+[Tool formats](#tool-formats) ·
+[Dynamic names](#dynamic-names) ·
+[Alternative installation](#alternative-installation) ·
+[Roadmap](#roadmap) ·
+[Contributing](#contributing) ·
+[Limitations](#current-limitations) ·
+[License](#license)
 
 ---
 
@@ -18,12 +58,9 @@ Most AI agents have a problem:
 
 **They forget.**
 
-*like forget forget*,
-get it? Cause it was in short term memory and you might shut down your computer? 
-
 You correct an agent today, and tomorrow it makes the same mistake again. You can put instructions in a system prompt, but that makes the prompt larger, it becomes slower when processing, and doesn't really teach the model anything.
 
-Symbio takes a different approach - obviously why else make this?
+Symbio takes a different approach.
 
 ```text
 You → Agent → Mistake → Correction
@@ -35,7 +72,6 @@ You → Agent → Mistake → Correction
              New adapter
                     ↓
               Agent improves
-       it now can be shown in the layer
 ```
 
 Corrections and successful tool recoveries are automatically collected as training examples. Once enough examples accumulate, Symbio performs a small LoRA fine-tune and reloads the resulting adapter.
@@ -44,29 +80,62 @@ The goal is simple:
 
 > **The longer you use Symbio, the more you define what AI means to you**
 
-Everything can stay on your machine, nothing phones "home"
+Everything can stay on your machine, nothing phones "home".
 
 ---
 
-## Le Features
+## Does it work? A CLI it has never seen
 
-*  **Learns from corrections** — automatically detects corrections and turns them into training data.
-*  **Self-corrects tool mistakes** — successful recovery from a failed command can become a training example.
-*  **Learnable skills** — create a skill as a Markdown procedure and train a dedicated worker adapter for it.
-*  **LoRA fine-tuning** — only small adapter weights are trained; the base model stays frozen.
-*  **Mixture of Agents** — a headmaster can delegate bounded tasks to smaller worker models.
-*  **Local memory** — notes, sessions, training data, adapters and caches live locally.
-*  **RAG retrieval** — relevant notes can be retrieved and supplied as context.
-*  **Web research** — search the web and automatically save useful discoveries as notes.
-*  **Browser automation** — open pages, click, type and scroll through a live browser.
-*  **Shell & Python tools** — execute sandboxed commands and short Python programs.
-*  **Telegram gateway** — use your local Symbio instance from your phone.
-*  **Permission gates** — dangerous actions require explicit approval.
-*  **Golden-set regression protection** — bad fine-tunes can automatically roll back.
-*  **Skill evaluation** — compare base, prompted and adapter performance.
-*  **Crash recovery** — interrupted training is recorded and can be resumed.
-*  **Self-pruning** — junk notes and duplicate session turns can be archived.
-*  **No API required for inference** — the default architecture is designed around local models.
+The honest objection to "the agent learns" is that the agent already knew. So
+the proof runs against `aws_sim/` — a cloud CLI built to be **counter-familiar**,
+where pretrained AWS knowledge actively misleads: the services are
+`store`/`compute`/`access`, `--region` is required on every command, paths carry
+no URI scheme, labels are `Key:Value`, filters are `tag/Key:Value`. The system
+prompt says nothing about the syntax.
+
+| held-out battery, single-shot | before | after |
+| ----------------------------- | -----: | ----: |
+| score                         | **0/13** | **13/13** |
+
+What that is worth, concretely:
+
+* **It learns a tool you never documented.** Zero correct commands at the start,
+  every one correct at the end, on tasks it was not trained on.
+* **Nobody writes the training data.** The model attempts a task, the simulator
+  *runs* what it emits, and the pair is kept only when the world changed the way
+  the task asked. A wrong command earns no sample.
+* **The knowledge ends up in the weights, not the prompt.** The prompt is
+  identical before and after. Prompt-stuffing the same CLI means carrying it on
+  every turn forever; the adapter carries it for free.
+* **It is cheap.** Perfect score at **iteration 100 of 1000** — 1.5 s per
+  iteration, 8.4 GB peak, on one Mac.
+* **You can audit it.** 51 checkpoints, a held-out battery, raw emissions kept.
+
+Full method, the three ablation runs, and the mistakes that nearly faked the
+result: [How much does it take to learn something new?](#how-much-does-it-take-to-learn-something-new)
+
+---
+
+## Features
+
+* **Learns from corrections** — automatically detects corrections and turns them into training data.
+* **Self-corrects tool mistakes** — successful recovery from a failed command can become a training example.
+* **Learnable skills** — create a skill as a Markdown procedure and train a dedicated worker adapter for it.
+* **LoRA fine-tuning** — only small adapter weights are trained; the base model stays frozen.
+* **Mixture of Agents** — a headmaster can delegate bounded tasks to smaller worker models.
+* **Local memory** — notes, sessions, training data, adapters and caches live locally.
+* **RAG retrieval** — relevant notes can be retrieved and supplied as context.
+* **Web research** — search the web and automatically save useful discoveries as notes.
+* **Browser automation** — open pages, click, type and scroll through a live browser.
+* **Shell & Python tools** — execute sandboxed commands and short Python programs.
+* **Telegram gateway** — use your local Symbio instance from your phone.
+* **Permission gates** — dangerous actions require explicit approval.
+* **Golden-set regression protection** — bad fine-tunes can automatically roll back.
+* **Skill evaluation** — compare base, prompted and adapter performance.
+* **Crash recovery** — interrupted training is recorded and can be resumed.
+* **Self-pruning** — junk notes and duplicate session turns can be archived.
+* **No API required for inference** — the default architecture is designed around local models.
+
 ---
 
 ## Demo
@@ -76,7 +145,9 @@ Everything can stay on your machine, nothing phones "home"
 Try the real tag parser, correction miner, research memory and RAG retriever in your browser:
 
 **[https://huggingface.co/spaces/HuyEdits/symbio-demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)**
-(no fine tuning just actions)
+
+(No fine-tuning in the demo — tag parsing, correction mining and retrieval only.)
+
 ### Screenshots
 
 <img width="1300" alt="Symbio CLI" src="https://github.com/user-attachments/assets/c4e02593-f527-44dc-9bcb-181f329360ad" />
@@ -85,19 +156,19 @@ Try the real tag parser, correction miner, research memory and RAG retriever in 
 
 ### Browser automation
 
-Symbio can use a live browser to perform tasks such as opening Chrome and interacting with pages. wowie
+Symbio can use a live browser to perform tasks such as opening Chrome and interacting with pages.
 
 [https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20](https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20)
 
 ---
 
-# Quick Start
+## Quick start
 
-## Requirements
+### Requirements
 
 Symbio currently targets **Apple Silicon Macs** using Apple's MLX stack. (unfortunately until we can get support for CUDA, and other stuff)
 
-### Recommended
+#### Recommended
 
 * macOS
 * Apple Silicon M-series Mac
@@ -112,11 +183,11 @@ The default 8B-class (or others - check the wizard) configuration is much more c
 
 ---
 
-## Install
+### Install
 
 ```bash
-cd symbio
 git clone https://github.com/huyedits/Symbio
+cd Symbio
 ./install.sh
 ```
 
@@ -129,10 +200,10 @@ The installer:
 5. Optionally prefetches the model.
 6. Drops you into an activated environment.
 
-Exit the environment with:
+Exit the environment with `exit`, or Control-C:
 
 ```bash
-exit or control + c
+exit
 ```
 
 Your original shell is untouched.
@@ -175,7 +246,7 @@ symb setup
 
 ---
 
-# How it learns
+## How it learns
 
 The core learning loop is intentionally simple:
 
@@ -235,7 +306,7 @@ The `/learn` command can still be used to manually trigger learning from the pre
 
 ---
 
-# Learning from tool mistakes
+## Learning from tool mistakes
 
 Symbio can also learn from its own successful recovery.
 
@@ -272,7 +343,7 @@ Only a confirmed successful recovery is captured.
 
 ---
 
-# Skills
+## Skills
 
 Skills let Symbio turn procedures into dedicated, trainable capabilities.
 
@@ -340,7 +411,7 @@ symb archive --restore adapter fix_wifi
 
 ---
 
-# Proving a skill is actually in the weights
+## Proving a skill is actually in the weights
 
 There is an obvious objection to learned skills:
 
@@ -416,25 +487,24 @@ The goal is to make the evaluation auditable rather than flattering.
 
 ---
 
-# Six-skill evaluation
+## Five-skill evaluation
 
-A larger evaluation using six generated skills produced:
+A larger evaluation using five generated skills produced:
 
 | Skill                      | Base | Prompted | Adapter |
 | -------------------------- | ---: | -------: | ------: |
 | Quick Task Helper          |  0/5 |      1/5 | **5/5** |
-| Coffee Making              |  1/5 |      5/5 | **5/5** |
 | Bicycle Tuning             |  1/5 |      5/5 | **5/5** |
 | Repotting a Houseplant     |  2/5 |      5/5 | **5/5** |
 | Shipping a Parcel Overseas |  0/5 |      5/5 | **5/5** |
 | Sharpening a Kitchen Knife |  1/5 |      4/5 | **5/5** |
 
-WOWIE, that is a BIG BIG jump!!!!
 Overall:
 
 ```text
-Adapter: 30/30
-Base:     5/30
+Adapter:  25/25
+Prompted: 20/25
+Base:      4/25
 ```
 
 These numbers should be treated as an experiment, not a benchmark claim. The evaluation metric measures reproduction of the skill's procedure, which is specifically what the experiment is designed to test.
@@ -460,7 +530,7 @@ Example:
 
 ---
 
-# How much does it take to learn something new?
+## How much does it take to learn something new?
 
 Measured on 2026-09-15, Qwen3-14B on an M-series Mac, against `aws_sim/` — a
 deliberately **counter-familiar** cloud CLI built so that pretrained knowledge
@@ -473,7 +543,7 @@ Nothing in the corpus is hand-written. The model attempts a task, the simulator
 the task asked. A model that never gets a command right earns exactly zero
 samples.
 
-## The curve: 51 checkpoints, held-out battery, single-shot
+### The curve: 51 checkpoints, held-out battery, single-shot
 
 | iteration | 0 | 20 | 40 | 60 | 80 | **100** | 140 | 160–1000 |
 | --------- | -: | -: | -: | -: | -: | ------: | --: | -------: |
@@ -483,7 +553,7 @@ samples.
 the compute, 23 of the 25.7 minutes — changed nothing. Training cost 1.5s per
 iteration at 8.4 GB peak.
 
-## The ceiling is what it DISCOVERED, not how long it trained
+### The ceiling is what it DISCOVERED, not how long it trained
 
 Three runs, same model, same loop. Only the environment changed:
 
@@ -506,7 +576,7 @@ took discovery from 39/60 to 59/60 and cut the time by 40%.
 Rigid means refusing wrong input, not rationing information. A model that is
 lost gets the whole map.
 
-## How many examples per capability
+### How many examples per capability
 
 60 training examples (plus 10 held out) covered 13 verbs — roughly 2–6 each:
 
@@ -534,7 +604,7 @@ sequencing. "Get rid of the container, it still holds a path" needs a
 precondition nobody stated, and that is genuinely new. Treat any
 per-capability sample figure here as unestablished.
 
-## A warning worth more than the results
+### A warning worth more than the results
 
 The first version of this benchmark **mimicked the real AWS CLI**, and the
 model scored 13/13 before a single step of training. It was reciting `aws s3
@@ -558,7 +628,9 @@ python aws_sim/train_and_curve.py 1000 20   # train, then score 50 checkpoints
 python aws_sim/train_and_curve.py --score-only   # re-score without retraining
 ```
 
-# Mixture of Agents
+---
+
+## Mixture of Agents
 
 Symbio can optionally use a **Mixture of Agents (MoA)** architecture.
 
@@ -626,13 +698,13 @@ Worker training uses the same safety mechanisms as headmaster training:
 
 ---
 
-# Training safety
+## Training safety
 
 Self-training is useful, but blindly training on everything an agent produces is dangerous.
 
 Symbio therefore has several safeguards.
 
-## Golden-set regression testing
+### Golden-set regression testing
 
 Before and after each LoRA update, Symbio runs a fixed golden set.
 
@@ -666,7 +738,7 @@ symb eval-lora
 
 ---
 
-## Retrieval hygiene
+### Retrieval hygiene
 
 A self-learning agent has an unusual failure mode:
 
@@ -699,7 +771,7 @@ If nothing relevant matches, retrieval is allowed to return **nothing**.
 
 ---
 
-## Self-pruning
+### Self-pruning
 
 Junk notes and duplicate session turns can be archived automatically.
 
@@ -724,7 +796,7 @@ Notes are archived rather than silently deleted.
 
 ---
 
-## Crash-safe training
+### Crash-safe training
 
 Long-running training jobs are recorded before they begin.
 
@@ -757,14 +829,14 @@ Training is **not automatically restarted after a crash**. This prevents a machi
 
 ---
 
-# 💻 Tools
+## Tools
 
 Symbio can interact with the local machine through several tool groups.
 
 Each tool is one markdown file in `tools/`, seeded on first run and yours to
 edit afterwards:
 
-```markdown
+````markdown
 ---
 name: browser_click
 family: browser
@@ -776,7 +848,7 @@ Click an element in the open browser, identified by its visible text.
 ```json
 {"type":"object","properties":{"target":{"type":"string"}},"required":["target"]}
 ```
-```
+````
 
 The system prompt does not carry all of those schemas. It carries the *index* —
 the families, the tool names in each, one line on what the family is for — and
@@ -822,7 +894,7 @@ Save information for future retrieval:
 {"name":"note","arguments":{
   "action":"add",
   "target":"note",
-  "content":"The user likes coffee."
+  "content":"Deploys go to eu-west-1, never us-east-1."
 }}
 </tool_call>
 ```
@@ -831,13 +903,13 @@ Save information for future retrieval:
 
 Search the web and save useful discoveries as local `Learned:` notes.
 
-### Telegram
+### Telegram gateway
 
 Run the same agent through a Telegram gateway.
 
 ---
 
-# 📱 Telegram
+## Telegram
 
 Start the gateway:
 
@@ -988,9 +1060,10 @@ in the listing — and saving one never runs it; only you do, by typing the name
 
 ---
 
-#CLI
+## CLI
+
 ```bash
-symbio # start chat
+symbio                       # Start chat
 symbio config                # Show configuration
 symbio config get <key>      # Read a config value
 symbio config set <key> <value>
@@ -1006,9 +1079,10 @@ symbio gateway status        # Check Telegram
 symbio gateway start         # Start Telegram
 symbio gateway stop          # Stop Telegram
 ```
+
 ---
 
-# Slash commands
+## Slash commands
 
 Once inside Symbio:
 
@@ -1041,7 +1115,7 @@ Once inside Symbio:
 
 ---
 
-# LoRA fine-tuning
+## LoRA fine-tuning
 
 Symbio uses **LoRA (Low-Rank Adaptation)** through Apple's MLX ecosystem.
 
@@ -1097,7 +1171,7 @@ Training uses validation checks and can stop early when validation loss plateaus
 
 ---
 
-#Configuration
+## Configuration
 
 Configuration lives in:
 
@@ -1137,7 +1211,7 @@ Some important settings:
 
 ---
 
-#Security
+## Security
 
 Symbio is designed to run locally, but **local does not mean automatically safe**.
 
@@ -1147,25 +1221,24 @@ The sandbox is intended to reduce accidental damage, not provide a perfect secur
 
 ### Important rules
 
-* ### Review untrusted code before executing it.
-* ### Do not give Symbio access to files you would not give a local program access to.
-* ### Pay attention to permission prompts.
-* ### A denied action is not retried through another tool.
-* ### Telegram actions can require explicit approval.
-* ### Keep secrets such as Telegram tokens out of source control.
+* **Review untrusted code before executing it.**
+* **Do not give Symbio access to files you would not give a local program access to.**
+* **Pay attention to permission prompts.**
+* **A denied action is not retried through another tool.**
+* **Telegram actions can require explicit approval.**
+* **Keep secrets such as Telegram tokens out of source control.**
 
 The environment variable:
 
 ```bash
 SYMBIO_TELEGRAM_TOKEN
-etc
 ```
 
 takes precedence over the token stored in `config.json`.
 
 ---
 
-# Architecture
+## Architecture
 
 The project is organized as a Python package with a thin compatibility wrapper:
 
@@ -1229,7 +1302,7 @@ The project is organized as a Python package with a thin compatibility wrapper:
 
 ---
 
-# Tool formats
+## Tool formats
 
 Symbio supports legacy XML tags as well as the preferred Hermes-style tool format.
 
@@ -1252,7 +1325,7 @@ Symbio supports legacy XML tags as well as the preferred Hermes-style tool forma
 {"name":"note","arguments":{
   "action":"add",
   "target":"note",
-  "content":"The user likes coffee."
+  "content":"Deploys go to eu-west-1, never us-east-1."
 }}
 </tool_call>
 ```
@@ -1261,7 +1334,7 @@ Symbio supports legacy XML tags as well as the preferred Hermes-style tool forma
 
 ```xml
 <note title="User Preference">
-The user likes coffee.
+Deploys go to eu-west-1, never us-east-1.
 </note>
 ```
 
@@ -1273,7 +1346,7 @@ Legacy formats remain supported for compatibility.
 
 ---
 
-# Dynamic names
+## Dynamic names
 
 Symbio can learn both the user's name and its own name.
 
@@ -1308,7 +1381,7 @@ is intentionally not treated as an assistant rename because smaller models can c
 
 ---
 
-# Alternative installation
+## Alternative installation
 
 For an isolated install:
 
@@ -1345,9 +1418,9 @@ python main.py --train
 
 ---
 
-# Roadmap
+## Roadmap
 
-## High priority
+### High priority
 
 * [ ] **CUDA backend** — Support NVIDIA/AMD hardware through PyTorch or Transformers.
 * [ ] **llama.cpp backend** — Support GGUF models and broader hardware.
@@ -1359,7 +1432,7 @@ python main.py --train
 * [ ] **Additional messaging platforms**.
 * [ ] **Long-term weight pruning**.
 
-## Completed
+### Completed
 
 * [x] More tools
 * [x] Live browser automation
@@ -1377,7 +1450,7 @@ python main.py --train
 
 ---
 
-# Contributing
+## Contributing
 
 Contributions are welcome.
 
@@ -1408,7 +1481,7 @@ If you find a bug, please include:
 
 ---
 
-# Current limitations
+## Current limitations
 
 Symbio is still experimental.
 
@@ -1426,13 +1499,13 @@ If you have a different Apple Silicon configuration, please report whether it wo
 
 ---
 
-# License
+## License
 
 Apache 2.0
 
 ---
 
-## Support the project :
+## Support the project
 
 If Symbio is useful or interesting to you, **a GitHub star helps other people discover it.** :P
 
