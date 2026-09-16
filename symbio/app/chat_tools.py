@@ -11,6 +11,7 @@ inherits it.
 
 import json
 import math
+import os
 import re
 import shlex
 import time
@@ -1160,6 +1161,20 @@ class ToolsMixin:
         return out
 
     def _dispatch_tool(self, name: str, params: dict[str, Any]) -> str:
+        # The contract first. Everything below reads its arguments with
+        # `params.get(...)`, so a call with an argument misspelled is not an
+        # error — it is a call with an empty string, and what comes back is
+        # whatever an empty argument produces. The model then guesses again
+        # about its own guess. Checked against the schema the prompt handed
+        # out, the same wrong call comes back as the shape it should have had.
+        ok, why = tooling.validate_arguments(name, params)
+        if not ok:
+            mode = _argument_check_mode(getattr(self, "config", None))
+            if mode == "audit":
+                _audit_argument_fault(name, params, why)
+            elif mode != "off":
+                return why
+
         if name == "tool_docs":
             # The other half of the index catalog: the prompt names the tools,
             # this hands over the arguments. Filtered by the same enabled
@@ -1963,6 +1978,44 @@ class ToolsMixin:
             return (f"Submit the form on the live page? target='{params.get('target')}' "
                     f"expected to land on '{params.get('expected_url')}'.")
         return f"Allow tool '{name}'?"
+
+
+def _argument_check_mode(config: Any) -> str:
+    """"on" (default), "audit" or "off".
+
+    The env var is not a second setting, it is how a live install is measured
+    without editing its config: run the suite or a real session with
+    SYMBIO_TOOL_ARGS=audit and read what WOULD have been refused before
+    refusing it. A guard switched on without that measurement is how three of
+    them ended up dead in the shipped config with their tests passing.
+    """
+    from_env = os.environ.get("SYMBIO_TOOL_ARGS", "").strip().lower()
+    if from_env in ("on", "off", "audit"):
+        return from_env
+    try:
+        mode = (config or {}).get("agent", {}).get("validate_tool_arguments", "on")
+    except AttributeError:
+        return "on"
+    mode = str(mode).strip().lower()
+    return mode if mode in ("on", "off", "audit") else "on"
+
+
+def _audit_argument_fault(name: str, params: Any, why: str) -> None:
+    """Record a call the check would have refused, and let it through."""
+    try:
+        from symbio import constants
+
+        path = constants.LOG_DIR / "tool_argument_audit.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "tool": name,
+                "arguments": sorted(params) if isinstance(params, dict) else str(type(params)),
+                "why": why.split(". This is the call")[0],
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        # An audit that can break a turn is worse than an unmeasured guard.
+        pass
 
 
 class _StandIn(ToolsMixin):

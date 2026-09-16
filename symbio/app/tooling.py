@@ -1378,6 +1378,7 @@ def tool_group_enabled(name: str, groups: set[str] | None) -> bool:
 # user's file against, and a description improved in code could never be
 # offered to an install that had already seeded the old one.
 _BUILTIN_TOOLS: list[dict[str, Any]] = copy.deepcopy(_TOOLS)
+_BUILTIN_BY_NAME: dict[str, dict[str, Any]] = {t["name"]: t for t in _BUILTIN_TOOLS}
 
 
 def refresh_tool_files(names: list[str] | None = None,
@@ -1456,6 +1457,7 @@ def sync_tool_files(seed: bool = True) -> None:
             _TOOL_FAMILIES.setdefault(internal, parsed["_family"])
         if name in by_name:
             by_name[name].update(schema)
+            _restore_dropped_properties(by_name[name])
             continue
         # A NEW tool file needs a group, or the catalog filter — which drops
         # anything whose group is unknown — would leave it defined and never
@@ -1464,6 +1466,38 @@ def sync_tool_files(seed: bool = True) -> None:
         # a group is gated by it like any built-in.
         _TOOL_GROUPS.setdefault(internal, parsed["_group"] or "core")
         _TOOLS.append(schema)
+
+
+def _restore_dropped_properties(spec: dict[str, Any]) -> None:
+    """Put back an argument the built-in declares and the file has never heard of.
+
+    The file wins on wording — that is the whole point of an editable catalog —
+    but it cannot un-declare an argument the dispatcher reads. A file seeded
+    before a tool grew one is not an edit saying "remove this", it is a file
+    written earlier, and on 2026-09-16 that difference cost the desktop tools
+    their entire accessibility path: tools/desktop_click.md still advertised
+    {x, y} from 2026-09-14, so `element` — the numbered control that ax.py
+    exists to provide — could not be named in a tool call at all. The
+    capability was shipped, tested, and unreachable.
+    """
+    built_in = _BUILTIN_BY_NAME.get(spec["name"])
+    if not built_in:
+        return
+    theirs = (spec.get("parameters") or {}).get("properties")
+    ours = (built_in.get("parameters") or {}).get("properties") or {}
+    if theirs is None or not ours:
+        return
+    for key, prop in ours.items():
+        theirs.setdefault(key, prop)
+    # And it cannot demand more than the built-in does. desktop_click's file
+    # still required {x, y} from when coordinates were the only way to click;
+    # restoring `element` beside a required x would have advertised a control
+    # number the model was not allowed to send on its own. A file may RELAX a
+    # requirement — that is a legitimate edit — never add one back.
+    required = (spec.get("parameters") or {}).get("required")
+    ours_required = set((built_in.get("parameters") or {}).get("required") or [])
+    if required:
+        spec["parameters"]["required"] = [k for k in required if k in ours_required]
 
 
 def build_tools_block(groups: set[str] | None = None,
@@ -3089,3 +3123,146 @@ def redact_messages(messages: list[dict[str, str]] | None):
     if not messages:
         return messages
     return [{**m, "content": redact_secrets(m.get("content", ""))} for m in messages]
+
+
+# --- the call has to match the contract the prompt handed out ---------------
+#
+# Every tool in this file advertises a JSON schema, and until now nothing
+# checked a call against it. The dispatcher reads what it wants with
+# `params.get("cmd", "")`, so a call with the argument spelled wrong is not an
+# error: it is a call with an empty command. The model gets back whatever an
+# empty argument produces, which is rarely an error message and never the
+# schema, and its next attempt is a guess about the same guess. That is the
+# `reflex` mistake kind in learn.py -- a wrong SHAPE, not a wrong fact -- and
+# the cure for a wrong shape is being shown the right one.
+#
+# Borrowed from Atomic Agents, whose whole discipline is that every component
+# declares its input and output schema and nothing is wired by name and hope:
+# validate at the boundary, and hand back the contract that was broken.
+
+# Second spellings the dispatcher honours for an argument its schema names once.
+# The catalog advertises ONE name per argument on purpose — teaching a model
+# three ways to say the same thing is three ways for it to be inconsistent —
+# but the dispatcher has always accepted these, and a check that refused them
+# would break calls that work today. Found by scanning the dispatcher for the
+# argument names it reads; a test does that scan so the next alias added
+# without a line here is a failure rather than a silent refusal.
+#
+#   tool -> the declared argument -> the other spellings that satisfy it
+_ARGUMENT_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
+    "delete_note": {"title": ("query", "name")},
+    "fill_form": {"fields": ("values", "form")},
+    # Either identifies the control; the schema has to call one of them
+    # required or the model omits both.
+    "submit_form": {"target": ("selector",)},
+}
+
+# Arguments a schema calls required and the tool answers without anyway. The
+# schema keeps saying required because that is the pressure that makes a model
+# supply one; the dispatcher keeps its answer because "list_notes" parses to
+# `recall` with no query at all, and refusing that sends the model back to
+# "I cannot look" — the exact sentence recall was built to stop.
+_TOLERATES_ABSENT: dict[str, set[str]] = {
+    "recall": {"query"},
+}
+
+
+def _schema_for_call(name: str) -> dict[str, Any] | None:
+    """The advertised schema for a name the dispatcher was given.
+
+    The dispatcher works in INTERNAL names (`run_command`); the catalog is
+    written in advertised ones (`terminal`), and a dozen model spellings map
+    onto each. Look up both ways or every internal name validates as unknown
+    and the check quietly does nothing — see the guards that were dead in the
+    shipped config while their tests passed.
+    """
+    sync_tool_files()
+    for spec in _TOOLS:
+        advertised = spec["name"]
+        if name in (advertised, _HERMES_NAME_MAP.get(advertised, advertised)):
+            return spec
+    return None
+
+
+def _type_mismatch(expected: str, value: Any) -> str:
+    """A description of a clearly wrong type, or "" when it is acceptable.
+
+    Deliberately lenient. A model that sends 5 where the schema says "string"
+    has made no mistake worth a round trip — the dispatcher's own `str()` will
+    do exactly what was meant. A model that sends a whole object where a
+    command line belongs has made a different kind of mistake, and that one is
+    worth catching before the tool runs on the empty string it coerces to.
+    """
+    if expected in ("string", "integer", "number", "boolean"):
+        if isinstance(value, (dict, list)):
+            return f"a {type(value).__name__}, but {expected} is expected"
+    elif expected == "object" and not isinstance(value, dict):
+        return f"a {type(value).__name__}, but an object is expected"
+    elif expected == "array" and not isinstance(value, (list, tuple)):
+        return f"a {type(value).__name__}, but an array is expected"
+    return ""
+
+
+def validate_arguments(name: str, params: Any) -> tuple[bool, str]:
+    """Check one call against its advertised schema. (ok, what to say back).
+
+    The message is written to be the whole of the model's next move: what was
+    wrong, what the tool actually takes, and the schema itself. Naming the
+    fault without the schema buys one round and spends the next on tool_docs.
+    """
+    spec = _schema_for_call(name)
+    if spec is None:
+        # Not a catalog tool. Unknown names are answered by nearest_tools,
+        # which has more to say than this does.
+        return True, ""
+    schema = spec.get("parameters") or {}
+    properties = schema.get("properties") or {}
+    if not isinstance(params, dict):
+        return False, (
+            f"{name} takes a JSON object of arguments, not "
+            f"{type(params).__name__}. Schema: {schemas_for_names([spec['name']])}")
+    if not properties:
+        return True, ""
+
+    aliases = _ARGUMENT_ALIASES.get(spec["name"], {})
+    accepted = set(properties)
+    for spellings in aliases.values():
+        accepted.update(spellings)
+    # ABSENT, not empty. An empty string is a value the tool may have its own
+    # meaning for — `recall` with a blank query deliberately lists what exists
+    # — and refusing it here would break behaviour the prompt promises.
+    tolerated = _TOLERATES_ABSENT.get(spec["name"], set())
+    missing = [key for key in (schema.get("required") or [])
+               if key not in tolerated
+               and all(params.get(spelling) is None
+                       for spelling in (key, *aliases.get(key, ())))]
+    unknown = [key for key in params if key not in accepted]
+    wrong = [(key, _type_mismatch(str(properties[key].get("type", "")), value))
+             for key, value in params.items()
+             if key in properties and properties[key].get("type")]
+    wrong = [(key, why) for key, why in wrong if why]
+
+    if not (missing or unknown or wrong):
+        return True, ""
+
+    faults = []
+    if missing:
+        faults.append(f"{name} needs {_and_list(missing)}, and "
+                      f"{'they were' if len(missing) > 1 else 'it was'} not given")
+    if unknown:
+        faults.append(f"{name} has no argument {_and_list(unknown)}; it takes "
+                      f"{_and_list(sorted(accepted))}")
+    for key, why in wrong:
+        faults.append(f"{key} was given as {why}")
+    return False, (
+        "; ".join(faults) + ". This is the call, not the task: send it again "
+        "with the arguments this schema names, rather than trying a different "
+        f"tool. Schema: {schemas_for_names([spec['name']])}")
+
+
+def _and_list(items: list[str]) -> str:
+    """`a`, `a` and `b`, `a`, `b` and `c` — backticked, for an error line."""
+    quoted = [f"`{i}`" for i in items]
+    if len(quoted) <= 1:
+        return "".join(quoted)
+    return ", ".join(quoted[:-1]) + " and " + quoted[-1]

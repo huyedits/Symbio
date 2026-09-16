@@ -149,6 +149,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # different target, a decoded value. Below this, a turn that stops on
         # a tool error is asked once for another approach and handed the list
         # of tools it has not tried.
+        # "on" checks every tool call against the schema the prompt advertised
+        # for it and hands the schema back when it does not match; "audit"
+        # records what it WOULD have refused and lets the call through, which
+        # is how a live install is measured before a guard is switched on;
+        # "off" restores the old silent coercion, where a misspelled argument
+        # became an empty one and the tool answered about that instead.
+        "validate_tool_arguments": "on",
         "min_distinct_attempts": 3,
         # How many times one turn may challenge its own reasoning before it is
         # allowed to stop. Each challenge costs a round, and the rungs escalate

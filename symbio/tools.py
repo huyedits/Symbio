@@ -1196,11 +1196,25 @@ def _tool_browser_navigate(agent: AIAgent, args: dict[str, Any]) -> str:
 
 
 def _tool_browser_click(agent: AIAgent, args: dict[str, Any]) -> str:
+    """Click by `target`, the one argument the catalog advertises.
+
+    This runner read `selector` and `text` while the prompt both loops share
+    told the model to send `target`. A model that followed its own catalog
+    clicked nothing here and was told nothing about why -- the call succeeded,
+    against the empty string. `selector`/`text` stay accepted because the
+    registry has always taken them.
+    """
     if agent._browser_session is None:
         return "Browser automation is not available."
-    return agent._browser_session.click(
-        selector=args.get("selector", ""), text=args.get("text", "")
-    )
+    target = str(args.get("target", "") or "")
+    selector = str(args.get("selector", "") or "")
+    text = str(args.get("text", "") or "")
+    if target and not (selector or text):
+        if target.startswith(("#", ".", "//", "[")):
+            selector = target
+        else:
+            text = target
+    return agent._browser_session.click(selector=selector, text=text)
 
 
 def _tool_browser_type(agent: AIAgent, args: dict[str, Any]) -> str:
@@ -1209,7 +1223,10 @@ def _tool_browser_type(agent: AIAgent, args: dict[str, Any]) -> str:
     return agent._browser_session.type_text(
         text=args.get("text", ""),
         selector=args.get("selector", ""),
-        press_enter=bool(args.get("press_enter", False)),
+        # `enter` is what the catalog advertises; `press_enter` is what this
+        # runner has always read. Both, or a model following the prompt types
+        # the text and never sends it.
+        press_enter=bool(args.get("press_enter", args.get("enter", False))),
     )
 
 

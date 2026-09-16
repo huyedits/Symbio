@@ -175,3 +175,110 @@ def test_a_broken_tool_file_costs_only_itself(tmp_path, monkeypatch):
             tooling._TOOL_GROUPS.pop(n, None)
             tooling._TOOL_FAMILIES.pop(n, None)
         tooling._disk_signature = None
+
+
+# ------------------------------------------- a file written earlier is not an edit
+
+def _stale_file(tmp_path, monkeypatch, body: str, name: str = "browser_type"):
+    """Point the catalog at a directory holding one out-of-date tool file."""
+    from symbio import constants
+
+    directory = tmp_path / "tools"
+    directory.mkdir()
+    (directory / f"{name}.md").write_text(body, encoding="utf-8")
+    monkeypatch.setattr(constants, "TOOLS_DIR", directory)
+    monkeypatch.setattr(tooling, "_disk_signature", None)
+
+
+def _restore(name: str):
+    """Put the built-in back: sync mutates the catalog entry in place."""
+    import copy
+
+    built_in = copy.deepcopy(tooling._BUILTIN_BY_NAME[name])
+    for spec in tooling._TOOLS:
+        if spec["name"] == name:
+            spec.clear()
+            spec.update(built_in)
+    tooling._disk_signature = None
+
+
+def test_a_file_written_before_an_argument_existed_still_advertises_it(
+        tmp_path, monkeypatch):
+    """2026-09-16, live: tools/desktop_click.md was seeded on the 14th with
+    {x, y}, and the accessibility work landed on the 16th. The file replaced
+    the schema wholesale, so `element` — the numbered control ax.py exists to
+    provide — could not be named in a tool call at all. The capability was
+    shipped, tested, and unreachable, and nothing said so."""
+    _stale_file(tmp_path, monkeypatch,
+                "---\nname: browser_type\nfamily: browser\ngroup: browser\n---\n\n"
+                "Type text into the page.\n\n"
+                '```json\n{"type":"object","properties":'
+                '{"text":{"type":"string"}},"required":["text"]}\n```\n')
+    try:
+        tooling.sync_tool_files(seed=False)
+        live = next(t for t in tooling._TOOLS if t["name"] == "browser_type")
+        properties = live["parameters"]["properties"]
+
+        assert "text" in properties
+        assert "selector" in properties, "the file cannot un-declare an argument"
+        assert "enter" in properties
+    finally:
+        _restore("browser_type")
+
+
+def test_the_file_still_wins_on_wording(tmp_path, monkeypatch):
+    """Restoring the arguments must not undo the edit the file was made for."""
+    _stale_file(tmp_path, monkeypatch,
+                "---\nname: browser_type\nfamily: browser\ngroup: browser\n---\n\n"
+                "Type into the composer, never the page body.\n\n"
+                '```json\n{"type":"object","properties":'
+                '{"text":{"type":"string"}},"required":["text"]}\n```\n')
+    try:
+        tooling.sync_tool_files(seed=False)
+        live = next(t for t in tooling._TOOLS if t["name"] == "browser_type")
+
+        assert live["description"] == "Type into the composer, never the page body."
+    finally:
+        _restore("browser_type")
+
+
+def test_a_file_may_relax_a_requirement_but_never_add_one(tmp_path, monkeypatch):
+    """desktop_click's stale file required {x, y} from when coordinates were
+    the only way to click. Restoring `element` beside a required x would have
+    advertised a control number the model was not allowed to send alone."""
+    _stale_file(tmp_path, monkeypatch,
+                "---\nname: browser_type\nfamily: browser\ngroup: browser\n---\n\n"
+                "Type text into the page.\n\n"
+                '```json\n{"type":"object","properties":'
+                '{"text":{"type":"string"},"selector":{"type":"string"}},'
+                '"required":["text","selector"]}\n```\n')
+    try:
+        tooling.sync_tool_files(seed=False)
+        live = next(t for t in tooling._TOOLS if t["name"] == "browser_type")
+
+        assert live["parameters"]["required"] == ["text"]
+    finally:
+        _restore("browser_type")
+
+
+def test_a_tool_file_with_no_built_in_is_left_exactly_as_written(tmp_path,
+                                                                 monkeypatch):
+    """The merge is about files that have fallen behind code. A tool that only
+    exists as a file has nothing to fall behind."""
+    _stale_file(tmp_path, monkeypatch,
+                "---\nname: check_tide\nfamily: web\n---\n\n"
+                "Read the tide table.\n\n"
+                '```json\n{"type":"object","properties":'
+                '{"harbour":{"type":"string"}},"required":["harbour"]}\n```\n',
+                name="check_tide")
+    try:
+        tooling.sync_tool_files(seed=False)
+        live = next(t for t in tooling._TOOLS if t["name"] == "check_tide")
+
+        assert live["parameters"]["required"] == ["harbour"]
+        assert set(live["parameters"]["properties"]) == {"harbour"}
+    finally:
+        tooling._TOOLS[:] = [t for t in tooling._TOOLS if t["name"] != "check_tide"]
+        tooling._TOOL_GROUPS.pop("check_tide", None)
+        tooling._TOOL_FAMILIES.pop("check_tide", None)
+        tooling._disk_signature = None
