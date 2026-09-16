@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from symbio import constants
-from symbio.app import chat, cron, learn, memory, sandbox, sessions, tooling, training, web
+from symbio.app import chat, chat_turn, cron, learn, memory, sandbox, sessions, tooling, training, web
 from symbio.app import config as app_config
 from symbio.app.prompts import DEFAULT_SYSTEM_PROMPT, build_system_prompt
 from test_utils import preserve_training_state
@@ -1132,7 +1132,15 @@ class FakeBrowser:
             return self._closed("scroll")
         return f"Scrolled {direction} 800px."
 
-    def submit_form(self, target="", selector="", expected_url=""):
+    def fill_form(self, fields):
+        self.actions.append(("fill_form", tuple(sorted(dict(fields)))))
+        if not self._url:
+            return self._closed("fill")
+        return (f"Filled {len(dict(fields))} field(s). Every field was read "
+                "back and holds its value.")
+
+    def submit_form(self, target="", selector="", expected_url="",
+                    expect_text="", timeout_ms=8000):
         """Mirror the verdict head the guard matches on. The browser-side
         semantics (which URL transitions confirm, which do not) are tested in
         test_computer.py; here the stub only needs the observation to carry
@@ -1783,6 +1791,19 @@ def test_correction_detection_and_mining():
     print("test_correction_detection_and_mining passed")
 
 
+def _expected_iters(config):
+    """The iteration count the pending batch asks for, read before it trains.
+
+    A batch of wrong SHAPES repeats harder and runs shorter than a batch of
+    wrong FACTS (learn.training_recipe), so the number these tests pin depends
+    on what is sitting in notes/mistakes/ at the moment of the call — and the
+    call archives the notes, so it has to be read first."""
+    return learn.training_recipe(
+        learn.pending_mistake_kinds(),
+        config["learn"]["batch_train_iters"],
+        config["learn"]["boost_factor"])["iters"]
+
+
 def test_mistake_digest_and_threshold_training():
     import shutil
     import tempfile
@@ -1808,11 +1829,12 @@ def test_mistake_digest_and_threshold_training():
 
             learn.save_mistake_note("Q-beta?", "wrong-b", "no,", "right-b")
             # At threshold: digest (boosted), archive, train with batch iters.
+            expected_iters = _expected_iters(config)
             assert learn.maybe_train_on_mistakes(config, FakeTokenizer(), "SYS")
             assert learn.mistake_note_count() == 0
             archived = list(constants.MISTAKES_ARCHIVE_DIR.glob("*.md"))
             assert len(archived) == 2, archived
-            assert trained_with == [config["learn"]["batch_train_iters"]], trained_with
+            assert trained_with == [expected_iters], trained_with
             # boost=2 -> each corrected answer appears in two samples. Counted
             # per record, not by substring: a sample stores its answer in both
             # "text" and "messages", so substring counting double-counts.
@@ -1871,9 +1893,13 @@ def test_automatic_mistakes_check_the_model_before_retraining():
         with scratch_mistakes_dir():
             _auto_note("[System observation: Type failed: nothing focused]")
             _auto_note("[System observation: Press failed: Enter did nothing]")
+            expected_iters = _expected_iters(config)
             assert learn.maybe_train_on_mistakes(
                 config, FakeTokenizer(), "SYS", check_fn=lambda: (7, 9))
-            assert trained_with == [config["learn"]["batch_train_iters"]], trained_with
+            # Both notes are automatic tool-error captures, which is a batch of
+            # wrong SHAPES: the recipe repeats those harder and runs them
+            # shorter than a batch of wrong facts (learn.training_recipe).
+            assert trained_with == [expected_iters], trained_with
 
         # One correction the user actually typed and the gate does not apply,
         # however healthy the battery says the model is.
@@ -1881,9 +1907,10 @@ def test_automatic_mistakes_check_the_model_before_retraining():
         with scratch_mistakes_dir():
             _auto_note("[System observation: Type failed: nothing focused]")
             learn.save_mistake_note("Who am I?", "Bob", "no, I'm Huy", "Huy")
+            expected_iters = _expected_iters(config)
             assert learn.maybe_train_on_mistakes(
                 config, FakeTokenizer(), "SYS", check_fn=lambda: (9, 9))
-            assert trained_with == [config["learn"]["batch_train_iters"]], trained_with
+            assert trained_with == [expected_iters], trained_with
 
         # A check that raises must not be the thing that cancels a retrain.
         trained_with.clear()
@@ -1894,18 +1921,20 @@ def test_automatic_mistakes_check_the_model_before_retraining():
             def _boom():
                 raise RuntimeError("model unloaded")
 
+            expected_iters = _expected_iters(config)
             assert learn.maybe_train_on_mistakes(
                 config, FakeTokenizer(), "SYS", check_fn=_boom)
-            assert trained_with == [config["learn"]["batch_train_iters"]], trained_with
+            assert trained_with == [expected_iters], trained_with
 
         # Neither may switching the battery off: no check, train as before.
         trained_with.clear()
         with scratch_mistakes_dir():
             _auto_note("[System observation: Type failed: nothing focused]")
             _auto_note("[System observation: Click failed: no element 'Post']")
+            expected_iters = _expected_iters(config)
             assert learn.maybe_train_on_mistakes(
                 config, FakeTokenizer(), "SYS", check_fn=lambda: None)
-            assert trained_with == [config["learn"]["batch_train_iters"]], trained_with
+            assert trained_with == [expected_iters], trained_with
 
         # And the gate is opt-out.
         trained_with.clear()
@@ -1913,9 +1942,10 @@ def test_automatic_mistakes_check_the_model_before_retraining():
         with scratch_mistakes_dir():
             _auto_note("[System observation: Type failed: nothing focused]")
             _auto_note("[System observation: Click failed: no element 'Post']")
+            expected_iters = _expected_iters(config)
             assert learn.maybe_train_on_mistakes(
                 config, FakeTokenizer(), "SYS", check_fn=lambda: (9, 9))
-            assert trained_with == [config["learn"]["batch_train_iters"]], trained_with
+            assert trained_with == [expected_iters], trained_with
     finally:
         training.run_training = real_run_training
         constants.TRAIN_FILE = real_train
@@ -1968,6 +1998,7 @@ def test_severity_scales_training_iters():
         with scratch_mistakes_dir():
             learn.save_mistake_note("Q-a?", "wrong-a", "that's wrong", "right-a", severity=2)
             learn.save_mistake_note("Q-b?", "wrong-b", "wrong again", "right-b", severity=3)
+            expected_iters = _expected_iters(config)
             assert learn.maybe_train_on_mistakes(config, FakeTokenizer(), "SYS")
             # Total severity 5 over 2 notes -> 25 + 5*(5-2) = 40 iters.
             assert trained_with == [40], trained_with
@@ -1980,6 +2011,7 @@ def test_severity_scales_training_iters():
             config["learn"]["max_batch_train_iters"] = 30
             learn.save_mistake_note("Q-c?", "w", "wrong", "right-c", severity=3)
             learn.save_mistake_note("Q-d?", "w", "wrong", "right-d", severity=3)
+            expected_iters = _expected_iters(config)
             assert learn.maybe_train_on_mistakes(config, FakeTokenizer(), "SYS")
             assert trained_with[-1] == 30, trained_with
     finally:
@@ -2678,3 +2710,149 @@ def test_continuation_challenge_fires_once_per_turn():
 
     assert len(session.prompts_seen) == 3, len(session.prompts_seen)
     print("test_continuation_challenge_fires_once_per_turn passed")
+
+
+def test_publishing_is_an_action_request():
+    """"Tweet it" asks for something to be DONE.
+
+    The phrase list behind this gate named browser verbs only, so every
+    posting request scored False and the "you described the action but called
+    no tool" nudge could not fire on it.
+    """
+    from symbio.app.chat_text import _asks_for_action, _is_action_request
+
+    for asked in ("now tweet it", "tweet @grok asking if it is a robot",
+                  "post this to x", "submit the form", "dm them the link",
+                  "comment on that issue"):
+        assert _is_action_request(asked), asked
+        assert _asks_for_action(asked), asked
+
+    # Word-boundary matched, so these are not requests to publish anything.
+    for idle in ("what is postgres", "how do you feel about twitter"):
+        assert not _is_action_request(idle), idle
+    print("test_publishing_is_an_action_request passed")
+
+
+def test_incapacity_verdict_is_read_strictly():
+    """The judge's answer is trusted only when it actually says YES."""
+    session = chat.ChatSession.__new__(chat.ChatSession)
+
+    def _answer(text):
+        return lambda _ask: text
+
+    for said, expected in (("YES", True), ("yes", True),
+                           ("YES — it claims no tool exists", True),
+                           ("NO", False), ("no, it reports a failure", False),
+                           ("", False), ("unsure", False), ("   ", False)):
+        session._generate_tag_metadata = _answer(said)
+        got = session._claims_incapacity("I cannot post tweets.", "tweet it")
+        assert got is expected, (said, got, expected)
+
+    # A judge that throws must not take the turn down with it.
+    def _boom(_ask):
+        raise RuntimeError("model unavailable")
+
+    session._generate_tag_metadata = _boom
+    try:
+        session._claims_incapacity("I cannot post tweets.", "tweet it")
+    except RuntimeError:
+        pass  # the caller's own guard decides; the point is it is not silent
+    # An empty reply never reaches the judge at all.
+    session._generate_tag_metadata = _answer("YES")
+    assert session._claims_incapacity("   ", "tweet it") is False
+    print("test_incapacity_verdict_is_read_strictly passed")
+
+
+def test_agent_loop_challenges_a_capability_refusal(monkeypatch):
+    """Saying "I can't" with no tool behind it does not end the turn.
+
+    The judge is stubbed: ScriptedSession's fake model answers from one
+    scripted list, so a real judge call would eat the next reply and misalign
+    the whole run -- the same reason conftest.py switches the tag index off.
+    """
+    monkeypatch.setattr(chat.ChatSession, "_claims_incapacity",
+                        lambda self, reply, user_input: True)
+    session = ScriptedSession(
+        user_inputs=["now tweet it", "/quit", "n"],
+        model_replies=[
+            "I don't have a Twitter tool, so I can only draft the text.",
+            "I still have no way to post it; here is the text instead.",
+            "<browse>https://x.com/compose/post</browse>",
+            "The composer is open.",
+        ],
+    )
+    session.run()
+
+    # Not asserted at a fixed index: a refusal that reads as hedging trips the
+    # auto-search branch first, which spends the round before this gate is
+    # reached. What matters is that the turn does not end on the refusal.
+    served = "\n".join(session.prompts_seen)
+    assert "that is a belief about yourself, not a result" in served, served[-1500:]
+    assert "do not cite a rule you cannot quote" in served.lower()
+    print("test_agent_loop_challenges_a_capability_refusal passed")
+
+
+def test_a_reported_failure_is_not_a_capability_refusal(monkeypatch):
+    """The gate costs nothing on a turn that tried and said what happened."""
+    monkeypatch.setattr(chat.ChatSession, "_claims_incapacity",
+                        lambda self, reply, user_input: False)
+    session = ScriptedSession(
+        user_inputs=["now tweet it", "/quit", "n"],
+        model_replies=["I could not find the compose box on that page."],
+    )
+    session.run()
+
+    # Two rounds, not one: "tweet it" IS an action request, so the generic
+    # "you described it but called no tool" nudge still fires. What must not
+    # happen is the capability challenge on top of it.
+    assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+    assert all("belief about yourself" not in p for p in session.prompts_seen)
+    print("test_a_reported_failure_is_not_a_capability_refusal passed")
+
+
+def test_a_tool_result_is_shown_as_it_happens():
+    """"[Tool: recall]" says a tool RAN. It does not say whether it found
+    anything — and a front end that shows only the name leaves the turn
+    looking identical whether the search hit or missed, which is the whole
+    question while waiting. Hermes Desktop streams tool output for this
+    reason; this is the same line, shortened."""
+    shown = []
+
+    class _Session(chat_turn.AgentTurnMixin):
+        def __init__(self):
+            self.config = {"agent": {}}
+            self.output_fn = shown.append
+
+    session = _Session()
+    session._show_tool_result("recall", "1 match(es) for 'my name':\n"
+                                        "[note User_Identity.md] My user's name is Huy.")
+
+    assert shown and shown[0].startswith("  [Result] ")
+    assert "User_Identity" in shown[0]
+
+
+def test_a_long_tool_result_is_cut_rather_than_dumped():
+    """A file read or a page dump would push the conversation off the screen."""
+    shown = []
+
+    class _Session(chat_turn.AgentTurnMixin):
+        def __init__(self):
+            self.config = {"agent": {}}
+            self.output_fn = shown.append
+
+    _Session()._show_tool_result("read_file", "x" * 5000)
+
+    assert len(shown[0]) < 300 and shown[0].endswith("…")
+
+
+def test_showing_tool_results_can_be_switched_off():
+    shown = []
+
+    class _Session(chat_turn.AgentTurnMixin):
+        def __init__(self):
+            self.config = {"agent": {"show_tool_output": False}}
+            self.output_fn = shown.append
+
+    _Session()._show_tool_result("recall", "1 match(es)")
+
+    assert shown == []

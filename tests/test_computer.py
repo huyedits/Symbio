@@ -1055,6 +1055,217 @@ def test_a_page_that_cannot_be_read_back_refuses_a_verdict():
     assert "Do NOT report the form as submitted" in result
 
 
+# ---- a page that has loaded is not a page that has rendered ----
+
+class _SpaPage:
+    """A client-side app: the document is ready, the body is empty, and the
+    text arrives a few polls later. Live on 2026-09-16, claude.ai/pricing
+    answered domcontentloaded with a title and zero characters of text."""
+
+    def __init__(self, texts, title="Claude"):
+        self.texts = list(texts)
+        self._title = title
+        self.waited = 0
+
+    def goto(self, url, **kw):
+        return None
+
+    def title(self):
+        return self._title
+
+    def evaluate(self, script, arg=None):
+        return len(self.texts[0].strip()) if self.texts else 0
+
+    def wait_for_timeout(self, ms):
+        self.waited += ms
+        if len(self.texts) > 1:
+            self.texts.pop(0)
+
+
+def _opened(page, url="https://example.com/"):
+    session = BrowserSession()
+    session._init = lambda channel="": (None, page)
+    session._page = page
+    return session.open(url)
+
+
+def test_an_empty_body_is_waited_out_not_reported_as_the_page():
+    page = _SpaPage(["", "", "Pro $17 per month with annual billing"])
+    result = _opened(page)
+    assert "rendered no text yet" not in result, result
+    assert page.waited > 0, "it did not wait for the app to paint"
+
+
+def test_a_page_that_never_renders_says_so_instead_of_staying_silent():
+    """The failure mode this replaces is worse than a slow answer: an empty
+    read is handed over as if it were the page, and what fills the gap is the
+    model's own guess about what a pricing page says."""
+    page = _SpaPage([""])
+    result = _opened(page)
+    assert "rendered no text yet" in result
+    assert "do NOT describe a page you have not read" in result
+
+
+def test_a_short_page_is_not_mistaken_for_an_empty_one():
+    """A local form page is eight characters of heading and entirely real."""
+    page = _SpaPage(["The wall"])
+    result = _opened(page)
+    assert "rendered no text yet" not in result
+
+
+# ---- posting on any site, with no per-site tool ----
+
+class _PublishPage(_Scope):
+    """A page where the submit control publishes: after the click the words
+    move OUT of the composer and INTO a rendered element.
+
+    `published` is what _TEXT_RENDERED_JS answers — the text as PUBLISHED
+    content, outside every field. `holds_after` is what is still sitting in a
+    field. Keeping them apart is the point of the test: a composer holding
+    the words is a draft, and reading the page body would call it a post.
+    """
+
+    def __init__(self, clicks, table, holds="", holds_after="",
+                 published="", url="https://x.com/home"):
+        super().__init__(clicks, table)
+        self.holds = holds
+        self.holds_after = holds_after
+        self.published = published
+        self.url = url
+        self.waited = 0
+
+    def wait_for_timeout(self, ms):
+        self.waited += ms
+
+    def evaluate(self, script, arg=None):
+        if arg is None:                        # _PENDING_FIELD_JS, before
+            return self.holds
+        if "inEditable" in script:             # _TEXT_RENDERED_JS
+            return bool(self.published) and arg in self.published
+        return arg in self.holds_after         # _FIELD_STILL_HOLDS_JS
+
+
+_POST = {("button", True): "Post"}
+
+
+def test_text_rendered_outside_a_field_confirms_any_submission():
+    """The site-independent proof, and the reason posting needs no tool of
+    its own: the words came back as published content, on a URL that never
+    changed and a site this code knows nothing about."""
+    page = _PublishPage([], _POST, published="shipping the desktop window today")
+
+    result = _session_on(page).submit_form(
+        target="Post", expect_text="shipping the desktop window today")
+
+    assert result.startswith("[Submit CONFIRMED:")
+    assert "outside every input field" in result
+    assert "you may report the submission as done" in result
+
+
+def test_a_draft_still_in_the_composer_is_never_a_post():
+    """The failure this exists to stop. The words ARE on the page — in the
+    box the model typed them into. Reading the body text would confirm every
+    unsent draft as published."""
+    page = _PublishPage([], _POST, holds="a draft nobody sent",
+                        holds_after="a draft nobody sent", published="")
+
+    result = _session_on(page).submit_form(
+        target="Post", expect_text="a draft nobody sent")
+
+    assert result.startswith("[Submit NOT confirmed:")
+    assert "not rendered on the page as published content" in result
+    assert "do NOT report it as posted" in result
+
+
+def test_the_expected_text_is_polled_not_read_once():
+    """A feed re-renders after the network call, not during it. One read at
+    the moment of the click is the wrong read."""
+    page = _PublishPage([], _POST, published="")
+
+    def land_later(ms):
+        page.waited += ms
+        if page.waited >= 1400:
+            page.published = "late but live"
+
+    page.wait_for_timeout = land_later
+    result = _session_on(page).submit_form(target="Post",
+                                           expect_text="late but live")
+
+    assert result.startswith("[Submit CONFIRMED:")
+
+
+def test_a_hopeless_wait_still_ends():
+    page = _PublishPage([], _POST, published="")
+    result = _session_on(page).submit_form(target="Post", expect_text="nope",
+                                           timeout_ms=1000)
+    assert result.startswith("[Submit NOT confirmed:")
+
+
+# ---- filling a whole form in one call ----
+
+class _FormPage:
+    """Fields addressed by selector, with a read-back that only answers for
+    what was actually written."""
+
+    def __init__(self, refuse=()):
+        self.values: dict[str, str] = {}
+        self.refuse = set(refuse)
+
+    def fill(self, selector, text):
+        if selector in self.refuse:
+            return
+        self.values[selector] = text
+
+    def query_selector(self, selector):
+        return object() if selector not in self.refuse else None
+
+    def evaluate(self, script, arg=None):
+        # _SELECTOR_HOLDS_JS is given (selector, text).
+        if isinstance(arg, (list, tuple)) and len(arg) == 2:
+            selector, text = arg
+            return text in self.values.get(selector, "")
+        return False
+
+
+def _filled(page, fields):
+    session = BrowserSession()
+    session._page = page
+    session.type_text = lambda text, selector="", press_enter=False: (
+        page.fill(selector, text) or "typed")
+    return session.fill_form(fields)
+
+
+def test_a_form_is_filled_and_every_field_read_back():
+    page = _FormPage()
+    result = _filled(page, {"#title": "My story", "#url": "https://example.com"})
+
+    assert page.values == {"#title": "My story", "#url": "https://example.com"}
+    assert "Filled 2/2" in result
+    assert "read back and holds its value" in result
+
+
+def test_a_field_that_did_not_take_its_value_is_named():
+    """Half a form submitted is a wrong post, not a partial one."""
+    page = _FormPage(refuse={"#url"})
+    result = _filled(page, {"#title": "My story", "#url": "https://example.com"})
+
+    assert "NOT filled" in result and "#url" in result
+    assert "Do not submit this form yet" in result
+
+
+def test_fill_form_accepts_the_list_shape_a_model_emits():
+    page = _FormPage()
+    result = _filled(page, [{"selector": "#title", "text": "one"},
+                            {"selector": "#url", "value": "two"}])
+    assert page.values == {"#title": "one", "#url": "two"}
+    assert "Filled 2/2" in result
+
+
+def test_fill_form_with_no_fields_says_what_to_pass():
+    result = BrowserSession().fill_form({})
+    assert "Fill failed" in result and "see_screen" in result
+
+
 def test_submit_before_open_does_not_raise():
     session = BrowserSession()
     result = session.submit_form(target="submit")

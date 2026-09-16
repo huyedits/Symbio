@@ -308,6 +308,98 @@ EXTENDED_CASES: tuple[ToolCase, ...] = DEFAULT_CASES + (
 )
 
 
+# --------------------------------------------------------------------------
+# Resilience: the requests with no tool named after them.
+#
+# Every case above names its tool in the request. "Run uname -s" is answered by
+# a tool called run_command, "search the web" by one called web_search, and a
+# model that pattern-matches the noun scores full marks without ever deciding
+# anything. That measured the naming, not the reaching.
+#
+# These are the failures the logs actually hold. On 2026-09-15, asked to tweet
+# at @grok, the model reasoned that no Twitter tool was listed and stopped --
+# holding the browser toolset that has posted to X before. Across five sessions
+# on 2026-09-14 and 2026-09-15, "What is my name?" produced "I don't have
+# access to personal information like your name", with zero tool calls, on an
+# install whose notes/ held the answer.
+#
+# What each case has in common: the capability exists, nothing is called after
+# it, and the honest move is to reach for the general tool. A model that scores
+# well here is one that will not tell its user it cannot.
+RESILIENCE_CASES: tuple[ToolCase, ...] = (
+    ToolCase(
+        id="recall_name",
+        description="A question about a saved fact reaches recall, not a refusal",
+        prompt="What is my name?",
+        expect_tool="recall",
+        # The other honest route: grep the notes directory. Scored as a pass
+        # because it IS one -- the failure being measured is calling nothing.
+        also_accept=("run_command", "read_file", "execute_code"),
+        observation="1 match for 'my name': [note User_Identity.md] My user's name is Huy.",
+        check_final=_contains("huy"),
+    ),
+    ToolCase(
+        id="recall_decision",
+        description="'What did we decide' is a lookup, not a memory lapse",
+        prompt="What did we decide about the keyboard layout last week?",
+        expect_tool="recall",
+        also_accept=("run_command", "read_file", "execute_code"),
+        observation="1 match: [note Keyboard.md] Huy switched to Colemak on 2026-09-01.",
+        check_final=_contains("colemak"),
+    ),
+    ToolCase(
+        id="post_to_site",
+        description="Publishing has no posting tool; it is the browser",
+        prompt="Post 'shipping today' to x.com for me.",
+        expect_tool="browser_open",
+        also_accept=("see_screen", "browser_click", "browser_type", "submit_form"),
+        observation="Opened https://x.com. The composer is visible.",
+        check_final=_any_of("composer", "open", "type", "post"),
+    ),
+    ToolCase(
+        id="weather_lookup",
+        description="No weather tool exists; the web is the answer",
+        prompt="What's the weather in Hanoi right now?",
+        expect_tool="web_search",
+        also_accept=("read_page", "browser_open", "fetch_html"),
+        observation="Top result: Hanoi, 31C, humid, scattered thunderstorms.",
+        check_final=_contains("31"),
+    ),
+    ToolCase(
+        id="count_files",
+        description="No counting tool exists; the shell is the answer",
+        prompt="How many markdown files are in the notes directory?",
+        expect_tool="run_command",
+        also_accept=("execute_code",),
+        observation="42",
+        check_final=_contains("42"),
+    ),
+    ToolCase(
+        id="convert_units",
+        description="Arithmetic is a tool call, not a guess",
+        prompt="Convert 3 miles 240 yards to metres, exactly.",
+        expect_tool="execute_code",
+        also_accept=("run_command",),
+        observation="5047.4496",
+        check_final=_contains("5047"),
+    ),
+    ToolCase(
+        id="email_has_no_tool",
+        description="A capability that genuinely is absent is reported as tried, not assumed",
+        prompt="Send an email to my landlord about the leak.",
+        # There is no email tool in this catalog. The pass condition is that
+        # the model reaches for the one route it has -- the browser, at a
+        # webmail page -- rather than announcing the limit from the prompt.
+        # A model that calls nothing here fails at `invoked`, which is the
+        # number this case exists to produce.
+        expect_tool="browser_open",
+        also_accept=("see_screen", "web_search", "run_command"),
+        observation="Opened https://mail.google.com. The compose button is visible.",
+        check_final=_any_of("compose", "open", "draft", "gmail", "mail"),
+    ),
+)
+
+
 def run_tool_cases(
     model,
     tokenizer,

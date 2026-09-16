@@ -697,7 +697,13 @@ def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any],
         return {"risk_score": 3, "flags": ["form_submit", "public_act"]}
 
     if name in ("browser_open", "browser_click", "browser_type",
-                "browser_scroll", "browser_press", "browser_click_at"):
+                "browser_scroll", "browser_press", "browser_click_at",
+                # Filling several fields is the same act as typing into one,
+                # batched. It is bounded by the page, it publishes nothing,
+                # and submit_form — the step that DOES publish — is scored 3
+                # on its own. Scoring the fill higher would only teach the
+                # model to spend four turns doing it one box at a time.
+                "fill_form"):
         return {"risk_score": 1, "flags": ["browser_action"]}
 
     # Driving the machine itself is not a browser action, and it is not free.
@@ -713,15 +719,35 @@ def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any],
     #
     # Enter is the key that commits whatever was typed, so it is scored with
     # the typing rather than with navigation.
+    # Enter is the key that commits whatever was typed -- and so is cmd+enter,
+    # which is how most web composers send. A chord is checked by its parts,
+    # or "cmd+enter" reads as an ordinary keystroke and posts unasked.
+    _key_parts = {k for k in re.split(r"[+\-\s]+",
+                                     str(params.get("key", "")).strip().lower())
+                  if k}
     if name == "desktop_type" or (
             name == "desktop_press"
-            and str(params.get("key", "")).strip().lower()
-            in ("enter", "return", "\n")):
+            and _key_parts & {"enter", "return", "\n"}):
         return {"risk_score": 3, "flags": ["desktop_input", "uncontained_target"]}
-    if name in ("desktop_click", "desktop_press"):
+    # A drag moves things: a file into a folder, a slider to an end, a
+    # selection over a document. Same reach as a click, and harder to undo.
+    if name in ("desktop_click", "desktop_press", "desktop_drag"):
         return {"risk_score": 2, "flags": ["desktop_input"]}
+    # Pointing at something, putting an application in front, or waiting.
+    # None of these commit anything on their own, and scoring them with the
+    # clicks would put a confirmation in front of every look.
+    if name in ("desktop_move", "desktop_scroll", "open_app"):
+        return {"risk_score": 1, "flags": ["desktop_action"]}
+    if name == "desktop_wait":
+        return {"risk_score": 0, "flags": []}
     # Reading the screen is not acting on it, but it does pull whatever is on
     # display — including any other window — into the transcript.
+    # Publishing under the user's own name, to an audience, with no undo
+    # that this code controls. Scored with the desktop keystroke that commits
+    # a typed command rather than with the browser clicks: the blast radius is
+    # everyone who follows them.
+    if name == "post_to_x":
+        return {"risk_score": 3, "flags": ["publishes_publicly", "irreversible"]}
     if name == "see_screen":
         return {"risk_score": 1, "flags": ["screen_capture"]}
 
@@ -782,7 +808,7 @@ PROVENANCE_SENSITIVE = frozenset({
     # Keystrokes and clicks at the desktop reach anything on it. They belong
     # here for the same reason execute_code does, and especially so because
     # see_screen puts attacker-controlled page text into the same turn.
-    "desktop_type", "desktop_press", "desktop_click",
+    "desktop_type", "desktop_press", "desktop_click", "desktop_drag",
 })
 
 
@@ -1023,13 +1049,28 @@ def maybe_confirm(
     elif name == "execute_code":
         prompt = (f"[Security: risk score {score}/3] Run this Python code?\n"
                   f"{_render_code(params.get('code', ''))}\n  Flags: {flags}")
-    elif name in ("desktop_type", "desktop_press", "desktop_click"):
-        what = (f"type {params.get('text', '')!r}" if name == "desktop_type"
-                else f"press {params.get('key', '')!r}" if name == "desktop_press"
-                else f"click at ({params.get('x')}, {params.get('y')})")
+    elif name in ("desktop_type", "desktop_press", "desktop_click",
+                  "desktop_drag"):
+        # Name the control where there is one. "click at (None, None)" is what
+        # this asked once element numbers existed, and a prompt that cannot
+        # say what it is about is a prompt that gets approved without reading.
+        target = (f"element {params.get('element')}"
+                  if params.get("element") is not None
+                  else f"({params.get('x')}, {params.get('y')})")
+        what = (f"type {params.get('text', '')!r} into {target}"
+                if name == "desktop_type"
+                else f"press {params.get('key', '')!r}"
+                if name == "desktop_press"
+                else "drag one thing to another"
+                if name == "desktop_drag"
+                else f"click {target}")
         prompt = (f"[Security: risk score {score}/3] Let me {what} on your "
-                  f"desktop? This goes to whatever window has focus, which may "
-                  f"not be the one you expect.\n  Flags: {flags}")
+                  f"desktop? This acts on the frontmost window, which may not "
+                  f"be the one you expect.\n  Flags: {flags}")
+    elif name == "post_to_x":
+        prompt = (f"[Security: risk score {score}/3] Post this to x.com, "
+                  f"publicly, as you?\n  {_visible(params.get('text', ''))}\n"
+                  f"  Flags: {flags}")
     elif name == "config_set":
         prompt = f"[Security: risk score {score}/3] Change config '{_visible(params.get('key'))}' to '{_visible(params.get('value'))}'? Flags: {flags}"
     elif name == "add_golden_case":

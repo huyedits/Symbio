@@ -5,6 +5,8 @@ Supports two formats:
   2. Legacy short tags: <cmd>, <py>, <search>, <note>, <digest />, etc.
 """
 
+import copy
+import difflib
 import json
 import re
 from typing import Any
@@ -15,6 +17,11 @@ from symbio.app import tool_docs
 # Map each parsed tool name to the user-facing group used for enable/disable menus.
 _TOOL_GROUPS: dict[str, str] = {
     "write_note": "notes",
+    # Reading back what was saved serves both stores, so either opt-in is
+    # enough. Gating it on "memory" alone left a notes-only install able to
+    # write notes and unable to look at one -- which is the state the model
+    # reports as "I don't have access to that", having called nothing.
+    "recall": ("memory", "notes"),
     "delete_note": "notes",
     "save_skill": "notes",
     "run_command": "terminal",
@@ -29,6 +36,8 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_press": "browser",
     "browser_close": "browser",
     "submit_form": "browser",
+    "fill_form": "browser",
+    "post_to_x": "browser",
     "browser_get_text": "browser",
     # Looking is grouped with the browser, not with desktop control: seeing the
     # page the assistant already drives is the same capability as reading it,
@@ -47,6 +56,11 @@ _TOOL_GROUPS: dict[str, str] = {
     "desktop_click": "desktop",
     "desktop_type": "desktop",
     "desktop_press": "desktop",
+    "desktop_scroll": "desktop",
+    "desktop_drag": "desktop",
+    "desktop_move": "desktop",
+    "desktop_wait": "desktop",
+    "open_app": "desktop",
     "save_memory": "memory",
     "compact_memory": "memory",
     "set_standing_instruction": "memory",
@@ -111,11 +125,19 @@ _TOOL_FAMILIES: dict[str, str] = {
     "browser_press": "browser",
     "browser_close": "browser",
     "submit_form": "browser",
+    "fill_form": "browser",
     "see_screen": "browser",
     "desktop_click": "desktop",
     "desktop_type": "desktop",
     "desktop_press": "desktop",
+    "desktop_scroll": "desktop",
+    "desktop_drag": "desktop",
+    "desktop_move": "desktop",
+    "desktop_wait": "desktop",
+    "open_app": "desktop",
+    "post_to_x": "browser",
     "write_note": "memory",
+    "recall": "memory",
     "delete_note": "memory",
     "save_skill": "memory",
     "save_command": "memory",
@@ -324,7 +346,7 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "see_screen",
-        "description": "LOOK at the screen and get back what is actually there: every control with its exact selector, its current contents, and coordinates you can click directly with browser_click_at or desktop_click. On a web page this is instant and exact — it asks the page itself and does not need a screenshot — so use it freely rather than guessing a label, and use it FIRST when a click or a type has just failed. It also tells apart two controls with the same name, which page text cannot. Only a question the page cannot answer about itself — how something looks, an image, a canvas, or anything on the desktop — falls back to the slower screenshot. Name ONE thing per call in 'question' ('where is the composer?'); asking about several at once makes the positions unreliable.",
+        "description": "LOOK at the screen and get back what is actually there: every control with its exact selector, its current contents, and coordinates you can click directly with browser_click_at or desktop_click. On a web page this is instant and exact — it asks the page itself and does not need a screenshot — so use it freely rather than guessing a label, and use it FIRST when a click or a type has just failed. It also tells apart two controls with the same name, which page text cannot. On the desktop it is exact too: the window publishes its controls through the accessibility API and this returns them NUMBERED, which desktop_click, desktop_type, desktop_scroll and desktop_drag take directly — a number cannot miss by a few pixels and has no minimum size. Only a question nothing can answer about itself — how something looks, an image, a canvas, a window that draws its own interface — falls back to the slower screenshot. Name ONE thing per call in 'question' ('where is the composer?'); asking about several at once makes the positions unreliable.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -347,45 +369,128 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "submit_form",
-        "description": "Click the submit control of the form currently composed in the open browser, wait, and return a MACHINE-VERIFIED verdict. Use AFTER the form on the page is fully filled in — e.g. after browser_open on an HN submitlink URL, or browser_type into the fields. The verdict is CONFIRMED only when the page actually lands on a URL you can prove is the result page; otherwise it is NOT confirmed and the form may not have been submitted — report exactly what the verdict said and never claim a post was made without a CONFIRMED verdict. For Hacker News, pass expected_url='https://news.ycombinator.com/item?id='.",
+        "description": "Click the submit control of the form composed in the open browser, wait, and return a MACHINE-VERIFIED verdict. Use AFTER the form is filled in — after fill_form, or browser_type with a selector. This is how you send ANY form on ANY site, posting on x.com included: no site needs its own tool. The verdict is CONFIRMED only when the code itself saw the page land on the result URL, or saw 'expect_text' rendered on the page OUTSIDE every input box — text sitting in a composer is a draft, not a post. Otherwise it is NOT confirmed: report exactly what the verdict said and never claim something was posted, sent or submitted without a CONFIRMED verdict. On x.com: pass expect_text = the post's exact words, so the timeline itself is the proof. On Hacker News: expected_url='https://news.ycombinator.com/item?id='.",
         "parameters": {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "description": "Visible text of the submit control, e.g. 'submit' for HN."},
-                "selector": {"type": "string", "description": "Optional CSS selector for the submit control, e.g. 'input[type=submit]'."},
+                "target": {"type": "string", "description": "Visible text of the submit control, e.g. 'submit' on HN, 'Post' on x.com."},
+                "selector": {"type": "string", "description": "Optional CSS selector for the submit control, e.g. 'input[type=submit]' or '[data-testid=\"tweetButtonInline\"]'. Use this when the button's text is ambiguous."},
                 "expected_url": {"type": "string", "description": "URL prefix the page must land on after a successful submit. For HN: 'https://news.ycombinator.com/item?id='."},
+                "expect_text": {"type": "string", "description": "Text that must appear rendered on the page as published content once the submit worked — the post's own words on x.com, the comment's words under an article. The site-independent proof."},
             },
             "required": ["target"],
         },
     },
     {
-        "name": "desktop_click",
-        "description": "Click pixel coordinates anywhere on the macOS screen. Use coordinates returned by see_screen with target='desktop'.",
+        "name": "fill_form",
+        "description": "Fill several form fields at once, each addressed by CSS selector, and read every one back. Call see_screen first: it lists each visible field with the exact selector that reaches it. This is the reliable way to fill anything — a selector cannot miss, while coordinates cannot reach a control under ~32px at all (x.com's composer is 28px tall). The result names any field whose value did not land; do not call submit_form until they all did.",
         "parameters": {
             "type": "object",
             "properties": {
-                "x": {"type": "integer", "description": "Horizontal pixel coordinate from see_screen."},
-                "y": {"type": "integer", "description": "Vertical pixel coordinate from see_screen."},
+                "fields": {"type": "object", "description": "A map of CSS selector to the text that goes in it, e.g. {\"#title\": \"My story\", \"#url\": \"https://example.com\"}."},
             },
-            "required": ["x", "y"],
+            "required": ["fields"],
+        },
+    },
+    {
+        "name": "desktop_click",
+        "description": "Click a control on the macOS screen. Prefer 'element': see_screen with target='desktop' numbers every control the window publishes, and clicking by number presses the real control — it cannot miss by a few pixels and does not care what is drawn on top. Pass x/y only for something with no number, such as a point inside a canvas or an image.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "element": {"type": "integer", "description": "The number of a control from see_screen target='desktop'."},
+                "x": {"type": "integer", "description": "Horizontal coordinate, for a point with no element number."},
+                "y": {"type": "integer", "description": "Vertical coordinate, for a point with no element number."},
+                "button": {"type": "string", "description": "'left' (default), 'right' for a context menu, or 'middle'."},
+                "clicks": {"type": "integer", "description": "1 (default), 2 to double-click, 3 to select a line."},
+            },
         },
     },
     {
         "name": "desktop_type",
-        "description": "Type text into whatever has keyboard focus on the macOS desktop. Click the field first with desktop_click, and confirm with see_screen that the caret is where you expect.",
+        "description": "Type text on the macOS desktop. Pass 'element' — the number of a text field from see_screen — and the text goes into THAT field. Without one the text goes wherever the keyboard focus happens to be, and keys sent at a window with no field focused are shortcuts, not text, so that form is refused when the focused control cannot take text.",
         "parameters": {
             "type": "object",
-            "properties": {"text": {"type": "string", "description": "The text to type."}},
+            "properties": {
+                "text": {"type": "string", "description": "The text to type."},
+                "element": {"type": "integer", "description": "Number of the text field from see_screen target='desktop'."},
+                "press_enter": {"type": "boolean", "description": "Press enter afterwards. Many apps send with cmd+enter instead — use desktop_press for those."},
+            },
             "required": ["text"],
         },
     },
     {
         "name": "desktop_press",
-        "description": "Press a key on the macOS desktop (e.g. 'enter', 'esc', 'tab', 'down').",
+        "description": "Press a key or a chord on the macOS desktop: 'enter', 'esc', 'tab', 'down', and also 'cmd+s', 'cmd+shift+4', 'cmd+enter'. Chords are how a desktop is actually driven — a single modifier name on its own does nothing.",
         "parameters": {
             "type": "object",
-            "properties": {"key": {"type": "string", "description": "Key name such as 'enter', 'esc', 'tab', 'down'."}},
+            "properties": {"key": {"type": "string", "description": "A key ('enter', 'tab') or a chord ('cmd+s', 'cmd+shift+3')."}},
             "required": ["key"],
+        },
+    },
+    {
+        "name": "desktop_scroll",
+        "description": "Scroll the macOS window under the pointer, or over a numbered element. Use it when what you are looking for is not in the list of controls yet — the window publishes what is on screen, and scrolling is what changes that.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "direction": {"type": "string", "description": "'down' (default), 'up', 'left' or 'right'."},
+                "amount": {"type": "integer", "description": "How far, roughly in wheel notches. Default 5."},
+                "element": {"type": "integer", "description": "Optional element number to put the pointer over first."},
+            },
+        },
+    },
+    {
+        "name": "desktop_drag",
+        "description": "Press at one point on the macOS screen, move, and release at another: dragging a file, moving a slider, selecting a range. Give either element numbers or raw coordinates for each end.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "from_element": {"type": "integer", "description": "Element number to drag from."},
+                "to_element": {"type": "integer", "description": "Element number to drag to."},
+                "from_x": {"type": "integer", "description": "Start coordinate, if there is no element."},
+                "from_y": {"type": "integer", "description": "Start coordinate, if there is no element."},
+                "to_x": {"type": "integer", "description": "End coordinate, if there is no element."},
+                "to_y": {"type": "integer", "description": "End coordinate, if there is no element."},
+            },
+        },
+    },
+    {
+        "name": "desktop_move",
+        "description": "Move the mouse pointer without clicking, to a numbered element or a coordinate. Menus and toolbars that only appear on hover need this — a click on something that is not showing yet lands on whatever is underneath.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "element": {"type": "integer", "description": "Element number from see_screen target='desktop'."},
+                "x": {"type": "integer", "description": "Horizontal coordinate, if there is no element."},
+                "y": {"type": "integer", "description": "Vertical coordinate, if there is no element."},
+            },
+        },
+    },
+    {
+        "name": "desktop_wait",
+        "description": "Wait for the screen to catch up, up to 10 seconds. Use it after something that takes time — an application launching, a page rendering, a file copying — instead of looking again immediately and reporting that nothing happened.",
+        "parameters": {
+            "type": "object",
+            "properties": {"seconds": {"type": "number", "description": "How long to wait. Default 2, maximum 10."}},
+        },
+    },
+    {
+        "name": "post_to_x",
+        "description": "Write a post on x.com and verify it went out. The browser must already be open at x.com and signed in — this does not navigate there, because posting is not something to do on a page nobody asked for. Returns a verdict you cannot shape: '[Post CONFIRMED' only when the exact text was found rendered on the timeline afterwards. Never report a post as made without that verdict; if it says NOT confirmed, check x.com before trying again or it goes out twice.",
+        "parameters": {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "The post, 280 characters or fewer."}},
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "open_app",
+        "description": "Launch a macOS application by name, or bring it to the front if it is already running ('Safari', 'Notes', 'System Settings'). Everything else on the desktop acts on the frontmost window, so this is the first step of any task in an app that is not already in front.",
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "The application's name, e.g. 'Notes'."}},
+            "required": ["name"],
         },
     },
     {
@@ -398,6 +503,18 @@ _TOOLS: list[dict[str, Any]] = [
                 "body": {"type": "string", "description": "Markdown content."},
             },
             "required": ["title", "body"],
+        },
+    },
+    {
+        "name": "recall",
+        "description": "Look up what you have already saved: your notes, your durable memory, the profile of your user, and past sessions. This is the READ side of your memory -- write_note and save_memory only put things in. Use it whenever the user refers to something you were told before ('what is my name', 'the proxy I mentioned', 'what did we decide'), and use it BEFORE saying you do not know something about them. Returns the matching entries with their titles; an empty result is a real answer (nothing saved matches) and is the only ground for saying you have nothing.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to look for, in the user's own words."},
+                "scope": {"type": "string", "description": "'memory' (notes, saved memory and profile; the default), 'sessions' (past conversations), or 'all'."},
+            },
+            "required": ["query"],
         },
     },
     {
@@ -789,6 +906,23 @@ _HERMES_NAME_MAP: dict[str, str] = {
     "search": "web_search",
     "web_search": "web_search",
     "google": "web_search",
+    # Looking something up in your OWN store. The model reaches for all of
+    # these spellings and, before recall existed, every one of them was an
+    # unknown tool -- so the lookup it had decided to make became a sentence
+    # saying it had no way to make it.
+    "recall": "recall",
+    # NOT "remember": that spelling is mapped to write_note further down, and
+    # in a dict literal the later key wins. "remember this: X" is a save.
+    "search_notes": "recall",
+    "notes_search": "recall",
+    "search_memory": "recall",
+    "memory_search": "recall",
+    "read_note": "recall",
+    "read_notes": "recall",
+    "get_note": "recall",
+    "list_notes": "recall",
+    "search_sessions": "recall",
+    "session_search": "recall",
     "read": "read_page",
     "read_page": "read_page",
     "fetch_html": "fetch_html",
@@ -839,6 +973,49 @@ _HERMES_NAME_MAP: dict[str, str] = {
     "save_note": "write_note",
     "write_note": "write_note",
     "remember": "write_note",
+    # Driving the machine itself. The names a model reaches for here come from
+    # the computer-use tools it has seen elsewhere -- "screenshot",
+    # "left_click", "key" -- and every one of them was an unknown tool, which
+    # is read back as "this assistant cannot use a computer".
+    "screenshot": "see_screen",
+    "take_screenshot": "see_screen",
+    "screen": "see_screen",
+    "look": "see_screen",
+    "see_screen": "see_screen",
+    "desktop_click": "desktop_click",
+    "left_click": "desktop_click",
+    "mouse_click": "desktop_click",
+    "click_element": "desktop_click",
+    "desktop_type": "desktop_type",
+    "desktop_press": "desktop_press",
+    "hotkey": "desktop_press",
+    "key": "desktop_press",
+    "keypress": "desktop_press",
+    "desktop_hotkey": "desktop_press",
+    "desktop_scroll": "desktop_scroll",
+    "desktop_drag": "desktop_drag",
+    "drag": "desktop_drag",
+    "left_click_drag": "desktop_drag",
+    "desktop_move": "desktop_move",
+    "mouse_move": "desktop_move",
+    "hover": "desktop_move",
+    "move_mouse": "desktop_move",
+    "desktop_wait": "desktop_wait",
+    "wait": "desktop_wait",
+    "sleep": "desktop_wait",
+    "open_app": "open_app",
+    "fill_form": "fill_form",
+    "fill_fields": "fill_form",
+    "fill_in_form": "fill_form",
+    "post_to_x": "post_to_x",
+    "tweet": "post_to_x",
+    "post_tweet": "post_to_x",
+    "send_tweet": "post_to_x",
+    "launch_app": "open_app",
+    "open_application": "open_app",
+    "switch_app": "open_app",
+    "activate_app": "open_app",
+    "focus_app": "open_app",
 }
 
 # Argument-name aliases: the model often emits natural argument names that
@@ -848,7 +1025,36 @@ _HERMES_NAME_MAP: dict[str, str] = {
 _ARG_ALIASES: dict[str, dict[str, str]] = {
     "run_command": {"cmd": "cmd", "command": "cmd", "shell": "cmd", "cmdline": "cmd"},
     "web_search": {"query": "query", "q": "query", "search": "query", "term": "query", "what": "query"},
+    "recall": {"query": "query", "q": "query", "search": "query", "term": "query",
+               "what": "query", "text": "query", "title": "query", "topic": "query",
+               "scope": "scope", "source": "scope", "where": "scope"},
     "read_page": {"url": "url", "link": "url", "page": "url", "site": "url", "address": "url"},
+    "desktop_click": {"element": "element", "index": "element", "id": "element",
+                      "number": "element", "target": "element", "x": "x", "y": "y",
+                      "button": "button", "clicks": "clicks", "count": "clicks"},
+    "desktop_type": {"text": "text", "value": "text", "content": "text",
+                     "element": "element", "index": "element", "field": "element",
+                     "target": "element", "press_enter": "press_enter",
+                     "enter": "press_enter", "submit": "press_enter"},
+    "desktop_press": {"key": "key", "keys": "key", "combo": "key",
+                      "hotkey": "key", "shortcut": "key"},
+    "desktop_scroll": {"direction": "direction", "dir": "direction",
+                       "amount": "amount", "clicks": "amount", "element": "element",
+                       "index": "element", "target": "element"},
+    "desktop_drag": {"from_element": "from_element", "to_element": "to_element",
+                     "from_x": "from_x", "from_y": "from_y", "to_x": "to_x",
+                     "to_y": "to_y", "start_x": "from_x", "start_y": "from_y",
+                     "end_x": "to_x", "end_y": "to_y", "x1": "from_x",
+                     "y1": "from_y", "x2": "to_x", "y2": "to_y",
+                     "source": "from_element", "destination": "to_element"},
+    "desktop_move": {"element": "element", "index": "element", "target": "element",
+                     "x": "x", "y": "y"},
+    "desktop_wait": {"seconds": "seconds", "duration": "seconds", "time": "seconds",
+                     "amount": "seconds"},
+    "post_to_x": {"text": "text", "message": "text", "content": "text",
+                  "body": "text", "tweet": "text", "status": "text"},
+    "open_app": {"name": "name", "app": "name", "application": "name",
+                 "app_name": "name", "target": "name"},
     "browser_open": {"url": "url", "link": "url", "page": "url", "site": "url", "address": "url", "to": "url"},
     "browser_click": {"target": "target", "text": "target", "selector": "target", "element": "target", "name": "target", "button": "target"},
     "browser_type": {"text": "text", "value": "text", "input": "text", "content": "text", "string": "text", "enter": "enter", "press_enter": "enter", "return": "enter"},
@@ -1166,13 +1372,31 @@ def tool_group_enabled(name: str, groups: set[str] | None) -> bool:
     return group in groups
 
 
+# The built-ins as the CODE defines them, before any tools/*.md is folded in.
+# sync_tool_files edits _TOOLS in place -- that is what makes the directory
+# authoritative -- so without this copy there is nothing left to compare a
+# user's file against, and a description improved in code could never be
+# offered to an install that had already seeded the old one.
+_BUILTIN_TOOLS: list[dict[str, Any]] = copy.deepcopy(_TOOLS)
+
+
+def refresh_tool_files(names: list[str] | None = None,
+                       force: bool = False) -> tuple[list[str], list[str]]:
+    """Bring tools/*.md back in step with the built-ins. See tool_docs.refresh."""
+    out = tool_docs.refresh(_BUILTIN_TOOLS, _TOOL_FAMILIES, _TOOL_GROUPS,
+                            _HERMES_NAME_MAP, names=names, force=force)
+    global _disk_signature
+    _disk_signature = None  # re-read on the next sync
+    return out
+
+
 # Tools whose full schema stays inline even in index mode: the ones an
 # ordinary turn reaches for without deliberating. Making these cost a
 # tool_docs round would trade ~2,200 prompt tokens for a round-trip on every
 # routine request, which is the wrong side of that trade.
 _CORE_SCHEMA_TOOLS = frozenset({
     "terminal", "web_search", "execute_code", "read_file", "edit_file",
-    "browser_open", "write_note", "tool_docs",
+    "browser_open", "write_note", "recall", "tool_docs",
     # These two are here for their DESCRIPTIONS, not their frequency.
     # browser_press's says that many web apps submit with cmd+enter and that
     # plain enter posts nothing — a correction the model cannot know it needs
@@ -2168,6 +2392,89 @@ def dropped_tool_calls(reply: str,
     return dropped
 
 
+# Words that mean the same thing to a model naming a tool. Without these the
+# overlap between `browser_read` and `browser_get_text` is the word "browser"
+# alone, which every browser tool shares equally, and the tie falls to
+# whichever name happens to look most like the invented one.
+_MATCH_SYNONYMS: dict[str, str] = {
+    "read": "get", "fetch": "get", "view": "get", "show": "get",
+    "text": "get", "content": "get", "contents": "get",
+    "lookup": "search", "find": "search", "query": "search",
+    "recall": "search", "remember": "search", "retrieve": "search",
+    "note": "notes", "memories": "memory", "shell": "command",
+    "cmd": "command", "terminal": "command", "run": "command",
+    "screenshot": "screen", "capture": "screen", "look": "screen",
+    "write": "save", "store": "save", "create": "save", "add": "save",
+    "press": "key", "keypress": "key",
+}
+
+
+def _match_words(name: str) -> set[str]:
+    """`name` as the set of concepts it is built from, synonyms folded."""
+    words = {w for w in re.split(r"[^a-z0-9]+", name.lower()) if w}
+    return {_MATCH_SYNONYMS.get(w, w) for w in words}
+
+
+def nearest_tools(name: str, enabled_groups: set[str] | None,
+                  limit: int = 3) -> list[str]:
+    """Real tool names closest to an invented one, best first.
+
+    A name the catalog does not hold is reported back as "no tool named X
+    exists, here are all 44 of them" -- a list the model has already read, in
+    the prompt, and disagreed with. What it needs is the one name it was
+    reaching for. `list_threads` is nothing; `search_notes` is `recall`;
+    `browser_read` is `browser_get_text`.
+
+    Matched on the WORDS as well as the characters: a model that invents a
+    name builds it out of the right vocabulary in the wrong order
+    ("notes_search" for "search_notes"), which difflib on the raw string
+    scores poorly and a token overlap scores exactly right.
+    """
+    candidates = enabled_tool_names(enabled_groups)
+    if not candidates:
+        return []
+    target = name.strip().lower()
+    target_words = _match_words(target)
+    scored: list[tuple[float, str]] = []
+    for cand in candidates:
+        low = cand.lower()
+        words = _match_words(low)
+        overlap = len(target_words & words) / max(1, len(target_words | words))
+        ratio = difflib.SequenceMatcher(None, target, low).ratio()
+        # Word overlap leads: it is the signal that survives a reordering,
+        # and character similarity alone ranks `read_file` above `recall`
+        # for `read_note`, which is the wrong half of the name to match.
+        # A shared WHOLE WORD is the floor, not a character-similarity score.
+        # Measured over the invented names in the logs, letters alone rank
+        # `read_file` first for `send_email` (0.53) and `list_cron_jobs` for
+        # `list_threads` (0.54) -- confident, adjacent, and wrong. An email
+        # tool does not exist here, and the useful answer is to say nothing
+        # and let the full catalog speak.
+        if overlap < 0.3:
+            continue
+        scored.append((overlap * 2 + ratio, cand))
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    return [cand for _score, cand in scored[:limit]]
+
+
+def schemas_for_names(names: list[str]) -> str:
+    """The JSON schemas of `names`, or "" -- what a correction should carry.
+
+    Naming the right tool without its arguments buys one round and spends the
+    next one on tool_docs. The schema is ~60 tokens and closes the loop in
+    the round that noticed the mistake.
+    """
+    sync_tool_files()
+    by_name = {t["name"]: t for t in _TOOLS}
+    wanted = [by_name[n] for n in names if n in by_name]
+    if not wanted:
+        return ""
+    return json.dumps(
+        [{"name": t["name"], "description": t["description"],
+          "parameters": t["parameters"]} for t in wanted],
+        ensure_ascii=False, separators=(",", ":"))
+
+
 def enabled_tool_names(enabled_groups: set[str] | None) -> list[str]:
     """The tool names the <tools> catalog advertises, filtered to what is on."""
     names = []
@@ -2250,6 +2557,7 @@ _PRIMARY_ARG: dict[str, str] = {
     "run_command": "cmd",
     "execute_code": "code",
     "web_search": "query",
+    "recall": "query",
     "read_page": "url",
     # Registering the primary arg is what makes <fetch_html>URL</fetch_html>
     # parse, via _ALIAS_TO_TOOL below. Without it the model emitted exactly

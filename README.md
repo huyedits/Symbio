@@ -89,6 +89,107 @@ Symbio can use a live browser to perform tasks such as opening Chrome and intera
 
 [https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20](https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20)
 
+### Desktop control
+
+Symbio drives the Mac itself, not only a browser page. It reads the frontmost
+window through the macOS accessibility API — the same interface a screen
+reader uses — so `see_screen` comes back with the window's real controls:
+
+```
+Notes — window "Shopping"
+   1 Button        'New Note' at (48,96) 28x28
+   2 TextArea      '(empty text field)' at (320,140) 600x420
+   3 Button        'Share' at (980,96) 28x28
+```
+
+Every action then takes a number: `desktop_click {"element": 1}`,
+`desktop_type {"element": 2, "text": "..."}`, plus `desktop_press` (chords
+included: `cmd+shift+4`), `desktop_scroll`, `desktop_drag`, `desktop_move`,
+`desktop_wait` and `open_app`. Nothing here loads a vision model, so the
+listing costs no RAM beside the headmaster, it has no minimum control size,
+and a control that is absent from the tree is genuinely not on screen.
+
+Two things the tree gives that a screenshot cannot:
+
+- **Typing goes into a named field.** Keys sent at a window with no text field
+  focused are not discarded, they are shortcuts. `desktop_type` refuses to
+  type blind when the focused control cannot take text, and names the field to
+  use instead.
+- **A click that changed nothing says so.** The window title and the focused
+  control are read before and after, so "clicked" is not reported as "done".
+
+Vision stays as the fallback for windows that draw their own interface — a
+canvas, a game, a screen share — where there is no tree to read.
+
+**Permission:** macOS returns an empty tree rather than an error until the
+terminal running Symbio is granted Accessibility. `python3 -m symbio.ax` shows
+the grant dialog and then prints the live control listing; `/selfcheck` in
+chat reports the same thing.
+
+### The window
+
+```bash
+symb daemon start          # loads the model once, in its own process
+symbio-desktop             # opens the chat window in your browser
+```
+
+A chat-first interface: conversation in the middle, the agent's own tool calls
+folded into one line you can open, approval prompts inline (the same gate the
+terminal shows), and the adapter map, skills, corpus and health report behind a
+drawer you open when you want them.
+
+It is deliberately not an Electron app. The server is the Python standard
+library, the model lives in `symb daemon` and is reached over a Unix socket,
+and the page is plain HTML and CSS — **28 MB resident idle, 31 MB after serving
+every endpoint**, against the 200-400 MB an Electron shell starts at.
+`--window` opens a native WKWebView instead of a browser tab; that hosts WebKit
+in this process and costs about 400 MB all told, which is why it is off by
+default.
+
+### Staying online
+
+```bash
+symb daemon start     # load the model once, in its own process
+symb watch            # keep it loaded, and run what is due
+symb watch --status   # the last heartbeat
+```
+
+Scheduled jobs used to run inside a chat session's background thread, so
+"every morning at 8" meant "every morning at 8, if a window happens to be
+open". `symb watch` is the process that watches instead: it restarts the
+resident model when it dies (with a backoff, because each attempt maps several
+GB of weights), ticks the cron table itself, and hands each fired job to the
+model as an ordinary turn.
+
+**Unattended turns are denied by default.** The model asks its client before a
+risky tool, and here the client is a loop — nobody is reading the prompt. The
+answer is no, and the refusal is recorded in the heartbeat.
+`cron.unattended_approve` turns that off for someone who has read this
+paragraph.
+
+### Posting to X
+
+```
+post_to_x  {"text": "shipping the desktop window today"}
+```
+
+The browser must already be open at x.com and signed in — it does not navigate
+there on its own, because posting is not something to do on a page nobody
+asked for. It fills the composer **by selector** (the composer is 28px tall,
+under the vision model's one-patch floor, and a coordinate for it missed by
+~36px every time), sends with x's own Post button, then reads the timeline back
+and returns a verdict the model cannot shape:
+
+```
+[Post CONFIRMED] The post is rendered on the timeline: 'shipping the desktop window today'
+[Post NOT confirmed] The composer still holds the text, so it was not sent.
+[Post NOT confirmed] The composer cleared but the post is not on the timeline yet …
+```
+
+A cleared composer is not confirmation — a discarded draft clears too. This
+project has already posted something and reported that it had not, which is
+why the proof is read from the DOM rather than from a toast.
+
 ---
 
 # Quick Start
@@ -217,7 +318,28 @@ Symbio:   Your name is Alice.
 
 Once the configured threshold is reached, Symbio digests the examples and runs a short LoRA update.
 
-The default threshold is **5 mistake notes** - but you can edit that.
+The threshold is not a constant. It scales with the corpus, because every
+sample already in `train.jsonl` competes with the new ones: five boosted notes
+are most of an epoch against 50 samples and a rounding error against 882. It
+rises by log, not by multiple — a corpus ten times bigger needs a bit more
+evidence, not ten times as much — and severe mistakes pull it back down.
+Clamped to 2..20 either way; `learn.mistake_threshold` sets the base and
+`learn.scale_threshold_with_corpus` turns the scaling off.
+
+## Not every mistake asks for the same training
+
+A correction is one of two things, and they want opposite recipes:
+
+| | What it is | What the fix needs |
+| --- | --- | --- |
+| **Knowledge** | the model said something false — a name, a version, which file holds what | passes over the corpus; a fact repeated four times in one epoch is still one fact |
+| **Reflex** | the model reached for the wrong SHAPE — a tool that does not exist, a guessed argument, a GNU flag on BSD, a click before a look | repetition of the exact form; an action learned once is not automatic |
+
+Every mistake note now records its `**Kind:**`, classified at capture time,
+and the batch decides the dials: a batch of wrong shapes repeats harder and
+runs shorter, a batch of wrong facts trains at ordinary weight for the full
+run, and a mixed batch lands between. One batch is still one LoRA pass — this
+machine trains one model at a time.
 
 ```text
 notes/mistakes/
@@ -269,6 +391,49 @@ but also from:
 > "That command failed, so here's what actually worked."
 
 Only a confirmed successful recovery is captured.
+
+## Mistakes in the environment, not just in the answer
+
+The same loop runs over the machine itself. A desktop is full of failures that
+come back looking like ordinary results, and each one used to end the turn:
+
+| What came back | What it actually means |
+| --- | --- |
+| `No results found.` | the search produced no work |
+| `Timed out after 30s.` | the command was killed |
+| `Browser is not open.` | the action was aimed at nothing |
+| `Refused to type: the focused control is a Button` | keys there are shortcuts, not text |
+| `Nothing about the window changed` | the click may not have landed |
+| `There is no element 9 on screen` | the listing is stale; look again |
+| `The accessibility tree is empty` | a permission is missing, the screen is not |
+
+Symbio treats all of these as failures rather than answers. Two things follow
+from that: the turn keeps going instead of reporting a dead end as done, and
+the recovery it finds becomes a training example the same way a corrected
+answer does.
+
+```text
+You: post this to x.com
+
+Symbio: <tool_call>{"name": "desktop_type", "arguments": {"text": "..."}}</tool_call>
+
+Tool:
+Refused to type: the focused control is a Button ('Post'), not a text field.
+Look with see_screen target='desktop' and type into the field by its number.
+
+Symbio: <tool_call>{"name": "see_screen", "arguments": {"target": "desktop"}}</tool_call>
+        <tool_call>{"name": "desktop_type", "arguments": {"element": 2, "text": "..."}}</tool_call>
+
+[Learn]
+Tool mistake captured.
+```
+
+Some of these were learned the hard way and are in the corpus as fixed
+behaviour: a `sed -i` written GNU-style silently does nothing on macOS and got
+reported as done; a tweet posted while the model said it had not; keystrokes
+sent at an unfocused window that fired shortcuts instead of typing. The
+environment is where an agent's confident wrong answers actually cost
+something, so it is the environment that gets checked after every action.
 
 ---
 

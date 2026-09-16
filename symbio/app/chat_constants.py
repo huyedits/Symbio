@@ -81,7 +81,10 @@ _TELEGRAM_CONFIRM_TOOLS = frozenset({
     "execute_code", "run_command", "edit_file", "write_file", "digest_notes", "train_adapter",
     "save_command", "realign",
     "schedule_job", "config_set", "delete_cron_job", "update_cron_job",
-    "delete_note", "submit_form",
+    "delete_note", "submit_form", "post_to_x",
+    # Driving the machine from a chat app on a phone: the window that receives
+    # this is not in front of whoever is sending it.
+    "desktop_click", "desktop_type", "desktop_press", "desktop_drag", "open_app",
 })
 
 # Map internal tool names back to Hermes-style names for <tool_response> labels.
@@ -436,7 +439,7 @@ BUILTIN_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("config", "[set <key> <value>]", "Show or change a setting"),
     ("think", "[none|low|medium|flurry|max]", "How hard the model reasons before answering"),
     ("commands", "[new|rm|show] ...", "Your own slash commands, saved in commands/"),
-    ("tools", "[family]", "What tools exist, and their exact arguments"),
+    ("tools", "[family|name|refresh]", "What tools exist, their exact arguments; refresh re-seeds unedited tool files"),
     ("realign", "[--dry-run]",
      "Find which learned weights are misaligned, and damp them"),
     ("constitution", "[set|clear|axes|revise]",
@@ -454,6 +457,7 @@ BUILTIN_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("train_worker", "<role>", "Fine-tune one worker adapter"),
     ("resume", "", "Pick up a fine-tune that was killed mid-run"),
     ("golden", "[audit|prune]", "The regression battery, and corpus that fights it"),
+    ("tooleval", "[resilience|all]", "Can it reach a tool when nothing is named after the job"),
     ("wildcards", "", "Golden cases the model has never seen"),
     ("skills", "", "Saved procedures"),
     ("new-skill", "<name> | <steps>", "Save a procedure and train a worker for it"),

@@ -52,6 +52,24 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
     """Return the full Hermes-style tool registry for an agent instance."""
     return [
         {
+            # The read side of memory. The catalog in symbio/app/tooling.py
+            # advertises this to every loop, and only the chat dispatcher
+            # could run it -- so on this one the model called the name its own
+            # prompt had offered and was told the tool does not exist.
+            "name": "recall",
+            "description": "Look up what you have already saved: your notes, your durable memory, the profile of your user, and past sessions. Use it before saying you do not know something about the user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to look for, in the user's own words."},
+                    "scope": {"type": "string", "description": "'memory' (the default), 'sessions', or 'all'."},
+                },
+                "required": ["query"],
+            },
+            "readonly": True,
+            "run": lambda params, a=agent: _tool_recall(a, params),
+        },
+        {
             "name": "note",
             "description": "Save, update, or remove a fact as a markdown note in notes/.",
             "parameters": {
@@ -382,19 +400,19 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
         },
         {
             "name": "desktop_click",
-            "description": "Click the mouse at the given screen coordinates (x, y).",
+            "description": "Click a control on screen. Prefer 'element': see_screen numbers every control the frontmost window publishes, and a number presses the real control instead of a guessed point.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "element": {"type": "integer"},
                     "x": {"type": "integer"},
                     "y": {"type": "integer"},
                     "clicks": {"type": "integer"},
                     "button": {"type": "string"},
                 },
-                "required": ["x", "y"],
             },
             "readonly": False,
-            "run": lambda params, a=agent: _tool_desktop_click(a, params),
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_click", params),
         },
         {
             "name": "desktop_move",
@@ -408,7 +426,7 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
                 "required": ["x", "y"],
             },
             "readonly": False,
-            "run": lambda params, a=agent: _tool_desktop_move(a, params),
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_move", params),
         },
         {
             "name": "desktop_type",
@@ -419,7 +437,7 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
                 "required": ["text"],
             },
             "readonly": False,
-            "run": lambda params, a=agent: _tool_desktop_type(a, params),
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_type", params),
         },
         {
             "name": "desktop_press",
@@ -430,7 +448,72 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
                 "required": ["key"],
             },
             "readonly": False,
-            "run": lambda params, a=agent: _tool_desktop_press(a, params),
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_press", params),
+        },
+        {
+            "name": "see_screen",
+            "description": "Look at the frontmost window and get back every control it publishes — role, label and exact frame — each with a number that desktop_click and desktop_type take. Falls back to a screenshot and the vision model only for a window that draws its own interface.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                    "question": {"type": "string"},
+                },
+            },
+            "readonly": True,
+            "run": lambda params, a=agent: _tool_desktop(a, "see_screen", params),
+        },
+        {
+            "name": "desktop_scroll",
+            "description": "Scroll the window under the pointer, or over a numbered element.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string"},
+                    "amount": {"type": "integer"},
+                    "element": {"type": "integer"},
+                },
+            },
+            "readonly": False,
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_scroll", params),
+        },
+        {
+            "name": "desktop_drag",
+            "description": "Press at one point, move, and release at another. Give element numbers or raw coordinates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from_element": {"type": "integer"},
+                    "to_element": {"type": "integer"},
+                    "from_x": {"type": "integer"},
+                    "from_y": {"type": "integer"},
+                    "to_x": {"type": "integer"},
+                    "to_y": {"type": "integer"},
+                },
+            },
+            "readonly": False,
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_drag", params),
+        },
+        {
+            "name": "desktop_wait",
+            "description": "Wait for the screen to catch up, up to 10 seconds.",
+            "parameters": {
+                "type": "object",
+                "properties": {"seconds": {"type": "number"}},
+            },
+            "readonly": True,
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_wait", params),
+        },
+        {
+            "name": "open_app",
+            "description": "Launch a macOS application by name, or bring it to the front.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+            "readonly": False,
+            "run": lambda params, a=agent: _tool_desktop(a, "open_app", params),
         },
     ]
 
@@ -556,16 +639,44 @@ def tool_few_shots(config: dict[str, Any],
                 {"code": "import base64\nprint(base64.b64decode('aGVsbG8=').decode())"},
                 "Decoding that.")
     )
+    # Driving the machine: look, then act on a NUMBER. The worked example is
+    # the whole point — a model shown only single calls types at whatever has
+    # focus and clicks coordinates it invented, which is the entire failure
+    # mode of driving a screen. see_screen numbers the controls the window
+    # itself publishes, and those numbers are what the actions take.
+    desktop_look = (
+        "Notes — window \"Shopping\"" + chr(10)
+        + "   1 Button        'New Note' at (48,96) 28x28" + chr(10)
+        + "   2 TextArea      '(empty text field)' at (320,140) 600x420" + chr(10)
+        + "   3 Button        'Share' at (980,96) 28x28")
     desktop = (
+        [
+            {"role": "user", "content": "open notes and start a shopping list"},
+            {"role": "assistant",
+             "content": _tc("open_app", {"name": "Notes"}) + chr(10)
+             + "Opening Notes." + E},
+            {"role": "user", "content": "[System observation: Opened Notes. "
+             "It is now frontmost.]" + chr(10)
+             + _resp("open_app", "Opened Notes. It is now frontmost.")},
+            {"role": "assistant",
+             "content": _tc("see_screen", {"target": "desktop",
+                                           "question": "the note body"})
+             + chr(10) + "Looking at the window." + E},
+            {"role": "user", "content": "[System observation: " + desktop_look
+             + "]" + chr(10) + _resp("see_screen", desktop_look)},
+            {"role": "assistant",
+             "content": _tc("desktop_type", {"element": 2,
+                                             "text": "Shopping" + chr(10) + "- milk"})
+             + chr(10) + "Writing the list into the note body." + E},
+        ]
         # The coordinates are in the USER's line on purpose. An example where
         # they appear from nowhere teaches the model to invent them, and a
         # confident wrong coordinate is the whole failure mode of driving a
-        # screen — real ones come from looking first.
-        _pair("click at 1200, 12 on my screen", "desktop_click",
-              {"x": 1200, "y": 12}, "Clicking there.")
-        + _pair("type my email address there", "desktop_type",
-                {"text": "me@example.com"}, "Typing it in.")
-        + _pair("hit escape", "desktop_press", {"key": "esc"}, "Pressing Escape.")
+        # screen — real ones come from looking first, and a number is better
+        # than any coordinate.
+        + _pair("click at 1200, 12 on my screen", "desktop_click",
+                {"x": 1200, "y": 12}, "Clicking there.")
+        + _pair("save it", "desktop_press", {"key": "cmd+s"}, "Saving.")
     )
     by_family = {
         "file": files, "code": code, "shell": shell, "web": web,
@@ -641,7 +752,41 @@ def tool_metadata(name: str, tools: list[dict[str, Any]], agent: AIAgent) -> dic
             "readonly": False,
             "run": lambda params, n=name, a=agent: _tool_terminal(a, {"cmd": n}),
         }
-    return {"readonly": False, "run": lambda _: f"Unknown tool: {name}"}
+    return {"readonly": False,
+            "run": lambda _, n=name, a=agent: _unknown_tool(n, a)}
+
+
+def _unknown_tool(name: str, agent: AIAgent) -> str:
+    """What a name this loop cannot run says back to the model.
+
+    The bare sentence gave it nothing to do, and what a model does with
+    nothing is conclude it cannot do the job at all. The same answer the chat
+    dispatcher gives: the closest real name, with its arguments attached, so
+    the retry lands in this round instead of spending the next one on
+    tool_docs.
+    """
+    from symbio.app import tooling
+
+    groups = getattr(agent, "enabled_groups", None)
+    near = tooling.nearest_tools(name, groups)
+    if near:
+        return (f"Unknown tool: {name}. Closest real tools: "
+                f"{', '.join(near)}. Their schemas: "
+                f"{tooling.schemas_for_names(near)}")
+    return (f"Unknown tool: {name}. Call "
+            '{"name": "tool_docs", "arguments": {"family": "<family>"}} '
+            "to see what exists, then use a real name.")
+
+
+def _tool_recall(agent: AIAgent, args: dict[str, Any]) -> str:
+    """Search the saved stores, through the chat dispatcher's own recall code.
+
+    Imported at call time, not at module scope: symbio.app.chat_tools imports
+    this module's siblings, and binding it here at import would close the ring.
+    """
+    from symbio.app.chat_tools import recall_for
+
+    return recall_for(agent, args)
 
 
 def _tool_note(agent: AIAgent, args: dict[str, Any]) -> str:
@@ -1163,7 +1308,7 @@ def _look(shot, config: dict[str, Any]) -> str:
     return safety.wrap_untrusted("screen contents", out, scan)
 
 
-def _tool_desktop_click(agent: AIAgent, args: dict[str, Any]) -> str:
+def _tool_desktop_click_at(agent: AIAgent, args: dict[str, Any]) -> str:
     """Click a point the model read off a screenshot.
 
     Through the converting path, like the ChatSession front-end: the
@@ -1184,22 +1329,19 @@ def _tool_desktop_click(agent: AIAgent, args: dict[str, Any]) -> str:
     )
 
 
-def _tool_desktop_move(agent: AIAgent, args: dict[str, Any]) -> str:
-    if desktop_move is None:
-        return "Desktop automation is not available."
-    return desktop_move(int(args.get("x", 0)), int(args.get("y", 0)))
+def _tool_desktop(agent: AIAgent, name: str, args: dict[str, Any]) -> str:
+    """Every desktop tool, through the chat dispatcher's own implementation.
 
+    The element numbers come from the accessibility tree, the focus guard
+    refuses to type at a control that is not a text field, and a click reports
+    when nothing on screen changed. None of that is worth a second copy, and a
+    second copy is what the two registries used to be — see the 2026-09-16
+    "Unknown tool: recall", where this loop answered for a tool the prompt it
+    shares had already offered.
+    """
+    from symbio.app.chat_tools import desktop_for
 
-def _tool_desktop_type(agent: AIAgent, args: dict[str, Any]) -> str:
-    if desktop_type is None:
-        return "Desktop automation is not available."
-    return desktop_type(args.get("text", ""))
-
-
-def _tool_desktop_press(agent: AIAgent, args: dict[str, Any]) -> str:
-    if desktop_press is None:
-        return "Desktop automation is not available."
-    return desktop_press(args.get("key", ""))
+    return desktop_for(agent, name, args)
 
 
 def _parallel_safe(meta: dict[str, Any]) -> bool:
@@ -1298,7 +1440,8 @@ def run_single_tool(agent: AIAgent, name: str, params: dict[str, Any]) -> str:
         )
 
     meta = tool_metadata(name, agent.tools, agent)
-    runner: Callable[[dict[str, Any]], str] = meta.get("run", lambda _: f"Unknown tool: {name}")
+    runner: Callable[[dict[str, Any]], str] = meta.get(
+        "run", lambda _, n=name, a=agent: _unknown_tool(n, a))
     print(f"  [Tool: {name}]")
     try:
         return runner(params)

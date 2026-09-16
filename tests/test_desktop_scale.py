@@ -68,7 +68,10 @@ def test_the_registry_front_end_converts_too(mouse, monkeypatch):
     # raw mouse function.
     monkeypatch.setattr(tools, "desktop_click_in_image",
                         computer.desktop_click_in_image)
-    agent = type("A", (), {})()
-    tools._tool_desktop_click(agent, {"x": 1440, "y": 900})
+    # The registry now routes the whole desktop family through the chat
+    # dispatcher rather than keeping a second implementation beside it, so
+    # this is the same call the CLI makes.
+    agent = type("A", (), {"config": {}, "enabled_groups": None})()
+    tools._tool_desktop(agent, "desktop_click", {"x": 1440, "y": 900})
 
     assert mouse == [(720, 450)]

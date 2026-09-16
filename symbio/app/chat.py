@@ -1975,6 +1975,53 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         except Exception as e:
             return ""
 
+    def _claims_incapacity(self, reply: str, user_input: str) -> bool:
+        """Ask the model whether its own reply refused on grounds of capability.
+
+        The mirror of `_claims_completion`, and the more dangerous half. A
+        model that says it did work it never did gets challenged; a model that
+        says it CANNOT do work it can do just ends the turn, and reads as
+        obedient while doing it.
+
+        Live 2026-09-15, asked to tweet at @grok: "The tools listed don't
+        include a Twitter API tool... the previous note from Huy says they
+        can't post tweets, only generate text." No such note exists anywhere in
+        the install — the constraint was manufactured inside the reasoning
+        block and then obeyed — and the browser toolset it was holding at the
+        time has posted to X before.
+
+        Asked of the model rather than matched with a pattern. The claim has no
+        fixed surface: "I don't have a Twitter tool", "that's outside what I
+        can reach from here", "I can only draft it for you" and a dozen other
+        phrasings all mean the same thing, and a list of them is a list of the
+        ones already seen. The distinction that matters here is semantic too —
+        "I couldn't find the compose box" is the report of an attempt, the
+        opposite of this, and separating the two is reading comprehension.
+
+        Fails closed on anything unexpected: a blank answer, an exception, or a
+        verdict that is neither word returns False, so a judge that cannot
+        answer costs the turn nothing rather than inventing a challenge.
+        """
+        if not reply.strip():
+            return False
+        ask = (
+            "You are grading one reply, not continuing the conversation.\n\n"
+            f"The user asked: {user_input.strip()[:600]}\n\n"
+            f"The assistant replied: {reply.strip()[:1200]}\n\n"
+            "Did the assistant decline on the grounds that it LACKS the "
+            "ability — no tool for it, no access, nothing it can do but write "
+            "text? Answer YES only for a claim about what it is able to do.\n"
+            "Answer NO if it reports that an ATTEMPT failed or came up empty "
+            "('I couldn't find the button', 'the page did not load'), if it "
+            "refused for safety or because the user declined, or if it simply "
+            "did the thing.\n\n"
+            "Answer with one word, YES or NO."
+        )
+        verdict = self._generate_tag_metadata(ask).strip().upper()
+        # First word only: a small model likes to explain itself afterwards.
+        first = verdict.split()[0].strip(".,:;!*_`\"'") if verdict.split() else ""
+        return first == "YES"
+
     def _ensure_tag_index(self) -> bool:
         """Initialize self.tag_index if needed. Returns True if ready."""
         rag_cfg = self.config.get("rag", {})

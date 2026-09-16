@@ -1,154 +1,160 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Symbio Desktop</title>
+<title>Symbio</title>
 <link rel="stylesheet" href="/static/style.css">
 <script src="https://d3js.org/d3.v7.min.js"></script>
 </head>
 <body>
 
-<!-- Sidebar -->
 <aside id="sidebar">
-  <div class="sidebar-header">
-    <div class="logo">
-      <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-        <circle cx="14" cy="14" r="12" stroke="currentColor" stroke-width="2"/>
-        <circle cx="14" cy="14" r="4" fill="currentColor"/>
-        <path d="M14 2 L14 6 M14 22 L14 26 M2 14 L6 14 M22 14 L26 14" stroke="currentColor" stroke-width="1.5" opacity="0.5"/>
-        <path d="M5.5 5.5 L8.5 8.5 M19.5 19.5 L22.5 22.5 M5.5 22.5 L8.5 19.5 M19.5 8.5 L22.5 5.5" stroke="currentColor" stroke-width="1" opacity="0.3"/>
-      </svg>
-      <span>Symbio</span>
-    </div>
-    <div class="version-badge">v1.0</div>
+  <div class="sidebar-top">
+    <button class="icon-btn" id="btn-collapse" title="Hide sidebar" aria-label="Hide sidebar">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" fill="none" stroke-width="1.3"/><line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" stroke-width="1.3"/></svg>
+    </button>
+    <button class="new-chat" id="btn-new-chat">
+      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      New chat
+    </button>
   </div>
 
-  <nav class="sidebar-nav">
-    <button class="nav-btn active" data-view="mindmap">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2" fill="currentColor"/><circle cx="3" cy="4" r="1.5" fill="currentColor" opacity="0.6"/><circle cx="13" cy="4" r="1.5" fill="currentColor" opacity="0.6"/><circle cx="3" cy="12" r="1.5" fill="currentColor" opacity="0.6"/><circle cx="13" cy="12" r="1.5" fill="currentColor" opacity="0.6"/><line x1="8" y1="6" x2="4" y2="5" stroke="currentColor" stroke-width="0.5" opacity="0.4"/><line x1="8" y1="6" x2="12" y2="5" stroke="currentColor" stroke-width="0.5" opacity="0.4"/><line x1="8" y1="10" x2="4" y2="11" stroke="currentColor" stroke-width="0.5" opacity="0.4"/><line x1="8" y1="10" x2="12" y2="11" stroke="currentColor" stroke-width="0.5" opacity="0.4"/></svg>
-      Mind Map
-    </button>
-    <button class="nav-btn" data-view="skills">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="2" y="10" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="9" y="10" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.2"/></svg>
-      Skills
-    </button>
-    <button class="nav-btn" data-view="rag">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.2"/><path d="M8 2 L8 5 M8 11 L8 14 M2 8 L5 8 M11 8 L14 8" stroke="currentColor" stroke-width="1"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/></svg>
-      RAG Corpus
-    </button>
-    <button class="nav-btn" data-view="health">
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 2 L8 9 M8 11 L8 11.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="13" r="0.8" fill="currentColor"/></svg>
-      Health
-    </button>
-  </nav>
+  <div class="sidebar-section">
+    <div class="sidebar-label">Chats</div>
+    <div id="chat-list" class="chat-list"></div>
+  </div>
 
-  <div class="sidebar-footer">
-    <div class="status-dot" id="status-dot"></div>
-    <span id="status-text">Connecting...</span>
+  <div class="sidebar-section">
+    <div class="sidebar-label">Workspace</div>
+    <button class="side-item" data-open-view="mindmap">Adapter map</button>
+    <button class="side-item" data-open-view="skills">Skills</button>
+    <button class="side-item" data-open-view="rag">RAG corpus</button>
+    <button class="side-item" data-open-view="health">Health</button>
+  </div>
+
+  <div class="sidebar-foot">
+    <div class="status"><span class="status-dot" id="status-dot"></span><span id="status-text">Connecting…</span></div>
+    <button class="icon-btn" id="btn-theme" title="Light or dark" aria-label="Toggle theme">
+      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M13 9.5A5.5 5.5 0 0 1 6.5 3a5.5 5.5 0 1 0 6.5 6.5z" fill="currentColor"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-settings" title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><circle cx="8" cy="8" r="2.4" stroke="currentColor" fill="none" stroke-width="1.3"/><path d="M8 1.6v1.6M8 12.8v1.6M14.4 8h-1.6M3.2 8H1.6M12.5 3.5l-1.1 1.1M4.6 11.4l-1.1 1.1M12.5 12.5l-1.1-1.1M4.6 4.6L3.5 3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+    </button>
   </div>
 </aside>
 
-<!-- Main content -->
 <main id="main">
+  <header id="topbar">
+    <button class="icon-btn" id="btn-show-sidebar" title="Show sidebar" aria-label="Show sidebar">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" fill="none" stroke-width="1.3"/><line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" stroke-width="1.3"/></svg>
+    </button>
+    <div class="topbar-title" id="conversation-title">New chat</div>
+    <div class="topbar-right">
+      <span class="chip" id="model-chip">—</span>
+    </div>
+  </header>
 
-  <!-- Chat Panel -->
-  <section id="chat-panel">
-    <div class="chat-header">
-      <div class="chat-header-left">
-        <span class="chat-model-badge" id="chat-model-badge">Loading...</span>
-        <span class="chat-title">Chat</span>
-      </div>
-      <div class="chat-header-right">
-        <button class="action-btn" id="btn-clear-chat" title="Clear chat">✕</button>
-        <button class="action-btn" id="btn-toggle-chat" title="Toggle chat panel">−</button>
+  <div id="thread" class="thread">
+    <div class="welcome" id="welcome">
+      <h1 id="welcome-title">Symbio</h1>
+      <p class="welcome-sub">A local agent that trains itself on what you correct.</p>
+      <div class="suggestions">
+        <button class="suggestion" data-send="What do you know about me?">What do you know about me?</button>
+        <button class="suggestion" data-send="Look at my screen and tell me what's in front.">Look at my screen</button>
+        <button class="suggestion" data-send="What skills have you trained adapters for?">List your trained skills</button>
       </div>
     </div>
-    <div class="chat-messages" id="chat-messages">
-      <div class="chat-welcome">
-        <div class="welcome-icon">🧠</div>
-        <div class="welcome-text">Symbio Desktop</div>
-        <div class="welcome-sub">Local-first AI agent with self-finetuning adapters</div>
-      </div>
+  </div>
+
+  <div class="composer-wrap">
+    <div class="read-only-banner" id="read-only-banner" hidden>
+      Reading a saved transcript. <button class="link-btn" id="btn-back-live">Back to the live chat</button>
     </div>
-    <div class="chat-confirm" id="chat-confirm" style="display:none">
-      <div class="confirm-text" id="confirm-text"></div>
-      <div class="confirm-buttons">
-        <button class="confirm-btn deny" id="btn-confirm-deny">Deny</button>
-        <button class="confirm-btn allow" id="btn-confirm-allow">Allow</button>
-      </div>
-    </div>
-    <div class="chat-input-area">
-      <textarea id="chat-input" placeholder="Message Symbio..." rows="1"></textarea>
-      <button id="btn-send" title="Send message">
-        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2 9 L16 9 M10 3 L16 9 L10 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <form class="composer" id="composer">
+      <textarea id="input" rows="1" placeholder="Message Symbio…" autofocus></textarea>
+      <button type="submit" id="btn-send" disabled aria-label="Send">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 13V3M4 7l4-4 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
       </button>
-    </div>
-  </section>
-
-  <!-- Resize handle -->
-  <div class="resize-handle" id="resize-handle"></div>
-
-  <!-- Bottom panel: views -->
-  <section id="bottom-panel">
-
-    <!-- Mind Map View -->
-    <section id="view-mindmap" class="view active">
-      <div class="view-header">
-        <h1>Adapter Ecosystem</h1>
-        <div class="view-actions">
-          <button class="action-btn" id="btn-zoom-in" title="Zoom in">+</button>
-          <button class="action-btn" id="btn-zoom-out" title="Zoom out">−</button>
-          <button class="action-btn" id="btn-zoom-fit" title="Fit to screen">⊡</button>
-          <button class="action-btn" id="btn-refresh" title="Refresh data">↻</button>
-        </div>
-      </div>
-      <div class="mindmap-container" id="mindmap">
-        <div class="mindmap-legend">
-          <span class="legend-item"><span class="legend-dot headmaster"></span> Headmaster</span>
-          <span class="legend-item"><span class="legend-dot worker"></span> Workers</span>
-          <span class="legend-item"><span class="legend-dot skill"></span> Skills</span>
-          <span class="legend-item"><span class="legend-dot rag"></span> RAG</span>
-          <span class="legend-item"><span class="legend-dot training"></span> Training</span>
-        </div>
-        <svg id="mindmap-svg"></svg>
-      </div>
-      <div class="detail-panel hidden" id="detail-panel">
-        <div class="detail-placeholder">Click a node for details</div>
-      </div>
-      <div class="watermark">
-        <span>Symbio Pro</span>
-        <span class="watermark-dot">·</span>
-        <span>Local-first AI</span>
-        <span class="watermark-dot">·</span>
-        <span>Self-finetuning</span>
-      </div>
-    </section>
-
-    <!-- Skills View -->
-    <section id="view-skills" class="view">
-      <div class="view-header">
-        <h1>Skill Adapters</h1>
-        <span class="count-badge" id="skill-count">0</span>
-      </div>
-      <div class="skills-grid" id="skills-grid"></div>
-    </section>
-
-    <!-- RAG View -->
-    <section id="view-rag" class="view">
-      <div class="view-header"><h1>RAG Corpus</h1></div>
-      <div class="rag-stats" id="rag-stats"></div>
-    </section>
-
-    <!-- Health View -->
-    <section id="view-health" class="view">
-      <div class="view-header"><h1>System Health</h1></div>
-      <div class="health-content" id="health-content"></div>
-    </section>
-
-  </section>
+    </form>
+    <div class="composer-hint">Enter to send · Shift+Enter for a new line · runs entirely on this Mac</div>
+  </div>
 </main>
 
-<script src="/static/app.js"></script>
+<section id="workspace">
+  <header class="ws-head">
+    <nav class="ws-tabs">
+      <button class="ws-tab active" data-view="mindmap">Adapter map</button>
+      <button class="ws-tab" data-view="skills">Skills</button>
+      <button class="ws-tab" data-view="rag">RAG corpus</button>
+      <button class="ws-tab" data-view="health">Health</button>
+      <button class="ws-tab" data-view="sessions">Sessions</button>
+    </nav>
+    <div class="ws-actions">
+      <button class="icon-btn" id="btn-zoom-out" title="Zoom out">−</button>
+      <button class="icon-btn" id="btn-zoom-in" title="Zoom in">+</button>
+      <button class="icon-btn" id="btn-zoom-fit" title="Fit">⊡</button>
+      <button class="icon-btn" id="btn-refresh" title="Refresh">↻</button>
+      <button class="icon-btn" id="btn-layout" title="Move this panel: right, left, below">⇄</button>
+      <button class="icon-btn" id="btn-swap" title="Swap the chat and this panel">⇆</button>
+      <button class="icon-btn" id="btn-close-workspace" title="Close" aria-label="Close workspace">✕</button>
+    </div>
+  </header>
+
+  <section id="view-mindmap" class="view active">
+    <div class="mindmap-container" id="mindmap">
+      <div class="mindmap-legend">
+        <span class="legend-item"><span class="legend-dot headmaster"></span> Headmaster</span>
+        <span class="legend-item"><span class="legend-dot worker"></span> Workers</span>
+        <span class="legend-item"><span class="legend-dot skill"></span> Skills</span>
+        <span class="legend-item"><span class="legend-dot rag"></span> RAG</span>
+        <span class="legend-item"><span class="legend-dot training"></span> Training</span>
+      </div>
+      <svg id="mindmap-svg"></svg>
+    </div>
+    <div class="detail-panel hidden" id="detail-panel">
+      <div class="detail-placeholder">Click a node for details</div>
+    </div>
+  </section>
+
+  <section id="view-skills" class="view">
+    <div class="view-header"><h1>Skill adapters</h1><span class="count-badge" id="skill-count">0</span></div>
+    <div class="skills-grid" id="skills-grid"></div>
+  </section>
+
+  <section id="view-rag" class="view">
+    <div class="view-header"><h1>RAG corpus</h1></div>
+    <div class="rag-stats" id="rag-stats"></div>
+  </section>
+
+  <section id="view-sessions" class="view">
+    <div class="view-header"><h1>Sessions</h1><span class="count-badge" id="session-count">0</span></div>
+    <div class="sessions-split">
+      <div class="session-list" id="session-list"></div>
+      <div class="session-detail" id="session-detail"><div class="detail-placeholder">Pick a session to read it</div></div>
+    </div>
+  </section>
+
+  <section id="view-health" class="view">
+    <div class="view-header"><h1>System health</h1></div>
+    <div class="health-content" id="health-content"></div>
+  </section>
+</section>
+
+<div id="scrim"></div>
+
+<section id="settings" hidden>
+  <div class="settings-panel" role="dialog" aria-label="Settings">
+    <header class="settings-head">
+      <h2>Settings</h2>
+      <button class="icon-btn" id="btn-close-settings" aria-label="Close settings">✕</button>
+    </header>
+    <div class="settings-body" id="settings-body"></div>
+  </div>
+</section>
+
+<script src="/static/chat.js"></script>
+<script src="/static/workspace.js"></script>
+<script src="/static/settings.js"></script>
 </body>
 </html>

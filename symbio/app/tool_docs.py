@@ -42,6 +42,7 @@ an agent with no tools.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -149,7 +150,23 @@ def parse_tool_file(path: Path) -> dict[str, Any] | None:
         "parameters": parameters,
         "_family": meta.get("family", "other"),
         "_group": meta.get("group", ""),
+        "_seeded": meta.get("seeded", ""),
     }
+
+
+def schema_fingerprint(description: str, parameters: dict[str, Any]) -> str:
+    """A short hash of what a tool file SAYS, ignoring how it is laid out.
+
+    Written into the file when it is seeded, so a later sync can tell a file
+    nobody has touched from one the user has edited. Without that, a
+    description improved in code is invisible on every install that already
+    seeded the old one -- the shipped guard that the running config never
+    sees.
+    """
+    payload = json.dumps(
+        {"d": " ".join((description or "").split()), "p": parameters or {}},
+        sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def render_tool_file(schema: dict[str, Any], family: str, group: str) -> str:
@@ -159,6 +176,7 @@ def render_tool_file(schema: dict[str, Any], family: str, group: str) -> str:
         f"name: {schema['name']}\n"
         f"family: {family}\n"
         f"group: {group}\n"
+        f"seeded: {schema_fingerprint(schema.get('description', ''), schema.get('parameters', {}))}\n"
         "---\n\n"
         f"{schema.get('description', '').strip()}\n\n"
         "```json\n"
@@ -308,3 +326,60 @@ def docs_for(schemas: list[dict[str, Any]], family_of,
         [{"name": s["name"], "description": s["description"],
           "parameters": s["parameters"]} for s in wanted],
         ensure_ascii=False, separators=(",", ":"))
+
+
+def refresh(schemas: list[dict[str, Any]],
+            families: dict[str, str],
+            groups: dict[str, Any],
+            hermes_names: dict[str, str] | None = None,
+            names: list[str] | None = None,
+            force: bool = False) -> tuple[list[str], list[str]]:
+    """Rewrite tool files from the built-ins. Returns (rewritten, kept).
+
+    A file is rewritten when its contents still fingerprint as the version
+    that was seeded -- nobody has edited it -- and the built-in has since
+    changed. Anything the user has touched is KEPT and named in the second
+    list, because this directory is theirs; `force` (or naming the file
+    explicitly with `names`) is the way to overwrite one deliberately.
+
+    Files seeded before fingerprints existed carry no marker. They cannot be
+    told apart from an edit, so they are kept and reported rather than
+    silently replaced.
+    """
+    hermes_names = hermes_names or {}
+    wanted = set(names or [])
+    rewritten: list[str] = []
+    kept: list[str] = []
+    for schema in schemas:
+        name = schema["name"]
+        if wanted and name not in wanted:
+            continue
+        path = constants.TOOLS_DIR / f"{name}.md"
+        if not path.exists():
+            continue
+        parsed = parse_tool_file(path)
+        if parsed is None:
+            kept.append(name)
+            continue
+        current = schema_fingerprint(schema.get("description", ""),
+                                     schema.get("parameters", {}))
+        on_disk = schema_fingerprint(parsed["description"], parsed["parameters"])
+        if on_disk == current:
+            continue  # already says what the code says
+        unedited = bool(parsed.get("_seeded")) and parsed["_seeded"] == on_disk
+        if not (unedited or force or name in wanted):
+            kept.append(name)
+            continue
+        internal = hermes_names.get(name, name)
+        group = groups.get(internal, "")
+        if isinstance(group, tuple):
+            group = group[0]
+        try:
+            path.write_text(
+                render_tool_file(schema, families.get(internal, "other"),
+                                 str(group)),
+                encoding="utf-8")
+            rewritten.append(name)
+        except Exception:
+            kept.append(name)
+    return rewritten, kept

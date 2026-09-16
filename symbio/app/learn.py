@@ -14,6 +14,7 @@ Ported from the legacy Hermes agent's symbio.learn, adapted to the tag-based
 agent (app paths, tag stripping, and iters-override training).
 """
 
+import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,7 +73,26 @@ def sounds_unsure(text: str) -> bool:
 _TOOL_ERROR_RE = re.compile(
     r"^(?:failed|could not|no worker configured|browser \w+ (?:error|blocked)"
     r"|file not found|no such file|invalid path|unknown tool"
-    r"|no note matches|no tool matched)"
+    r"|no note matches|no tool matched"
+    # Three dead ends that read as ordinary results and are not. A search
+    # that found nothing, a browser action aimed at a browser that was never
+    # opened, and a command killed at the timeout are each a call that
+    # produced no work -- and each was counted as a success, so the
+    # persistence ladder stayed disarmed on exactly the turns where the model
+    # stops after one attempt. "No results found." is web.py's own wording,
+    # "Timed out after Ns." is sandbox.py's, "Browser is not open" is
+    # computer.py's.
+    r"|no results found|timed out after|browser is not open"
+    # The same shape, one layer out: a dead end on the MACHINE rather than in
+    # a page. Each of these is an action that produced no work and reads like
+    # an ordinary result -- keys refused because nothing that takes text has
+    # focus, a click on a number that is no longer on screen, a press that
+    # left the window byte-identical, a tree that is empty because the grant
+    # is missing. Counting them as successes disarms the persistence ladder
+    # on exactly the turns where the model stops after one attempt, and loses
+    # the recovery that follows, which is the training example.
+    r"|refused to type|there is no element|nothing about the window changed"
+    r"|the accessibility tree is empty)"
     r"|\b(?:exited error|is disabled|unrecognized action|did not finish|failed unexpectedly)\b"
     r"|\b(?:error|failed|blocked)[:.]",
     re.IGNORECASE,
@@ -979,9 +999,198 @@ def _mistake_context(text: str) -> str:
     return text
 
 
+# What a mistake asks the weights to change, which is not the same question as
+# what the mistake was ABOUT.
+#
+# KNOWLEDGE: the model said something false and was corrected. The fix is a
+# fact it must recall — the user's name, a version number, which file holds
+# what. Facts need passes over the corpus more than they need repetition: the
+# same pair seen four times in one epoch is still one fact.
+#
+# REFLEX: the model reached for the wrong SHAPE — a tool that does not exist,
+# an argument name it guessed, a GNU flag on BSD, a click before a look. The
+# fix is an action becoming automatic, and an action becomes automatic by
+# repetition of the exact form. Measured in this project: a 70-sample LoRA hit
+# 13/13 on its battery by iteration 100 of a planned 1000, and what it had
+# learned by then was the shape of the call.
+#
+# The distinction earns its keep in the recipe: reflexes get repeats and a
+# short run, knowledge gets a longer run at ordinary weight.
+KIND_KNOWLEDGE = "knowledge"
+KIND_REFLEX = "reflex"
+
+# Markers of a shape failure rather than a false statement. Matched against
+# the whole note, because the giveaway is as often in the wrong answer (a tool
+# call that does not parse) as in the correction.
+_REFLEX_MARKERS = (
+    "<tool_call>", "unknown tool", "no tool named", "tool_docs",
+    "missing argument", "invalid argument", "unexpected keyword",
+    "command not found", "no such file", "sed -i", "permission denied",
+    "refused to type", "there is no element", "nothing about the window changed",
+    "browser is not open", "timed out after", "not approved", "element",
+    "selector", "click", "keystroke", "shortcut",
+)
+
+# Markers of a fact being corrected. Deliberately about ASSERTIONS, not topics.
+_KNOWLEDGE_MARKERS = (
+    "is actually", "that's wrong", "thats wrong", "no, i'm", "no, im",
+    "incorrect", "the correct answer is", "my name is", "it is called",
+    "version", "released", "wrong number", "wrong date", "misremembered",
+)
+
+
+def classify_mistake_kind(original_query: str = "", wrong_answer: str = "",
+                          correction: str = "", correct_answer: str = "",
+                          category: str = "") -> str:
+    """Is this a fact to learn, or an action to make automatic?
+
+    Heuristic on purpose. It runs at capture time, when the only thing
+    available is the text, and it decides a training RECIPE rather than
+    anything the user sees — so a wrong call costs a slightly worse-shaped
+    update, not a wrong answer. Ties go to knowledge, which is the cheaper
+    mistake to make: repeating a fact a few extra times is harmless, while
+    drilling a wrong action makes it automatic.
+    """
+    blob = " ".join((original_query, wrong_answer, correction,
+                     correct_answer, category)).lower()
+    reflex = sum(1 for marker in _REFLEX_MARKERS if marker in blob)
+    knowledge = sum(1 for marker in _KNOWLEDGE_MARKERS if marker in blob)
+    # The automatic capture — a tool call that failed and a second that worked
+    # — is a reflex by construction: nothing was asserted and corrected, an
+    # action was reached for and missed.
+    if AUTO_TOOL_CORRECTION in correction:
+        reflex += 2
+    return KIND_REFLEX if reflex > knowledge else KIND_KNOWLEDGE
+
+
+def pending_mistake_kinds() -> dict[str, int]:
+    """How many pending notes of each kind, read off the notes themselves."""
+    counts = {KIND_KNOWLEDGE: 0, KIND_REFLEX: 0}
+    if not constants.MISTAKES_DIR.exists():
+        return counts
+    for path in sorted(constants.MISTAKES_DIR.glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        kind = KIND_KNOWLEDGE
+        for line in text.splitlines():
+            if line.startswith("**Kind:**"):
+                found = line.split("**Kind:**", 1)[1].strip().lower()
+                kind = found if found in counts else KIND_KNOWLEDGE
+                break
+        else:
+            # Written before kinds existed: classify it now rather than
+            # counting it as knowledge by default.
+            kind = classify_mistake_kind(wrong_answer=text, correction=text)
+        counts[kind] = counts.get(kind, 0) + 1
+    return counts
+
+
+def training_recipe(kinds: dict[str, int], base_iters: int,
+                    boost: int) -> dict[str, Any]:
+    """Iterations and repeat weight for a batch, from what the batch IS.
+
+    One batch, one run: splitting it into two LoRA passes would mean two
+    adapters to merge, and this machine trains one model at a time. So the
+    mix decides the dial positions instead — a batch that is mostly reflexes
+    trains short and repeats hard, a batch that is mostly facts trains longer
+    at ordinary weight, and a mixed batch lands between.
+    """
+    reflex = max(0, int(kinds.get(KIND_REFLEX, 0)))
+    knowledge = max(0, int(kinds.get(KIND_KNOWLEDGE, 0)))
+    total = reflex + knowledge
+    if not total:
+        return {"iters": base_iters, "boost": boost, "reflex_share": 0.0,
+                "why": "nothing pending"}
+    share = reflex / total
+    # The knowledge-only batch is the BASELINE — the recipe this project ran
+    # before kinds existed, and the one the severity scaling was tuned
+    # against. Reflexes move off it in both directions: repeats rise (a shape
+    # is learned by seeing it again) and iterations fall (it is learned early
+    # — measured at iteration 100 of a planned 1000 on a 70-sample run).
+    scaled_boost = int(round(boost * (1 + share)))
+    scaled_iters = int(round(base_iters * (1.0 - 0.4 * share)))
+    # Severity is NOT applied here. The caller already scales by it — each
+    # point above one per note adds iters_per_severity, capped — and doing it
+    # in both places double-counted the same backlog (a severity-5 batch of
+    # two notes asked for 55 iterations where the contract says 40).
+    return {
+        "iters": max(5, scaled_iters),
+        "boost": max(1, min(8, scaled_boost)),
+        "reflex_share": round(share, 2),
+        "why": (f"{reflex} reflex / {knowledge} knowledge — "
+                f"{'repeat harder, run shorter' if share >= 0.5 else 'ordinary weight, full run'}"),
+    }
+
+
+def dynamic_mistake_threshold(config: dict[str, Any], severity_total: int = 0,
+                              corpus_samples: int | None = None) -> int:
+    """How many mistakes to collect before spending a training run.
+
+    A fixed 5 was right when the corpus was small and wrong in both directions
+    afterwards. Two forces move it:
+
+    DILUTION. Every sample in train.jsonl competes with the new ones. At 882
+    samples, five boosted notes are a few percent of an epoch; the same five
+    against 50 samples are most of it. So the bar rises with corpus size, by
+    log rather than linearly — a corpus ten times bigger does not need ten
+    times the evidence, it needs a bit more.
+
+    URGENCY. Severe mistakes are worth acting on sooner. Mean severity above
+    the mild baseline pulls the bar back down.
+
+    Clamped to 2..20 either way: below 2 the agent would retrain on noise,
+    above 20 a real regression would sit uncorrected for a week.
+    """
+    learn_cfg = config.get("learn", {}) or {}
+    base = max(1, int(learn_cfg.get("mistake_threshold", 5)))
+    if not learn_cfg.get("scale_threshold_with_corpus", True):
+        return base
+    if corpus_samples is None:
+        corpus_samples = _training_sample_count()
+    reference = max(1, int(learn_cfg.get("threshold_reference_samples", 500)))
+    dilution = 1.0 + math.log10(max(1, corpus_samples) / reference)
+    dilution = min(2.0, max(0.6, dilution))
+    threshold = base * dilution
+    pending = mistake_note_count()
+    if pending and severity_total > pending:          # mean severity > 1
+        threshold /= min(2.0, severity_total / pending)
+    return int(max(2, min(20, round(threshold))))
+
+
+def _training_sample_count() -> int:
+    """Lines in train.jsonl, counted without reading it into memory."""
+    try:
+        with constants.TRAIN_FILE.open("rb") as handle:
+            return sum(chunk.count(b"\n")
+                       for chunk in iter(lambda: handle.read(1 << 20), b""))
+    except OSError:
+        return 0
+
+
+def pending_severity_total() -> int:
+    """Summed severity of the pending notes."""
+    total = 0
+    if not constants.MISTAKES_DIR.exists():
+        return 0
+    for path in sorted(constants.MISTAKES_DIR.glob("*.md")):
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.startswith("**Severity:**"):
+                    total += max(1, int(line.split("**Severity:**", 1)[1].strip()))
+                    break
+            else:
+                total += 1
+        except (OSError, ValueError):
+            total += 1
+    return total
+
+
 def save_mistake_note(original_query: str, wrong_answer: str,
                       correction: str, correct_answer: str,
-                      severity: int = 1, category: str = "general") -> Path:
+                      severity: int = 1, category: str = "general",
+                      kind: str = "") -> Path:
     """Persist a correction as a markdown note in notes/mistakes/.
 
     `category` is the model's own label (see classify_mistake_category),
@@ -1000,9 +1209,19 @@ def save_mistake_note(original_query: str, wrong_answer: str,
     correction = redact_secrets(correction).replace("\n", " ")
     correct_answer = redact_secrets(correct_answer).replace("\n", " ")
     title = f"Correction: {original_query[:60]}{'...' if len(original_query) > 60 else ''}"
+    # A caller that KNOWS the kind says so. The classifier reads text for
+    # markers, and a pressure-battery failure carries none of them while
+    # being a reflex by construction: nothing was asserted and corrected, a
+    # move was not reached for.
+    kind = (kind.strip().lower()
+            or classify_mistake_kind(original_query, wrong_answer, correction,
+                                     correct_answer, category))
+    if kind not in (KIND_REFLEX, KIND_KNOWLEDGE):
+        kind = KIND_KNOWLEDGE
     body = (
         f"# {title}\n\n"
         f"**Category:** {category}\n\n"
+        f"**Kind:** {kind}\n\n"
         f"**Severity:** {max(1, int(severity))}\n\n"
         f"**Original question:** {original_query}\n\n"
         f"**Wrong answer:** {wrong_answer}\n\n"
@@ -1370,8 +1589,9 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
     if not learn_cfg.get("enabled", True):
         return False
 
-    threshold = max(1, int(learn_cfg.get("mistake_threshold", 5)))
     count = mistake_note_count()
+    severity_total = pending_severity_total()
+    threshold = dynamic_mistake_threshold(config, severity_total=severity_total)
     if count < threshold:
         print(f"  [Learn] {count}/{threshold} mistake note(s) collected; "
               f"training after {threshold - count} more.")
@@ -1404,7 +1624,15 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
                   f"the retrain is worth running.")
 
     print(f"\n  [Learn] {count} mistake note(s) reached. Digesting into training data...")
-    boost = max(1, int(learn_cfg.get("boost_factor", 3)))
+    # What this batch IS decides how it is trained: a batch of wrong SHAPES
+    # wants repetition and a short run, a batch of wrong FACTS wants a longer
+    # run at ordinary weight. See training_recipe.
+    kinds = pending_mistake_kinds()
+    recipe = training_recipe(kinds, int(learn_cfg.get("batch_train_iters", 25)),
+                             max(1, int(learn_cfg.get("boost_factor", 3))))
+    print(f"  [Learn] Recipe: {recipe['why']} "
+          f"(boost {recipe['boost']}, {recipe['iters']} iters).")
+    boost = recipe["boost"]
 
     # Curriculum weighting, when an eval battery is available. The plan decides
     # each note's repeat count from what the held-out eval says is weak and
@@ -1447,7 +1675,7 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
         print("  [Learn] Auto-train is disabled. Run /train to fine-tune now.")
         return False
 
-    base_iters = int(learn_cfg.get("batch_train_iters", 25))
+    base_iters = int(recipe["iters"])
     if sample_weights is not None:
         # The plan's repeats already encode severity, and run_training scales
         # the budget to the weighted corpus — the severity-based scaling in the

@@ -13,6 +13,7 @@ import json
 import math
 import re
 import shlex
+import time
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +61,18 @@ def _coords(params: dict[str, Any]) -> tuple[int, int] | None:
     if not (math.isfinite(x) and math.isfinite(y)) or x < 0 or y < 0:
         return None
     return int(x), int(y)
+
+
+def _ax_centre(element: dict[str, Any]) -> tuple[int, int]:
+    """The middle of a control's frame, in the points the mouse moves in.
+
+    Accessibility frames are already logical points on the main display's
+    origin — the same space pyautogui clicks in — so unlike a coordinate read
+    off a screenshot there is no Retina scale to undo here.
+    """
+    from symbio import ax
+
+    return ax.centre(element)
 
 
 def _browser_peek(browser, config=None) -> str:
@@ -310,6 +323,126 @@ class ToolsMixin:
     # evidence than a rendered-text diff. Leave the judgement to it.
     _MUST_CHANGE_THE_PAGE = ("browser_click", "browser_click_at", "browser_press")
 
+    # How much of one recalled entry is shown. A note is a whole document and
+    # the answer is usually its first paragraph; pasting five notes in full
+    # costs more context than the turn that asked for them is worth.
+    _RECALL_CHARS = 700
+    _RECALL_HITS = 5
+
+    def _recall(self, params: dict[str, Any]) -> str:
+        """Search what has been saved: notes, memory, profile, past sessions.
+
+        The memory family was write-only. write_note, save_memory,
+        save_skill and set_standing_instruction all put things in, and nothing
+        took anything out -- recall happened only through the automatic RAG
+        block, which the model does not control and cannot ask for. So a
+        question about something it had saved had no tool behind it, and the
+        logs show what that produced: "I don't have access to personal
+        information like your name", with zero tool calls, on an install whose
+        notes/ held the answer.
+
+        Returning nothing is a result, not a failure. An empty search is the
+        only honest ground for saying there is nothing saved, and it is said
+        here in those words so the model reports a lookup rather than a
+        limitation.
+        """
+        query = str(params.get("query") or params.get("q")
+                    or params.get("text") or "").strip()
+        if not query:
+            # No query is not a malformed call, it is "what have I got?" --
+            # which is what a model emitting list_notes means. Answering it
+            # with an error would send it back to the one conclusion this
+            # tool exists to prevent: that it cannot look.
+            return self._recall_inventory()
+        scope = str(params.get("scope") or "memory").strip().lower()
+        if scope not in ("memory", "sessions", "all"):
+            scope = "memory"
+
+        found: list[tuple[str, str]] = []
+        searched: list[str] = []
+        if scope in ("memory", "all"):
+            searched.append("notes")
+            try:
+                for hit in self.retriever.search_notes(query):
+                    found.append((f"note {hit.get('title', '?')}",
+                                  str(hit.get("text", ""))))
+            except Exception as e:
+                found.append(("notes", f"(note search failed: {e})"))
+            searched.extend(["saved memory", "profile"])
+            found.extend(self._recall_stores(query))
+        if scope in ("sessions", "all"):
+            searched.append("past sessions")
+            try:
+                for hit in self.retriever.search_sessions(query):
+                    found.append((f"session {hit.get('title', '?')}",
+                                  str(hit.get("text", ""))))
+            except Exception as e:
+                found.append(("sessions", f"(session search failed: {e})"))
+
+        if not found:
+            return (
+                f"No saved entry matches {query!r}. Searched: "
+                f"{', '.join(searched)}. That is the answer -- nothing was "
+                "ever saved about this, so say so and, if it matters, ask."
+            )
+
+        body = "\n\n".join(
+            f"[{label}]\n{text.strip()[:self._RECALL_CHARS]}"
+            for label, text in found[:self._RECALL_HITS])
+        # Saved text is untrusted like any other retrieved content: a note can
+        # hold whatever a web page said when it was written, and a recalled
+        # procedure that says "reply X and stop" has been obeyed before.
+        self._untrusted_this_turn = True
+        return (f"{min(len(found), self._RECALL_HITS)} match(es) for "
+                f"{query!r}:\n"
+                + safety.wrap_untrusted(
+                    "recalled from your own saved memory", body,
+                    safety.scan_for_injection(body, self.config)))
+
+    def _recall_inventory(self) -> str:
+        """Every note title, newest first -- the answer to "what do you have?"."""
+        try:
+            paths = sorted(constants.NOTES_DIR.glob("*.md"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+        except Exception as e:
+            return f"Could not list notes: {e}"
+        if not paths:
+            return ("No notes are saved yet. Saved memory and the user profile "
+                    "are already in front of you, above this turn.")
+        shown = [p.stem for p in paths[:40]]
+        more = f" (+{len(paths) - len(shown)} more)" if len(paths) > len(shown) else ""
+        return ("Saved notes, newest first" + more + ":\n- "
+                + "\n- ".join(shown)
+                + "\nCall recall with a query to read one.")
+
+    def _recall_stores(self, query: str) -> list[tuple[str, str]]:
+        """The always-on stores, returned only when the query touches them.
+
+        These two files are already in every prompt, so repeating them whole
+        on an unrelated lookup is pure cost. They are included when a
+        discriminative word of the query appears in them -- which is the case
+        that matters, because the model asking at all means it did not trust
+        or did not see the copy it was given.
+        """
+        from symbio import rag
+
+        terms = {t for t in rag._normalize(query) if len(t) > 2}
+        out: list[tuple[str, str]] = []
+        for label, path in (("saved memory", constants.MEMORY_FILE),
+                            ("profile", constants.PROFILE_FILE)):
+            try:
+                if not path.exists():
+                    continue
+                text = path.read_text(encoding="utf-8").strip()
+            except Exception:
+                continue
+            if not text:
+                continue
+            words = set(rag._normalize(text))
+            if terms and terms & words:
+                out.append((label, text))
+        return out
+
     def _no_effect_note(self, name: str, before: str, out: str) -> str:
         """A sentence saying the action left the page untouched, or "".
 
@@ -447,7 +580,10 @@ class ToolsMixin:
         # different places — a selector needs no coordinates and no focus, a
         # coordinate needs no selector to be stable.
         lines.append("  Fill by selector, or click the coordinates; the type "
-                     "is checked afterwards either way.]")
+                     "is checked afterwards either way. Several fields at "
+                     "once: fill_form. Sending the form: submit_form, with "
+                     "expect_text = the words that must come back rendered on "
+                     "the page.]")
         return "\n".join(lines)
 
     def _can_look(self) -> bool:
@@ -477,6 +613,30 @@ class ToolsMixin:
 
         target = str(params.get("target") or "browser").strip().lower()
         question = str(params.get("question") or "").strip()
+
+        # The desktop's own answer, before any model is asked. macOS publishes
+        # every native control's role, title and frame through the same API a
+        # screen reader uses: exact text instead of text read off 11px type,
+        # exact frames with no patch floor and no Retina scale to undo, and no
+        # second set of weights resident next to the headmaster. Vision stays
+        # for what has no tree — a canvas, a game, a screen share — which is
+        # the only place it was ever the better instrument.
+        if target.startswith("desk") or target.startswith("screen"):
+            if not self._desktop_enabled():
+                return ("Looking at the whole desktop is disabled. Enable the "
+                        "'desktop' tool group first, or use target='browser' "
+                        "to look at the open page.")
+            listing = self._ax_look(question)
+            if listing:
+                return self._wrap_look(listing)
+            # No tree. If the reason is the Accessibility grant, say that
+            # rather than falling through to a vision failure: one setting
+            # away is the exact list of controls, and a model told only
+            # "vision is unavailable" concludes it cannot see the screen at
+            # all — which is now false.
+            grant_note = getattr(self, "_ax_grant_note", "")
+            if grant_note and not vision.available():
+                return grant_note
 
         if not vision.is_enabled(self.config):
             return ("Vision is disabled. Enable it with "
@@ -556,10 +716,15 @@ class ToolsMixin:
                     lines.append("\nEverything else on the page:")
                     lines.extend(self._control_line(c) for c in rest[:12])
                 lines.append(
-                    "\nFill a field with browser_type selector=..., press a "
-                    "button with browser_click_at at its coordinates. Look "
-                    "with see_screen only if you need something the page "
-                    "cannot name — an image, a canvas, or how it LOOKS.")
+                    "\nFill one field with browser_type selector=..., or all "
+                    "of them at once with fill_form {\"fields\": {selector: "
+                    "text}}. Send the form with submit_form — pass expect_text "
+                    "= the words that must come back rendered on the page, and "
+                    "it is the code, not you, that decides whether it went. "
+                    "Press any other button with browser_click_at at its "
+                    "coordinates. Look with see_screen only if you need "
+                    "something the page cannot name — an image, a canvas, or "
+                    "how it LOOKS.")
                 return self._wrap_look("\n".join(lines))
 
         if shot is None:
@@ -708,20 +873,158 @@ class ToolsMixin:
             if slept:
                 wake_fn()
 
+    # How long a listing of controls is worth acting on. Elements are live
+    # handles into another process's tree: they survive a click, they do not
+    # survive the window being replaced. A minute is long enough for a look
+    # and the action that follows it, short enough that a stale number
+    # re-reads rather than pressing whatever now sits in that slot.
+    _AX_TTL = 60.0
+
+    def _ax_look(self, question: str = "", limit: int = 40) -> str:
+        """The frontmost window as a numbered list of controls, or "".
+
+        An empty string means "this is not answerable from the tree" — no
+        Accessibility grant, or a window that draws its own interface — and
+        the caller falls through to vision, which is the instrument for that.
+        """
+        from symbio import ax
+
+        if not ax.available():
+            return ""
+        snap = ax.snapshot(limit=limit)
+        if not snap.get("ok"):
+            # A missing grant is worth saying out loud rather than silently
+            # spending 10 GB of model swap on a screenshot: it is one setting
+            # away from the exact answer.
+            self._ax_grant_note = str(snap.get("reason") or "")
+            return ""
+        if not snap.get("elements"):
+            return ""
+        self._last_ax = snap
+        listing = ax.render(snap, limit=limit)
+        if question:
+            hits = [e for e in snap["elements"]
+                    if self._words_overlap(question, e["label"])]
+            if hits:
+                listing += ("\n\nMatching " + repr(question) + ": "
+                            + ", ".join(f"{e['index']} ({e['label']!r})"
+                                        for e in hits[:6]))
+            else:
+                listing += (f"\n\nNothing in this window is labelled like "
+                            f"{question!r}. The tree is what the window "
+                            "publishes, so that control is not there under "
+                            "that name — check the list above before "
+                            "concluding it is hidden.")
+        return listing
+
+    @staticmethod
+    def _words_overlap(question: str, label: str) -> bool:
+        wanted = {w for w in re.split(r"[^a-z0-9]+", question.lower())
+                  if len(w) > 2}
+        have = {w for w in re.split(r"[^a-z0-9]+", label.lower()) if len(w) > 2}
+        return bool(wanted & have)
+
+    def _ax_element(self, index: Any) -> tuple[dict[str, Any] | None, str]:
+        """The element a number refers to, re-reading the tree if it is stale."""
+        from symbio import ax
+
+        try:
+            number = int(index)
+        except (TypeError, ValueError):
+            return None, (f"{index!r} is not an element number. Call "
+                          "see_screen with target='desktop' and use the "
+                          "numbers it lists.")
+        snap = getattr(self, "_last_ax", None)
+        if not snap or time.time() - snap.get("taken_at", 0) > self._AX_TTL:
+            snap = ax.snapshot(limit=60)
+            if not snap.get("ok"):
+                return None, str(snap.get("reason"))
+            self._last_ax = snap
+        elements = snap.get("elements", [])
+        for element in elements:
+            if element["index"] == number:
+                return element, ""
+        return None, (f"There is no element {number} on screen — this window "
+                      f"lists {len(elements)}. Look again with see_screen "
+                      "target='desktop'.")
+
+    def _ax_state(self) -> str:
+        """A one-line fingerprint of the screen, for telling apart did-nothing
+        from did-something. Cheap: two attributes, no tree walk."""
+        from symbio import ax
+
+        if not ax.available() or not ax.trusted():
+            return ""
+        focused = ax.focused_element()
+        snap = getattr(self, "_last_ax", None)
+        window = (snap or {}).get("window", "")
+        if focused:
+            return f"{window}|{focused.get('role')}|{focused.get('label')}"
+        return f"{window}|"
+
     def _desktop_action(self, name: str, params: dict[str, Any]) -> str:
         if not self._desktop_enabled():
             return (f"Tool '{name}' is disabled. Enable the 'desktop' tool "
                     f"group to let me control the screen directly.")
+
+        if name == "open_app":
+            out = computer.open_app(str(params.get("name") or ""))
+            # The tree of whatever was in front is now the wrong tree.
+            self._last_ax = None
+            return out
+
+        if name == "desktop_wait":
+            try:
+                seconds = min(10.0, max(0.0, float(params.get("seconds") or 2)))
+            except (TypeError, ValueError):
+                seconds = 2.0
+            time.sleep(seconds)
+            # Whatever was listed before the wait was listed for a reason:
+            # something was expected to change during it.
+            self._last_ax = None
+            return (f"Waited {seconds:g}s. Look again to see what changed.")
+
+        if name == "desktop_move":
+            point, problem = self._point(params, "")
+            if problem:
+                return problem
+            return computer.desktop_move(*point)
+
+        if name == "desktop_scroll":
+            element, problem = ((None, "") if params.get("element") is None
+                                else self._ax_element(params.get("element")))
+            if problem:
+                return problem
+            point = _ax_centre(element) if element else (None, None)
+            return computer.desktop_scroll(
+                str(params.get("direction") or "down"),
+                int(params.get("amount") or 5), *point)
+
+        if name == "desktop_drag":
+            start, problem = self._point(params, "from")
+            if problem:
+                return problem
+            end, problem = self._point(params, "to")
+            if problem:
+                return problem
+            return computer.desktop_drag(*start, *end)
+
         if name == "desktop_type":
-            text = str(params.get("text") or "")
-            if not text:
-                return "Type failed: missing 'text'."
-            return computer.desktop_type(text)
+            return self._desktop_type(params)
+
         if name == "desktop_press":
-            key = str(params.get("key") or "")
+            key = str(params.get("key") or params.get("keys") or "")
             if not key:
                 return "Press failed: missing 'key'."
-            return computer.desktop_press(key)
+            # Chords go through hotkey; it hands a single key back to press.
+            return computer.desktop_hotkey(key)
+
+        # A click, by element where there is one. The number is the whole
+        # point: it came out of the window's own tree, so it cannot be off by
+        # a patch, and pressing it does not depend on what is on top.
+        if params.get("element") is not None:
+            return self._click_element(params)
+
         coords = _coords(params)
         if coords is None:
             return ("Click failed: desktop_click needs numeric 'x' and 'y'. "
@@ -737,8 +1040,124 @@ class ToolsMixin:
         # fix precisely where it was needed: PIL missing, an unreadable
         # capture, or a desktop_click issued before any see_screen. It reports
         # a display it cannot measure rather than clicking at twice the offset.
-        size = self._last_desktop_shot_size or None
+        # getattr: this runs over a stand-in for the AIAgent loop too,
+        # which has no session attributes of its own.
+        size = getattr(self, "_last_desktop_shot_size", None) or None
         return computer.desktop_click_in_image(*coords, image_size=size)
+
+    def _point(self, params: dict[str, Any],
+               end: str = "") -> tuple[tuple[int, int], str]:
+        """A point on screen, given either as an element number or as x/y.
+
+        `end` prefixes the keys, so the same resolution serves a move ("") and
+        both halves of a drag ("from", "to").
+        """
+        prefix = f"{end}_" if end else ""
+        if params.get(f"{prefix}element") is not None:
+            element, problem = self._ax_element(params.get(f"{prefix}element"))
+            if problem:
+                return (0, 0), problem
+            return _ax_centre(element), ""
+        x, y = params.get(f"{prefix}x"), params.get(f"{prefix}y")
+        try:
+            return (int(x), int(y)), ""
+        except (TypeError, ValueError):
+            return (0, 0), (
+                f"Give {prefix}element, or {prefix}x and {prefix}y as numbers. "
+                "Look with see_screen target='desktop' first — it numbers "
+                "every control, and a number cannot miss.")
+
+    def _click_element(self, params: dict[str, Any]) -> str:
+        """Press a control the window itself named.
+
+        AXPress before the mouse: it reaches the control whether or not
+        something is drawn over it, and it cannot land on a neighbour. Where
+        the control refuses to press — a canvas-backed view, a cell that only
+        answers to a real click — the frame's centre is clicked instead, in
+        the same logical points the mouse already uses. No screenshot, so no
+        Retina scale to undo.
+        """
+        from symbio import ax
+
+        element, problem = self._ax_element(params.get("element"))
+        if problem:
+            return problem
+        if not element.get("enabled", True):
+            return (f"Element {element['index']} ({element['label']!r}) is "
+                    "disabled — pressing it does nothing. Something else has "
+                    "to happen first.")
+        before = self._ax_state()
+        clicks = int(params.get("clicks") or 1)
+        button = str(params.get("button") or "left").lower()
+        how = "pressed"
+        if clicks == 1 and button == "left" and ax.press(element):
+            out = (f"Pressed {element['label']!r} ({element['role'][2:]}, "
+                   f"element {element['index']}).")
+        else:
+            how = "clicked"
+            x, y = _ax_centre(element)
+            out = computer.desktop_click(x, y, clicks=clicks, button=button)
+            out = (f"{out} That is {element['label']!r} "
+                   f"(element {element['index']}).")
+        # An action that changed nothing is the failure this reports. The
+        # window title and the focused control are what a person would glance
+        # at to tell the two apart, and they cost two attribute reads.
+        self._last_ax = None
+        after = self._ax_state()
+        if before and after and before == after:
+            out += (" Nothing about the window changed — same title, same "
+                    "focus — so this may not have landed. Look again before "
+                    "reporting it as done.")
+        return out
+
+    def _desktop_type(self, params: dict[str, Any]) -> str:
+        """Type into a named field, or at the keyboard with focus checked.
+
+        Keys sent at a window with no text field focused are not discarded,
+        they are shortcuts: that is how a message meant for a composer becomes
+        a sequence of commands the app happened to bind. So the field comes
+        first, and typing blind is refused with the reason.
+        """
+        from symbio import ax
+
+        text = str(params.get("text") or "")
+        if not text:
+            return "Type failed: missing 'text'."
+
+        if params.get("element") is not None:
+            element, problem = self._ax_element(params.get("element"))
+            if problem:
+                return problem
+            ax.focus(element)
+            if ax.set_text(element, text):
+                landed = ax.value_of(element)
+                self._last_ax = None
+                if text.strip() and text.strip() not in landed:
+                    return (f"Set {element['label']!r} but it now reads "
+                            f"{landed[:80]!r}, not what was sent. The field "
+                            "may reformat or reject input — look again.")
+                return (f"Typed into {element['label']!r} (element "
+                        f"{element['index']}); it now holds {landed[:80]!r}.")
+            # A field that will not take a value set still takes keystrokes,
+            # and focus has just been put on it, so this is no longer blind.
+            out = computer.desktop_type(text)
+            self._last_ax = None
+            return f"{out} (into {element['label']!r}, by typing.)"
+
+        focused = ax.focused_element() if ax.available() else None
+        if focused is not None and not focused.get("takes_text"):
+            return (f"Refused to type: the focused control is a "
+                    f"{focused['role'][2:]} ({focused['label']!r}), not a text "
+                    "field. Keys sent there are shortcuts, not text. Look with "
+                    "see_screen target='desktop' and type into the field by "
+                    "its number: "
+                    '{"name": "desktop_type", "arguments": '
+                    '{"element": 2, "text": "..."}}')
+        out = computer.desktop_type(text)
+        if params.get("press_enter"):
+            out += " " + computer.desktop_press("enter")
+        self._last_ax = None
+        return out
 
     def _dispatch_tool(self, name: str, params: dict[str, Any]) -> str:
         if name == "tool_docs":
@@ -790,6 +1209,9 @@ class ToolsMixin:
                     f"/{path.stem}; it is a file at "
                     f"{_commands.display_path(path)} that they can edit or "
                     f"delete.")
+
+        if name == "recall":
+            return self._recall(params)
 
         if name == "write_note":
             # Same idiom as the browser actions below: name the missing field
@@ -1046,7 +1468,9 @@ class ToolsMixin:
         if name == "see_screen":
             return self._see_screen(params)
 
-        if name in ("desktop_click", "desktop_type", "desktop_press"):
+        if name in ("desktop_click", "desktop_type", "desktop_press",
+                    "desktop_scroll", "desktop_drag", "desktop_move",
+                    "desktop_wait", "open_app"):
             return self._desktop_action(name, params)
 
         if name == "browser_open":
@@ -1120,7 +1544,15 @@ class ToolsMixin:
             "submit_form": lambda: self.browser.submit_form(
                 target=str(params.get("target", "")),
                 selector=str(params.get("selector", "") or ""),
-                expected_url=str(params.get("expected_url", "") or "")),
+                expected_url=str(params.get("expected_url", "") or ""),
+                expect_text=str(params.get("expect_text", "") or "")),
+            # Several fields in one call. The per-field loop is what runs out
+            # of turns on a real form, and a selector reaches a control that
+            # coordinates cannot — which is the whole reason posting on x.com
+            # needs no tool of its own.
+            "fill_form": lambda: self.browser.fill_form(
+                params.get("fields") or params.get("values")
+                or params.get("form") or {}),
         }
 
         if name in browser_action_tools:
@@ -1154,6 +1586,16 @@ class ToolsMixin:
                     "Press failed: missing 'key'. "
                     "Retry now with <press>down</press>. "
                     "Do not explain the failure — just emit the corrected press tag."
+                )
+            if name == "fill_form" and not (params.get("fields")
+                                            or params.get("values")
+                                            or params.get("form")):
+                return (
+                    "Fill failed: missing 'fields'. Call see_screen first for "
+                    "the selectors, then retry with "
+                    "<tool_call>{\"name\": \"fill_form\", \"arguments\": "
+                    "{\"fields\": {\"#title\": \"the title\", \"#url\": "
+                    "\"https://example.com\"}}}</tool_call>."
                 )
             if name == "submit_form" and not params.get("target") and not params.get("selector"):
                 return (
@@ -1386,6 +1828,16 @@ class ToolsMixin:
             return self.dispatch.run_delegated_task(
                 params["role"], params["task"], browser=self.browser)
 
+        if name == "post_to_x":
+            if not self.config.get("browser", {}).get("enabled", False):
+                return "Browser automation is disabled, so there is nothing to post with."
+            if not self.browser.is_open:
+                return ("The browser is not open. Open https://x.com/home with "
+                        "browser_open first, check you are signed in, then post.")
+            out = self.browser.post_to_x(str(params.get("text") or ""))
+            self._untrusted_this_turn = True   # the timeline was read back
+            return out
+
         if name == "add_golden_case":
             return self._add_golden_case(params)
 
@@ -1395,7 +1847,17 @@ class ToolsMixin:
             ok, output = mcp_tools.execute_mcp_tool(tool_name, params, self.config)
             return f"MCP tool '{name}' {'succeeded' if ok else 'failed'}.\nOutput:\n{output}"
 
-        return f"Unknown tool: {name}"
+        # A name that got past the group filter and has no branch here. Rare,
+        # but the bare sentence gave the model nothing to do with it, and what
+        # it does with nothing is conclude it cannot do the job at all.
+        near = tooling.nearest_tools(name, self.enabled_groups)
+        if near:
+            return (f"Unknown tool: {name}. Closest real tools: "
+                    f"{', '.join(near)}. Their schemas: "
+                    f"{tooling.schemas_for_names(near)}")
+        return (f"Unknown tool: {name}. Call "
+                '{"name": "tool_docs", "arguments": {"family": "<family>"}} '
+                "to see what exists, then use a real name.")
 
     def _add_golden_case(self, params: dict[str, Any]) -> str:
         """Append a new case to golden_cases.json and return a status message."""
@@ -1501,3 +1963,64 @@ class ToolsMixin:
             return (f"Submit the form on the live page? target='{params.get('target')}' "
                     f"expected to land on '{params.get('expected_url')}'.")
         return f"Allow tool '{name}'?"
+
+
+class _StandIn(ToolsMixin):
+    """A `self` for the dispatcher's code, over something that is not a session.
+
+    Attribute lookups that the mixin defines -- the helpers, the constants --
+    resolve on the class. Everything else falls through to the object
+    underneath, which is where the retriever, the config and the enabled
+    groups live.
+    """
+
+    def __init__(self, agent: Any) -> None:
+        object.__setattr__(self, "_agent", agent)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.__dict__["_agent"], name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # State the dispatcher keeps between calls -- the cached element
+        # listing, the untrusted-content flag -- belongs to the caller, or the
+        # numbers a look just handed out would die with this wrapper and the
+        # click that follows would find nothing.
+        setattr(self.__dict__["_agent"], name, value)
+
+
+def recall_for(agent: Any, params: dict[str, Any]) -> str:
+    """Run the recall tool for a caller that is not a ChatSession.
+
+    AIAgent keeps its own tool registry (symbio/tools.py) and its own
+    dispatcher, so a tool added here is advertised in the catalog BOTH loops
+    read and runnable in only one of them. That divergence is what the log
+    holds for 2026-09-16 08:17: the model called `recall`, the name the prompt
+    had just offered it, and got back "Unknown tool: recall" -- which reads,
+    from inside the model, as proof that looking things up is not something it
+    can do.
+
+    A second implementation would be a second thing to keep in step, so this
+    lends the real one a `self` instead.
+    """
+    stand_in = _StandIn(agent)
+    out = stand_in._recall(params)
+    # The flag is what marks the rest of the turn as carrying retrieved text.
+    # Set on the stand-in it would die with it, so it goes back to the caller.
+    if getattr(stand_in, "_untrusted_this_turn", False):
+        agent._untrusted_this_turn = True
+    return out
+
+
+def desktop_for(agent: Any, name: str, params: dict[str, Any]) -> str:
+    """Run a desktop tool for a caller that is not a ChatSession.
+
+    Same reason as recall_for: the catalog advertises these to every loop, and
+    the accessibility work behind them -- the element numbers, the focus guard
+    before typing, the did-anything-change check after a click -- is not worth
+    writing twice. The stand-in caches its element listing on the agent, so a
+    look and the click that follows it see the same numbers.
+    """
+    stand_in = _StandIn(agent)
+    if name == "see_screen":
+        return stand_in._see_screen(params)
+    return stand_in._desktop_action(name, params)

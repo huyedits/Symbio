@@ -15,6 +15,7 @@ from __future__ import annotations
 import atexit
 import json
 import re
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -328,6 +329,47 @@ class BrowserSession:
                 return False, f"User denied access to '{domain}'."
         return True, ""
 
+    # How long to keep waiting for a page that has loaded its document but
+    # not yet rendered anything. Half the web is a client-side app: claude.ai
+    # and x.com both answer domcontentloaded with an EMPTY body, and every
+    # read taken at that moment comes back with nothing in it. A model handed
+    # nothing concludes the page is blank, or worse, fills the gap itself —
+    # measured here on 2026-09-16: claude.ai/pricing, title "Claude", zero
+    # characters of text.
+    _RENDER_TIMEOUT_MS = 8000
+    _RENDER_MIN_CHARS = 40
+
+    def _await_render(self, page: Any, timeout_ms: int | None = None) -> bool:
+        """Wait until the body has actually rendered text. True if it did.
+
+        Polls rather than trusting one load event: 'networkidle' never fires
+        on a page holding a websocket open, which is most of them now.
+        """
+        budget = self._RENDER_TIMEOUT_MS if timeout_ms is None else timeout_ms
+        started = time.time()
+        deadline = started + max(0.0, budget / 1000.0)
+        # A page with SOME text is already readable; the extra beat is for the
+        # app that paints "Loading…" first and the real page a moment later.
+        # A page with NO text is the one worth waiting the full budget for.
+        soft = started + 1.5
+        length = 0
+        while True:
+            try:
+                length = int(page.evaluate(
+                    "() => (document.body && document.body.innerText || '').trim().length"))
+            except Exception:
+                return False
+            if length >= self._RENDER_MIN_CHARS:
+                return True
+            if length > 0 and time.time() >= soft:
+                return True
+            if time.time() >= deadline:
+                return length > 0
+            try:
+                page.wait_for_timeout(250)
+            except Exception:
+                time.sleep(0.25)
+
     def open(self, url: str, channel: str = "") -> str:
         ok, msg = self._check_url(url)
         if not ok:
@@ -335,9 +377,24 @@ class BrowserSession:
         try:
             _, page = self._init(channel=channel)
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            rendered = self._await_render(page)
             title = page.title()
+            if not (title or "").strip() and rendered:
+                # A client-side app often sets document.title one tick after
+                # it paints. An empty title reads as a broken page.
+                try:
+                    page.wait_for_timeout(500)
+                    title = page.title()
+                except Exception:
+                    pass
             self._last_url = url
-            return f"Opened browser at {url}. Page title: {title}"
+            note = "" if rendered else (
+                " The page has loaded but rendered no text yet — it may be a "
+                "client-side app still starting up, or it may need a sign-in. "
+                "Look at it (see_screen) or read it again before concluding "
+                "anything about what is on it; do NOT describe a page you have "
+                "not read.")
+            return f"Opened browser at {url}. Page title: {title}.{note}"
         except Exception as e:
             return self._fail("open", e)
 
@@ -347,6 +404,8 @@ class BrowserSession:
     def get_text(self) -> str:
         try:
             page = self._ensure_open()
+            # A read that lands mid-render answers "" and is believed.
+            self._await_render(page)
             text = page.inner_text("body", timeout=10000)
             # Collapse whitespace.
             text = re.sub(r"\n{3,}", "\n\n", text)
@@ -903,8 +962,106 @@ class BrowserSession:
         except Exception as e:
             return self._fail("click_at", e)
 
+    # Proof that content reached the page rather than a field: the needle is
+    # rendered in an element that is NOT a form control and does not contain
+    # one. The exclusion is the whole point. Typing into a composer already
+    # puts the text "on the page" as far as innerText is concerned, so a
+    # naive body-text search would confirm every draft as published. An
+    # x.com timeline article holds no composer; the composer's own ancestors
+    # all hold it, and are skipped.
+    _TEXT_RENDERED_JS = r"""(needle) => {
+        const editable = (el) => el.isContentEditable
+            || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
+        const inEditable = (el) => {
+            for (let n = el; n; n = n.parentElement) if (editable(n)) return true;
+            return false;
+        };
+        const q = 'article, li, p, blockquote, td, h1, h2, h3, h4, span, div';
+        for (const el of document.querySelectorAll(q)) {
+            if (!el.getClientRects().length) continue;
+            if (inEditable(el)) continue;
+            if (el.querySelector('input, textarea, [contenteditable="true"]')) continue;
+            const t = (el.innerText || '').replace(/\s+/g, ' ');
+            if (t.includes(needle)) return true;
+        }
+        return false;
+    }"""
+
+    def text_rendered(self, text: str) -> bool:
+        """Is this text rendered on the open page, outside every form field?"""
+        probe = " ".join((text or "").split())[:80]
+        if not probe:
+            return False
+        try:
+            page = self._ensure_open()
+            return bool(page.evaluate(self._TEXT_RENDERED_JS, probe))
+        except Exception:
+            return False
+
+    def fill_form(self, fields: Any) -> str:
+        """Fill several fields by CSS selector and report what actually landed.
+
+        One call per field costs a turn each, and a model that spends four
+        turns filling four boxes runs out of runway before it reaches the
+        submit button. More importantly, a selector reaches a control that
+        vision cannot: anything under one 32px patch — x.com's 28px composer,
+        most of a dense signup form — is ungroundable by coordinates and
+        exact by selector.
+
+        `fields` is {selector: value} or a list of {"selector", "text"}. Every
+        field is read back after filling, and the return says per field
+        whether the value is there. A field that did not take its value is
+        named, because the alternative is submitting a half-filled form and
+        reporting it as sent.
+        """
+        pairs: list[tuple[str, str]] = []
+        if isinstance(fields, dict):
+            pairs = [(str(k), str(v)) for k, v in fields.items()]
+        elif isinstance(fields, (list, tuple)):
+            for item in fields:
+                if isinstance(item, dict):
+                    sel = str(item.get("selector") or item.get("field") or "")
+                    val = str(item.get("text", item.get("value", "")))
+                    if sel:
+                        pairs.append((sel, val))
+                elif isinstance(item, (list, tuple)) and len(item) == 2:
+                    pairs.append((str(item[0]), str(item[1])))
+        if not pairs:
+            return ("Fill failed: no fields. Pass {\"fields\": {\"#title\": "
+                    "\"...\", \"#url\": \"...\"}} — call see_screen first "
+                    "for the selectors.")
+        try:
+            page = self._ensure_open()
+        except Exception as e:
+            return f"Fill error: {e}"
+
+        done: list[str] = []
+        missed: list[str] = []
+        for sel, value in pairs:
+            try:
+                self.type_text(value, selector=sel)
+            except Exception as e:
+                missed.append(f"{sel} ({_short_error(e)})")
+                continue
+            if self._selector_holds(page, sel, value):
+                done.append(sel)
+            else:
+                missed.append(f"{sel} (the value is not in the field)")
+        parts = []
+        if done:
+            parts.append(f"Filled {len(done)}/{len(pairs)}: {', '.join(done)}.")
+        if missed:
+            parts.append(
+                f"NOT filled: {'; '.join(missed)}. Do not submit this form yet "
+                "— read the page back and fix those fields first.")
+        else:
+            parts.append("Every field was read back and holds its value. "
+                         "Submit with submit_form when the form is complete.")
+        return " ".join(parts)
+
     def submit_form(self, target: str = "", selector: str = "",
-                    expected_url: str = "") -> str:
+                    expected_url: str = "", expect_text: str = "",
+                    timeout_ms: int = 8000) -> str:
         """Click a form's submit control and MACHINE-VERIFY the submission.
 
         Returns a verdict string the model cannot shape: a submit button does
@@ -912,15 +1069,21 @@ class BrowserSession:
         that mismatch hides ("Clicked" reports what the mouse did, never what
         it achieved; a cleared field is also a discarded draft). So this reads
         the page back AFTER the click and only ever says CONFIRMED when the
-        code can prove the browser landed on a URL that only exists once the
-        submission went through — for HN, the story page /item?id=N.
+        code itself observed one of three things:
 
-        `target` is the submit control's visible text ("submit" on HN) and
-        `selector` a CSS selector for it; either is enough to click. When the
-        URL lands on `expected_url`'s prefix (e.g. an HN item page) that
-        confirms too, but only ever on operator-allowlisted domains — a page
-        could history.pushState a fake URL, so a lax prefix on an untrusted
-        site is not confirmation.
+          * the browser landed on a URL that only exists once the submission
+            went through — for HN, the story page /item?id=N;
+          * the URL starts with the caller's `expected_url`;
+          * `expect_text` is now RENDERED on the page outside every form
+            field — the generic form of the timeline read-back that proves a
+            post on x.com went out. It is the site-independent proof, and the
+            reason posting does not need a per-site function: fill the
+            composer by selector, click Post, and require the words back on
+            the page as published content rather than as a draft.
+
+        The evidence is polled until `timeout_ms`, because a submit that has
+        to round-trip a server and re-render a feed is not done in the 400 ms
+        a click waits.
 
         The three verdict heads below are a contract the app layer matches on:
         "[Submit CONFIRMED", "[Submit NOT confirmed", "[Submit verification
@@ -934,19 +1097,26 @@ class BrowserSession:
             return f"Submit error: {e}"
         try:
             text, url_before = self._pending_state(page)
+            needle = " ".join((expect_text or "").split())[:80]
             out = self._try_click(page, selector, target)
             if out.startswith("Click failed"):
                 return out + (
                     " Do NOT report this form as submitted — the click did not "
                     "happen.")
+
+            # One settle beat first: a form POST redirects cross-page, and
+            # reading page.url in the same tick as the click reads the page
+            # the form was ON. Then poll — a single fixed wait is either too
+            # short for a slow server or wasted on a fast one.
             try:
-                # Let the POST round-trip and its redirect land. click() waits
-                # 400 ms for a _submit_note; a real submit redirects cross-page
-                # and a slow server can take longer.
                 page.wait_for_timeout(1000)
             except Exception:
                 pass
-            url_after = page.url or ""
+
+            # The field read-back happens before any verdict, because a page
+            # that will not evaluate cannot be verified AT ALL — that is
+            # "could not run", never "not confirmed" (which asserts the form
+            # did not go) and never a confirmation on the URL alone.
             still = False
             if text:
                 try:
@@ -956,22 +1126,52 @@ class BrowserSession:
                         "[Submit verification could not run: the page cannot be "
                         "read back after the click. Do NOT report the form as "
                         "submitted.]")
+
+            deadline = time.time() + max(1.0, timeout_ms / 1000.0)
+            url_after = url_before
             confirmed = False
             why = ""
-            if _HN_ITEM_RE.match(url_after):
-                confirmed = True
-                why = (
-                    f"the browser is now on an HN story page ({url_after}) — a "
-                    "URL that only exists once a story is live")
-            elif expected_url and url_after.startswith(expected_url):
-                confirmed = True
-                why = (
-                    f"the page landed on {url_after}, which starts with the "
-                    f"expected '{expected_url}'")
+            while True:
+                try:
+                    url_after = page.url or ""
+                except Exception:
+                    url_after = url_after or ""
+                if _HN_ITEM_RE.match(url_after):
+                    confirmed = True
+                    why = (f"the browser is now on an HN story page "
+                           f"({url_after}) — a URL that only exists once a "
+                           f"story is live")
+                    break
+                if expected_url and url_after.startswith(expected_url):
+                    confirmed = True
+                    why = (f"the page landed on {url_after}, which starts with "
+                           f"the expected '{expected_url}'")
+                    break
+                if needle and self.text_rendered(needle):
+                    confirmed = True
+                    why = (f"the text is now rendered on the page as published "
+                           f"content, outside every input field: {needle!r}")
+                    break
+                if time.time() >= deadline:
+                    break
+                try:
+                    page.wait_for_timeout(400)
+                except Exception:
+                    time.sleep(0.4)
+
             if confirmed:
                 return (
                     f"[Submit CONFIRMED: {why}. This was observed by the code "
                     "after the click — you may report the submission as done.]")
+
+            if text:
+                # Re-read: the poll may have spent seconds on the page, and
+                # the fresher answer is the truer one. A read that fails now
+                # keeps the earlier answer rather than discarding the verdict.
+                try:
+                    still = bool(page.evaluate(self._FIELD_STILL_HOLDS_JS, text))
+                except Exception:
+                    pass
             evidence = []
             if not url_after or url_after == url_before:
                 evidence.append("the URL did not change")
@@ -979,6 +1179,9 @@ class BrowserSession:
                 evidence.append(
                     f"the URL is now {url_after}, which does not match "
                     f"'{expected_url or 'an HN item page'}'")
+            if needle:
+                evidence.append("the text is not rendered on the page as "
+                                "published content")
             if text:
                 if still:
                     evidence.append("the field(s) that still hold the content "
@@ -1084,6 +1287,123 @@ class BrowserSession:
         }
         return out;
     }"""
+
+    def post_to_x(self, text: str, timeout_ms: int = 15000) -> str:
+        """Write a post on x.com and MACHINE-VERIFY that it went out.
+
+        Everything about this is shaped by two failures already recorded
+        against this project. A post was made and the model reported that it
+        had not been ("clicked" is what the mouse did, never what it
+        achieved), and the composer could not be grounded by vision at all
+        because it is 28px tall. So: fill by selector, send by the button x's
+        own code labels, and then prove it by reading the timeline back.
+
+        The verdict is a string the model cannot shape. CONFIRMED means this
+        code found the exact text rendered in a timeline article after the
+        click. Anything else says so plainly, because a post nobody can prove
+        is a post that has to be checked by a person.
+        """
+        body = (text or "").strip()
+        if not body:
+            return f"{X_NOT_CONFIRMED}] Nothing to post: the text was empty."
+        if len(body) > 280:
+            return (f"{X_NOT_CONFIRMED}] That is {len(body)} characters; x.com "
+                    "takes 280. Shorten it and try again.")
+        try:
+            page = self._ensure_open()
+        except Exception as e:
+            return f"{X_UNVERIFIABLE}] The browser is not open: {e}"
+
+        try:
+            url = page.url or ""
+        except Exception:
+            url = ""
+        if "x.com" not in url and "twitter.com" not in url:
+            return (f"{X_UNVERIFIABLE}] The open page is {url or 'unknown'}, not "
+                    "x.com. Open https://x.com/home first — this does not "
+                    "navigate on its own, because a post is not something to "
+                    "do on a page nobody asked for.")
+
+        for selector in X_LOGGED_OUT:
+            try:
+                if page.query_selector(selector):
+                    return (f"{X_NOT_CONFIRMED}] Not signed in to x.com — the "
+                            "page is showing a login link. Sign in in this "
+                            "browser window, then ask again.")
+            except Exception:
+                pass
+
+        try:
+            composer = page.query_selector(X_COMPOSER)
+        except Exception as e:
+            return f"{X_UNVERIFIABLE}] Could not read the page: {_short_error(e)}"
+        if composer is None:
+            return (f"{X_NOT_CONFIRMED}] No composer on this page. Open "
+                    "https://x.com/home, or click the Post button to open one.")
+
+        try:
+            composer.click()
+            page.keyboard.type(body)
+        except Exception as e:
+            return f"{X_NOT_CONFIRMED}] Could not write the post: {_short_error(e)}"
+
+        # What the composer holds now, BEFORE sending. A draft that never
+        # landed would otherwise be "sent" into an empty box.
+        try:
+            in_box = " ".join((composer.inner_text() or "").split())
+        except Exception:
+            in_box = ""
+        if in_box and " ".join(body.split())[:40] not in in_box:
+            return (f"{X_NOT_CONFIRMED}] The text did not reach the composer — "
+                    f"it holds {in_box[:80]!r}. Nothing was sent.")
+
+        clicked = False
+        for selector in X_POST_BUTTONS:
+            try:
+                button = page.query_selector(selector)
+                if button is None:
+                    continue
+                if button.get_attribute("aria-disabled") == "true":
+                    return (f"{X_NOT_CONFIRMED}] The Post button is disabled. "
+                            "The composer may not have registered the text.")
+                button.click()
+                clicked = True
+                break
+            except Exception:
+                continue
+        if not clicked:
+            # cmd+enter is x.com's own send shortcut, and the reason
+            # browser_press's description warns that plain enter posts nothing.
+            try:
+                page.keyboard.press("Meta+Enter")
+                clicked = True
+            except Exception as e:
+                return f"{X_NOT_CONFIRMED}] Could not send: {_short_error(e)}"
+
+        # Proof, or the absence of it. The composer clearing is necessary and
+        # not sufficient — a discarded draft clears too — so the text has to
+        # be found on the timeline.
+        deadline = time.time() + max(1.0, timeout_ms / 1000.0)
+        while time.time() < deadline:
+            if _x_text_on_timeline(page, body):
+                return (f"{X_CONFIRMED}] The post is rendered on the timeline: "
+                        f"{body[:80]!r}")
+            try:
+                page.wait_for_timeout(500)
+            except Exception:
+                time.sleep(0.5)
+
+        try:
+            still_there = " ".join((page.query_selector(X_COMPOSER).inner_text()
+                                    or "").split())
+        except Exception:
+            still_there = ""
+        if still_there:
+            return (f"{X_NOT_CONFIRMED}] The composer still holds the text, so "
+                    "it was not sent. Nothing was posted.")
+        return (f"{X_NOT_CONFIRMED}] The composer cleared but the post is not "
+                "on the timeline yet. It may have gone out — check x.com "
+                "before posting it again, or it will go out twice.")
 
     def controls(self, limit: int = 25) -> list[dict]:
         """Visible fields and buttons, each with a selector that addresses it.
@@ -1350,3 +1670,161 @@ def desktop_press(key: str) -> str:
         return f"Pressed '{k}' on the desktop."
     except Exception as e:
         return f"Desktop press error: {e}"
+
+
+# The rest of a pointer. desktop_click and desktop_type were the whole desktop
+# surface, which is a mouse that cannot drag, right-click, or reach anything
+# below the fold — three of the moves any real interface needs.
+
+def desktop_hotkey(combo: str) -> str:
+    """Press a chord: 'cmd+s', 'cmd+shift+4', 'ctrl+alt+delete'.
+
+    desktop_press sends ONE key. Everything a desktop is actually driven with
+    is a chord, and a model that can only send single keys either gives up or
+    sends 'command' on its own, which does nothing and reports success.
+    """
+    try:
+        pyautogui = _init_pyautogui()
+        parts = [p for p in re.split(r"[+\-\s]+", combo.strip().lower()) if p]
+        if not parts:
+            return "Hotkey failed: no keys given."
+        alias = {"cmd": "command", "meta": "command", "super": "command",
+                 "control": "ctrl", "opt": "option", "alt": "option",
+                 "return": "enter", "esc": "escape", "del": "delete"}
+        keys = [alias.get(p, p) for p in parts]
+        if len(keys) == 1:
+            return desktop_press(keys[0])
+        pyautogui.hotkey(*keys)
+        return f"Pressed {'+'.join(keys)}."
+    except Exception as e:
+        return f"Desktop hotkey error: {e}"
+
+
+def desktop_scroll(direction: str = "down", amount: int = 5,
+                   x: int | None = None, y: int | None = None) -> str:
+    """Scroll the window under the pointer, or under (x, y) if given."""
+    try:
+        pyautogui = _init_pyautogui()
+        clicks = max(1, int(amount or 5)) * 10
+        direction = (direction or "down").strip().lower()
+        if x is not None and y is not None:
+            pyautogui.moveTo(x, y)
+        if direction in ("down", "up"):
+            pyautogui.scroll(-clicks if direction == "down" else clicks)
+        elif direction in ("left", "right"):
+            pyautogui.hscroll(-clicks if direction == "left" else clicks)
+        else:
+            return (f"Scroll failed: direction {direction!r} is not one of "
+                    "up, down, left, right.")
+        return f"Scrolled {direction} by {amount or 5}."
+    except Exception as e:
+        return f"Desktop scroll error: {e}"
+
+
+def desktop_drag(x1: int, y1: int, x2: int, y2: int,
+                 duration: float = 0.4, button: str = "left") -> str:
+    """Press at one point, move, release at another.
+
+    Slow on purpose: a drag with duration 0 is delivered as a teleport and
+    most interfaces (selection, sliders, file moves) read it as a click.
+    """
+    try:
+        pyautogui = _init_pyautogui()
+        pyautogui.moveTo(x1, y1)
+        pyautogui.dragTo(x2, y2, duration=max(0.2, float(duration)),
+                         button=button)
+        return f"Dragged from ({x1}, {y1}) to ({x2}, {y2})."
+    except Exception as e:
+        return f"Desktop drag error: {e}"
+
+
+def desktop_cursor() -> tuple[int, int]:
+    pyautogui = _init_pyautogui()
+    pos = pyautogui.position()
+    return int(pos.x), int(pos.y)
+
+
+def running_apps() -> list[str]:
+    """Application names with a window open, frontmost first-ish.
+
+    Read from System Events rather than a process list: what matters here is
+    what can be switched to and clicked, not what is running.
+    """
+    script = ('tell application "System Events" to get name of every '
+              'application process whose background only is false')
+    try:
+        out = subprocess.run(["osascript", "-e", script], capture_output=True,
+                             text=True, timeout=10)
+        if out.returncode != 0:
+            return []
+        return [n.strip() for n in out.stdout.split(",") if n.strip()]
+    except Exception:
+        return []
+
+
+def open_app(name: str) -> str:
+    """Launch or switch to an application by name."""
+    name = (name or "").strip()
+    if not name:
+        return "Open failed: no application named."
+    try:
+        out = subprocess.run(["open", "-a", name], capture_output=True,
+                             text=True, timeout=20)
+        if out.returncode != 0:
+            detail = (out.stderr or out.stdout).strip().splitlines()
+            near = [a for a in running_apps() if name.lower() in a.lower()]
+            hint = (f" Running applications matching that: {', '.join(near)}."
+                    if near else
+                    f" Open applications: {', '.join(running_apps()[:12])}.")
+            return (f"Could not open {name!r}: "
+                    f"{detail[0] if detail else 'no such application'}.{hint}")
+        # `open -a` returns as soon as the launch is handed off, which is
+        # before the window exists. Acting on the app in the same turn would
+        # act on whatever was in front of it.
+        time.sleep(1.2)
+        return f"Opened {name}. It is now frontmost."
+    except Exception as e:
+        return f"Open error: {e}"
+
+
+# ── Posting to X ────────────────────────────────────────────────────
+
+# The composer and the post button, by the attributes x.com's own code uses.
+# Not by coordinates and not by vision: the composer is 28px tall, under the
+# vision worker's one-patch floor, and a coordinate for it was wrong by ~36px
+# every time it was tried (2026-09-07). A selector is exact or it fails
+# loudly, which is the property that matters for something irreversible.
+X_COMPOSER = 'div[data-testid="tweetTextarea_0"]'
+X_POST_BUTTONS = ('button[data-testid="tweetButtonInline"]',
+                  'button[data-testid="tweetButton"]')
+X_LOGGED_OUT = ('a[data-testid="loginButton"]', 'a[href="/login"]')
+
+# Verdict heads, matching submit_form's contract so the app layer can read
+# either with the same rule.
+X_CONFIRMED = "[Post CONFIRMED"
+X_NOT_CONFIRMED = "[Post NOT confirmed"
+X_UNVERIFIABLE = "[Post verification could not run"
+
+
+def _x_text_on_timeline(page: Any, text: str) -> bool:
+    """Is this exact text now rendered in a timeline article?
+
+    The proof that a post went out. Read from the DOM rather than from a
+    toast: a toast is a transient element that may already be gone, and its
+    text says "Your post was sent" whether or not the network call returned.
+    """
+    probe = " ".join(text.split())[:80]
+    if not probe:
+        return False
+    try:
+        return bool(page.evaluate(
+            """(needle) => {
+                const articles = document.querySelectorAll('article');
+                for (const article of articles) {
+                    const rendered = (article.innerText || '').replace(/\\s+/g, ' ');
+                    if (rendered.includes(needle)) return true;
+                }
+                return false;
+            }""", probe))
+    except Exception:
+        return False

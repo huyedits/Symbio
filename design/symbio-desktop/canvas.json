@@ -1,0 +1,23 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html", "x": 0, "y": 0, "w": 1440, "h": 900, "title": "Symbio Desktop — live turn", "is_interactive": true },
+    { "file": "Approval.dc.html", "x": 1560, "y": 0, "w": 1440, "h": 900, "title": "Approval gate (dark)", "is_interactive": true }
+  ],
+  "annotations": [
+    {
+      "id": "how-to-drive",
+      "x": 0,
+      "y": -150,
+      "w": 520,
+      "text": "Both artboards are live. Left: type in the composer (or hit a suggestion) — the turn goes silent while the prompt is read, the tool card opens, the answer streams, and the reasoning folds into 'Thought for N words'. Theme button is bottom-left. Right: Allow or Deny the destructive command."
+    },
+    {
+      "id": "matched-from",
+      "x": 1560,
+      "y": -150,
+      "w": 520,
+      "text": "Values lifted from symbio_desktop/static/style.css, not approximated: #c15f3c / #d97757 accent, 260px sidebar, 6/10/16/22px radii, 15px base, 720px thread column, 32px send button, 1.62 line-height."
+    }
+  ],
+  "launch": { "view": "canvas" }
+}

@@ -35,6 +35,32 @@ from symbio.app.chat_text import (
 
 
 class AgentTurnMixin:
+    # How much of a tool's result is shown as it happens. The model gets the
+    # whole thing; this is the line a person reads to know what the turn is
+    # doing, and a full file read or page dump pushed past it would bury the
+    # conversation instead.
+    _RESULT_PREVIEW_LINES = 3
+    _RESULT_PREVIEW_CHARS = 240
+
+    def _show_tool_result(self, name: str, observation: str) -> None:
+        """Print what a tool just returned, in short.
+
+        "[Tool: recall]" says a tool RAN. It does not say whether it found
+        anything, and a front-end that shows only the name leaves the turn
+        looking identical whether the search hit or missed -- which is the
+        whole question while waiting. The result went to the model and to the
+        log and to nothing a person could see.
+        """
+        if not self.config.get("agent", {}).get("show_tool_output", True):
+            return
+        text = " ".join(str(observation or "").split("\n")[:self._RESULT_PREVIEW_LINES])
+        text = " ".join(text.split()).strip()
+        if not text:
+            return
+        if len(text) > self._RESULT_PREVIEW_CHARS:
+            text = text[:self._RESULT_PREVIEW_CHARS].rstrip() + "…"
+        self.output_fn(f"  [Result] {text}")
+
     """The agent loop for ChatSession."""
 
     def _family_budget(self, family: str) -> int:
@@ -418,6 +444,7 @@ class AgentTurnMixin:
         unparsed_tag_nudged = False
         echo_retry_nudged = False
         continuation_challenged = False
+        incapacity_challenged = False
         thinking_cut_retried = False
         # The round index used to select thinking (think=round_num > 0);
         # agent.thinking_level owns that now, so nothing reads the counter.
@@ -884,6 +911,26 @@ class AgentTurnMixin:
                             f"No tool named {', '.join(unknown)} exists. The "
                             f"tools you can call are: "
                             f"{', '.join(tooling.enabled_tool_names(self.enabled_groups))}.")
+                        # The full list is what it already read in the prompt
+                        # and invented a name against, so repeating it is the
+                        # weakest half of this correction. The strong half is
+                        # the one name it was reaching for, with the arguments
+                        # attached: `browser_read` is browser_get_text,
+                        # `memory_lookup` is recall. Handing over the schema
+                        # here is what lets the retry land in THIS round
+                        # rather than spending the next one on tool_docs.
+                        near: list[str] = []
+                        for invented in unknown:
+                            for real in tooling.nearest_tools(
+                                    invented, self.enabled_groups):
+                                if real not in near:
+                                    near.append(real)
+                        schemas = tooling.schemas_for_names(near[:3])
+                        if schemas:
+                            detail.append(
+                                f"Closest real tools: {', '.join(near[:3])} — "
+                                f"here are their schemas, use one of these "
+                                f"exactly: {schemas}")
                     if disabled:
                         detail.append(
                             f"{', '.join(disabled)} is turned off in this "
@@ -1249,6 +1296,55 @@ class AgentTurnMixin:
                     )})
                     self._trim_history()
                     continue
+                # Refusing on capability grounds, having tried nothing.
+                #
+                # The claim guard above catches a reply that says it DID work
+                # it never did. This is the inverse and it has no guard at all:
+                # a reply that says it CANNOT do work it can do ends the turn
+                # looking obedient. Live 2026-09-15, asked to tweet at @grok,
+                # the model reasoned that no Twitter tool was listed, invented
+                # a note from the user saying it could only generate text, and
+                # stopped — while holding the browser toolset that has posted
+                # to X before.
+                #
+                # Ordered after the nudges above on purpose: those are cheap
+                # string checks, and this one spends a generation. It runs only
+                # on a turn that asked for an action, ran no tool at all, and
+                # still produced a real reply — which is already the shape of
+                # the failure, so the judge is asked rarely.
+                if (not incapacity_challenged
+                        and action_req
+                        and not any_tool_ran
+                        and not user_refused_this_turn
+                        and challenges_used < self._challenge_budget()
+                        and _is_substantive(display)
+                        and self._claims_incapacity(display, user_input)):
+                    incapacity_challenged = True
+                    challenges_used += 1
+                    options = tooling.untried_tools(
+                        attempted_names, self.enabled_groups)
+                    self.output_fn(
+                        "  [Capability] Reply declines on grounds of ability, "
+                        "and no tool was tried — naming what is reachable.")
+                    self.history.append({"role": "user", "content": (
+                        "[System observation: you said you are unable to do "
+                        "this, and you called no tool this turn — so that is a "
+                        "belief about yourself, not a result. It is also "
+                        "usually wrong: a task has no dedicated tool named "
+                        "after it, and is still reachable through the general "
+                        "ones. Posting to a site is the browser, not a "
+                        "posting API. Reading a file is <py>, not a file "
+                        "service."
+                        + (f" Reachable right now: {', '.join(options)}."
+                           if options else "")
+                        + " Nothing in your instructions forbids this — do not "
+                        "cite a rule you cannot quote. Try the tool that "
+                        "actually fits, once. If it fails, report exactly what "
+                        "it returned; that is a result and this was not.]"
+                    )})
+                    self._trim_history()
+                    continue
+
                 # Normal turn (or pure repetition): stop.
                 # BUT: if the user asked for an action (open/click/type/etc.)
                 # and the model only talked about doing it without actually
@@ -1448,6 +1544,7 @@ class AgentTurnMixin:
                         submit_confirmed = True
                 if learn.is_user_refusal(observation):
                     user_refused_this_turn = True
+                self._show_tool_result(name, observation)
             local_telemetry.log_event(
                 "tool", name=name, ok=not learn.sounds_like_tool_error(observation),
                 result=observation,

@@ -1,214 +1,16 @@
-/* ═══════════════════════════════════════════════════════════════════════
-   Symbio Desktop — Chat + Mind Map + Dashboard
-   ═══════════════════════════════════════════════════════════════════════ */
-
-// ── State ──────────────────────────────────────────────────────────
+/* Workspace views — the mind map, skills, RAG corpus and health panels.
+ *
+ * Lifted unchanged out of the single-file app.js when the shell became
+ * chat-first: the chat is the application now and these are what it can be
+ * asked to show, so they live behind the workspace drawer rather than under
+ * a permanently half-height conversation. Element ids are the ones the old
+ * markup used, which is why the rendering below needed no edits.
+ */
 
 let ecosystem = null;
 let svg = null;
 let simulation = null;
 let selectedNode = null;
-let ws = null;
-let streamingMsgEl = null;
-let chatCollapsed = false;
-
-// ── WebSocket Chat ─────────────────────────────────────────────────
-
-function connectChat() {
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${protocol}//${location.host}/ws/chat`;
-
-  ws = new WebSocket(url);
-
-  ws.onopen = () => {
-    setStatus('connected', 'Connected');
-  };
-
-  ws.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    handleWsMessage(data);
-  };
-
-  ws.onclose = () => {
-    setStatus('error', 'Disconnected');
-    // Reconnect after 3s
-    setTimeout(connectChat, 3000);
-  };
-
-  ws.onerror = () => {
-    setStatus('error', 'Connection error');
-  };
-}
-
-function handleWsMessage(data) {
-  switch (data.type) {
-    case 'connected':
-      document.getElementById('chat-model-badge').textContent =
-        data.model_name ? data.model_name.split('/').pop() : 'Symbio';
-      addSystemMsg(`Connected to ${data.assistant_name} (${data.model_name || 'unknown'})`);
-      break;
-
-    case 'token':
-      if (!streamingMsgEl) {
-        streamingMsgEl = addAssistantMsg('');
-        streamingMsgEl.classList.add('streaming');
-      }
-      streamingMsgEl.querySelector('.msg-bubble').textContent += data.text;
-      scrollChat();
-      break;
-
-    case 'done':
-      clearProgress();
-      if (streamingMsgEl) {
-        streamingMsgEl.classList.remove('streaming');
-        streamingMsgEl = null;
-      }
-      break;
-
-    case 'system':
-      clearProgress();
-      addSystemMsg(data.text);
-      break;
-
-    case 'progress':
-      showProgress(data.text);
-      break;
-
-    case 'confirm':
-      showConfirm(data.prompt);
-      break;
-
-    case 'error':
-      addSystemMsg('Error: ' + data.text);
-      if (streamingMsgEl) {
-        streamingMsgEl.classList.remove('streaming');
-        streamingMsgEl = null;
-      }
-      break;
-
-    case 'quit':
-      addSystemMsg('Session ended.');
-      break;
-
-    case 'pong':
-      break;
-  }
-}
-
-function sendMessage() {
-  const input = document.getElementById('chat-input');
-  const text = input.value.trim();
-  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-
-  addUserMsg(text);
-  input.value = '';
-  input.style.height = 'auto';
-  document.getElementById('btn-send').disabled = true;
-
-  ws.send(JSON.stringify({ type: 'chat', message: text }));
-}
-
-function sendConfirm(approved) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: 'confirm_response', approved }));
-  hideConfirm();
-}
-
-// ── Chat UI helpers ────────────────────────────────────────────────
-
-function addUserMsg(text) {
-  const el = document.createElement('div');
-  el.className = 'chat-msg user';
-  el.innerHTML = `<div class="msg-sender">You</div><div class="msg-bubble">${escHtml(text)}</div>`;
-  document.getElementById('chat-messages').appendChild(el);
-  scrollChat();
-  return el;
-}
-
-function addAssistantMsg(text) {
-  const el = document.createElement('div');
-  el.className = 'chat-msg assistant';
-  el.innerHTML = `<div class="msg-sender">Symbio</div><div class="msg-bubble">${escHtml(text)}</div>`;
-  document.getElementById('chat-messages').appendChild(el);
-  scrollChat();
-  return el;
-}
-
-function addSystemMsg(text) {
-  const el = document.createElement('div');
-  el.className = 'chat-msg system';
-  el.innerHTML = `<div class="msg-bubble">${escHtml(text)}</div>`;
-  document.getElementById('chat-messages').appendChild(el);
-  scrollChat();
-  return el;
-}
-
-function scrollChat() {
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
-}
-
-let progressEl = null;
-
-function showProgress(text) {
-  if (!text) return;
-  if (!progressEl) {
-    progressEl = document.createElement('div');
-    progressEl.className = 'chat-msg system progress-msg';
-    progressEl.innerHTML = '<div class="msg-bubble"></div>';
-    document.getElementById('chat-messages').appendChild(progressEl);
-  }
-  // Clean up tqdm progress bars and spinner frames into a readable line.
-  // tqdm format: "Fetching 7 files: 100%|████| 7/7 [00:00<00:00, 7909it/s]"
-  let clean = text
-    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')  // strip ANSI escapes
-    .replace(/[▀-▟]+/g, '')        // strip tqdm bar characters
-    .replace(/\s+/g, ' ')
-    .trim();
-  // Extract the meaningful part from tqdm lines
-  const tqdmMatch = clean.match(/^(.+?):\s*(\d+%)\s*\|/);
-  if (tqdmMatch) {
-    clean = tqdmMatch[1] + ' ' + tqdmMatch[2];
-  }
-  // Collapse spinner frames
-  clean = clean.replace(/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*/, '');
-  if (clean) {
-    progressEl.querySelector('.msg-bubble').textContent = clean;
-    scrollChat();
-  }
-}
-
-function clearProgress() {
-  if (progressEl) {
-    progressEl.remove();
-    progressEl = null;
-  }
-}
-
-function showConfirm(prompt) {
-  document.getElementById('confirm-text').textContent = prompt;
-  document.getElementById('chat-confirm').style.display = 'flex';
-}
-
-function hideConfirm() {
-  document.getElementById('chat-confirm').style.display = 'none';
-}
-
-// ── Navigation ─────────────────────────────────────────────────────
-
-document.querySelectorAll('.nav-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    const view = btn.dataset.view;
-    document.querySelectorAll('#bottom-panel .view').forEach(v => v.classList.remove('active'));
-    const target = document.getElementById(`view-${view}`);
-    if (target) target.classList.add('active');
-    if (view === 'mindmap' && ecosystem) renderMindMap();
-  });
-});
-
-// ── Data Fetching ──────────────────────────────────────────────────
 
 async function fetchEcosystem() {
   try {
@@ -221,17 +23,55 @@ async function fetchEcosystem() {
   }
 }
 
-function setStatus(state, text) {
-  const dot = document.getElementById('status-dot');
-  const label = document.getElementById('status-text');
-  dot.className = 'status-dot ' + state;
-  label.textContent = text;
+async function renderSessions() {
+  const list = document.getElementById('session-list');
+  list.innerHTML = '<div class="detail-placeholder">Reading the session store…</div>';
+  let data;
+  try {
+    data = await (await fetch('/api/sessions')).json();
+  } catch (e) {
+    list.innerHTML = '<div class="detail-placeholder">Could not read the session store.</div>';
+    return;
+  }
+  const sessions = data.sessions || [];
+  document.getElementById('session-count').textContent = sessions.length;
+  if (!sessions.length) {
+    list.innerHTML = `<div class="detail-placeholder">${escHtml(data.reason || 'No sessions yet.')}</div>`;
+    return;
+  }
+  list.innerHTML = sessions.map(s => `<button class="session-row" data-id="${escHtml(s.id)}">
+      <span class="session-when">${escHtml((s.started || s.id).replace('T', ' ').slice(0, 16))}</span>
+      <span class="session-opening">${escHtml(s.opening || '(no user turn)')}</span>
+      <span class="session-turns">${s.turns}</span>
+    </button>`).join('');
+  list.querySelectorAll('.session-row').forEach(row => {
+    row.addEventListener('click', () => openSession(row.dataset.id, row));
+  });
 }
 
-// ── Render All ─────────────────────────────────────────────────────
+async function openSession(id, row) {
+  document.querySelectorAll('.session-row').forEach(r => r.classList.remove('active'));
+  if (row) row.classList.add('active');
+  const detail = document.getElementById('session-detail');
+  detail.innerHTML = '<div class="detail-placeholder">Reading…</div>';
+  let data;
+  try {
+    data = await (await fetch(`/api/sessions?id=${encodeURIComponent(id)}`)).json();
+  } catch (e) {
+    detail.innerHTML = '<div class="detail-placeholder">Could not read that session.</div>';
+    return;
+  }
+  // Every turn here was written by a past conversation — other people's text
+  // in the Telegram case. Rendered as escaped plain text, never as markup.
+  detail.innerHTML = (data.turns || []).map(t => `<div class="session-turn ${escHtml(t.role)}">
+      <div class="session-role">${escHtml(t.role)}</div>
+      <div class="session-text">${escHtml(t.text || '')}</div>
+    </div>`).join('') || '<div class="detail-placeholder">That session has no turns.</div>';
+}
 
 function renderAll() {
-  renderMindMap();
+  if (!ecosystem) return;
+  if (document.getElementById('view-mindmap').classList.contains('active')) renderMindMap();
   renderSkills();
   renderRag();
   renderHealth();
@@ -628,108 +468,80 @@ function escHtml(str) {
   return div.innerHTML;
 }
 
-// ═════════════════════════════════════════════════════════════════════
-// EVENT BINDINGS
-// ═════════════════════════════════════════════════════════════════════
 
-// Send button
-document.getElementById('btn-send').addEventListener('click', sendMessage);
+// ── Drawer ──────────────────────────────────────────────────────────
 
-// Enter to send, Shift+Enter for newline
-document.getElementById('chat-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
+function openWorkspace(view) {
+  document.body.classList.add('workspace-open');
+  document.querySelectorAll('.ws-tab').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === view);
+  });
+  document.querySelectorAll('#workspace .view').forEach(v => v.classList.remove('active'));
+  const target = document.getElementById(`view-${view}`);
+  if (target) target.classList.add('active');
+  if (view === 'sessions') return renderSessions();
+  if (!ecosystem) fetchEcosystem();
+  // The mind map sizes itself to its container, which was 0x0 while closed.
+  else if (view === 'mindmap') setTimeout(renderMindMap, 60);
+  else renderAll();
+}
+
+function closeWorkspace() {
+  document.body.classList.remove('workspace-open');
+}
+
+document.querySelectorAll('[data-open-view]').forEach(btn => {
+  btn.addEventListener('click', () => openWorkspace(btn.dataset.openView));
+});
+document.querySelectorAll('.ws-tab').forEach(btn => {
+  btn.addEventListener('click', () => openWorkspace(btn.dataset.view));
+});
+document.getElementById('btn-close-workspace').addEventListener('click', closeWorkspace);
+document.getElementById('btn-refresh').addEventListener('click', fetchEcosystem);
+document.getElementById('btn-zoom-in').addEventListener('click', () => zoomBy(1.3));
+document.getElementById('btn-zoom-out').addEventListener('click', () => zoomBy(1 / 1.3));
+document.getElementById('btn-zoom-fit').addEventListener('click', zoomFit);
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.body.classList.contains('workspace-open')) {
+    closeWorkspace();
   }
 });
 
-// Auto-resize textarea
-document.getElementById('chat-input').addEventListener('input', function() {
-  this.style.height = 'auto';
-  this.style.height = Math.min(this.scrollHeight, 120) + 'px';
-  document.getElementById('btn-send').disabled = !this.value.trim();
-});
-
-// Confirm buttons
-document.getElementById('btn-confirm-allow').addEventListener('click', () => sendConfirm(true));
-document.getElementById('btn-confirm-deny').addEventListener('click', () => sendConfirm(false));
-
-// Toggle chat panel
-document.getElementById('btn-toggle-chat').addEventListener('click', () => {
-  chatCollapsed = !chatCollapsed;
-  const panel = document.getElementById('chat-panel');
-  const btn = document.getElementById('btn-toggle-chat');
-  if (chatCollapsed) {
-    panel.classList.add('collapsed');
-    btn.textContent = '+';
-  } else {
-    panel.classList.remove('collapsed');
-    btn.textContent = '−';
-  }
-  // Re-render mind map if visible (size changed)
-  setTimeout(() => {
-    if (document.getElementById('view-mindmap').classList.contains('active') && ecosystem) {
-      renderMindMap();
-    }
-  }, 300);
-});
-
-// Clear chat
-document.getElementById('btn-clear-chat').addEventListener('click', () => {
-  const container = document.getElementById('chat-messages');
-  container.innerHTML = `
-    <div class="chat-welcome">
-      <div class="welcome-icon">🧠</div>
-      <div class="welcome-text">Symbio Desktop</div>
-      <div class="welcome-sub">Local-first AI agent with self-finetuning adapters</div>
-    </div>
-  `;
-  streamingMsgEl = null;
-});
-
-// Resize handle
-const resizeHandle = document.getElementById('resize-handle');
-const chatPanel = document.getElementById('chat-panel');
-let resizeActive = false;
-let resizeStartY = 0;
-let resizeStartHeight = 0;
-
-resizeHandle.addEventListener('mousedown', (e) => {
-  resizeActive = true;
-  resizeStartY = e.clientY;
-  resizeStartHeight = chatPanel.offsetHeight;
-  resizeHandle.classList.add('active');
-  document.body.style.cursor = 'row-resize';
-  document.body.style.userSelect = 'none';
-});
-
-document.addEventListener('mousemove', (e) => {
-  if (!resizeActive) return;
-  const delta = e.clientY - resizeStartY;
-  const newHeight = Math.max(120, Math.min(resizeStartHeight + delta, window.innerHeight * 0.7));
-  chatPanel.style.height = newHeight + 'px';
-  chatPanel.style.minHeight = '120px';
-  chatPanel.classList.remove('collapsed');
-  chatCollapsed = false;
-  document.getElementById('btn-toggle-chat').textContent = '−';
-});
-
-document.addEventListener('mouseup', () => {
-  if (!resizeActive) return;
-  resizeActive = false;
-  resizeHandle.classList.remove('active');
-  document.body.style.cursor = '';
-  document.body.style.userSelect = '';
-  // Re-render mind map
-  setTimeout(() => {
-    if (document.getElementById('view-mindmap').classList.contains('active') && ecosystem) {
-      renderMindMap();
-    }
-  }, 100);
-});
-
-// ── Init ────────────────────────────────────────────────────────────
-
-connectChat();
 fetchEcosystem();
-setInterval(fetchEcosystem, 30000);
+setInterval(() => { if (document.body.classList.contains('workspace-open')) fetchEcosystem(); }, 30000);
+
+
+/* Where the panel sits, and which side the conversation is on. Taken from
+ * OpenClaw's Control UI, which lets a thread move its side panel left, right
+ * or below and swap it with the chat — the useful half of a dashboard is
+ * being able to put it where the work is. */
+const LAYOUTS = ['right', 'left', 'below'];
+
+function applyLayout() {
+  let layout = 'right';
+  let swapped = false;
+  try {
+    layout = localStorage.getItem('symbio.layout') || 'right';
+    swapped = localStorage.getItem('symbio.swapped') === '1';
+  } catch (e) { /* storage blocked: the default layout is fine */ }
+  document.body.dataset.layout = LAYOUTS.includes(layout) ? layout : 'right';
+  document.body.classList.toggle('swapped', swapped);
+}
+
+document.getElementById('btn-layout').addEventListener('click', () => {
+  const next = LAYOUTS[(LAYOUTS.indexOf(document.body.dataset.layout || 'right') + 1) % LAYOUTS.length];
+  try { localStorage.setItem('symbio.layout', next); } catch (e) {}
+  applyLayout();
+  if (ecosystem && document.getElementById('view-mindmap').classList.contains('active')) {
+    setTimeout(renderMindMap, 200);   // the container just changed size
+  }
+});
+
+document.getElementById('btn-swap').addEventListener('click', () => {
+  const swapped = !document.body.classList.contains('swapped');
+  try { localStorage.setItem('symbio.swapped', swapped ? '1' : '0'); } catch (e) {}
+  applyLayout();
+});
+
+applyLayout();

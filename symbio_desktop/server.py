@@ -1,38 +1,77 @@
-"""Symbio Desktop server — FastAPI backend that exposes the adapter/RAG ecosystem
-as a REST API and a WebSocket chat endpoint consumed by the mind-map frontend."""
+"""Symbio Desktop — the window's backend.
+
+Three decisions, all of them about memory.
+
+**No web framework.** This was FastAPI on uvicorn, which is four packages
+(fastapi, starlette, uvicorn, pydantic) that were not installed on the machine
+it shipped from — `python3 -m symbio_desktop.cli` died on
+`ModuleNotFoundError: No module named 'fastapi'`, so the app had never run at
+all. The standard library has an HTTP server and enough socket to speak
+WebSocket in about a hundred lines, and it costs nothing to import.
+
+**The model lives in the daemon, not here.** A ChatSession constructed in this
+process would pull the headmaster's weights into it — ~10 GB — and the desktop
+would be the largest thing on the Mac. `symb daemon` already keeps one loaded
+copy behind a Unix socket, so this process is a bridge: browser WebSocket on
+one side, daemon socket on the other, nothing resident in between. With no
+daemon running it says so and names the command, rather than quietly loading a
+second copy of a 14B model.
+
+**Nothing is imported that is not needed to answer.** The API handlers read
+JSON off disk; `symbio.app.dispatch` is imported inside the one handler that
+needs the catalog. Importing the agent stack at module scope would drag mlx in
+behind it.
+
+The wire protocol is unchanged from the FastAPI version, so the frontend did
+not have to know any of this happened: {type: connected|token|system|progress|
+confirm|done|error} out, {type: chat|confirm_response|ping} in.
+"""
 
 from __future__ import annotations
 
-import asyncio
+import base64
+import hashlib
 import json
-import queue
+import mimetypes
+import os
+import re
+import socket
+import sqlite3
+import struct
 import threading
 import time
-import traceback
+import urllib.parse
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-
-from symbio import constants
-from symbio.app.config import load_config
-from symbio.app.dispatch import load_catalog
 
 APP_DIR = Path(__file__).parent.resolve()
 STATIC_DIR = APP_DIR / "static"
 
-app = FastAPI(title="Symbio Desktop", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def _load_constants():
+    """symbio/constants.py, loaded WITHOUT importing the symbio package.
+
+    `from symbio import constants` runs symbio/__init__.py, which imports the
+    agent, the chat loop, mlx, anthropic, fastmcp, telegram, pydantic,
+    starlette and uvicorn behind it: measured at 130 MB resident for a process
+    that wanted eight Path objects. constants.py imports nothing but pathlib
+    and typing, so it can be loaded as a standalone module and the rest of the
+    package left alone. Same 25 MB the standard library costs on its own.
+    """
+    import importlib.util
+
+    path = APP_DIR.parent / "symbio" / "constants.py"
+    spec = importlib.util.spec_from_file_location("_symbio_constants", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+constants = _load_constants()
+
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 # ── data model builders ──────────────────────────────────────────────
@@ -73,7 +112,7 @@ def _skill_notes() -> list[dict[str, Any]]:
     for note_path in sorted(constants.NOTES_DIR.glob("*Skill__*.md")):
         try:
             first_line = note_path.read_text(encoding="utf-8").splitlines()[0].strip()
-        except OSError:
+        except (OSError, IndexError):
             continue
         name = first_line.removeprefix("# Skill:").strip()
         slug = name.lower().replace(" ", "_").replace("'", "")
@@ -107,8 +146,12 @@ def _rag_stats() -> dict[str, Any]:
     if train_file.exists():
         try:
             stats["training_size_mb"] = round(train_file.stat().st_size / (1024 * 1024), 1)
-            lines = train_file.read_text(encoding="utf-8").strip().splitlines()
-            stats["training_samples"] = len(lines)
+            # Counted by scanning for newlines rather than by reading the file
+            # into a list of lines: the corpus here is already 6.7 MB and this
+            # endpoint is polled.
+            with train_file.open("rb") as fh:
+                stats["training_samples"] = sum(chunk.count(b"\n")
+                                                for chunk in iter(lambda: fh.read(1 << 20), b""))
         except OSError:
             pass
     if constants.SESSIONS_DIR.exists():
@@ -133,11 +176,23 @@ def _config_summary() -> dict[str, Any]:
     }
 
 
-# ── REST API routes ──────────────────────────────────────────────────
+def _worker_catalog() -> dict[str, dict[str, Any]]:
+    """The worker/skill catalog, read straight off disk.
 
-@app.get("/api/ecosystem")
+    symbio.app.dispatch has load_catalog(), and importing it costs 40 MB of
+    agent stack in a process whose entire job is to serve four JSON endpoints
+    and forward a socket. The file is a JSON object; reading it is the whole
+    function.
+    """
+    try:
+        loaded = json.loads(constants.WORKER_MODELS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def get_ecosystem() -> dict[str, Any]:
-    catalog = load_catalog()
+    catalog = _worker_catalog()
     config = _config_summary()
     skills = _skill_notes()
     rag = _rag_stats()
@@ -181,298 +236,805 @@ def get_ecosystem() -> dict[str, Any]:
         "skills": skill_nodes,
         "rag": {"type": "rag", **rag},
         "training": {"type": "training", "samples": rag["training_samples"],
-                      "size_mb": rag["training_size_mb"], "auto_train": config["auto_train"]},
+                     "size_mb": rag["training_size_mb"],
+                     "auto_train": config["auto_train"]},
         "config": config,
         "timestamp": datetime.now().isoformat(),
     }
 
 
-@app.get("/api/adapter/{role}")
-def get_adapter(role: str) -> dict[str, Any]:
-    if role == "headmaster":
-        return _adapter_info(role=None)
-    return _adapter_info(role=role)
+# What the window may switch, and what each switch means in the user's terms.
+# Deliberately a SHORT list of user-facing capabilities: config.json holds
+# ~90 booleans, most of them training internals nobody should flip from a
+# chat window, and a settings page that offers all of them is a page nobody
+# reads. Anything not named here is not reachable from the browser at all.
+TOOL_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("terminal", "Shell commands", "Run commands on this Mac. The approval gate still applies."),
+    ("code", "Python sandbox", "Run Python in the sandbox directory."),
+    ("browser", "Browser control", "Drive a real Chrome window — open pages, click, type."),
+    ("desktop", "Desktop control", "Read the screen's controls and click, type and drag on them."),
+    ("web_search", "Web search", "Look things up online."),
+    ("memory", "Memory", "Read and write saved memory and the user profile."),
+    ("notes", "Notes", "Save, search and delete notes."),
+    ("digest", "Digest notes", "Fold notes into training data."),
+    ("train", "Training", "Run LoRA training and rebuild adapters."),
+    ("cron", "Scheduled jobs", "Run work on a schedule."),
+    ("delegate", "Worker models", "Hand tasks to smaller trained workers."),
+    ("config", "Change settings", "Let the agent edit its own configuration."),
+    ("system", "System checks", "Health checks and feature verification."),
+)
+
+# Single booleans, addressed by dotted path.
+FEATURE_FLAGS: tuple[tuple[str, str, str], ...] = (
+    ("safety.enabled", "Safety gate", "Risk scoring and approval prompts before dangerous tools."),
+    ("rag.enabled", "Retrieval", "Pull matching notes and past sessions into the prompt."),
+    ("memory.enabled", "Durable memory", "Keep the agent's saved memory in every prompt."),
+    ("vision.enabled", "Vision", "Look at the screen with the vision model when there is no control tree."),
+    ("learn.auto_train", "Learn from corrections", "Train on mistakes once enough have collected."),
+    ("agent.show_reasoning", "Show reasoning", "Stream the model's thinking, folded above each reply."),
+    ("agent.stream_output", "Stream replies", "Show tokens as they arrive instead of all at once."),
+    ("agent.show_tool_output", "Show tool results", "Print what each tool returned, in short, as it happens."),
+    ("dispatch.enabled", "Delegation", "Let the headmaster route work to worker adapters."),
+    ("telemetry.enabled", "Telemetry", "Send anonymous usage pings. Off by default."),
+)
 
 
-@app.get("/api/health")
+def _dotted(config: dict, path: str, default=None):
+    node: Any = config
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return default
+        node = node[part]
+    return node
+
+
+def get_settings() -> dict[str, Any]:
+    """Every switch the window offers, with its current value."""
+    try:
+        config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        config = {}
+    groups = set(_dotted(config, "tools.enabled_groups", []) or [])
+    return {
+        "groups": [{"key": k, "label": label, "hint": hint, "on": k in groups}
+                   for k, label, hint in TOOL_GROUPS],
+        "features": [{"key": k, "label": label, "hint": hint,
+                      "on": bool(_dotted(config, k, False))}
+                     for k, label, hint in FEATURE_FLAGS],
+        "restart_note": "Tool changes reach the model on its next turn; the "
+                        "rest apply when the resident model restarts.",
+    }
+
+
+def set_settings(patch: dict[str, Any]) -> dict[str, Any]:
+    """Apply a settings change to config.json, and nothing else.
+
+    Only keys named in TOOL_GROUPS and FEATURE_FLAGS are writable, so a
+    request cannot reach model_name, the remote hosts table or the safety
+    thresholds. Written through a temporary file and renamed: config.json is
+    read by the daemon and by every CLI session, and a half-written one
+    breaks all of them at once.
+    """
+    allowed_groups = {k for k, _l, _h in TOOL_GROUPS}
+    allowed_flags = {k for k, _l, _h in FEATURE_FLAGS}
+    try:
+        config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return {"ok": False, "error": f"Could not read config.json: {e}"}
+
+    changed: list[str] = []
+    for key, value in (patch.get("groups") or {}).items():
+        if key not in allowed_groups:
+            continue
+        groups = list(_dotted(config, "tools.enabled_groups", []) or [])
+        if value and key not in groups:
+            groups.append(key)
+            changed.append(f"+{key}")
+        elif not value and key in groups:
+            groups.remove(key)
+            changed.append(f"-{key}")
+        config.setdefault("tools", {})["enabled_groups"] = groups
+
+    for key, value in (patch.get("features") or {}).items():
+        if key not in allowed_flags:
+            continue
+        head, _, leaf = key.rpartition(".")
+        node = config
+        for part in head.split("."):
+            node = node.setdefault(part, {})
+        if bool(node.get(leaf)) != bool(value):
+            changed.append(f"{key}={'on' if value else 'off'}")
+        node[leaf] = bool(value)
+
+    if not changed:
+        return {"ok": True, "changed": []}
+    temporary = constants.CONFIG_FILE.with_suffix(".json.tmp")
+    try:
+        temporary.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        os.replace(temporary, constants.CONFIG_FILE)
+    except OSError as e:
+        return {"ok": False, "error": f"Could not write config.json: {e}"}
+    return {"ok": True, "changed": changed}
+
+
+def get_sessions(limit: int = 60, session_id: str = "") -> dict[str, Any]:
+    """Every conversation this agent has had, across every front end.
+
+    The CLI, the Telegram gateway and this window all write to the same
+    logs/sessions.db, and until now nothing listed them: 850 sessions and
+    6,136 turns with no way to look at one without opening SQLite. Read
+    immutably — the daemon has this file open and is writing to it.
+    """
+    db = constants.PROJECT_DIR / "logs" / "sessions.db"
+    if not db.is_file():
+        return {"sessions": [], "reason": "No session store yet."}
+    try:
+        connection = sqlite3.connect(f"file:{db}?immutable=1", uri=True)
+    except sqlite3.Error as e:
+        return {"sessions": [], "reason": f"Could not read the session store: {e}"}
+    try:
+        if session_id:
+            rows = connection.execute(
+                "SELECT timestamp, role, content FROM turns WHERE session_id = ? "
+                "ORDER BY id LIMIT 400", (session_id,)).fetchall()
+            return {"session": session_id,
+                    "turns": [{"at": at, "role": role, "text": text}
+                              for at, role, text in rows]}
+        rows = connection.execute(
+            "SELECT s.id, s.started, COUNT(t.id), "
+            "       MIN(CASE WHEN t.role = 'user' THEN t.content END) "
+            "FROM sessions s LEFT JOIN turns t ON t.session_id = s.id "
+            "GROUP BY s.id ORDER BY s.started DESC LIMIT ?", (limit,)).fetchall()
+        return {"sessions": [
+            {"id": sid, "started": started, "turns": turns,
+             "opening": (opening or "").strip()[:120]}
+            for sid, started, turns, opening in rows]}
+    except sqlite3.Error as e:
+        return {"sessions": [], "reason": f"Could not read the session store: {e}"}
+    finally:
+        connection.close()
+
+
+def _supervisor_state() -> dict[str, Any]:
+    """The watcher's heartbeat, if one is running.
+
+    Read straight off disk rather than through symbio.app.supervisor: the
+    window does not import the agent package (see the memory note at the top
+    of this file), and a heartbeat is four fields of JSON.
+    """
+    try:
+        state = json.loads(
+            (constants.PROJECT_DIR / "logs" / "supervisor.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"running": False}
+    checked = str(state.get("checked_at", ""))
+    fresh = False
+    try:
+        fresh = (datetime.now() - datetime.fromisoformat(checked)).total_seconds() < 300
+    except ValueError:
+        pass
+    return {"running": fresh, "checked_at": checked,
+            "model": state.get("model", "?"),
+            "restarts": state.get("restarts", 0),
+            "jobs_run": state.get("jobs_run", 0),
+            "last_error": state.get("last_error", ""),
+            "ran": (state.get("ran") or [])[-5:]}
+
+
 def get_health() -> dict[str, Any]:
     skills = _skill_notes()
-    total_errors = sum(s["error_count"] for s in skills)
-    total_corrections = sum(s["correction_count"] for s in skills)
     return {
+        "supervisor": _supervisor_state(),
         "total_skills": len(skills),
-        "total_errors": total_errors,
-        "total_corrections": total_corrections,
+        "total_errors": sum(s["error_count"] for s in skills),
+        "total_corrections": sum(s["correction_count"] for s in skills),
         "skills_with_errors": [s["name"] for s in skills if s["error_count"] > 0],
         "skills_with_corrections": [s["name"] for s in skills if s["correction_count"] > 0],
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════
-# WebSocket Chat
-# ═══════════════════════════════════════════════════════════════════════
+# ── WebSocket, by hand ───────────────────────────────────────────────
 
-class DesktopChatSession:
-    """Wraps a Symbio ChatSession for the desktop WebSocket frontend.
+class WSError(Exception):
+    pass
 
-    The native ChatSession.run() is a blocking readline loop. This adapter
-    calls _agent_turn() directly per inbound WebSocket message and routes
-    all output (system messages, streaming tokens, confirmations) back over
-    the wire as typed JSON frames.
+
+def ws_accept_key(client_key: str) -> str:
+    """RFC 6455's handshake: the client's key, the magic GUID, SHA-1, base64."""
+    digest = hashlib.sha1((client_key + _WS_GUID).encode("ascii")).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def ws_frame(payload: bytes, opcode: int = 0x1) -> bytes:
+    """One unmasked server frame. Servers never mask; clients always do."""
+    header = bytearray([0x80 | opcode])
+    length = len(payload)
+    if length < 126:
+        header.append(length)
+    elif length < (1 << 16):
+        header.append(126)
+        header += struct.pack(">H", length)
+    else:
+        header.append(127)
+        header += struct.pack(">Q", length)
+    return bytes(header) + payload
+
+
+def _read_exactly(sock: socket.socket, count: int) -> bytes:
+    chunks = []
+    remaining = count
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise WSError("socket closed")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def ws_read_message(sock: socket.socket) -> tuple[int, bytes]:
+    """The next complete message: (opcode, payload). Continuations joined."""
+    payload = bytearray()
+    first_opcode = None
+    while True:
+        b1, b2 = _read_exactly(sock, 2)
+        fin = b1 & 0x80
+        opcode = b1 & 0x0F
+        masked = b2 & 0x80
+        length = b2 & 0x7F
+        if length == 126:
+            length = struct.unpack(">H", _read_exactly(sock, 2))[0]
+        elif length == 127:
+            length = struct.unpack(">Q", _read_exactly(sock, 8))[0]
+        # A browser always masks. An unmasked frame is either a broken client
+        # or something that is not a browser, and the RFC says to fail.
+        if not masked:
+            raise WSError("unmasked frame from client")
+        mask = _read_exactly(sock, 4)
+        data = bytearray(_read_exactly(sock, length))
+        for i in range(length):
+            data[i] ^= mask[i % 4]
+        if first_opcode is None and opcode != 0x0:
+            first_opcode = opcode
+        payload += data
+        if fin:
+            return first_opcode or opcode, bytes(payload)
+
+
+# ── the bridge to the resident model ─────────────────────────────────
+
+# The one live conversation, kept across browser reloads.
+#
+# A refresh closes the WebSocket, which used to close the daemon connection
+# under it -- so the ChatSession ended and the model forgot the conversation
+# the user was still looking at. The daemon serves one session at a time
+# anyway, so the bridge belongs to the server, not to a socket.
+_BRIDGE: "DaemonBridge | None" = None
+_BRIDGE_LOCK = threading.Lock()
+
+
+class DaemonBridge:
+    """One browser conversation, wired to one daemon connection.
+
+    The daemon speaks the CLI's protocol -- it drives a real ChatSession whose
+    input_fn blocks on the socket -- so the mapping is direct: its `stream` is
+    a token, its `output` is a line of activity, its `confirm` is the same
+    approval the terminal would print, and its `input_prompt` is the end of a
+    turn.
     """
 
-    def __init__(self, ws: WebSocket):
-        self.ws = ws
-        self.config = load_config()
-        self._session: Any = None
-        self._session_lock = threading.Lock()
-        self._reply_buffer: list[str] = []
-        self._confirm_response: bool | None = None
-        self._confirm_event = threading.Event()
-        self._progress_buf: list[str] = []
-        self._progress_last_flush = 0.0
+    # What the terminal adds and a window must not repeat. The daemon builds
+    # its session with stream_prefix=True, so every turn arrives as
+    # "Caine   : " -- a label that belongs to a transcript, not to a chat
+    # bubble that already says who is speaking.
+    #
+    # Matched against the ASSISTANT'S NAME, not against "anything before a
+    # colon". The loose pattern ate the opening of any reply that began with
+    # a clause and a colon: "Here you go: " vanished and the answer started
+    # mid-sentence. A label this window did not expect is better left in than
+    # a sentence taken out.
+    _FALLBACK_PREFIX = re.compile(r"^\s*[A-Za-z][A-Za-z0-9_-]{0,23}\s{2,}:\s*")
 
-    def _output_fn(self, text: str):
-        """System messages (tool observations, status lines)."""
-        if text.strip():
-            asyncio.run_coroutine_threadsafe(
-                self._safe_send({"type": "system", "text": text}), _LOOP)
+    # Sentinels that are protocol, not text. They end a turn or a block, and
+    # every one of them has been seen in a reply this window rendered.
+    _SENTINELS = ("<end>", "<|im_end|>", "<|endoftext|>", "</s>")
+    # Spans the reader must never see mid-reply: a tool call is an instruction
+    # to the runtime that already ran, and a thinking block belongs in the
+    # folded Thought section, not in the answer.
+    _SPANS = (("<tool_call>", "</tool_call>"),
+              ("<think>", "</think>"),
+              ("<thinking>", "</thinking>"))
 
-    def _stream_chunk_fn(self, chunk: str):
-        """Streaming tokens from the model."""
-        self._reply_buffer.append(chunk)
-        asyncio.run_coroutine_threadsafe(
-            self._safe_send({"type": "token", "text": chunk}), _LOOP)
+    def __init__(self, send_json, assistant_name: str = "") -> None:
+        self.sink = send_json
+        self.assistant_name = assistant_name
+        self.prefix_re = (
+            re.compile(r"^\s*" + re.escape(assistant_name) + r"\s*:\s*", re.IGNORECASE)
+            if assistant_name else self._FALLBACK_PREFIX)
+        self.turn_text = ""
+        self.prefix_done = False
+        self.carry = ""
+        self.inside: tuple[str, str] | None = None
+        self.sock: socket.socket | None = None
+        self.rfile = None
+        self.wfile = None
+        self.turn_open = False
+        # The session prints its banner and THEN asks for input, so a message
+        # sent the moment the socket opens arrives before the session is
+        # listening: the banner's own input_prompt closed a turn that had not
+        # started, the browser was told `done` with nothing in it, and the
+        # reply the model then produced had no turn left to belong to.
+        # Nothing is written to the daemon until it has asked once.
+        self.ready = False
+        self.pending: list[str] = []
+        self.spoke = False
 
-    def _confirm_fn(self, prompt: str) -> bool:
-        """Ask the user to confirm an action. Blocks until the client responds."""
-        self._confirm_response = None
-        self._confirm_event.clear()
-        asyncio.run_coroutine_threadsafe(
-            self._safe_send({"type": "confirm", "prompt": prompt}), _LOOP)
-        self._confirm_event.wait(timeout=60)
-        return self._confirm_response or False
+    @staticmethod
+    def daemon_ready() -> bool:
+        """Is there a loaded model behind the socket right now?
 
-    async def _safe_send(self, data: dict[str, Any]):
+        The same two checks symbio.app.daemon makes, rather than an import of
+        it: a Unix socket file outlives the process that bound it, so presence
+        alone is a trap after an OOM kill, and the pid has to be alive too.
+        Importing daemon.py here would pull the whole package back in.
+        """
         try:
-            await self.ws.send_json(data)
+            if not constants.DAEMON_SOCKET.exists():
+                return False
+            pid = int(constants.DAEMON_PID_FILE.read_text(encoding="utf-8").strip())
+            os.kill(pid, 0)
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def connect(self) -> tuple[bool, str]:
+        if self.alive():
+            return True, ""
+        if not self.daemon_ready():
+            return False, (
+                "No resident model is running, so there is nothing to talk to "
+                "yet. Start one with `symb daemon start` — it loads the "
+                "headmaster once, in its own process, and this window stays a "
+                "few megabytes."
+            )
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(str(constants.DAEMON_SOCKET))
+        except ConnectionRefusedError:
+            # A live socket that refuses means its backlog is full: the daemon
+            # serves one session at a time and several are already waiting.
+            return False, (
+                "The resident model is up but its queue is full — it serves "
+                "one window at a time and something else is holding it. Close "
+                "the other tab or `symb chat` session, then send again.")
+        except OSError as e:
+            return False, f"The resident model is running but refused a connection: {e}"
+        self.sock = sock
+        self.rfile = sock.makefile("rb")
+        self.wfile = sock.makefile("wb")
+        threading.Thread(target=self._pump, daemon=True).start()
+        threading.Thread(target=self._report_if_queued, daemon=True).start()
+        return True, ""
+
+    # How long a silent connection is normal. The daemon prints its banner
+    # and asks for input within a second of accepting; longer than this means
+    # it never accepted, because it serves ONE client at a time and another
+    # window is holding it.
+    _QUEUE_GRACE = 8.0
+
+    def _report_if_queued(self) -> None:
+        """Say when the connection is sitting in the daemon's backlog.
+
+        connect() succeeds either way -- the kernel completes the handshake
+        into the listen backlog -- so a window queued behind another one looks
+        exactly like a window whose model is thinking, forever. That silence
+        is the thing to name.
+        """
+        time.sleep(self._QUEUE_GRACE)
+        if not self.ready and self.sock is not None:
+            self.send_json({"type": "system", "text": (
+                "Connected, but the resident model has not answered in "
+                f"{self._QUEUE_GRACE:.0f}s. It serves one window at a time — "
+                "another tab or a `symb chat` session is probably holding it. "
+                "Close that one and this window takes over.")})
+
+    def send_json(self, payload: dict) -> None:
+        """Out to whichever browser socket is attached right now.
+
+        Between a reload and the new socket's arrival there is no sink. A turn
+        in flight keeps running -- the daemon is mid-generation and stopping it
+        would waste the work -- and its frames are dropped rather than queued:
+        the reconnecting page restores its own transcript, and replaying half a
+        turn into it would double the text.
+        """
+        sink = self.sink
+        if sink is None:
+            return
+        try:
+            sink(payload)
         except Exception:
             pass
 
-    def _progress_write(self, text: str):
-        """Called from the captured stdout/stderr during blocking ops.
+    def attach(self, send_json) -> None:
+        self.sink = send_json
 
-        tqdm progress bars write bare \\r lines; the spinner writes
-        animation frames. We batch them and flush every ~200ms so the
-        UI gets smooth updates without flooding the WebSocket."""
-        if not text:
+    def detach(self) -> None:
+        self.sink = None
+
+    def alive(self) -> bool:
+        return self.sock is not None and self.ready
+
+    def _send(self, msg: dict) -> None:
+        if not self.wfile:
             return
-        # tqdm uses \\r to overwrite the same line — treat each \\r as a
-        # new frame and keep only the last one per flush window.
-        self._progress_buf.append(text)
-        now = time.time()
-        if now - self._progress_last_flush >= 0.2:
-            self._flush_progress()
+        self.wfile.write((json.dumps(msg) + "\n").encode("utf-8"))
+        self.wfile.flush()
 
-    def _flush_progress(self):
-        if not self._progress_buf:
-            return
-        merged = "".join(self._progress_buf)
-        self._progress_buf.clear()
-        self._progress_last_flush = time.time()
-        import re as _re
-        # Strip ANSI escapes
-        merged = _re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', merged)
-        # tqdm writes frames separated by \r — take the last complete frame
-        segments = [s.strip() for s in merged.split('\r') if s.strip()]
-        if segments:
-            cleaned = segments[-1]
-        else:
-            lines = [l.strip() for l in merged.split('\n') if l.strip()]
-            cleaned = '\n'.join(lines[-5:])
-        if cleaned:
-            asyncio.run_coroutine_threadsafe(
-                self._safe_send({"type": "progress", "text": cleaned}), _LOOP)
-
-    class _ProgressCapture:
-        """Context manager that redirects stdout/stderr to capture_fn.
-
-        The original streams still receive output (so nothing is lost),
-        but every write is also forwarded to the progress callback."""
-        def __init__(self, capture_fn):
-            self._fn = capture_fn
-            self._stdout = None
-            self._stderr = None
-
-        def __enter__(self):
-            import sys
-            self._stdout = sys.stdout
-            self._stderr = sys.stderr
-            fn = self._fn
-
-            class _TeeOut:
-                def write(self, text):
-                    self._orig.write(text)
-                    fn(text)
-                def flush(self):
-                    self._orig.flush()
-                def __getattr__(self, name):
-                    return getattr(self._orig, name)
-
-            class _TeeErr:
-                def write(self, text):
-                    self._orig.write(text)
-                    fn(text)
-                def flush(self):
-                    self._orig.flush()
-                def __getattr__(self, name):
-                    return getattr(self._orig, name)
-
-            out = _TeeOut()
-            out._orig = self._stdout
-            err = _TeeErr()
-            err._orig = self._stderr
-            sys.stdout = out
-            sys.stderr = err
-            return self
-
-        def __exit__(self, *args):
-            import sys
-            sys.stdout = self._stdout
-            sys.stderr = self._stderr
-
-    def _ensure_session(self):
-        if self._session is not None:
-            return
-        with self._session_lock:
-            if self._session is not None:
-                return
-            from symbio.app.chat import ChatSession
-            from symbio.app.setup import ensure_identity_defaults
-
-            ensure_identity_defaults(self.config)
-            session = ChatSession(
-                self.config,
-                input_fn=lambda _="": "",
-                output_fn=self._output_fn,
-                confirm_fn=self._confirm_fn,
-                stream_chunk_fn=self._stream_chunk_fn,
-                stream_prefix=False,
-                owner="desktop",
-            )
-            # Model loading writes tqdm progress bars to stderr — capture
-            # them so the UI shows "Fetching 7 files…" instead of silence.
-            with self._ProgressCapture(self._progress_write):
-                session._ensure_model_loaded()
-            self._flush_progress()
-            self._session = session
-
-    def process_message(self, text: str) -> str:
-        """Run one agent turn. Returns the full reply text."""
-        self._ensure_session()
-        self._reply_buffer = []
+    def _pump(self) -> None:
+        """Daemon frames in, browser frames out, until either end hangs up."""
         try:
-            # The spinner and "thinking…" lines write to stdout — capture
-            # them so the UI shows generation progress.
-            with self._ProgressCapture(self._progress_write):
-                self._session._agent_turn(text)
-            self._flush_progress()
-        except Exception as e:
-            tb = traceback.format_exc()
-            asyncio.run_coroutine_threadsafe(
-                self._safe_send({"type": "error", "text": f"{e}\n{tb}"}), _LOOP)
-        return "".join(self._reply_buffer)
-
-    def handle_confirm(self, approved: bool):
-        self._confirm_response = approved
-        self._confirm_event.set()
-
-    def handle_command(self, cmd: str) -> str | None:
-        """Handle a slash command. Returns a quit signal string if the session ended."""
-        self._ensure_session()
-        from symbio.app.chat import _QUIT
-        try:
-            result = self._session._handle_command(cmd)
-            if result == _QUIT:
-                return "quit"
-        except Exception as e:
-            asyncio.run_coroutine_threadsafe(
-                self._safe_send({"type": "error", "text": str(e)}), _LOOP)
-        return None
-
-
-# Global event loop reference for cross-thread scheduling
-_LOOP: asyncio.AbstractEventLoop | None = None
-
-# One chat session per WebSocket connection
-_sessions: dict[str, DesktopChatSession] = {}
-
-
-@app.websocket("/ws/chat")
-async def ws_chat(ws: WebSocket):
-    global _LOOP
-    _LOOP = asyncio.get_running_loop()
-
-    await ws.accept()
-    session = DesktopChatSession(ws)
-    sid = str(id(session))
-    _sessions[sid] = session
-
-    config = _config_summary()
-    await ws.send_json({
-        "type": "connected",
-        "assistant_name": config["assistant_name"],
-        "user_name": config["user_name"],
-        "model_name": config["model_name"],
-    })
-
-    try:
-        while True:
-            data = await ws.receive_json()
-            msg_type = data.get("type", "")
-
-            if msg_type == "chat":
-                text = data.get("message", "").strip()
-                if not text:
+            while True:
+                line = self.rfile.readline()
+                if not line:
+                    break
+                try:
+                    msg = json.loads(line.decode("utf-8"))
+                except ValueError:
                     continue
-                if text.startswith("/"):
-                    result = session.handle_command(text)
-                    if result == "quit":
-                        await ws.send_json({"type": "quit"})
-                        break
-                else:
-                    # Run the turn in a thread so we don't block the event loop
-                    loop = asyncio.get_running_loop()
-                    reply = await loop.run_in_executor(None, session.process_message, text)
-                    await ws.send_json({"type": "done", "text": reply})
+                kind = msg.get("type")
+                if kind == "stream":
+                    text = self._clean_stream(msg.get("text", ""))
+                    if text:
+                        self.spoke = True
+                        self.send_json({"type": "token", "text": text})
+                elif kind == "output":
+                    # Anything that is not a token means the reply has paused,
+                    # so whatever is being held back while looking for the
+                    # speaker label goes out first — or the activity line
+                    # would appear above text that was generated before it.
+                    self._flush_prefix()
+                    self.send_json({"type": "system", "text": msg.get("text", "")})
+                elif kind == "confirm":
+                    self._flush_prefix()
+                    self.send_json({"type": "confirm", "prompt": msg.get("prompt", "")})
+                elif kind == "input_prompt":
+                    # The session is asking for the next message. After a turn
+                    # that means the turn is over -- the text has already gone
+                    # out as tokens, so this carries no body. Before the first
+                    # one it means the session has finished starting up.
+                    if not self.ready:
+                        self.ready = True
+                        for queued in self.pending:
+                            self._send({"type": "input", "text": queued})
+                        self.pending.clear()
+                    elif self.turn_open:
+                        self._end_of_turn()
+                        self.turn_open = False
+                        self.spoke = False
+                        self.send_json({"type": "done", "text": ""})
+                elif kind == "done":
+                    self.send_json({"type": "quit"})
+                    break
+        except (OSError, ValueError):
+            pass
+        finally:
+            self.send_json({"type": "system", "text": "[The resident model closed the connection.]"})
 
-            elif msg_type == "confirm_response":
-                approved = data.get("approved", False)
-                session.handle_confirm(approved)
+    # How much of a turn's opening is held back while looking for the speaker
+    # label. The label is short ("Caine   : "); anything longer than this is
+    # the reply itself and goes out unchanged.
+    _PREFIX_WINDOW = 24
 
-            elif msg_type == "ping":
-                await ws.send_json({"type": "pong"})
+    def _scrub(self, chunk: str) -> str:
+        """Drop what is protocol rather than reply, across chunk boundaries.
 
-    except WebSocketDisconnect:
-        pass
-    finally:
-        _sessions.pop(sid, None)
+        A tag arrives a few tokens at a time, so nothing here can match on one
+        chunk: the tail of the stream is carried between calls, spans are
+        tracked open-to-close, and anything inside one is never emitted. What
+        the model MEANT to say is unaffected; what leaks out otherwise is the
+        stop sentinel, a tool call the runtime already executed, and a
+        thinking block that belongs in the folded section.
+        """
+        text = self.carry + chunk
+        self.carry = ""
+        out: list[str] = []
+        while text:
+            if self.inside:
+                _open, close = self.inside
+                index = text.find(close)
+                if index == -1:
+                    # Hold only as much as a closing tag could span.
+                    self.carry = text[-len(close):] if len(text) > len(close) else text
+                    return "".join(out)
+                text = text[index + len(close):]
+                self.inside = None
+                continue
+            starts = [(text.find(o), (o, c)) for o, c in self._SPANS if text.find(o) != -1]
+            if starts:
+                at, span = min(starts)
+                out.append(text[:at])
+                text = text[at + len(span[0]):]
+                self.inside = span
+                continue
+            for sentinel in self._SENTINELS:
+                text = text.replace(sentinel, "")
+            # A partial tag at the very end is carried rather than printed;
+            # otherwise "<too" reaches the reader and is corrected a token
+            # later by deleting text they already saw.
+            longest = max(len(o) for o, _c in self._SPANS + tuple(
+                (s, s) for s in self._SENTINELS))
+            tail = text[-longest:]
+            cut = 0
+            for i in range(len(tail)):
+                fragment = tail[i:]
+                if any(o.startswith(fragment) for o, _c in self._SPANS) or \
+                   any(s.startswith(fragment) for s in self._SENTINELS):
+                    cut = len(tail) - i
+                    break
+            if cut:
+                self.carry = text[len(text) - cut:]
+                text = text[:len(text) - cut]
+            out.append(text)
+            break
+        return "".join(out)
+
+    def _clean_stream(self, chunk: str) -> str:
+        """One streamed chunk as the window should show it.
+
+        The label arrives a few tokens at a time -- "Cai", "ne", "   : " -- so
+        no single chunk contains it and matching per chunk finds nothing. The
+        opening of a turn is buffered until either the label is found and
+        dropped or enough text has arrived to prove there is none.
+        """
+        chunk = self._scrub(chunk)
+        if not chunk:
+            return ""
+        if self.prefix_done:
+            return chunk
+        self.turn_text += chunk
+        stripped = self.prefix_re.sub("", self.turn_text, count=1)
+        if stripped != self.turn_text:
+            self.prefix_done = True
+            return stripped
+        if len(self.turn_text) >= self._PREFIX_WINDOW or "\n" in self.turn_text:
+            self.prefix_done = True
+            return self.turn_text
+        return ""      # still inside the window: held, not dropped
+
+    def _end_of_turn(self) -> None:
+        """Release what is held, and say so when a turn ended mid-block.
+
+        An unclosed <think> is the failure where a truncated thinking block is
+        shown as the answer. Emitting the held text would reproduce it, and
+        dropping it silently leaves an empty bubble, so the turn says what
+        happened instead.
+        """
+        if self.inside is not None:
+            self.inside = None
+            self.carry = ""
+            self.turn_text = ""
+            self.prefix_done = True
+            self.send_json({"type": "system", "text": (
+                "[The reply ended inside a thinking block, so there is no "
+                "answer to show. Ask again — the model usually closes it on a "
+                "retry.]")})
+            return
+        if self.carry:
+            held, self.carry = self.carry, ""
+            if not self.prefix_done:
+                self.turn_text += held
+            else:
+                self.send_json({"type": "token", "text": held})
+        self._flush_prefix()
+
+    def _flush_prefix(self) -> None:
+        """Release a turn that ended inside the label window.
+
+        A short reply -- "Hi Huy!" -- can finish before enough text arrives to
+        decide whether it started with a speaker label. Without this it would
+        be held forever, which is to say silently swallowed.
+        """
+        if not self.prefix_done and self.turn_text:
+            self.prefix_done = True
+            self.send_json({"type": "token", "text": self.turn_text})
+
+    def say(self, text: str) -> None:
+        self.turn_text = ""
+        self.prefix_done = False
+        self.carry = ""
+        self.inside = None
+        self.turn_open = True
+        if not self.ready:
+            self.pending.append(text)
+            return
+        self._send({"type": "input", "text": text})
+
+    def confirm(self, approved: bool) -> None:
+        self._send({"type": "confirm", "answer": bool(approved)})
+
+    def close(self) -> None:
+        try:
+            if self.sock:
+                self.sock.close()
+        except OSError:
+            pass
 
 
-# ── static files ─────────────────────────────────────────────────────
+# ── HTTP ─────────────────────────────────────────────────────────────
 
-@app.get("/")
-def index():
-    return FileResponse(STATIC_DIR / "index.html")
+class Handler(BaseHTTPRequestHandler):
+    server_version = "Symbio/2.0"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):  # noqa: A003 - quiet by default
+        if os.environ.get("SYMBIO_DESKTOP_VERBOSE"):
+            super().log_message(fmt, *args)
+
+    # -- routing --
+
+    def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's name
+        path = self.path.split("?", 1)[0]
+        if path == "/ws/chat":
+            return self._websocket()
+        if path == "/api/ecosystem":
+            return self._json(get_ecosystem())
+        if path == "/api/health":
+            return self._json(get_health())
+        if path == "/api/settings":
+            return self._json(get_settings())
+        if path == "/api/sessions":
+            query = self.path.partition("?")[2]
+            wanted = ""
+            for pair in query.split("&"):
+                key, _, value = pair.partition("=")
+                if key == "id":
+                    wanted = urllib.parse.unquote(value)
+            return self._json(get_sessions(session_id=wanted))
+        if path.startswith("/api/adapter/"):
+            role = path.rsplit("/", 1)[-1]
+            return self._json(_adapter_info(None if role == "headmaster" else role))
+        if path in ("/", "/index.html"):
+            return self._file(STATIC_DIR / "index.html")
+        if path.startswith("/static/"):
+            return self._file(STATIC_DIR / path[len("/static/"):])
+        self.send_error(404, "Not found")
+
+    def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's name
+        if self.path.split("?", 1)[0] != "/api/settings":
+            return self.send_error(404, "Not found")
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, OSError):
+            return self._json({"ok": False, "error": "Malformed request."})
+        if not isinstance(body, dict):
+            return self._json({"ok": False, "error": "Malformed request."})
+        return self._json(set_settings(body))
+
+    def _json(self, payload: dict) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _file(self, path: Path) -> None:
+        # Resolved and checked against the static root: this serves whatever
+        # the URL names, and a path with .. in it would otherwise name
+        # anything on the disk. The server binds to localhost, but "only I can
+        # reach it" is not a reason to serve arbitrary files to it.
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(STATIC_DIR.resolve())
+            body = resolved.read_bytes()
+        except (OSError, ValueError):
+            return self.send_error(404, "Not found")
+        kind = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", kind)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(body)
+
+    # -- websocket --
+
+    def _websocket(self) -> None:
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key or self.headers.get("Upgrade", "").lower() != "websocket":
+            return self.send_error(400, "Expected a WebSocket upgrade")
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", ws_accept_key(key))
+        self.end_headers()
+
+        sock = self.connection
+        write_lock = threading.Lock()
+
+        def send_json(payload: dict) -> None:
+            data = json.dumps(payload).encode("utf-8")
+            try:
+                with write_lock:
+                    sock.sendall(ws_frame(data))
+            except OSError:
+                pass
+
+        config = _config_summary()
+        send_json({"type": "connected", **{k: config[k] for k in
+                                           ("assistant_name", "user_name", "model_name")}})
+
+        global _BRIDGE
+        with _BRIDGE_LOCK:
+            if _BRIDGE is not None and _BRIDGE.alive():
+                bridge = _BRIDGE
+                bridge.attach(send_json)
+                send_json({"type": "system", "text":
+                           "[Reattached to the conversation already running.]"})
+            else:
+                bridge = DaemonBridge(send_json, config.get("assistant_name", ""))
+                _BRIDGE = bridge
+
+        def ensure_bridge() -> tuple[bool, str]:
+            """Attach to the resident model on demand.
+
+            Not at page load: a browser that reconnects its socket -- a
+            refresh, a sleep/wake, the backoff loop after a restart -- would
+            take one of the daemon's queue slots each time and hold it for a
+            window nobody is typing in.
+            """
+            if bridge.alive():
+                return True, ""
+            return bridge.connect()
+
+        if not DaemonBridge.daemon_ready():
+            send_json({"type": "system", "text": (
+                "No resident model is running. Start one with `symb daemon "
+                "start` — it loads the headmaster once, in its own process, "
+                "and this window stays a few megabytes.")})
+
+        try:
+            while True:
+                opcode, payload = ws_read_message(sock)
+                if opcode == 0x8:          # close
+                    break
+                if opcode == 0x9:          # ping
+                    with write_lock:
+                        sock.sendall(ws_frame(payload, opcode=0xA))
+                    continue
+                if opcode != 0x1:
+                    continue
+                try:
+                    msg = json.loads(payload.decode("utf-8"))
+                except ValueError:
+                    continue
+                kind = msg.get("type")
+                if kind == "chat":
+                    text = (msg.get("message") or "").strip()
+                    if not text:
+                        continue
+                    ready, why = ensure_bridge()
+                    if not ready:
+                        send_json({"type": "system", "text": why})
+                        send_json({"type": "done", "text": ""})
+                        continue
+                    bridge.say(text)
+                elif kind == "confirm_response":
+                    bridge.confirm(msg.get("approved", False))
+                elif kind == "ping":
+                    send_json({"type": "pong"})
+        except (WSError, OSError):
+            pass
+        finally:
+            # Detach, do not close: the page may be reloading, and the next
+            # socket picks this conversation up where it left off. The daemon
+            # connection is released when the server exits, or when the daemon
+            # itself hangs up.
+            bridge.detach()
 
 
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
-def main():
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8742, log_level="info")
-
-
-if __name__ == "__main__":
-    main()
+def serve(host: str = "127.0.0.1", port: int = 8742) -> None:
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd.daemon_threads = True
+    httpd.serve_forever()

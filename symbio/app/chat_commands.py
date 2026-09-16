@@ -16,8 +16,8 @@ from symbio import constants
 from symbio.config import adapter_weights_present
 from symbio.app import (
     cron, dispatch, golden, health, local_telemetry, memory, note_history,
-    pending, prompts, sandbox, security, sessions, setup, skills, tooling,
-    training,
+    pending, prompts, sandbox, security, sessions, setup, skills, tool_eval,
+    tooling, training,
 )
 from symbio.app.config import config_show, set_config_value
 from symbio.app import commands as custom_commands
@@ -469,6 +469,28 @@ class CommandsMixin:
             if tooling.tool_group_enabled(
                 tooling._HERMES_NAME_MAP.get(t["name"], t["name"]), groups)]
         rest = rest.strip()
+        if rest.split()[:1] == ["refresh"]:
+            # A tool file seeded before a description was improved keeps
+            # saying the old thing forever: the directory is authoritative, so
+            # the better wording in code never reaches the model. This offers
+            # the update and refuses to make it silently.
+            wanted = rest.split()[1:]
+            force = "--force" in wanted
+            wanted = [w for w in wanted if not w.startswith("-")]
+            rewritten, kept = tooling.refresh_tool_files(
+                names=wanted or None, force=force)
+            if rewritten:
+                self.output_fn("  Updated from the built-ins: "
+                               + ", ".join(sorted(rewritten)))
+            if kept:
+                self.output_fn(
+                    "  Left alone (edited here, or seeded before this check "
+                    "existed): " + ", ".join(sorted(kept)))
+                self.output_fn("  /tools refresh <name> rewrites one of those "
+                               "from the built-in; your version is lost.")
+            if not rewritten and not kept:
+                self.output_fn("  Every tool file already matches the built-ins.")
+            return
         if not rest:
             by_family: dict[str, list[str]] = {}
             for t in schemas:
@@ -611,6 +633,26 @@ class CommandsMixin:
                 self.output_fn(
                     "  [Golden] /golden audit checks whether the corpus itself "
                     "teaches against a failing case.")
+
+        elif cmd in ("/tooleval", "/tooleval resilience", "/tooleval all"):
+            # Two batteries, because they answer different questions. The
+            # default cases name their own tool ("run uname -s" -> run_command)
+            # and measure whether the call SHAPE resolves. The resilience cases
+            # name nothing ("what is my name?", "post this to x.com") and
+            # measure whether the model reaches at all -- which is the failure
+            # in the logs: a refusal written from the prompt, with no call
+            # behind it.
+            which = cmd.split()[1] if len(cmd.split()) > 1 else "resilience"
+            cases = (tool_eval.RESILIENCE_CASES if which == "resilience"
+                     else tool_eval.EXTENDED_CASES + tool_eval.RESILIENCE_CASES)
+            report = tool_eval.run_tool_cases(
+                self.model, self.tokenizer, self.system_prompt, self.config,
+                self.generate_fn, self.sampler, cases=cases,
+                enabled_groups=self.enabled_groups,
+                output_fn=self.output_fn)
+            self.output_fn(
+                f"  [ToolEval] {report['passed']}/{report['total']} complete "
+                f"round trips.")
 
         elif cmd == "/wildcards":
             from symbio.app import wildcards as _wild

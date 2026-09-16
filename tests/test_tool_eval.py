@@ -263,3 +263,47 @@ def test_a_correct_answer_in_different_words_is_not_a_failure():
     report = run('<schedule_job schedule="0 9 * * *"/>', "System check passed.",
                  case=case)
     assert report["passed"] == 1
+
+
+# --- the requests with no tool named after them ----------------------------
+
+
+def test_the_resilience_cases_name_tools_that_exist():
+    """A case whose expected tool is not in the catalog can never pass, and
+    would read as a model failure."""
+    from symbio.app import tooling
+
+    # Internal names, which is what parse_tools returns: the shell is
+    # advertised as "terminal" and resolves to run_command.
+    known = {tooling._HERMES_NAME_MAP.get(n, n)
+             for n in tooling.enabled_tool_names(None)}
+    for case in tool_eval.RESILIENCE_CASES:
+        for name in case.accepted:
+            assert name in known, (case.id, name)
+
+
+def test_a_refusal_with_no_call_behind_it_fails_at_invoked():
+    """The live failure, as a score. "I don't have access to personal
+    information like your name" is fluent, polite, and reached nothing."""
+    case = next(c for c in tool_eval.RESILIENCE_CASES if c.id == "recall_name")
+    report = run("I don't have access to personal information like your name. "
+                 "Could you tell me what it is?", case=case)
+    assert report["passed"] == 0
+    assert report["funnel"]["invoked"] == 0
+
+
+def test_reaching_the_general_tool_passes():
+    """No tool is named after "what is my name", and recall answers it."""
+    case = next(c for c in tool_eval.RESILIENCE_CASES if c.id == "recall_name")
+    report = run('<tool_call>{"name": "recall", "arguments": {"query": "my name"}}</tool_call>',
+                 "Your name is Huy.", case=case)
+    assert report["passed"] == 1
+
+
+def test_grepping_the_notes_is_scored_as_the_pass_it_is():
+    """The failure being measured is calling NOTHING. A shell that reads the
+    same file is a different route to the same honest answer."""
+    case = next(c for c in tool_eval.RESILIENCE_CASES if c.id == "recall_name")
+    report = run("<cmd>grep -ril name notes/</cmd>", "Your name is Huy.",
+                 case=case)
+    assert report["passed"] == 1

@@ -166,6 +166,44 @@ def _build_parser() -> argparse.ArgumentParser:
         help="List archived notes and adapters",
     )
 
+    watch_parser = sub.add_parser(
+        "watch", help="Stay online: keep the model resident and run due jobs")
+    watch_parser.add_argument(
+        "--interval", type=float, default=30.0,
+        help="Seconds between passes (default 30)")
+    watch_parser.add_argument(
+        "--once", action="store_true", help="Run a single pass and exit")
+    watch_parser.add_argument(
+        "--status", action="store_true", help="Print the last heartbeat and exit")
+
+    pressure_parser = sub.add_parser(
+        "pressure", help="Measure hallucination and surrender against the resident model")
+    pressure_parser.add_argument(
+        "--only", choices=["hallucination", "surrender"], default="",
+        help="Run one half of the battery")
+    pressure_parser.add_argument(
+        "--case", default="",
+        help="Run one case by id, e.g. invented_preference")
+    pressure_parser.add_argument(
+        "--capture", action="store_true",
+        help="File every failure as a mistake note, so the learning loop "
+             "trains on it")
+
+    import_parser = sub.add_parser(
+        "import", help="Import what another local agent has written down")
+    import_parser.add_argument(
+        "agent", choices=["hermes", "openclaw"],
+        help="Which agent's state to read")
+    import_parser.add_argument(
+        "--path", default="",
+        help="Where that agent keeps its state (default: ~/.hermes, ~/.openclaw)")
+    import_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="List what would be imported and write nothing")
+    import_parser.add_argument(
+        "--sessions", type=int, default=0, metavar="N",
+        help="Also import the N most recent conversations (Hermes only)")
+
     index_parser = sub.add_parser("index-notes", help="Build or refresh the hierarchical tag index for notes")
     index_parser.add_argument(
         "--force", action="store_true",
@@ -882,6 +920,28 @@ def _cmd_train(config: dict[str, Any], skill: str | None = None,
                              resume=resume, iters=iters) else 1
 
 
+def _cmd_import(args) -> int:
+    """`symb import hermes|openclaw` — read another agent's store into notes/.
+
+    Everything it writes lands in notes/, which is retrieved and wrapped as
+    untrusted at use time. Nothing reaches soul.md, standing_instructions.md
+    or the prompt: those are the channels this agent treats as authority, and
+    an import path into them would hand another program the wheel.
+    """
+    from pathlib import Path as _Path
+
+    from symbio.app import importers
+
+    home = _Path(args.path).expanduser() if args.path else None
+    report = importers.run(args.agent, home=home,
+                           dry_run=args.dry_run,
+                           sessions=max(0, int(args.sessions or 0)))
+    print(importers.describe(report))
+    if args.dry_run and report.found:
+        print("\n  Dry run — nothing was written. Re-run without --dry-run.")
+    return 0
+
+
 def _cmd_index_notes(config: dict[str, Any], force: bool = False) -> int:
     """Build or refresh the hierarchical tag index over notes.
 
@@ -1102,6 +1162,50 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_skill(config, args)
     if command == "archive":
         return _cmd_archive(config, args)
+    if command == "pressure":
+        from symbio.app import pressure_eval, supervisor
+
+        if not supervisor.daemon_ready():
+            print("  No resident model. Start one with `symb daemon start` — "
+                  "this measures the model, so it needs the real one.")
+            return 1
+        cases = pressure_eval.ALL_CASES
+        if args.only:
+            cases = tuple(c for c in cases if c.measures == args.only)
+        if args.case:
+            cases = tuple(c for c in cases if c.id == args.case)
+            if not cases:
+                print(f"  No case called {args.case!r}. Ids: "
+                      + ", ".join(c.id for c in pressure_eval.ALL_CASES))
+                return 1
+        report = pressure_eval.run(
+            lambda prompt: supervisor.ask_daemon(prompt, collect_output=True),
+            cases=cases)
+        print(pressure_eval.describe(report))
+        if args.capture:
+            written = pressure_eval.capture_failures(report, cases=cases)
+            if written:
+                print(f"  Filed {len(written)} failure(s) as mistake notes: "
+                      + ", ".join(written))
+                print("  They are reflexes: the next training batch runs "
+                      "short and repeats them hard.")
+            else:
+                print("  Nothing to file — every case passed.")
+        return 0 if report["passed"] == report["total"] else 1
+    if command == "watch":
+        from symbio.app import supervisor
+
+        if args.status:
+            state = supervisor.read_heartbeat()
+            if not state:
+                print("  No supervisor heartbeat yet. Start one with `symb watch`.")
+                return 1
+            print(json.dumps(state, indent=2))
+            return 0
+        return supervisor.run(config, interval=args.interval,
+                              rounds=1 if args.once else None)
+    if command == "import":
+        return _cmd_import(args)
     if command == "index-notes":
         return _cmd_index_notes(config, force=getattr(args, "force", False))
     if command == "train":

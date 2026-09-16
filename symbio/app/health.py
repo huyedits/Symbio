@@ -344,6 +344,41 @@ def _check_web_search(config: dict[str, Any]) -> _CheckResult:
         )
 
 
+def _check_desktop(config: dict[str, Any]) -> _CheckResult:
+    """If the desktop group is on, say whether the screen is actually readable.
+
+    Both permissions fail silently on macOS: without the Accessibility grant
+    the control tree comes back EMPTY rather than refused, and without Screen
+    Recording a capture comes back black rather than refused. Each reads, from
+    inside a turn, as "there is nothing on the screen" — so they are worth
+    reporting before the model draws that conclusion on its own.
+    """
+    groups = config.get("tools", {}).get("enabled_groups")
+    if groups is not None and "desktop" not in groups:
+        return _CheckResult("desktop", False,
+                            message="Desktop control disabled; skipped.",
+                            severity="info")
+    from symbio import ax
+
+    if not ax.available():
+        return _CheckResult("desktop", False,
+                            message="Desktop control is macOS-only here; the "
+                                    "accessibility API is not available.",
+                            severity="info")
+    if ax.trusted():
+        return _CheckResult("desktop", True,
+                            message="Desktop control available: the "
+                                    "accessibility tree is readable.")
+    return _CheckResult(
+        "desktop", False,
+        message=("Desktop control is on but macOS has not granted "
+                 "Accessibility permission, so the screen's controls cannot "
+                 "be read and clicks land by coordinate only. Grant it in "
+                 "System Settings > Privacy & Security > Accessibility for "
+                 "the terminal Symbio runs in, then restart it."),
+        severity="warning")
+
+
 def _check_browser(config: dict[str, Any]) -> _CheckResult:
     """If browser automation is enabled, verify Playwright can open a page.
     Auto-fix: disable browser.enabled if it is clearly broken and tell the user."""
@@ -583,6 +618,7 @@ def verify_enabled_features(
         _check_rag(config),
         _check_web_search(config),
         _check_browser(config),
+        _check_desktop(config),
         _check_telegram(config),
         _check_dispatch(config),
         _check_cron(config),
