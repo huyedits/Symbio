@@ -994,7 +994,13 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     # Below this the cap is doing more harm than the freeze it prevents: the
     # system prompt alone is thousands of tokens, and a cap under it would trim
     # the whole conversation away every turn and still not fit.
-    _MIN_TOKEN_CAP = 4096
+    #
+    # 8192, not 4096, once the budget started being measured against live RAM.
+    # 4096 was chosen as a floor under a number nobody expected to reach; a
+    # tight machine reaches it, and this install's system prompt alone measures
+    # ~5.5k tokens (logs/daemon.log, "prompt 5493"). A floor UNDER the prompt
+    # is the one setting guaranteed to trim every turn and still overflow.
+    _MIN_TOKEN_CAP = 8192
     # Trimming lands here rather than exactly at the cap. Landing at the cap
     # means overflowing again on the very next turn, and each overflow moves
     # the start of the conversation, which is the one thing that invalidates

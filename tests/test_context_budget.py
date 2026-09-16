@@ -262,7 +262,10 @@ def _live_session(cap_tokens):
 def test_an_oversized_prompt_is_shrunk_before_it_reaches_the_model():
     """The whole point: the freeze happens during prefill, so the trim has to
     land before generation, not after it."""
-    s = _live_session(5000)
+    # Above _MIN_TOKEN_CAP: a cap under the floor is raised to it, because a
+    # cap below the system prompt trims the whole conversation every turn and
+    # still does not fit.
+    s = _live_session(9000)
     messages = [{"role": "system", "content": "SYSTEM " * 100}]
     for i in range(40):
         messages.append({"role": "user", "content": f"page{i} " * 500})
@@ -270,7 +273,7 @@ def test_an_oversized_prompt_is_shrunk_before_it_reaches_the_model():
     reply, _ = s._generate_reply(messages)
 
     assert reply == "fine."
-    assert s.seen["prompt_tokens"] <= 5000
+    assert s.seen["prompt_tokens"] <= 9000
 
 
 def test_a_prompt_that_fits_is_passed_through_untouched():

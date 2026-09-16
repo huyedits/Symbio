@@ -195,7 +195,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # — the browser, the compositor, the desktop — and the cap is taken
         # from whichever of the two budgets is smaller, measured each turn.
         # 0 switches the measurement off and trusts kv_budget_mb alone.
-        "kv_budget_reserve_gb": 3.0,
+        #
+        # 1.5, not 3: what is already resident — the weights, the browser, the
+        # desktop — is not free memory and so is not counted here twice. This
+        # reserve covers only what is still to come: the browser loading a
+        # page, the activations of a long generation, and enough margin that
+        # the OS does not reach for swap. Measured on this box with the 14B and
+        # Chrome up, 3.0 left a headroom of exactly 0 MB and would have pinned
+        # every prompt to the 4,096-token floor — below the system prompt
+        # itself, which is the region where the cap does more harm than the
+        # freeze it prevents.
+        "kv_budget_reserve_gb": 1.5,
         # Quantising the KV cache (4-bit) quarters the per-token cost, so the
         # same kv_budget_mb buys roughly four times the context. Off by
         # default: some models lose measurable quality below 8 bits, and the
