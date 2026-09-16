@@ -10,6 +10,7 @@ Reported 2026-09-07 as "after 50k the whole thing freezes".
 
 import pytest
 
+from symbio.app import chat
 from symbio.app.chat import ChatSession
 from symbio.app.chat_constants import _cache_nbytes
 
@@ -25,7 +26,13 @@ class _Layer:
 
 
 def _session(**agent):
-    """A ChatSession shell — no model, no tokenizer, just the budget logic."""
+    """A ChatSession shell — no model, no tokenizer, just the budget logic.
+
+    The live-RAM measurement is off unless a test asks for it: left on, every
+    assertion about the configured budget would also be an assertion about how
+    much memory the machine running the suite happens to have free.
+    """
+    agent.setdefault("kv_budget_reserve_gb", 0)
     s = ChatSession.__new__(ChatSession)
     s.config = {"agent": agent}
     s._prompt_cache = None
@@ -486,3 +493,140 @@ def test_the_bulk_is_shortened_before_the_conversation_is():
 
     assert any("cut from here" in m["content"] for m in kept)
     assert kept[1]["content"] == "post 'haii @grok' for me"   # untouched
+
+
+# ---- the budget the machine can actually afford ----
+#
+# kv_budget_mb is a constant and the machine is not. On 2026-09-16 a browser
+# turn spent the configured 4000 MB while Chrome held 2-3 GB of the same 16 GB,
+# and the Mac swapped: the whole desktop stopped responding, mid-tool-call, with
+# no traceback and no jetsam record. The budget is measured now, and the smaller
+# of the two wins.
+
+@pytest.fixture(autouse=True)
+def _forget_the_reading():
+    """The reading is process-wide and cached for seconds; no test inherits it."""
+    chat._reset_headroom()
+    yield
+    chat._reset_headroom()
+
+
+def _ram(monkeypatch, free_gb):
+    monkeypatch.setattr(chat.training, "free_ram_bytes",
+                        lambda: None if free_gb is None else int(free_gb * 1024 ** 3))
+
+
+def test_an_idle_machine_spends_the_whole_configured_budget(monkeypatch):
+    _ram(monkeypatch, 12)
+
+    s = _session(kv_budget_mb=4000, kv_budget_reserve_gb=3.0)
+
+    assert s._kv_budgets() == (4000.0, 9216.0)
+    assert s._prompt_token_cap() == int(4000 * 1024 * 1024
+                                        / s._FALLBACK_KV_BYTES_PER_TOKEN)
+
+
+def test_a_machine_with_the_browser_open_spends_less_than_the_budget(monkeypatch):
+    """The whole point: 4 GB free, 3 GB of it spoken for, is not 4000 MB of
+    cache however confidently the config says so."""
+    _ram(monkeypatch, 4)
+
+    s = _session(kv_budget_mb=4000, kv_budget_reserve_gb=3.0)
+
+    assert s._kv_budgets()[1] == 1024.0
+    assert s._prompt_token_cap() == max(
+        s._MIN_TOKEN_CAP,
+        int(1024 * 1024 * 1024 / s._FALLBACK_KV_BYTES_PER_TOKEN))
+
+
+def test_the_cache_a_session_already_holds_counts_as_available(monkeypatch):
+    """Trimming is what frees it. Counted as someone else's memory, a large
+    session reads its own cache as pressure and trims itself to the floor."""
+    _ram(monkeypatch, 4)
+    s = _session(kv_budget_mb=4000, kv_budget_reserve_gb=3.0)
+    s._prompt_cache = [_Layer(_Arr(2 * 1024 ** 3))]  # 2 GB of cache held
+
+    assert s._kv_budgets()[1] == 3072.0  # 4 free + 2 held - 3 reserved
+
+
+def test_the_reading_falls_at_once_and_rises_slowly(monkeypatch):
+    """Memory freed by a closing tab can be taken back a second later. A budget
+    that spends it the instant it appears is over budget with nothing to trim."""
+    _ram(monkeypatch, 12)
+    assert chat._live_headroom_mb(3.0, now=100.0) == 9216.0
+
+    _ram(monkeypatch, 4)
+    assert chat._live_headroom_mb(3.0, now=200.0) == 1024.0, "a fall is immediate"
+
+    _ram(monkeypatch, 4.4)  # 1434 MB, inside one step of the current reading
+    assert chat._live_headroom_mb(3.0, now=300.0) == 1024.0, "jitter must not move it"
+
+    _ram(monkeypatch, 6)
+    assert chat._live_headroom_mb(3.0, now=400.0) == 3072.0, "real recovery does"
+
+
+def test_a_reading_is_reused_for_a_few_seconds(monkeypatch):
+    """vm_stat is a subprocess, and free RAM does not move faster than this."""
+    _ram(monkeypatch, 12)
+    assert chat._live_headroom_mb(3.0, now=100.0) == 9216.0
+
+    _ram(monkeypatch, 1)
+    assert chat._live_headroom_mb(3.0, now=101.0) == 9216.0
+    assert chat._live_headroom_mb(3.0, now=110.0) == 0.0
+
+
+def test_ram_that_cannot_be_read_keeps_the_last_reading(monkeypatch):
+    """Never un-cap on a failed measurement: that is the freeze, via the guard
+    against it."""
+    _ram(monkeypatch, 4)
+    assert chat._live_headroom_mb(3.0, now=100.0) == 1024.0
+
+    _ram(monkeypatch, None)
+    assert chat._live_headroom_mb(3.0, now=200.0) == 1024.0
+
+
+def test_ram_that_was_never_readable_leaves_the_configured_budget_alone(monkeypatch):
+    _ram(monkeypatch, None)
+
+    s = _session(kv_budget_mb=4000, kv_budget_reserve_gb=3.0)
+
+    assert s._kv_budgets() == (4000.0, None)
+    assert s._prompt_token_cap() == int(4000 * 1024 * 1024
+                                        / s._FALLBACK_KV_BYTES_PER_TOKEN)
+
+
+def test_a_zero_reserve_trusts_the_configured_budget_alone(monkeypatch):
+    _ram(monkeypatch, 1)
+
+    s = _session(kv_budget_mb=4000, kv_budget_reserve_gb=0)
+
+    assert s._kv_budgets() == (4000.0, None)
+
+
+def test_an_explicit_token_cap_still_overrides_everything(monkeypatch):
+    _ram(monkeypatch, 1)
+
+    assert _session(max_prompt_tokens=9000,
+                    kv_budget_reserve_gb=3.0)._prompt_token_cap() == 9000
+    assert _session(max_prompt_tokens=0,
+                    kv_budget_reserve_gb=3.0)._prompt_token_cap() == 0
+
+
+def test_the_advice_names_whichever_budget_is_actually_binding(monkeypatch):
+    """"Raise kv_budget_mb" is wrong — and makes the freeze likelier — when the
+    real constraint is that something else holds the RAM."""
+    _ram(monkeypatch, 4)
+    tight = _session(kv_budget_mb=4000, kv_budget_reserve_gb=3.0)._cap_advice()
+    assert "held by something else" in tight and "kv_bits" in tight
+
+    chat._reset_headroom()
+    _ram(monkeypatch, 12)
+    roomy = _session(kv_budget_mb=4000, kv_budget_reserve_gb=3.0)._cap_advice()
+    assert "Raise agent.kv_budget_mb" in roomy
+
+
+def test_a_nonsense_reserve_falls_back_to_the_default(monkeypatch):
+    _ram(monkeypatch, 4)
+
+    assert _session(kv_budget_mb=4000,
+                    kv_budget_reserve_gb="plenty")._kv_budgets()[1] == 1024.0

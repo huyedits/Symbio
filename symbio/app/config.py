@@ -180,6 +180,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # turning quantisation on roughly quadruples the affordable context
         # without touching this number.
         "kv_budget_mb": 4000,
+        # kv_budget_mb is the budget for a machine that is otherwise idle, and
+        # this one is not: Chrome holding a page is 2-3 GB that was not there
+        # when 4000 was chosen, and spending the configured budget anyway is
+        # what froze the Mac on 2026-09-16 mid browser turn. This is the RAM
+        # that must stay free for everything that is neither cache nor weights
+        # — the browser, the compositor, the desktop — and the cap is taken
+        # from whichever of the two budgets is smaller, measured each turn.
+        # 0 switches the measurement off and trusts kv_budget_mb alone.
+        "kv_budget_reserve_gb": 3.0,
         # Quantising the KV cache (4-bit) quarters the per-token cost, so the
         # same kv_budget_mb buys roughly four times the context. Off by
         # default: some models lose measurable quality below 8 bits, and the

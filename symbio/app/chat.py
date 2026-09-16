@@ -157,6 +157,63 @@ def _browser_peek(browser: BrowserSession, config: dict | None = None) -> str:
     return "\n\nPage text now:\n" + text[:limit]
 
 
+# --- how much of this machine the cache may have, right now ----------------
+# Quantised, because a cap that follows free RAM exactly moves the trim
+# boundary every turn, and a moving boundary invalidates the KV prefix every
+# turn: the cure for the freeze being worse than the freeze is the failure
+# _fit_messages_to_cap exists to describe.
+_HEADROOM_STEP_MB = 512.0
+# vm_stat is a subprocess. Once every few seconds is far finer than the thing
+# being measured actually moves.
+_HEADROOM_TTL_S = 5.0
+# One machine, so one reading, shared by whatever sessions this process holds.
+_headroom_mb: float | None = None
+_headroom_at: float = 0.0
+
+
+def _live_headroom_mb(reserve_gb: float, held_mb: float = 0.0,
+                      now: float | None = None) -> float | None:
+    """MB the KV cache may occupy right now, or None when RAM cannot be read.
+
+    `reserve_gb` is what must stay free for everything that is neither cache
+    nor weights — the browser, the compositor, the rest of the desktop. Below
+    it macOS swaps rather than kills, and a swapping Mac is the failure the
+    whole budget exists to prevent.
+
+    `held_mb` is what this session's cache already occupies. It counts as
+    available because trimming is precisely what gives it back; without it a
+    large session reads its own cache as somebody else's memory and trims
+    itself to the floor.
+
+    It falls at once and rises slowly. Memory freed by a closing tab can be
+    taken back a second later, and a budget that spends it the instant it
+    appears is over budget again with nothing to trim.
+    """
+    global _headroom_mb, _headroom_at
+    now = time.time() if now is None else now
+    if _headroom_mb is not None and now - _headroom_at < _HEADROOM_TTL_S:
+        return _headroom_mb
+    free = training.free_ram_bytes()
+    if not free:
+        # Unreadable, on this or on any platform without vm_stat. Keep the last
+        # real reading; never un-cap on a failed measurement.
+        return _headroom_mb
+    allowance = free / (1024 * 1024) + max(0.0, held_mb) - reserve_gb * 1024
+    allowance = max(0.0, (allowance // _HEADROOM_STEP_MB) * _HEADROOM_STEP_MB)
+    _headroom_at = now
+    if _headroom_mb is None or allowance < _headroom_mb:
+        _headroom_mb = allowance
+    elif allowance >= _headroom_mb + 2 * _HEADROOM_STEP_MB:
+        _headroom_mb = allowance
+    return _headroom_mb
+
+
+def _reset_headroom() -> None:
+    """Forget the reading. For tests, and for a deliberate re-measure."""
+    global _headroom_mb, _headroom_at
+    _headroom_mb, _headroom_at = None, 0.0
+
+
 class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     """One interactive chat session: model, stores, browser, cron thread.
 
@@ -946,6 +1003,55 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     # turns per expensive one.
     _TRIM_TARGET = 0.75
 
+    def _kv_budgets(self) -> tuple[float, float | None]:
+        """(what config allows, what the machine can actually spare) in MB.
+
+        kv_budget_mb is the budget for a machine that is otherwise idle, and
+        this machine is not: Chrome holding a page is 2-3 GB that was not there
+        when the number was chosen. Spending the configured budget anyway is
+        what took the Mac down on 2026-09-16, mid browser turn. The second
+        number is measured, and the smaller of the two is what may be spent.
+
+        The cache this session already holds counts as available, because
+        trimming is what frees it -- otherwise a session that had grown large
+        would read its own cache as someone else's memory and trim to nothing.
+        """
+        agent_cfg = self.config.get("agent", {})
+        try:
+            configured = float(agent_cfg.get("kv_budget_mb", 4000))
+        except (TypeError, ValueError):
+            configured = 4000.0
+        try:
+            reserve_gb = float(agent_cfg.get("kv_budget_reserve_gb", 3.0))
+        except (TypeError, ValueError):
+            reserve_gb = 3.0
+        if reserve_gb <= 0:
+            return configured, None
+        # getattr: the cap is consulted on the first generation of a
+        # session, which can be before the cache attribute exists at
+        # all. No cache is held_mb = 0, not an error.
+        held = _cache_nbytes(getattr(self, "_prompt_cache", None))
+        held_mb = held / (1024 * 1024)
+        return configured, _live_headroom_mb(reserve_gb, held_mb)
+
+    def _cap_advice(self) -> str:
+        """What to actually change, given which budget is the binding one.
+
+        Telling someone to raise kv_budget_mb when the real constraint is that
+        Chrome has the RAM is advice that makes the freeze more likely, not
+        less.
+        """
+        configured, headroom = self._kv_budgets()
+        if headroom is not None and headroom < configured:
+            return (f"Most of this machine's memory is held by something else "
+                    f"right now — {headroom:.0f} MB is free for the cache "
+                    f"against a configured {configured:.0f} MB — so closing "
+                    f"the browser or other apps buys back more context than "
+                    f"raising agent.kv_budget_mb would. Either way, "
+                    f"agent.kv_bits set to 4 fits roughly four times as much.")
+        return ("Raise agent.kv_budget_mb, or set agent.kv_bits to 4 to fit "
+                "roughly four times as much.")
+
     def _measure_kv_cost(self, tokens: int) -> None:
         """Weigh the live cache and remember what a token costs.
 
@@ -978,11 +1084,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if isinstance(setting, str) and setting.strip().lstrip("-").isdigit():
             value = int(setting.strip())
             return 0 if value <= 0 else max(self._MIN_TOKEN_CAP, value)
-        try:
-            budget_mb = float(agent_cfg.get("kv_budget_mb", 4000))
-        except (TypeError, ValueError):
-            budget_mb = 4000.0
-        if budget_mb <= 0:
+        configured, headroom = self._kv_budgets()
+        budget_mb = configured if headroom is None else min(configured, headroom)
+        if configured <= 0:
             return 0
         per_token = self._kv_bytes_per_token or self._FALLBACK_KV_BYTES_PER_TOKEN
         return max(self._MIN_TOKEN_CAP, int(budget_mb * 1024 * 1024 / per_token))
@@ -1691,8 +1795,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                         f"  [Context] {prompt_tokens} tokens is over this "
                         f"machine's {cap}-token budget, so the oldest turns are "
                         f"being dropped from what the model sees (they stay in "
-                        f"the transcript). Raise agent.kv_budget_mb, or set "
-                        f"agent.kv_bits to 4 to fit roughly four times as much.")
+                        f"the transcript). {self._cap_advice()}")
                     tokenizing_spinner.start()
                 prompt_tokens = len(ids)
                 if timings is not None:
