@@ -238,3 +238,10 @@ build/
 # db), so it is both junk and the same kind of thing browser_profile/ is
 # ignored for.
 /null/
+
+# Design-canvas output. Artboards and a 2.5 MB rendered canvas that nothing in
+# the package imports, nothing in the desktop app serves, and no test reads --
+# the desktop window's real assets are symbio_desktop/static/. Kept on disk
+# because it is the source for that design; not shipped, because a repo that
+# carries it makes every clone pay 2.5 MB to run nothing.
+/design/
