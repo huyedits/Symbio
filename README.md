@@ -90,6 +90,107 @@ Symbio can use a live browser to perform tasks such as opening Chrome and intera
 
 [https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20](https://github.com/user-attachments/assets/9e910d11-d204-4fb1-b42f-e09dd6243d20)
 
+### Desktop control
+
+Symbio drives the Mac itself, not only a browser page. It reads the frontmost
+window through the macOS accessibility API — the same interface a screen
+reader uses — so `see_screen` comes back with the window's real controls:
+
+```
+Notes — window "Shopping"
+   1 Button        'New Note' at (48,96) 28x28
+   2 TextArea      '(empty text field)' at (320,140) 600x420
+   3 Button        'Share' at (980,96) 28x28
+```
+
+Every action then takes a number: `desktop_click {"element": 1}`,
+`desktop_type {"element": 2, "text": "..."}`, plus `desktop_press` (chords
+included: `cmd+shift+4`), `desktop_scroll`, `desktop_drag`, `desktop_move`,
+`desktop_wait` and `open_app`. Nothing here loads a vision model, so the
+listing costs no RAM beside the headmaster, it has no minimum control size,
+and a control that is absent from the tree is genuinely not on screen.
+
+Two things the tree gives that a screenshot cannot:
+
+- **Typing goes into a named field.** Keys sent at a window with no text field
+  focused are not discarded, they are shortcuts. `desktop_type` refuses to
+  type blind when the focused control cannot take text, and names the field to
+  use instead.
+- **A click that changed nothing says so.** The window title and the focused
+  control are read before and after, so "clicked" is not reported as "done".
+
+Vision stays as the fallback for windows that draw their own interface — a
+canvas, a game, a screen share — where there is no tree to read.
+
+**Permission:** macOS returns an empty tree rather than an error until the
+terminal running Symbio is granted Accessibility. `python3 -m symbio.ax` shows
+the grant dialog and then prints the live control listing; `/selfcheck` in
+chat reports the same thing.
+
+### The window
+
+```bash
+symb daemon start          # loads the model once, in its own process
+symbio-desktop             # opens the chat window in your browser
+```
+
+A chat-first interface: conversation in the middle, the agent's own tool calls
+folded into one line you can open, approval prompts inline (the same gate the
+terminal shows), and the adapter map, skills, corpus and health report behind a
+drawer you open when you want them.
+
+It is deliberately not an Electron app. The server is the Python standard
+library, the model lives in `symb daemon` and is reached over a Unix socket,
+and the page is plain HTML and CSS — **28 MB resident idle, 31 MB after serving
+every endpoint**, against the 200-400 MB an Electron shell starts at.
+`--window` opens a native WKWebView instead of a browser tab; that hosts WebKit
+in this process and costs about 400 MB all told, which is why it is off by
+default.
+
+### Staying online
+
+```bash
+symb daemon start     # load the model once, in its own process
+symb watch            # keep it loaded, and run what is due
+symb watch --status   # the last heartbeat
+```
+
+Scheduled jobs used to run inside a chat session's background thread, so
+"every morning at 8" meant "every morning at 8, if a window happens to be
+open". `symb watch` is the process that watches instead: it restarts the
+resident model when it dies (with a backoff, because each attempt maps several
+GB of weights), ticks the cron table itself, and hands each fired job to the
+model as an ordinary turn.
+
+**Unattended turns are denied by default.** The model asks its client before a
+risky tool, and here the client is a loop — nobody is reading the prompt. The
+answer is no, and the refusal is recorded in the heartbeat.
+`cron.unattended_approve` turns that off for someone who has read this
+paragraph.
+
+### Posting to X
+
+```
+post_to_x  {"text": "shipping the desktop window today"}
+```
+
+The browser must already be open at x.com and signed in — it does not navigate
+there on its own, because posting is not something to do on a page nobody
+asked for. It fills the composer **by selector** (the composer is 28px tall,
+under the vision model's one-patch floor, and a coordinate for it missed by
+~36px every time), sends with x's own Post button, then reads the timeline back
+and returns a verdict the model cannot shape:
+
+```
+[Post CONFIRMED] The post is rendered on the timeline: 'shipping the desktop window today'
+[Post NOT confirmed] The composer still holds the text, so it was not sent.
+[Post NOT confirmed] The composer cleared but the post is not on the timeline yet …
+```
+
+A cleared composer is not confirmation — a discarded draft clears too. This
+project has already posted something and reported that it had not, which is
+why the proof is read from the DOM rather than from a toast.
+
 ---
 
 ## Quick Start
@@ -218,7 +319,28 @@ Symbio:   Your name is Alice.
 
 Once the configured threshold is reached, Symbio digests the examples and runs a short LoRA update.
 
-The default threshold is **5 mistake notes** - but you can edit that.
+The threshold is not a constant. It scales with the corpus, because every
+sample already in `train.jsonl` competes with the new ones: five boosted notes
+are most of an epoch against 50 samples and a rounding error against 882. It
+rises by log, not by multiple — a corpus ten times bigger needs a bit more
+evidence, not ten times as much — and severe mistakes pull it back down.
+Clamped to 2..20 either way; `learn.mistake_threshold` sets the base and
+`learn.scale_threshold_with_corpus` turns the scaling off.
+
+## Not every mistake asks for the same training
+
+A correction is one of two things, and they want opposite recipes:
+
+| | What it is | What the fix needs |
+| --- | --- | --- |
+| **Knowledge** | the model said something false — a name, a version, which file holds what | passes over the corpus; a fact repeated four times in one epoch is still one fact |
+| **Reflex** | the model reached for the wrong SHAPE — a tool that does not exist, a guessed argument, a GNU flag on BSD, a click before a look | repetition of the exact form; an action learned once is not automatic |
+
+Every mistake note now records its `**Kind:**`, classified at capture time,
+and the batch decides the dials: a batch of wrong shapes repeats harder and
+runs shorter, a batch of wrong facts trains at ordinary weight for the full
+run, and a mixed batch lands between. One batch is still one LoRA pass — this
+machine trains one model at a time.
 
 ```text
 notes/mistakes/
@@ -270,6 +392,49 @@ but also from:
 > "That command failed, so here's what actually worked."
 
 Only a confirmed successful recovery is captured.
+
+## Mistakes in the environment, not just in the answer
+
+The same loop runs over the machine itself. A desktop is full of failures that
+come back looking like ordinary results, and each one used to end the turn:
+
+| What came back | What it actually means |
+| --- | --- |
+| `No results found.` | the search produced no work |
+| `Timed out after 30s.` | the command was killed |
+| `Browser is not open.` | the action was aimed at nothing |
+| `Refused to type: the focused control is a Button` | keys there are shortcuts, not text |
+| `Nothing about the window changed` | the click may not have landed |
+| `There is no element 9 on screen` | the listing is stale; look again |
+| `The accessibility tree is empty` | a permission is missing, the screen is not |
+
+Symbio treats all of these as failures rather than answers. Two things follow
+from that: the turn keeps going instead of reporting a dead end as done, and
+the recovery it finds becomes a training example the same way a corrected
+answer does.
+
+```text
+You: post this to x.com
+
+Symbio: <tool_call>{"name": "desktop_type", "arguments": {"text": "..."}}</tool_call>
+
+Tool:
+Refused to type: the focused control is a Button ('Post'), not a text field.
+Look with see_screen target='desktop' and type into the field by its number.
+
+Symbio: <tool_call>{"name": "see_screen", "arguments": {"target": "desktop"}}</tool_call>
+        <tool_call>{"name": "desktop_type", "arguments": {"element": 2, "text": "..."}}</tool_call>
+
+[Learn]
+Tool mistake captured.
+```
+
+Some of these were learned the hard way and are in the corpus as fixed
+behaviour: a `sed -i` written GNU-style silently does nothing on macOS and got
+reported as done; a tweet posted while the model said it had not; keystrokes
+sent at an unfocused window that fired shortcuts instead of typing. The
+environment is where an agent's confident wrong answers actually cost
+something, so it is the environment that gets checked after every action.
 
 ---
 
@@ -460,6 +625,104 @@ Example:
 ```
 
 ---
+
+# How much does it take to learn something new?
+
+Measured on 2026-09-15, Qwen3-14B on an M-series Mac, against `aws_sim/` — a
+deliberately **counter-familiar** cloud CLI built so that pretrained knowledge
+actively misleads (`store`/`compute`/`access`, `--region` required on every
+command, no URI scheme, `Key:Value` labels, `tag/Key:Value` filters). The
+system prompt says nothing about the syntax. The base model scores **0/13**.
+
+Nothing in the corpus is hand-written. The model attempts a task, the simulator
+**runs** what it emits, and the pair is kept only if the world changed the way
+the task asked. A model that never gets a command right earns exactly zero
+samples.
+
+## The curve: 51 checkpoints, held-out battery, single-shot
+
+| iteration | 0 | 20 | 40 | 60 | 80 | **100** | 140 | 160–1000 |
+| --------- | -: | -: | -: | -: | -: | ------: | --: | -------: |
+| score     | 0/13 | 3/13 | 9/13 | 11/13 | 12/13 | **13/13** | 12/13 | 13/13 ×43 |
+
+**Perfect score at iteration 100 of 1000.** The other 900 iterations — 90% of
+the compute, 23 of the 25.7 minutes — changed nothing. Training cost 1.5s per
+iteration at 8.4 GB peak.
+
+## The ceiling is what it DISCOVERED, not how long it trained
+
+Three runs, same model, same loop. Only the environment changed:
+
+| errors the environment gives | tasks solved | verbs earned | peak score |
+| ---------------------------- | -----------: | -----------: | ---------: |
+| the current service's verbs  |        39/60 |           10 |     10/13  |
+| every service's verbs        |        59/60 |           11 |        —   |
+| + full task coverage         |    **70/72** |       **13** | **13/13**  |
+
+It passed exactly the verbs it had earned samples for and generalised to
+**none** it had not. Earned 10 → scored 10. Earned 13 → scored 13.
+
+Why the error text mattered so much: asked to create a container, the model
+tried `awsim create-container`, was told the three services, guessed `compute`,
+and was then told compute's four verbs — none of which make containers. It
+never tried `store`. Every message was locally accurate and kept it inside the
+wrong service. Returning the **whole verb map** on any unknown service or verb
+took discovery from 39/60 to 59/60 and cut the time by 40%.
+
+Rigid means refusing wrong input, not rationing information. A model that is
+lost gets the whole map.
+
+## How many examples per capability
+
+60 training examples (plus 10 held out) covered 13 verbs — roughly 2–6 each:
+
+| verb | examples | result |
+| ---- | -------: | ------ |
+| `compute resume`  | 2 | passed |
+| `compute halt`    | 3 | passed |
+| `store duplicate` | 3 | passed |
+
+Those numbers tempted an obvious rule — "about three examples per capability" —
+and **the rule did not survive being tested forward.** Over-sampling two starved
+shapes to feed them deliberately, 1 of 4 predictions held: two chained shapes
+passed on a SINGLE example each, and one failed with thirteen. Reading what it
+emitted showed the thirteen-example failure had learned the verb perfectly and
+misread an ambiguous task (the target path began with another container's name).
+
+What the rule really was: a description fitted after the fact, which held only
+because the under-sampled shapes were also the hardest ones — sample count and
+difficulty moved together across three runs and separated the moment they were
+pulled apart.
+
+The better hypothesis, and it is untested: **compositionality**. "Shut it down
+and label it" is two verbs it already knows, sequenced — one example teaches the
+sequencing. "Get rid of the container, it still holds a path" needs a
+precondition nobody stated, and that is genuinely new. Treat any
+per-capability sample figure here as unestablished.
+
+## A warning worth more than the results
+
+The first version of this benchmark **mimicked the real AWS CLI**, and the
+model scored 13/13 before a single step of training. It was reciting `aws s3
+mb` from pretraining. A benchmark a model already knows measures recall and
+reports it as learning.
+
+And when the curve first read 0/13 at every checkpoint while the training loss
+said 0.055, that was the **evaluation**, not the model: `mlx_lm lora` has no
+`--keys` flag and trains q/k/v/o plus all three MLP projections (112 tensors at
+8 layers), so an eval that attaches only `q_proj`/`v_proj` loads 32 and
+`load_weights(strict=False)` drops the other 80 in silence. A silent partial
+load is indistinguishable from a model that learned nothing. The harness now
+reads the training run's own `adapter_config.json` and refuses to score a
+checkpoint whose tensors have nowhere to land.
+
+Reproduce with:
+
+```bash
+python aws_sim/self_teach.py 72        # model earns its own corpus
+python aws_sim/train_and_curve.py 1000 20   # train, then score 50 checkpoints
+python aws_sim/train_and_curve.py --score-only   # re-score without retraining
+```
 
 # Mixture of Agents
 
@@ -664,6 +927,30 @@ Training is **not automatically restarted after a crash**. This prevents a machi
 
 Symbio can interact with the local machine through several tool groups.
 
+Each tool is one markdown file in `tools/`, seeded on first run and yours to
+edit afterwards:
+
+```markdown
+---
+name: browser_click
+family: browser
+group: browser
+---
+
+Click an element in the open browser, identified by its visible text.
+
+```json
+{"type":"object","properties":{"target":{"type":"string"}},"required":["target"]}
+```
+```
+
+The system prompt does not carry all of those schemas. It carries the *index* —
+the families, the tool names in each, one line on what the family is for — and
+the model asks for the arguments it needs with `tool_docs`. That is about 1,300
+tokens instead of 5,100, on every turn, which on a 14B is room to think in.
+`/tools` shows the same index you are showing the model; `/tools browser` prints
+the schemas. `agent.tool_catalog: "full"` puts every schema back inline.
+
 ### Files
 
 Read, write, search and patch files within the project environment.
@@ -762,6 +1049,93 @@ For example, actions involving:
 can require an explicit approval before execution.
 
 > **Important:** saying `No` rejects the action for the entire turn. Symbio will not retry the same action through another tool.
+
+### The constitution
+
+The longer you use it, the more it works out how *you* want to be worked with —
+and writes it down where you can see it and change it:
+
+```text
+$ /constitution
+Held — this is in every prompt:
+  answers_vs_control: answers  Give the result first. Do not narrate the steps
+                               or offer a menu of options unless they ask for
+                               one. (4 for/0 against, since 2026-09-10)
+    from: told me twice to just do it; asked for the number only
+  act_vs_confirm: act          Take the ordinary reversible step without
+                               asking. (yours, since 2026-09-14)
+```
+
+It holds **one stance per question**, not a pile of observations. That is the
+whole design: `soul.md` collects what it saw each turn and only appends, so it
+ends up holding "wants to approve everything" and "wants no confirmations" at
+the same time, forever. An axis can only hold one, so new evidence either
+reinforces the stance or argues against it, and an axis flips only once the
+other side outweighs it — dated, so you can see when you changed.
+
+The questions it holds a stance on (`/constitution axes`): answers vs control,
+act vs confirm, brief vs complete, speed vs caution, do vs teach, blunt vs
+cushioned, show vs summarize, code vs prose.
+
+* `/constitution set <axis> <pole>` — your own word. Inference never
+  overwrites it; it can only record that the evidence disagrees.
+* `/constitution clear <axis>` — drop it.
+* `/constitution revise` — fold in what has been observed since last time.
+* It is `constitution.md`. Edit it by hand if you'd rather.
+
+Everything *inferred* goes back to the model wrapped as untrusted data, like
+every other store derived from conversation — so a web page cannot install a
+preference by being read, written down, and read back as yours.
+
+### Never giving up easily
+
+When a turn keeps failing, the harness does not repeat "try something else". It
+escalates, and what it attacks moves inward:
+
+```text
+1  the call        use the error you just got
+2  the approach    that is the same attempt; here is what you have not tried
+3  the assumptions name what this rests on and test the weakest one
+4  the evidence    you may be wrong about what you SAW; go and re-read it
+5  the method      solve it as if that tool didn't exist
+6  the problem     you may be solving the wrong problem
+```
+
+A repeated call is refused without running — a repeat is not another attempt —
+and the refusal comes back as the next rung. The ladder never runs out: what
+ends a turn is the round budget, which counts work actually attempted, never
+the harness running out of things to say. Every rung still leaves an honest way
+out ("here is what blocked me"), because pressure with no acceptable answer but
+success is pressure to fabricate one.
+
+Tune with `agent.min_distinct_attempts` and `agent.max_persistence_challenges`.
+
+### Your own slash commands
+
+A command is a file in `commands/` whose body is a prompt:
+
+```markdown
+---
+name: standup
+description: What moved and what is blocked
+---
+
+Read my notes from the last two days$ARGUMENTS, then give me three lines:
+what moved, what is blocked, what I should start with today.
+```
+
+Type `/standup` and that body becomes your next message, with `$ARGUMENTS`
+replaced by whatever you typed after the name (`$1`, `$2`, … take the words).
+
+* `/` on its own prints every command, yours first
+* `/` then Tab completes against them
+* `/commands new <name> | [description] | <prompt>` saves one without leaving the chat
+* `/commands show <name>`, `/commands rm <name>`
+* a mistyped command suggests the nearest real one
+
+The assistant can write one too, with the `save_command` tool, when it notices
+you asking for the same shape of thing repeatedly. Commands it wrote are marked
+in the listing — and saving one never runs it; only you do, by typing the name.
 
 ### Telegram commands
 

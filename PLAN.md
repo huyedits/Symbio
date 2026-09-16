@@ -90,11 +90,11 @@
 
 ## Files
 - `main.py` — `AIAgent`, tool registry, dual-format parser, parallel execution, session logging, SQLite store, anti-loop safeguards.
-- `seed_training.py` — seed corpus with identity, greetings, legacy XML tags for memory/terminal, and Hermes `<tool_call>` examples for file/web/email/code tools.
+- `scripts/seed_training.py` — seed corpus with identity, greetings, legacy XML tags for memory/terminal, and Hermes `<tool_call>` examples for file/web/email/code tools.
 - `config.json` — names and LoRA/agent settings; defaults: 3B model, temperature 0.1, max_turns 5, LoRA dropout 0.1, scale 5.0.
 - `requirements.txt` — unchanged; `concurrent.futures` is stdlib.
-- `smoke_test.py` — automated validation of identity, memory, file tools, terminal, code execution, email stubs, and search.
-- `test_dynamic_names.py` — end-to-end validation of natural-language name changes with real multi-turn history.
+- `tests/smoke_test.py` — automated validation of identity, memory, file tools, terminal, code execution, email stubs, and search.
+- `tests/test_dynamic_names.py` — end-to-end validation of natural-language name changes with real multi-turn history.
 - `PLAN.md` — this file.
 
 ## Training Run (2026-07-12)

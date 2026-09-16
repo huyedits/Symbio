@@ -1,7 +1,8 @@
 """Symbio: a personal, autonomous, self-fine-tuning AI assistant."""
 
-from symbio.agent import AIAgent
-from symbio.chat import build_system_prompt, chat_loop
+from symbio.app.agent import AIAgent
+from symbio.app.chat import chat_loop
+from symbio.app.prompts import build_system_prompt
 from symbio.config import (
     detect_model_type,
     list_model_presets,

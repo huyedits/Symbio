@@ -500,6 +500,19 @@ class GoldenResult:
         return {case_id for case_id, ok in self.results.items() if ok}
 
     @property
+    def failing(self) -> set[str]:
+        """The complement of `passing`.
+
+        Added because three call sites in the self-repair paths already used it
+        — `_repair_regression` and `_realign` both read `.failing` and would
+        have raised AttributeError on their first real invocation. Their tests
+        passed throughout, because every one of them short-circuits before a
+        battery is ever run. A property that reads naturally is one people will
+        write whether or not it exists.
+        """
+        return {case_id for case_id, ok in self.results.items() if not ok}
+
+    @property
     def pass_count(self) -> int:
         return sum(self.results.values())
 

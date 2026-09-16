@@ -95,11 +95,10 @@ def retrain_model(config: dict[str, Any], *, digest: bool = True, seed: bool = T
 
 def build_default_system_prompt(config: dict[str, Any]) -> str:
     """Build a minimal system prompt for training when none is configured."""
-    from symbio.chat import build_system_prompt
+    from symbio.app.prompts import build_training_system_prompt
 
-    tools: list[dict[str, Any]] = []
-    return build_system_prompt(
+    return build_training_system_prompt(
         config.get("assistant_name") or "Assistant",
         config.get("user_name") or "User",
-        tools,
+        config,
     )

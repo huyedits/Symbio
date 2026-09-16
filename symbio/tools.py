@@ -42,7 +42,7 @@ from symbio.store import SessionStore
 from symbio.utils import _project_path, _safe_note_filename, _truncated, save_note
 
 if TYPE_CHECKING:
-    from symbio.agent import AIAgent
+    from symbio.app.agent import AIAgent
 
 
 logger = logging.getLogger("chat")
@@ -51,6 +51,24 @@ logger = logging.getLogger("chat")
 def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
     """Return the full Hermes-style tool registry for an agent instance."""
     return [
+        {
+            # The read side of memory. The catalog in symbio/app/tooling.py
+            # advertises this to every loop, and only the chat dispatcher
+            # could run it -- so on this one the model called the name its own
+            # prompt had offered and was told the tool does not exist.
+            "name": "recall",
+            "description": "Look up what you have already saved: your notes, your durable memory, the profile of your user, and past sessions. Use it before saying you do not know something about the user.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "What to look for, in the user's own words."},
+                    "scope": {"type": "string", "description": "'memory' (the default), 'sessions', or 'all'."},
+                },
+                "required": ["query"],
+            },
+            "readonly": True,
+            "run": lambda params, a=agent: _tool_recall(a, params),
+        },
         {
             "name": "note",
             "description": "Save, update, or remove a fact as a markdown note in notes/.",
@@ -382,19 +400,19 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
         },
         {
             "name": "desktop_click",
-            "description": "Click the mouse at the given screen coordinates (x, y).",
+            "description": "Click a control on screen. Prefer 'element': see_screen numbers every control the frontmost window publishes, and a number presses the real control instead of a guessed point.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "element": {"type": "integer"},
                     "x": {"type": "integer"},
                     "y": {"type": "integer"},
                     "clicks": {"type": "integer"},
                     "button": {"type": "string"},
                 },
-                "required": ["x", "y"],
             },
             "readonly": False,
-            "run": lambda params, a=agent: _tool_desktop_click(a, params),
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_click", params),
         },
         {
             "name": "desktop_move",
@@ -408,7 +426,7 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
                 "required": ["x", "y"],
             },
             "readonly": False,
-            "run": lambda params, a=agent: _tool_desktop_move(a, params),
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_move", params),
         },
         {
             "name": "desktop_type",
@@ -419,7 +437,7 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
                 "required": ["text"],
             },
             "readonly": False,
-            "run": lambda params, a=agent: _tool_desktop_type(a, params),
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_type", params),
         },
         {
             "name": "desktop_press",
@@ -430,7 +448,72 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
                 "required": ["key"],
             },
             "readonly": False,
-            "run": lambda params, a=agent: _tool_desktop_press(a, params),
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_press", params),
+        },
+        {
+            "name": "see_screen",
+            "description": "Look at the frontmost window and get back every control it publishes — role, label and exact frame — each with a number that desktop_click and desktop_type take. Falls back to a screenshot and the vision model only for a window that draws its own interface.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                    "question": {"type": "string"},
+                },
+            },
+            "readonly": True,
+            "run": lambda params, a=agent: _tool_desktop(a, "see_screen", params),
+        },
+        {
+            "name": "desktop_scroll",
+            "description": "Scroll the window under the pointer, or over a numbered element.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string"},
+                    "amount": {"type": "integer"},
+                    "element": {"type": "integer"},
+                },
+            },
+            "readonly": False,
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_scroll", params),
+        },
+        {
+            "name": "desktop_drag",
+            "description": "Press at one point, move, and release at another. Give element numbers or raw coordinates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from_element": {"type": "integer"},
+                    "to_element": {"type": "integer"},
+                    "from_x": {"type": "integer"},
+                    "from_y": {"type": "integer"},
+                    "to_x": {"type": "integer"},
+                    "to_y": {"type": "integer"},
+                },
+            },
+            "readonly": False,
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_drag", params),
+        },
+        {
+            "name": "desktop_wait",
+            "description": "Wait for the screen to catch up, up to 10 seconds.",
+            "parameters": {
+                "type": "object",
+                "properties": {"seconds": {"type": "number"}},
+            },
+            "readonly": True,
+            "run": lambda params, a=agent: _tool_desktop(a, "desktop_wait", params),
+        },
+        {
+            "name": "open_app",
+            "description": "Launch a macOS application by name, or bring it to the front.",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+            "readonly": False,
+            "run": lambda params, a=agent: _tool_desktop(a, "open_app", params),
         },
     ]
 
@@ -450,7 +533,16 @@ def openai_tool_schemas(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return schemas
 
 
-def tool_few_shots(config: dict[str, Any]) -> list[dict[str, str]]:
+# The families a worked-example block can be rotated to. Same names the tool
+# index uses (symbio/app/tool_docs.py), so "the family the model last worked
+# in" and "the family it can ask for schemas about" are one vocabulary.
+FEW_SHOT_FAMILIES: tuple[str, ...] = (
+    "file", "code", "shell", "web", "browser", "desktop", "memory",
+)
+
+
+def tool_few_shots(config: dict[str, Any],
+                   family: str | None = None) -> list[dict[str, str]]:
     """Minimal tool-use examples in Hermes JSON-in-<tool_call> format.
 
     The examples MUST match the format the runtime actually parses: parse_tools
@@ -458,7 +550,27 @@ def tool_few_shots(config: dict[str, Any]) -> list[dict[str, str]]:
     <tool_call> — never legacy short tags like <browse>/<click>/<search>. The
     system prompt (app/prompts.py) teaches the same JSON format, so the few-shots
     reinforce it instead of contradicting it. Keep every emitted tool name and
-    argument key aligned with the registry schema so a parsed call resolves.
+    argument key aligned with the registry schema so a parsed call resolves —
+    test_prompt_tool_names.py fails the build if one does not, in EITHER stack.
+
+    `family` rotates the block: the universals plus that family's examples,
+    instead of the fixed set. Without one — the first turn of a session, or a
+    conversation that has used no tools yet — the full set comes back, which is
+    exactly what this always returned.
+
+    Rotating buys breadth. The fixed block was four browser examples, a search
+    and a note, so a file or code request was answered by a model that had just
+    been shown six ways to drive a page.
+
+    WHO chooses the family matters as much as the rotation. The obvious
+    implementation is a keyword table over the user's message — and it is the
+    wrong one: a bag of words deciding what a sentence is about, in front of a
+    model whose entire job is understanding sentences, gets "read config.json"
+    and "read the news" wrong in opposite directions and shows the model the
+    wrong toolset with confidence. So nothing here reads the user's text. The
+    caller passes the family the MODEL itself last worked in — the tool it
+    actually chose, last turn — and the model can also ask for any family's
+    schemas outright with tool_docs. The classifier is the model.
 
     Greetings -> prose (no tool). The greeting is placed LAST so ambiguous input
     (e.g. "hi") defaults to the final example (small models copy the last few-shot).
@@ -480,23 +592,116 @@ def tool_few_shots(config: dict[str, Any]) -> list[dict[str, str]]:
                 + "Wikipedia" + chr(10) + "The Free Encyclopedia" + chr(10)
                 + "English 6,000,000+ articles")
     E = " <end>"
+
+    def _pair(user, name, args, said):
+        return [
+            {"role": "user", "content": user},
+            {"role": "assistant",
+             "content": _tc(name, args) + chr(10) + said + E},
+        ]
+
+    browser = (
+        _pair("open chrome to the apple website", "browser_open",
+              {"url": "https://www.apple.com"}, "Opening Apple.com in the browser.")
+        + _pair("click the continue button", "browser_click",
+                {"text": "Continue"}, "Clicking the Continue button.")
+        + _pair("press the enter key", "browser_press",
+                {"key": "Enter"}, "Pressing Enter.")
+        + _pair("scroll down the page", "browser_scroll",
+                {"direction": "down"}, "Scrolling down.")
+    )
+    web = (
+        _pair("what's the weather in sydney", "web_search",
+              {"query": "current weather Sydney"}, "Looking up the weather for you.")
+        + _pair("read the webpage at https://example.com", "web_extract",
+                {"url": "https://example.com"}, "Reading that page for you.")
+    )
+    shell = _pair("how much free disk space do I have", "terminal",
+                  {"cmd": "df -h"}, "Checking disk space.")
+    memory = _pair(f"remember that {uname} likes coffee", "note",
+                   {"action": "add", "target": "note", "title": "User Preference",
+                    "content": f"{uname} likes coffee."}, "Noted.")
+    files = (
+        _pair("what's in config.json", "read_file",
+              {"path": "config.json"}, "Reading config.json.")
+        + _pair("change the temperature to 0.4 in config.json", "patch",
+                {"path": "config.json", "old_text": '"temperature": 0.6',
+                 "new_text": '"temperature": 0.4'},
+                "Editing config.json.")
+        + _pair("save those steps to notes/setup.md", "write_file",
+                {"path": "notes/setup.md", "content": "1. Install.\n2. Run.\n"},
+                "Wrote notes/setup.md.")
+    )
+    code = (
+        _pair("how many seconds are in 37 days", "execute_code",
+              {"code": "print(37 * 24 * 60 * 60)"}, "Working it out.")
+        + _pair("decode aGVsbG8= for me", "execute_code",
+                {"code": "import base64\nprint(base64.b64decode('aGVsbG8=').decode())"},
+                "Decoding that.")
+    )
+    # Driving the machine: look, then act on a NUMBER. The worked example is
+    # the whole point — a model shown only single calls types at whatever has
+    # focus and clicks coordinates it invented, which is the entire failure
+    # mode of driving a screen. see_screen numbers the controls the window
+    # itself publishes, and those numbers are what the actions take.
+    desktop_look = (
+        "Notes — window \"Shopping\"" + chr(10)
+        + "   1 Button        'New Note' at (48,96) 28x28" + chr(10)
+        + "   2 TextArea      '(empty text field)' at (320,140) 600x420" + chr(10)
+        + "   3 Button        'Share' at (980,96) 28x28")
+    desktop = (
+        [
+            {"role": "user", "content": "open notes and start a shopping list"},
+            {"role": "assistant",
+             "content": _tc("open_app", {"name": "Notes"}) + chr(10)
+             + "Opening Notes." + E},
+            {"role": "user", "content": "[System observation: Opened Notes. "
+             "It is now frontmost.]" + chr(10)
+             + _resp("open_app", "Opened Notes. It is now frontmost.")},
+            {"role": "assistant",
+             "content": _tc("see_screen", {"target": "desktop",
+                                           "question": "the note body"})
+             + chr(10) + "Looking at the window." + E},
+            {"role": "user", "content": "[System observation: " + desktop_look
+             + "]" + chr(10) + _resp("see_screen", desktop_look)},
+            {"role": "assistant",
+             "content": _tc("desktop_type", {"element": 2,
+                                             "text": "Shopping" + chr(10) + "- milk"})
+             + chr(10) + "Writing the list into the note body." + E},
+        ]
+        # The coordinates are in the USER's line on purpose. An example where
+        # they appear from nowhere teaches the model to invent them, and a
+        # confident wrong coordinate is the whole failure mode of driving a
+        # screen — real ones come from looking first, and a number is better
+        # than any coordinate.
+        + _pair("click at 1200, 12 on my screen", "desktop_click",
+                {"x": 1200, "y": 12}, "Clicking there.")
+        + _pair("save it", "desktop_press", {"key": "cmd+s"}, "Saving.")
+    )
+    by_family = {
+        "file": files, "code": code, "shell": shell, "web": web,
+        "browser": browser, "desktop": desktop, "memory": memory,
+    }
+
+    # The universals lead EVERY variant, hinted or not, and that ordering is
+    # load-bearing rather than cosmetic. The prompt cache is a prefix: it is
+    # prefilled (chat.py) against the no-hint block, and a turn keeps whatever
+    # it shares with that prefix from the first differing token onwards. With
+    # the universals first, a rotated turn still reuses the system prompt plus
+    # these four messages and re-prefills only its own family block — a few
+    # hundred tokens against a ~6k prefix. Lead with a family instead and every
+    # hinted turn re-prefills the whole few-shot region.
+    universals = shell + web[:2]
+    if family not in by_family:
+        # No hint, or nothing matched: every example, the same eight the block
+        # has always carried. An unclassified turn must never see less.
+        rotating = universals + browser + web[2:] + memory
+    else:
+        rotating = universals + [m for m in by_family[family]
+                                 if m not in universals]
+
     return [
-        {"role": "user", "content": "open chrome to the apple website"},
-        {"role": "assistant", "content": _tc("browser_open", {"url": "https://www.apple.com"}) + chr(10) + "Opening Apple.com in the browser." + E},
-        {"role": "user", "content": "what's the weather in sydney"},
-        {"role": "assistant", "content": _tc("web_search", {"query": "current weather Sydney"}) + chr(10) + "Looking up the weather for you." + E},
-        {"role": "user", "content": f"remember that {uname} likes coffee"},
-        {"role": "assistant", "content": _tc("note", {"action": "add", "target": "note", "title": "User Preference", "content": f"{uname} likes coffee."}) + chr(10) + 'Noted.' + E},
-        {"role": "user", "content": "how much free disk space do I have"},
-        {"role": "assistant", "content": _tc("terminal", {"cmd": "df -h"}) + chr(10) + "Checking disk space." + E},
-        {"role": "user", "content": "click the continue button"},
-        {"role": "assistant", "content": _tc("browser_click", {"text": "Continue"}) + chr(10) + "Clicking the Continue button." + E},
-        {"role": "user", "content": "press the enter key"},
-        {"role": "assistant", "content": _tc("browser_press", {"key": "Enter"}) + chr(10) + "Pressing Enter." + E},
-        {"role": "user", "content": "scroll down the page"},
-        {"role": "assistant", "content": _tc("browser_scroll", {"direction": "down"}) + chr(10) + "Scrolling down." + E},
-        {"role": "user", "content": "read the webpage at https://example.com"},
-        {"role": "assistant", "content": _tc("web_extract", {"url": "https://example.com"}) + chr(10) + "Reading that page for you." + E},
+        *rotating,
         # Post-observation pattern: after a tool runs, the result comes back as a
         # [System observation: ...] + <tool_response>...</tool_response> user turn.
         # Answer with ONE short prose summary and STOP — do not fire another tool
@@ -547,7 +752,41 @@ def tool_metadata(name: str, tools: list[dict[str, Any]], agent: AIAgent) -> dic
             "readonly": False,
             "run": lambda params, n=name, a=agent: _tool_terminal(a, {"cmd": n}),
         }
-    return {"readonly": False, "run": lambda _: f"Unknown tool: {name}"}
+    return {"readonly": False,
+            "run": lambda _, n=name, a=agent: _unknown_tool(n, a)}
+
+
+def _unknown_tool(name: str, agent: AIAgent) -> str:
+    """What a name this loop cannot run says back to the model.
+
+    The bare sentence gave it nothing to do, and what a model does with
+    nothing is conclude it cannot do the job at all. The same answer the chat
+    dispatcher gives: the closest real name, with its arguments attached, so
+    the retry lands in this round instead of spending the next one on
+    tool_docs.
+    """
+    from symbio.app import tooling
+
+    groups = getattr(agent, "enabled_groups", None)
+    near = tooling.nearest_tools(name, groups)
+    if near:
+        return (f"Unknown tool: {name}. Closest real tools: "
+                f"{', '.join(near)}. Their schemas: "
+                f"{tooling.schemas_for_names(near)}")
+    return (f"Unknown tool: {name}. Call "
+            '{"name": "tool_docs", "arguments": {"family": "<family>"}} '
+            "to see what exists, then use a real name.")
+
+
+def _tool_recall(agent: AIAgent, args: dict[str, Any]) -> str:
+    """Search the saved stores, through the chat dispatcher's own recall code.
+
+    Imported at call time, not at module scope: symbio.app.chat_tools imports
+    this module's siblings, and binding it here at import would close the ring.
+    """
+    from symbio.app.chat_tools import recall_for
+
+    return recall_for(agent, args)
 
 
 def _tool_note(agent: AIAgent, args: dict[str, Any]) -> str:
@@ -957,11 +1196,25 @@ def _tool_browser_navigate(agent: AIAgent, args: dict[str, Any]) -> str:
 
 
 def _tool_browser_click(agent: AIAgent, args: dict[str, Any]) -> str:
+    """Click by `target`, the one argument the catalog advertises.
+
+    This runner read `selector` and `text` while the prompt both loops share
+    told the model to send `target`. A model that followed its own catalog
+    clicked nothing here and was told nothing about why -- the call succeeded,
+    against the empty string. `selector`/`text` stay accepted because the
+    registry has always taken them.
+    """
     if agent._browser_session is None:
         return "Browser automation is not available."
-    return agent._browser_session.click(
-        selector=args.get("selector", ""), text=args.get("text", "")
-    )
+    target = str(args.get("target", "") or "")
+    selector = str(args.get("selector", "") or "")
+    text = str(args.get("text", "") or "")
+    if target and not (selector or text):
+        if target.startswith(("#", ".", "//", "[")):
+            selector = target
+        else:
+            text = target
+    return agent._browser_session.click(selector=selector, text=text)
 
 
 def _tool_browser_type(agent: AIAgent, args: dict[str, Any]) -> str:
@@ -970,7 +1223,10 @@ def _tool_browser_type(agent: AIAgent, args: dict[str, Any]) -> str:
     return agent._browser_session.type_text(
         text=args.get("text", ""),
         selector=args.get("selector", ""),
-        press_enter=bool(args.get("press_enter", False)),
+        # `enter` is what the catalog advertises; `press_enter` is what this
+        # runner has always read. Both, or a model following the prompt types
+        # the text and never sends it.
+        press_enter=bool(args.get("press_enter", args.get("enter", False))),
     )
 
 
@@ -1069,7 +1325,7 @@ def _look(shot, config: dict[str, Any]) -> str:
     return safety.wrap_untrusted("screen contents", out, scan)
 
 
-def _tool_desktop_click(agent: AIAgent, args: dict[str, Any]) -> str:
+def _tool_desktop_click_at(agent: AIAgent, args: dict[str, Any]) -> str:
     """Click a point the model read off a screenshot.
 
     Through the converting path, like the ChatSession front-end: the
@@ -1090,22 +1346,19 @@ def _tool_desktop_click(agent: AIAgent, args: dict[str, Any]) -> str:
     )
 
 
-def _tool_desktop_move(agent: AIAgent, args: dict[str, Any]) -> str:
-    if desktop_move is None:
-        return "Desktop automation is not available."
-    return desktop_move(int(args.get("x", 0)), int(args.get("y", 0)))
+def _tool_desktop(agent: AIAgent, name: str, args: dict[str, Any]) -> str:
+    """Every desktop tool, through the chat dispatcher's own implementation.
 
+    The element numbers come from the accessibility tree, the focus guard
+    refuses to type at a control that is not a text field, and a click reports
+    when nothing on screen changed. None of that is worth a second copy, and a
+    second copy is what the two registries used to be — see the 2026-09-16
+    "Unknown tool: recall", where this loop answered for a tool the prompt it
+    shares had already offered.
+    """
+    from symbio.app.chat_tools import desktop_for
 
-def _tool_desktop_type(agent: AIAgent, args: dict[str, Any]) -> str:
-    if desktop_type is None:
-        return "Desktop automation is not available."
-    return desktop_type(args.get("text", ""))
-
-
-def _tool_desktop_press(agent: AIAgent, args: dict[str, Any]) -> str:
-    if desktop_press is None:
-        return "Desktop automation is not available."
-    return desktop_press(args.get("key", ""))
+    return desktop_for(agent, name, args)
 
 
 def _parallel_safe(meta: dict[str, Any]) -> bool:
@@ -1204,7 +1457,8 @@ def run_single_tool(agent: AIAgent, name: str, params: dict[str, Any]) -> str:
         )
 
     meta = tool_metadata(name, agent.tools, agent)
-    runner: Callable[[dict[str, Any]], str] = meta.get("run", lambda _: f"Unknown tool: {name}")
+    runner: Callable[[dict[str, Any]], str] = meta.get(
+        "run", lambda _, n=name, a=agent: _unknown_tool(n, a))
     print(f"  [Tool: {name}]")
     try:
         return runner(params)

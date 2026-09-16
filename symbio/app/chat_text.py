@@ -257,12 +257,31 @@ def _is_greeting(text: str) -> bool:
     return all(w in _GREETING_WORDS or w in _GREETING_FILLERS for w in words)
 
 
+# Publishing an outward message is an action, and the phrase list below never
+# said so. Live 2026-09-15, "tweet @grok using tsundere voice asking if it is a
+# robot" and then "now tweet it" both scored False here, so the "you described
+# the action but called no tool" nudge could not fire, and the turn ended with
+# the model explaining that it had no Twitter tool — while holding the browser
+# toolset that has posted to X before.
+#
+# Word-boundary matched, unlike the phrase list, so "postgres" and "compost"
+# are not requests to publish something. Deliberately narrow: "send", "share"
+# and "message" are left out because "send me the summary" is a chat turn, and
+# the hint these gates print names the BROWSER tags — a verb that drags an
+# ordinary request towards the browser costs more than the gate is worth.
+_PUBLISH_VERB_RE = re.compile(
+    r"\b(?:post|posting|tweet|tweeting|retweet|publish|publishing|submit|"
+    r"submitting|dm|comment)\b", re.IGNORECASE)
+
+
 # do keywords
 def _is_action_request(text: str) -> bool:
     t = text.strip().lower()
     if not t:
         return False
     if "http" in t or ".com" in t:
+        return True
+    if _PUBLISH_VERB_RE.search(t):
         return True
     return any(m in t for m in (
         "go to ", "open ", "browse ", "click ", "press ", "type ", "scroll ",
@@ -284,6 +303,7 @@ enable disable turn put add save train schedule click type press scroll
 browse visit navigate go read check test try use call fetch scrape search
 find show list tell give pull push commit sync backup restore print
 mkdir touch rm ls cat grep chmod curl wget git npm pip brew
+post tweet retweet publish submit dm comment reply share
 """.split())
 
 _PATHY_RE = re.compile(
@@ -414,7 +434,25 @@ def _project_paths_in(cmd: str) -> list[str]:
         #
         # At least two components must survive, so this never resolves a bare
         # filename that several directories could satisfy.
+        #
+        # EXCEPT when the single component is a real entry at the project root.
+        # That is not ambiguous — the root either contains `puzzle/` or it does
+        # not — and excluding it left this guard dead for the most common
+        # orientation move there is. Live 2026-09-14: `read_file
+        # puzzle/step1.txt` succeeded, the model then ran `ls puzzle/` to find
+        # the next file, was told "No such file or directory" with no
+        # explanation, and spent the rest of the turn guessing filenames. The
+        # guard existed, was correct, and never ran: len(parts) - 1 == 0.
         parts = [q for q in rel.split("/") if q not in ("", ".")]
+        if len(parts) == 1:
+            try:
+                candidate = (_c.PROJECT_DIR / parts[0]).resolve()
+                candidate.relative_to(_c.PROJECT_DIR.resolve())
+                if candidate.exists() and parts[0] not in found:
+                    found.append(parts[0])
+            except (ValueError, OSError):
+                pass
+            continue
         for start in range(len(parts) - 1):
             suffix = "/".join(parts[start:])
             try:

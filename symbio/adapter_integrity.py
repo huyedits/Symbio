@@ -47,8 +47,17 @@ def _seal():
     _seal_tried = True
     from symbio import constants
 
-    path = constants.PROJECT_DIR / "adapter_seal.py"
-    if not path.exists():
+    # scripts/ first, then the repository root. The script moved into
+    # scripts/ during the 2026-09-15 root cleanup, and an install that
+    # predates the move still has it at the root — a security check that
+    # silently reports "no checker installed" because a file was tidied is
+    # worse than the tidying was worth.
+    for candidate in (constants.PROJECT_DIR / "scripts" / "adapter_seal.py",
+                      constants.PROJECT_DIR / "adapter_seal.py"):
+        if candidate.exists():
+            path = candidate
+            break
+    else:
         return None
     try:
         spec = importlib.util.spec_from_file_location("symbio_adapter_seal", path)
@@ -172,8 +181,8 @@ def describe(report: dict) -> str:
         lines.append(f"      {problem}")
     lines.append("      These are not the weights that were sealed. If you "
                  "retrained since, re-seal:")
-    lines.append("        python3 adapter_seal.py seal <dir> && "
-                 "python3 adapter_seal.py root")
+    lines.append("        python3 scripts/adapter_seal.py seal <dir> && "
+                 "python3 scripts/adapter_seal.py root")
     return "\n".join(lines)
 
 
@@ -195,8 +204,8 @@ def enforce(adapter_path: str | Path | None, config: dict | None,
         output_fn(
             f"  [Adapter] The signed root does not verify: {problem}\n"
             f"      Re-sign after a legitimate change:\n"
-            f"        python3 adapter_seal.py root && "
-            f"python3 adapter_seal.py sign-root --key <your key>")
+            f"        python3 scripts/adapter_seal.py root && "
+            f"python3 scripts/adapter_seal.py sign-root --key <your key>")
         if policy(config) == "refuse":
             raise RuntimeError(f"adapters_root.json failed its signature: {problem}")
 

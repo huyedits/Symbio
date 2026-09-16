@@ -157,6 +157,63 @@ def _browser_peek(browser: BrowserSession, config: dict | None = None) -> str:
     return "\n\nPage text now:\n" + text[:limit]
 
 
+# --- how much of this machine the cache may have, right now ----------------
+# Quantised, because a cap that follows free RAM exactly moves the trim
+# boundary every turn, and a moving boundary invalidates the KV prefix every
+# turn: the cure for the freeze being worse than the freeze is the failure
+# _fit_messages_to_cap exists to describe.
+_HEADROOM_STEP_MB = 512.0
+# vm_stat is a subprocess. Once every few seconds is far finer than the thing
+# being measured actually moves.
+_HEADROOM_TTL_S = 5.0
+# One machine, so one reading, shared by whatever sessions this process holds.
+_headroom_mb: float | None = None
+_headroom_at: float = 0.0
+
+
+def _live_headroom_mb(reserve_gb: float, held_mb: float = 0.0,
+                      now: float | None = None) -> float | None:
+    """MB the KV cache may occupy right now, or None when RAM cannot be read.
+
+    `reserve_gb` is what must stay free for everything that is neither cache
+    nor weights — the browser, the compositor, the rest of the desktop. Below
+    it macOS swaps rather than kills, and a swapping Mac is the failure the
+    whole budget exists to prevent.
+
+    `held_mb` is what this session's cache already occupies. It counts as
+    available because trimming is precisely what gives it back; without it a
+    large session reads its own cache as somebody else's memory and trims
+    itself to the floor.
+
+    It falls at once and rises slowly. Memory freed by a closing tab can be
+    taken back a second later, and a budget that spends it the instant it
+    appears is over budget again with nothing to trim.
+    """
+    global _headroom_mb, _headroom_at
+    now = time.time() if now is None else now
+    if _headroom_mb is not None and now - _headroom_at < _HEADROOM_TTL_S:
+        return _headroom_mb
+    free = training.free_ram_bytes()
+    if not free:
+        # Unreadable, on this or on any platform without vm_stat. Keep the last
+        # real reading; never un-cap on a failed measurement.
+        return _headroom_mb
+    allowance = free / (1024 * 1024) + max(0.0, held_mb) - reserve_gb * 1024
+    allowance = max(0.0, (allowance // _HEADROOM_STEP_MB) * _HEADROOM_STEP_MB)
+    _headroom_at = now
+    if _headroom_mb is None or allowance < _headroom_mb:
+        _headroom_mb = allowance
+    elif allowance >= _headroom_mb + 2 * _HEADROOM_STEP_MB:
+        _headroom_mb = allowance
+    return _headroom_mb
+
+
+def _reset_headroom() -> None:
+    """Forget the reading. For tests, and for a deliberate re-measure."""
+    global _headroom_mb, _headroom_at
+    _headroom_mb, _headroom_at = None, 0.0
+
+
 class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     """One interactive chat session: model, stores, browser, cron thread.
 
@@ -620,7 +677,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     # One rule for both of these, the same one style_line follows: colour on
     # means the new look, colour off means EXACTLY the legacy text. Anything
     # that reads this output rather than looking at it — the pty harnesses in
-    # verify_transcript_fixes.py, the Telegram bridge, a piped log — waits on
+    # tests/verify_transcript_fixes.py, the Telegram bridge, a piped log — waits on
     # the literal "Huy     : " prompt, so a styled one hangs it forever. Off a
     # terminal, or under NO_COLOR / SYMBIO_NO_COLOR, nothing changes at all.
     def assistant_prefix(self) -> str:
@@ -937,7 +994,13 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     # Below this the cap is doing more harm than the freeze it prevents: the
     # system prompt alone is thousands of tokens, and a cap under it would trim
     # the whole conversation away every turn and still not fit.
-    _MIN_TOKEN_CAP = 4096
+    #
+    # 8192, not 4096, once the budget started being measured against live RAM.
+    # 4096 was chosen as a floor under a number nobody expected to reach; a
+    # tight machine reaches it, and this install's system prompt alone measures
+    # ~5.5k tokens (logs/daemon.log, "prompt 5493"). A floor UNDER the prompt
+    # is the one setting guaranteed to trim every turn and still overflow.
+    _MIN_TOKEN_CAP = 8192
     # Trimming lands here rather than exactly at the cap. Landing at the cap
     # means overflowing again on the very next turn, and each overflow moves
     # the start of the conversation, which is the one thing that invalidates
@@ -945,6 +1008,55 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     # remaining context every single turn. Undershooting buys several cheap
     # turns per expensive one.
     _TRIM_TARGET = 0.75
+
+    def _kv_budgets(self) -> tuple[float, float | None]:
+        """(what config allows, what the machine can actually spare) in MB.
+
+        kv_budget_mb is the budget for a machine that is otherwise idle, and
+        this machine is not: Chrome holding a page is 2-3 GB that was not there
+        when the number was chosen. Spending the configured budget anyway is
+        what took the Mac down on 2026-09-16, mid browser turn. The second
+        number is measured, and the smaller of the two is what may be spent.
+
+        The cache this session already holds counts as available, because
+        trimming is what frees it -- otherwise a session that had grown large
+        would read its own cache as someone else's memory and trim to nothing.
+        """
+        agent_cfg = self.config.get("agent", {})
+        try:
+            configured = float(agent_cfg.get("kv_budget_mb", 4000))
+        except (TypeError, ValueError):
+            configured = 4000.0
+        try:
+            reserve_gb = float(agent_cfg.get("kv_budget_reserve_gb", 3.0))
+        except (TypeError, ValueError):
+            reserve_gb = 3.0
+        if reserve_gb <= 0:
+            return configured, None
+        # getattr: the cap is consulted on the first generation of a
+        # session, which can be before the cache attribute exists at
+        # all. No cache is held_mb = 0, not an error.
+        held = _cache_nbytes(getattr(self, "_prompt_cache", None))
+        held_mb = held / (1024 * 1024)
+        return configured, _live_headroom_mb(reserve_gb, held_mb)
+
+    def _cap_advice(self) -> str:
+        """What to actually change, given which budget is the binding one.
+
+        Telling someone to raise kv_budget_mb when the real constraint is that
+        Chrome has the RAM is advice that makes the freeze more likely, not
+        less.
+        """
+        configured, headroom = self._kv_budgets()
+        if headroom is not None and headroom < configured:
+            return (f"Most of this machine's memory is held by something else "
+                    f"right now — {headroom:.0f} MB is free for the cache "
+                    f"against a configured {configured:.0f} MB — so closing "
+                    f"the browser or other apps buys back more context than "
+                    f"raising agent.kv_budget_mb would. Either way, "
+                    f"agent.kv_bits set to 4 fits roughly four times as much.")
+        return ("Raise agent.kv_budget_mb, or set agent.kv_bits to 4 to fit "
+                "roughly four times as much.")
 
     def _measure_kv_cost(self, tokens: int) -> None:
         """Weigh the live cache and remember what a token costs.
@@ -978,11 +1090,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if isinstance(setting, str) and setting.strip().lstrip("-").isdigit():
             value = int(setting.strip())
             return 0 if value <= 0 else max(self._MIN_TOKEN_CAP, value)
-        try:
-            budget_mb = float(agent_cfg.get("kv_budget_mb", 4000))
-        except (TypeError, ValueError):
-            budget_mb = 4000.0
-        if budget_mb <= 0:
+        configured, headroom = self._kv_budgets()
+        budget_mb = configured if headroom is None else min(configured, headroom)
+        if configured <= 0:
             return 0
         per_token = self._kv_bytes_per_token or self._FALLBACK_KV_BYTES_PER_TOKEN
         return max(self._MIN_TOKEN_CAP, int(budget_mb * 1024 * 1024 / per_token))
@@ -1691,8 +1801,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                         f"  [Context] {prompt_tokens} tokens is over this "
                         f"machine's {cap}-token budget, so the oldest turns are "
                         f"being dropped from what the model sees (they stay in "
-                        f"the transcript). Raise agent.kv_budget_mb, or set "
-                        f"agent.kv_bits to 4 to fit roughly four times as much.")
+                        f"the transcript). {self._cap_advice()}")
                     tokenizing_spinner.start()
                 prompt_tokens = len(ids)
                 if timings is not None:
@@ -1975,6 +2084,53 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         except Exception as e:
             return ""
 
+    def _claims_incapacity(self, reply: str, user_input: str) -> bool:
+        """Ask the model whether its own reply refused on grounds of capability.
+
+        The mirror of `_claims_completion`, and the more dangerous half. A
+        model that says it did work it never did gets challenged; a model that
+        says it CANNOT do work it can do just ends the turn, and reads as
+        obedient while doing it.
+
+        Live 2026-09-15, asked to tweet at @grok: "The tools listed don't
+        include a Twitter API tool... the previous note from Huy says they
+        can't post tweets, only generate text." No such note exists anywhere in
+        the install — the constraint was manufactured inside the reasoning
+        block and then obeyed — and the browser toolset it was holding at the
+        time has posted to X before.
+
+        Asked of the model rather than matched with a pattern. The claim has no
+        fixed surface: "I don't have a Twitter tool", "that's outside what I
+        can reach from here", "I can only draft it for you" and a dozen other
+        phrasings all mean the same thing, and a list of them is a list of the
+        ones already seen. The distinction that matters here is semantic too —
+        "I couldn't find the compose box" is the report of an attempt, the
+        opposite of this, and separating the two is reading comprehension.
+
+        Fails closed on anything unexpected: a blank answer, an exception, or a
+        verdict that is neither word returns False, so a judge that cannot
+        answer costs the turn nothing rather than inventing a challenge.
+        """
+        if not reply.strip():
+            return False
+        ask = (
+            "You are grading one reply, not continuing the conversation.\n\n"
+            f"The user asked: {user_input.strip()[:600]}\n\n"
+            f"The assistant replied: {reply.strip()[:1200]}\n\n"
+            "Did the assistant decline on the grounds that it LACKS the "
+            "ability — no tool for it, no access, nothing it can do but write "
+            "text? Answer YES only for a claim about what it is able to do.\n"
+            "Answer NO if it reports that an ATTEMPT failed or came up empty "
+            "('I couldn't find the button', 'the page did not load'), if it "
+            "refused for safety or because the user declined, or if it simply "
+            "did the thing.\n\n"
+            "Answer with one word, YES or NO."
+        )
+        verdict = self._generate_tag_metadata(ask).strip().upper()
+        # First word only: a small model likes to explain itself afterwards.
+        first = verdict.split()[0].strip(".,:;!*_`\"'") if verdict.split() else ""
+        return first == "YES"
+
     def _ensure_tag_index(self) -> bool:
         """Initialize self.tag_index if needed. Returns True if ready."""
         rag_cfg = self.config.get("rag", {})
@@ -2105,6 +2261,48 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                     self._indexing_now = False
             for kind, line in written:
                 self._log_info(f"Soul [{kind}]: {line}")
+            self._maybe_revise_constitution()
+
+    def _maybe_revise_constitution(self) -> None:
+        """Fold accumulated observations into one stance per question.
+
+        Runs on the soul worker's thread, right after its pass, and under the
+        same lock — a second generation running beside the first is the double
+        residency that hard-freezes this box, and consolidation is the least
+        urgent thing in the session.
+
+        Not every pass: `memory.constitution_revise_every` observations have to
+        have piled up first. Consolidating after every single observation is
+        just the soul store again with extra steps — the point of this layer is
+        that it sees several turns at once and can weigh them against each
+        other."""
+        from symbio.app import constitution
+
+        cfg = self.config.get("memory", {})
+        if not cfg.get("constitution_enabled", True):
+            return
+        try:
+            every = max(1, int(cfg.get("constitution_revise_every", 3)))
+        except (TypeError, ValueError):
+            every = 3
+        if len(constitution.pending_observations(self.config)) < every:
+            return
+        while self._indexing_now and not self._index_stop.is_set():
+            time.sleep(0.5)
+        if self._index_stop.is_set():
+            return
+        with self._index_lock:
+            self._indexing_now = True
+            try:
+                changes = constitution.revise(
+                    self.config, self._soul_generate, min_new=every)
+            except Exception as e:
+                self._log_info(f"Constitution pass failed: {e!r}")
+                changes = []
+            finally:
+                self._indexing_now = False
+        for change in changes:
+            self._log_info(f"Constitution: {change}")
 
     def _background_index_worker(self) -> None:
         """Daemon thread that periodically reindexes notes when idle.
@@ -2205,7 +2403,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if err:
             self.output_fn(f"  [Train] Model reload failed: {err}")
 
-    def _train_unloaded(self, iters: int | None = None) -> bool:
+    def _train_unloaded(self, iters: int | None = None,
+                        sample_weights: list[float] | None = None) -> bool:
         """Run LoRA training with our own copy of the weights evicted first.
 
         `mlx_lm lora` runs as a child process and is a second, independent
@@ -2218,6 +2417,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         On success the model is left unloaded, because every caller reloads
         the freshly trained adapter anyway. On a skipped run, a failure, or
         an exception, the previous model is restored before returning.
+
+        `sample_weights` passes a per-corpus-line weight vector to the trainer
+        (see training.run_training): the batch trainer (maybe_train_on_mistakes
+        via _guarded_train) feeds it curriculum.plan's weights for this round.
         """
         # Both branches end the same way: a trainer child process has exited,
         # and whoever called this reloads the adapter immediately afterwards.
@@ -2225,8 +2428,18 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # the child's bulk Metal teardown, which is the sequence that panics
         # the driver — so the wait goes here, once, rather than at each of the
         # several places that reload.
+        #
+        # sample_weights is only passed when present, so the unweighted path
+        # keeps its exact historical call shape (trainers stubbed as
+        # run_training(config, iters=...) in the suite still bind).
+        def _run():
+            if sample_weights is None:
+                return training.run_training(self.config, iters=iters)
+            return training.run_training(self.config, iters=iters,
+                                         sample_weights=sample_weights)
+
         if not self.config.get("gpu", {}).get("unload_model_during_training", True):
-            trained = training.run_training(self.config, iters=iters)
+            trained = _run()
             training.settle_after_trainer_exit(self.config, status_fn=self.output_fn)
             return trained
 
@@ -2234,14 +2447,114 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         self._unload_model()
         trained = False
         try:
-            trained = training.run_training(self.config, iters=iters)
+            trained = _run()
             return trained
         finally:
             training.settle_after_trainer_exit(self.config, status_fn=self.output_fn)
             if not trained:
                 self._restore_model()
 
-    def _guarded_train(self, config: dict[str, Any] | None = None, iters: int | None = None) -> bool:
+    def _repair_regression(self, regressions: list[str], backup_dir,
+                           learn_cfg: dict) -> bool:
+        """Find which LoRA modules caused `regressions` and switch them off.
+
+        Returns True when the adapter was repaired AND the full battery passes
+        again — the caller then keeps it instead of rolling back a run that may
+        have improved fifteen modules and broken one.
+
+        The search runs entirely on the RESIDENT model (adapter_attrib.
+        switched_off), because the alternative — write an ablated adapter,
+        reload the 14B, evaluate — costs minutes per subset and a dozen subsets
+        per attribution. Only the surviving repair is ever written to disk.
+        """
+        from symbio.app import adapter_attrib, golden, training
+
+        if not learn_cfg.get("golden_repair_on_regression", True):
+            return False
+        if self.model is None:
+            return False
+        live = adapter_attrib.live_lora_modules(self.model)
+        if not live:
+            return False
+        candidates = sorted(
+            live, key=lambda n: (next((int(p) for p in n.split(".") if p.isdigit()), -1), n))
+
+        by_id = {c.id: c for c in golden.all_golden_cases()}
+        cases = [by_id[i] for i in regressions if i in by_id]
+        if not cases:
+            return False
+
+        self.output_fn(
+            f"  [Repair] Attributing {len(cases)} regression(s) across "
+            f"{len(candidates)} LoRA module(s)...")
+
+        def _restores(dropped) -> bool:
+            """Do the regressed cases pass with `dropped` switched off?"""
+            try:
+                with adapter_attrib.switched_off(self.model, dropped):
+                    result = golden.run_golden_set(
+                        self.model, self.tokenizer, self.generate_fn,
+                        self.sampler, self.system_prompt, self.config,
+                        self.enabled_groups, cases=cases)
+            except Exception as exc:
+                self._log_info(f"Repair evaluation failed: {exc!r}")
+                return False
+            return not (set(regressions) - result.passing)
+
+        culprits, spent = adapter_attrib.bisect_blame(candidates, _restores)
+        if not culprits:
+            self.output_fn(
+                f"  [Repair] Not attributable after {spent} evaluation(s): "
+                f"switching the whole adapter off does not bring these cases "
+                f"back, so something other than this training round moved "
+                f"them.")
+            return False
+        self.output_fn(
+            f"  [Repair] {len(culprits)} module(s) implicated in {spent} "
+            f"evaluation(s): {', '.join(culprits)}")
+
+        # The regressed cases coming back is necessary, not sufficient:
+        # switching a module off can cost something elsewhere, and an adapter
+        # that trades one regression for another is not repaired. So the FULL
+        # battery decides, with the repair actually applied.
+        with adapter_attrib.switched_off(self.model, culprits):
+            full = golden.run_golden_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config, self.enabled_groups)
+            if full.failing:
+                self.output_fn(
+                    f"  [Repair] {len(full.failing)} case(s) still failing with "
+                    f"those switched off; rolling back instead.")
+                return False
+            # Persist the repair while it is proven: the same ablation, written
+            # into the adapter file, so a restart serves what was just graded.
+            file_names = adapter_attrib.modules(constants.ADAPTER_DIR)
+            mapped = adapter_attrib.match_file_names(culprits, file_names)
+            missing = [c for c in culprits if c not in mapped]
+            if missing:
+                self.output_fn(
+                    f"  [Repair] Could not locate {', '.join(missing)} in the "
+                    f"adapter file; rolling back rather than keeping a repair "
+                    f"that would not survive a restart.")
+                return False
+            adapter_attrib.write_ablated(
+                constants.ADAPTER_DIR, constants.ADAPTER_DIR, mapped.values())
+
+        adapter_attrib.record_quarantine(
+            constants.ADAPTER_DIR, culprits, regressions,
+            datetime.now().strftime("%Y-%m-%d %H:%M"))
+        self.output_fn(
+            "  [Repair] Battery clean with those module(s) off — keeping the "
+            "adapter and quarantining them.")
+        self._last_train_note = (
+            f"Training regressed on {len(regressions)} check(s), traced to "
+            f"{', '.join(culprits)}; those modules were switched off and the "
+            f"rest of the adapter kept.")
+        return True
+
+    def _guarded_train(self, config: dict[str, Any] | None = None,
+                       iters: int | None = None,
+                       sample_weights: list[float] | None = None) -> bool:
         """Run LoRA training, reload the adapter, then check it against the
         golden set (a fixed battery of prompts covering identity and
         tool-tag formatting — see symbio.app.golden). A regression, a case
@@ -2253,7 +2566,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
         `config` is accepted (and ignored) so this method can be passed
         directly to learn.maybe_train_on_mistakes, which expects a
-        `train_fn(config, iters=...)` signature."""
+        `train_fn(config, iters=...)` signature. `sample_weights` is the
+        per-corpus-line weight vector from the batch trainer's curriculum
+        plan, passed straight through to run_training."""
         learn_cfg = self.config.get("learn", {})
         golden_on = learn_cfg.get("golden_set_enabled", True)
 
@@ -2296,7 +2611,14 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             backup_dir=str(backup_dir) if backup_dir else None)
 
         try:
-            trained = self._train_unloaded(iters=iters)
+            # sample_weights is only passed when present (same rule as the
+            # _train_unloaded closure): stubs and old trainers bound as
+            # _train_unloaded(iters=...) in the suite must keep binding.
+            if sample_weights is None:
+                trained = self._train_unloaded(iters=iters)
+            else:
+                trained = self._train_unloaded(iters=iters,
+                                               sample_weights=sample_weights)
             local_telemetry.log_event("train", iters=iters, ok=bool(trained))
             if not trained or not adapter_weights_present():
                 # Covers the "trained but no adapter on disk" case, which
@@ -2407,6 +2729,12 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 self.output_fn(
                     f"  [Golden] Regression: {len(regressions)} case(s) newly "
                     f"failing ({', '.join(regressions)}).")
+                # Before throwing the whole adapter away, ask WHICH PART broke
+                # it. LoRA is additive per module, so switching one off is an
+                # experiment rather than a guess — and a run that improved
+                # fifteen modules and broke one should not lose all sixteen.
+                if self._repair_regression(regressions, backup_dir, learn_cfg):
+                    return True
                 rolled_back = False
                 if not learn_cfg.get("golden_rollback_on_regression", True):
                     self.output_fn("  [Golden] Rollback disabled in config; keeping the regressed adapter.")
@@ -2590,7 +2918,30 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
         learn.maybe_train_on_mistakes(
             self.config, self.tokenizer, self.system_prompt,
-            train_fn=self._guarded_train, check_fn=self._golden_check)
+            train_fn=self._guarded_train, check_fn=self._golden_check,
+            eval_fn=self._eval_battery_result)
+
+    def _eval_battery_result(self):
+        """Run the held-out eval battery against the live model.
+
+        Returns an EvalResult for curriculum.plan to weight the mistake batch
+        by, or None when it cannot run — model not resident, battery disabled,
+        generation error. Every None is read by the caller (and by the plan
+        step after it) as "fall back to linear boost", never as a crash.
+        Called lazily by maybe_train_on_mistakes, only once a retrain is
+        actually going to run, so a 9-case battery is spent at most once per
+        real training round instead of on every turn that saves a note.
+        """
+        if self.model is None:
+            return None
+        try:
+            from symbio.app.eval import run_eval_set
+            return run_eval_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config)
+        except Exception as e:
+            self.output_fn(f"  [Learn] Eval battery failed to run: {e}")
+            return None
 
     def _golden_check(self) -> tuple[int, int] | None:
         """Run the golden battery against the live model and return
@@ -2856,6 +3207,60 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                     self._guarded_train()
 
 
+def _install_command_completion(session) -> bool:
+    """Make "/" complete against the commands that actually exist.
+
+    This is the terminal's half of the slash-command idea: a name is only
+    worth having if it can be recalled, and recall in a terminal is Tab. The
+    completer is rebuilt from the session on every keystroke rather than
+    captured once, so a command saved during the session — by the user or by
+    the assistant through save_command — is completable immediately.
+
+    readline is a standard-library module but not a guaranteed one (a stripped
+    Python, a non-tty front-end), and completion is a convenience: a failure
+    here costs Tab, never the session.
+    """
+    try:
+        import readline
+    except Exception:
+        return False
+    if not sys.stdin.isatty():
+        return False
+
+    def _complete(text: str, state: int):
+        try:
+            buffer = readline.get_line_buffer()
+            if not buffer.lstrip().startswith("/"):
+                return None
+            # Only the command word completes; arguments are free text.
+            if buffer.lstrip()[1:].find(" ") >= 0 and text != buffer.lstrip():
+                return None
+            typed = text.lstrip("/").lower()
+            matches = [f"/{n}" for n in session.command_names()
+                       if n.startswith(typed)]
+            return matches[state] if state < len(matches) else None
+        except Exception:
+            return None
+
+    try:
+        readline.set_completer(_complete)
+        # Slashes and hyphens are part of a command name, not delimiters, or
+        # "/new-skill" completes as if "skill" were its own word.
+        readline.set_completer_delims(" \t\n")
+        # libedit (the macOS system Python) speaks a different dialect of the
+        # same config language; bind for both rather than picking one.
+        if "libedit" in (getattr(readline, "__doc__", "") or ""):
+            readline.parse_and_bind("bind ^I rl_complete")
+        else:
+            readline.parse_and_bind("tab: complete")
+            # One Tab on an ambiguous prefix shows the candidates instead of
+            # waiting for a second — the menu is the point.
+            readline.parse_and_bind("set show-all-if-ambiguous on")
+    except Exception:
+        return False
+    return True
+
+
 def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
               adapter_loaded: bool | None = None,
               generate_fn=None, stream_fn=None,
@@ -2943,6 +3348,7 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
         input_fn=input_fn, output_fn=output_fn, confirm_fn=confirm_fn,
         owner="cli",
     )
+    _install_command_completion(session)
     # When the CLI itself runs, load and warm the model before showing the
     # banner or interactive prompt. Tests that inject a model or generation
     # functions skip this so they remain lightweight.

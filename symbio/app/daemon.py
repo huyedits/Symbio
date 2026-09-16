@@ -146,6 +146,19 @@ def _load_model(config: dict[str, Any]):
     return load(config["model_name"]), False
 
 
+class _ClientGone(Exception):
+    """Raised inside a turn whose client has disconnected, to end it early.
+
+    Dropping the writes alone was not enough. Generation keeps running to its
+    natural end -- hundreds of tokens nobody will read -- and the daemon
+    serves one session at a time, so the NEXT window sits in the backlog
+    behind a turn that is being produced for nobody. Live 2026-09-16: a
+    front-end was killed mid-generation and the replacement window waited
+    57 seconds, correctly reporting that something else was holding the model.
+    That something was a ghost.
+    """
+
+
 def _serve_connection(conn: socket.socket, config: dict[str, Any],
                       model: Any, tokenizer: Any, adapter_loaded: bool) -> None:
     """Run one ChatSession over a connected socket, then close it."""
@@ -157,14 +170,33 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
     # the socket must be serialized or two JSON lines can interleave.
     write_lock = threading.Lock()
 
+    # Set when a write fails: the client has gone (a closed browser tab, a
+    # front-end killed mid-turn). Every later write is dropped rather than
+    # raised, because a half-finished turn must not take the resident model
+    # down with it -- reloading the weights is 30s and this process is the
+    # only reason the desktop and `symb chat` start instantly.
+    client_gone = threading.Event()
+
     def send_msg(msg: dict) -> None:
-        with write_lock:
-            wfile.write(_encode_msg(msg))
-            wfile.flush()
+        if client_gone.is_set():
+            return
+        try:
+            with write_lock:
+                wfile.write(_encode_msg(msg))
+                wfile.flush()
+        except OSError:
+            client_gone.set()
 
     def recv_msg() -> dict:
-        line = rfile.readline()
+        if client_gone.is_set():
+            raise EOFError("client disconnected")
+        try:
+            line = rfile.readline()
+        except OSError as e:
+            client_gone.set()
+            raise EOFError("client disconnected") from e
         if not line:
+            client_gone.set()
             raise EOFError("client disconnected")
         return _decode_msg(line)
 
@@ -179,6 +211,10 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         send_msg({"type": "output", "text": text})
 
     def confirm_fn(prompt: str) -> bool:
+        # Nobody to ask is a NO, not a wait. Blocking here on a dead client
+        # holds the only model on the machine until the process is killed.
+        if client_gone.is_set():
+            return False
         send_msg({"type": "confirm", "prompt": prompt})
         while True:
             msg = recv_msg()
@@ -186,6 +222,11 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
                 return bool(msg.get("answer", False))
 
     def stream_chunk_fn(text: str) -> None:
+        # Checked BEFORE the write, and raised rather than swallowed: this is
+        # called once per token from inside the generation loop, so it is the
+        # one place a turn can be cut short when nobody is listening.
+        if client_gone.is_set():
+            raise _ClientGone()
         send_msg({"type": "stream", "text": text})
 
     session = ChatSession(
@@ -198,6 +239,10 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
     )
     try:
         session.run()
+    except (_ClientGone, EOFError):
+        # An ordinary end: the window closed. Not an error, and not a reason
+        # to keep the connection or the turn alive.
+        pass
     finally:
         try:
             send_msg({"type": "done"})
@@ -246,15 +291,30 @@ def daemon_main(config: dict[str, Any]) -> int:
         # A platform that will not chmod a socket node still had the umask
         # applied at bind; nothing here should take the daemon down.
         pass
-    sock.listen(1)
+    # Backlog, not concurrency: one model means one session at a time, and
+    # _serve_connection below runs them serially. But a backlog of 1 makes the
+    # SECOND waiting client an ECONNREFUSED rather than a wait, and a
+    # front-end that reconnects on failure then turns one busy moment into a
+    # refusal loop. Live 2026-09-16, the desktop reported "The resident model
+    # is running but refused a connection: [Errno 61] Connection refused"
+    # while the daemon was healthy and mid-turn. Queue them instead.
+    sock.listen(16)
 
     try:
         while True:
             conn, _ = sock.accept()
             try:
                 _serve_connection(conn, config, model, tokenizer, adapter_loaded)
-            except Exception as e:
-                print(f"Connection error: {e}", flush=True)
+            except KeyboardInterrupt:
+                raise
+            except BaseException as e:
+                # BaseException, not Exception. A session that ends through
+                # SystemExit -- or anything else a command handler raises --
+                # would otherwise leave this loop, run the finally below and
+                # take the loaded model with it, so one client hanging up
+                # would cost the next one a 30s reload. Whatever happened to
+                # that connection, the daemon keeps serving.
+                print(f"Connection error: {type(e).__name__}: {e}", flush=True)
                 try:
                     conn.close()
                 except OSError:

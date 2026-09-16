@@ -5,13 +5,23 @@ Supports two formats:
   2. Legacy short tags: <cmd>, <py>, <search>, <note>, <digest />, etc.
 """
 
+import copy
+import difflib
 import json
 import re
 from typing import Any
 
+from symbio import constants
+from symbio.app import tool_docs
+
 # Map each parsed tool name to the user-facing group used for enable/disable menus.
 _TOOL_GROUPS: dict[str, str] = {
     "write_note": "notes",
+    # Reading back what was saved serves both stores, so either opt-in is
+    # enough. Gating it on "memory" alone left a notes-only install able to
+    # write notes and unable to look at one -- which is the state the model
+    # reports as "I don't have access to that", having called nothing.
+    "recall": ("memory", "notes"),
     "delete_note": "notes",
     "save_skill": "notes",
     "run_command": "terminal",
@@ -26,6 +36,8 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_press": "browser",
     "browser_close": "browser",
     "submit_form": "browser",
+    "fill_form": "browser",
+    "post_to_x": "browser",
     "browser_get_text": "browser",
     # Looking is grouped with the browser, not with desktop control: seeing the
     # page the assistant already drives is the same capability as reading it,
@@ -44,6 +56,11 @@ _TOOL_GROUPS: dict[str, str] = {
     "desktop_click": "desktop",
     "desktop_type": "desktop",
     "desktop_press": "desktop",
+    "desktop_scroll": "desktop",
+    "desktop_drag": "desktop",
+    "desktop_move": "desktop",
+    "desktop_wait": "desktop",
+    "open_app": "desktop",
     "save_memory": "memory",
     "compact_memory": "memory",
     "set_standing_instruction": "memory",
@@ -65,7 +82,143 @@ _TOOL_GROUPS: dict[str, str] = {
     "verify_features": "system",
     "run_remote": "terminal",
     "add_golden_case": "config",
+    # The meta tool that hands out the other tools' schemas. "core" is not a
+    # group a user can switch off: an install with it disabled would be shown
+    # an index it could never expand.
+    "tool_docs": "core",
+    "save_command": "notes",
+    "realign": "train",
 }
+
+# Groups that exist so a tool can be advertised, not so it can be gated.
+_ALWAYS_ENABLED_GROUPS = frozenset({"core"})
+
+# Which toolset a tool belongs to, for the per-family round budget in
+# chat_turn. Groups (above) answer "may the user reach this?"; families answer
+# "is this another go at the same idea?" — and they are not the same question.
+# read_file, edit_file and run_command all sit in the "terminal" group because
+# one permission covers them, but a turn that has read six files has not tried
+# the shell at all.
+#
+# The budget this feeds exists because one global round count is spent
+# first-come-first-served: a browser sequence that clicks, scrolls, re-reads
+# and clicks again will consume all fifteen rounds before the model ever gets
+# to the search or the script that would have answered the question. Capping
+# per family leaves rounds behind for a different approach, which is the only
+# kind of retry worth having.
+_TOOL_FAMILIES: dict[str, str] = {
+    "read_file": "file",
+    "edit_file": "file",
+    "write_file": "file",
+    "run_command": "shell",
+    "run_remote": "shell",
+    "execute_code": "code",
+    "web_search": "web",
+    "read_page": "web",
+    "fetch_html": "web",
+    "browser_open": "browser",
+    "browser_get_text": "browser",
+    "browser_click": "browser",
+    "browser_click_at": "browser",
+    "browser_type": "browser",
+    "browser_scroll": "browser",
+    "browser_press": "browser",
+    "browser_close": "browser",
+    "submit_form": "browser",
+    "fill_form": "browser",
+    "see_screen": "browser",
+    "desktop_click": "desktop",
+    "desktop_type": "desktop",
+    "desktop_press": "desktop",
+    "desktop_scroll": "desktop",
+    "desktop_drag": "desktop",
+    "desktop_move": "desktop",
+    "desktop_wait": "desktop",
+    "open_app": "desktop",
+    "post_to_x": "browser",
+    "write_note": "memory",
+    "recall": "memory",
+    "delete_note": "memory",
+    "save_skill": "memory",
+    "save_command": "memory",
+    "save_memory": "memory",
+    "compact_memory": "memory",
+    "set_standing_instruction": "memory",
+    "config_show": "admin",
+    "config_set": "admin",
+    "digest_notes": "admin",
+    "train_adapter": "admin",
+    "retrain_adapter": "admin",
+    "schedule_job": "admin",
+    "list_cron_jobs": "admin",
+    "delete_cron_job": "admin",
+    "update_cron_job": "admin",
+    "delegate_task": "admin",
+    "brain_solve": "admin",
+    "system_check": "admin",
+    "verify_features": "admin",
+    "add_golden_case": "admin",
+    "realign": "admin",
+    "tool_docs": "core",
+}
+
+# Every family, in the order a listing should show them: the ones that do work
+# first, the ones that record or administer it last.
+TOOL_FAMILY_ORDER: tuple[str, ...] = (
+    "file", "code", "shell", "web", "browser", "desktop", "memory", "admin",
+)
+
+
+def tool_family(name: str) -> str:
+    """The family `name` belongs to; "other" for anything unmapped (MCP tools,
+    a name the model invented). "other" is deliberately one bucket rather than
+    per-tool: an unknown name should not get its own private round budget."""
+    return _TOOL_FAMILIES.get(_HERMES_NAME_MAP.get(name, name), "other")
+
+
+def family_tools(family: str, groups: set[str] | None = None) -> list[str]:
+    """The reachable tools in one family, in catalog order."""
+    return [
+        name for name in _TOOL_FAMILIES
+        if _TOOL_FAMILIES[name] == family and tool_group_enabled(name, groups)
+    ]
+
+
+# What may be offered as "another way to get this done". Deliberately not
+# every family: "memory" and "admin" are how the assistant records or
+# administers work, never how it obtains an answer, and a model that has just
+# failed at something should not be handed retrain_adapter or delete_cron_job
+# as the next thing to try. "core" is tool_docs, which the prompt already
+# points at continuously.
+_SUGGESTIBLE_FAMILIES: tuple[str, ...] = (
+    "file", "code", "shell", "web", "browser", "desktop",
+)
+
+
+def untried_tools(tried: set[str], groups: set[str] | None = None,
+                  limit: int = 8) -> list[str]:
+    """Reachable tools this turn has not called yet, other families first.
+
+    This is what a refusal hands back. Telling a model "you already tried that"
+    and nothing else leaves it with one move — try it again, differently worded
+    — which is how a turn spends fifteen rounds on one idea. Naming what has
+    NOT been tried turns the refusal into the list of remaining approaches, and
+    the families it has already worked through sort last so the first suggestion
+    is never more of the same.
+    """
+    used_families = {tool_family(t) for t in tried}
+    canonical = {_HERMES_NAME_MAP.get(t, t) for t in tried}
+    ranked: list[str] = []
+    for family in _SUGGESTIBLE_FAMILIES:
+        if family in used_families:
+            continue
+        ranked.extend(n for n in family_tools(family, groups) if n not in canonical)
+    for family in _SUGGESTIBLE_FAMILIES:
+        if family not in used_families:
+            continue
+        ranked.extend(n for n in family_tools(family, groups) if n not in canonical)
+    return ranked[:limit]
+
 
 # Hermes-style tool registry: JSON schemas for the system prompt <tools> block.
 _TOOLS: list[dict[str, Any]] = [
@@ -193,7 +346,7 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "see_screen",
-        "description": "LOOK at the screen and get back what is actually there: every control with its exact selector, its current contents, and coordinates you can click directly with browser_click_at or desktop_click. On a web page this is instant and exact — it asks the page itself and does not need a screenshot — so use it freely rather than guessing a label, and use it FIRST when a click or a type has just failed. It also tells apart two controls with the same name, which page text cannot. Only a question the page cannot answer about itself — how something looks, an image, a canvas, or anything on the desktop — falls back to the slower screenshot. Name ONE thing per call in 'question' ('where is the composer?'); asking about several at once makes the positions unreliable.",
+        "description": "LOOK at the screen and get back what is actually there: every control with its exact selector, its current contents, and coordinates you can click directly with browser_click_at or desktop_click. On a web page this is instant and exact — it asks the page itself and does not need a screenshot — so use it freely rather than guessing a label, and use it FIRST when a click or a type has just failed. It also tells apart two controls with the same name, which page text cannot. On the desktop it is exact too: the window publishes its controls through the accessibility API and this returns them NUMBERED, which desktop_click, desktop_type, desktop_scroll and desktop_drag take directly — a number cannot miss by a few pixels and has no minimum size. Only a question nothing can answer about itself — how something looks, an image, a canvas, a window that draws its own interface — falls back to the slower screenshot. Name ONE thing per call in 'question' ('where is the composer?'); asking about several at once makes the positions unreliable.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -216,45 +369,128 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "submit_form",
-        "description": "Click the submit control of the form currently composed in the open browser, wait, and return a MACHINE-VERIFIED verdict. Use AFTER the form on the page is fully filled in — e.g. after browser_open on an HN submitlink URL, or browser_type into the fields. The verdict is CONFIRMED only when the page actually lands on a URL you can prove is the result page; otherwise it is NOT confirmed and the form may not have been submitted — report exactly what the verdict said and never claim a post was made without a CONFIRMED verdict. For Hacker News, pass expected_url='https://news.ycombinator.com/item?id='.",
+        "description": "Click the submit control of the form composed in the open browser, wait, and return a MACHINE-VERIFIED verdict. Use AFTER the form is filled in — after fill_form, or browser_type with a selector. This is how you send ANY form on ANY site, posting on x.com included: no site needs its own tool. The verdict is CONFIRMED only when the code itself saw the page land on the result URL, or saw 'expect_text' rendered on the page OUTSIDE every input box — text sitting in a composer is a draft, not a post. Otherwise it is NOT confirmed: report exactly what the verdict said and never claim something was posted, sent or submitted without a CONFIRMED verdict. On x.com: pass expect_text = the post's exact words, so the timeline itself is the proof. On Hacker News: expected_url='https://news.ycombinator.com/item?id='.",
         "parameters": {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "description": "Visible text of the submit control, e.g. 'submit' for HN."},
-                "selector": {"type": "string", "description": "Optional CSS selector for the submit control, e.g. 'input[type=submit]'."},
+                "target": {"type": "string", "description": "Visible text of the submit control, e.g. 'submit' on HN, 'Post' on x.com."},
+                "selector": {"type": "string", "description": "Optional CSS selector for the submit control, e.g. 'input[type=submit]' or '[data-testid=\"tweetButtonInline\"]'. Use this when the button's text is ambiguous."},
                 "expected_url": {"type": "string", "description": "URL prefix the page must land on after a successful submit. For HN: 'https://news.ycombinator.com/item?id='."},
+                "expect_text": {"type": "string", "description": "Text that must appear rendered on the page as published content once the submit worked — the post's own words on x.com, the comment's words under an article. The site-independent proof."},
             },
             "required": ["target"],
         },
     },
     {
-        "name": "desktop_click",
-        "description": "Click pixel coordinates anywhere on the macOS screen. Use coordinates returned by see_screen with target='desktop'.",
+        "name": "fill_form",
+        "description": "Fill several form fields at once, each addressed by CSS selector, and read every one back. Call see_screen first: it lists each visible field with the exact selector that reaches it. This is the reliable way to fill anything — a selector cannot miss, while coordinates cannot reach a control under ~32px at all (x.com's composer is 28px tall). The result names any field whose value did not land; do not call submit_form until they all did.",
         "parameters": {
             "type": "object",
             "properties": {
-                "x": {"type": "integer", "description": "Horizontal pixel coordinate from see_screen."},
-                "y": {"type": "integer", "description": "Vertical pixel coordinate from see_screen."},
+                "fields": {"type": "object", "description": "A map of CSS selector to the text that goes in it, e.g. {\"#title\": \"My story\", \"#url\": \"https://example.com\"}."},
             },
-            "required": ["x", "y"],
+            "required": ["fields"],
+        },
+    },
+    {
+        "name": "desktop_click",
+        "description": "Click a control on the macOS screen. Prefer 'element': see_screen with target='desktop' numbers every control the window publishes, and clicking by number presses the real control — it cannot miss by a few pixels and does not care what is drawn on top. Pass x/y only for something with no number, such as a point inside a canvas or an image.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "element": {"type": "integer", "description": "The number of a control from see_screen target='desktop'."},
+                "x": {"type": "integer", "description": "Horizontal coordinate, for a point with no element number."},
+                "y": {"type": "integer", "description": "Vertical coordinate, for a point with no element number."},
+                "button": {"type": "string", "description": "'left' (default), 'right' for a context menu, or 'middle'."},
+                "clicks": {"type": "integer", "description": "1 (default), 2 to double-click, 3 to select a line."},
+            },
         },
     },
     {
         "name": "desktop_type",
-        "description": "Type text into whatever has keyboard focus on the macOS desktop. Click the field first with desktop_click, and confirm with see_screen that the caret is where you expect.",
+        "description": "Type text on the macOS desktop. Pass 'element' — the number of a text field from see_screen — and the text goes into THAT field. Without one the text goes wherever the keyboard focus happens to be, and keys sent at a window with no field focused are shortcuts, not text, so that form is refused when the focused control cannot take text.",
         "parameters": {
             "type": "object",
-            "properties": {"text": {"type": "string", "description": "The text to type."}},
+            "properties": {
+                "text": {"type": "string", "description": "The text to type."},
+                "element": {"type": "integer", "description": "Number of the text field from see_screen target='desktop'."},
+                "press_enter": {"type": "boolean", "description": "Press enter afterwards. Many apps send with cmd+enter instead — use desktop_press for those."},
+            },
             "required": ["text"],
         },
     },
     {
         "name": "desktop_press",
-        "description": "Press a key on the macOS desktop (e.g. 'enter', 'esc', 'tab', 'down').",
+        "description": "Press a key or a chord on the macOS desktop: 'enter', 'esc', 'tab', 'down', and also 'cmd+s', 'cmd+shift+4', 'cmd+enter'. Chords are how a desktop is actually driven — a single modifier name on its own does nothing.",
         "parameters": {
             "type": "object",
-            "properties": {"key": {"type": "string", "description": "Key name such as 'enter', 'esc', 'tab', 'down'."}},
+            "properties": {"key": {"type": "string", "description": "A key ('enter', 'tab') or a chord ('cmd+s', 'cmd+shift+3')."}},
             "required": ["key"],
+        },
+    },
+    {
+        "name": "desktop_scroll",
+        "description": "Scroll the macOS window under the pointer, or over a numbered element. Use it when what you are looking for is not in the list of controls yet — the window publishes what is on screen, and scrolling is what changes that.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "direction": {"type": "string", "description": "'down' (default), 'up', 'left' or 'right'."},
+                "amount": {"type": "integer", "description": "How far, roughly in wheel notches. Default 5."},
+                "element": {"type": "integer", "description": "Optional element number to put the pointer over first."},
+            },
+        },
+    },
+    {
+        "name": "desktop_drag",
+        "description": "Press at one point on the macOS screen, move, and release at another: dragging a file, moving a slider, selecting a range. Give either element numbers or raw coordinates for each end.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "from_element": {"type": "integer", "description": "Element number to drag from."},
+                "to_element": {"type": "integer", "description": "Element number to drag to."},
+                "from_x": {"type": "integer", "description": "Start coordinate, if there is no element."},
+                "from_y": {"type": "integer", "description": "Start coordinate, if there is no element."},
+                "to_x": {"type": "integer", "description": "End coordinate, if there is no element."},
+                "to_y": {"type": "integer", "description": "End coordinate, if there is no element."},
+            },
+        },
+    },
+    {
+        "name": "desktop_move",
+        "description": "Move the mouse pointer without clicking, to a numbered element or a coordinate. Menus and toolbars that only appear on hover need this — a click on something that is not showing yet lands on whatever is underneath.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "element": {"type": "integer", "description": "Element number from see_screen target='desktop'."},
+                "x": {"type": "integer", "description": "Horizontal coordinate, if there is no element."},
+                "y": {"type": "integer", "description": "Vertical coordinate, if there is no element."},
+            },
+        },
+    },
+    {
+        "name": "desktop_wait",
+        "description": "Wait for the screen to catch up, up to 10 seconds. Use it after something that takes time — an application launching, a page rendering, a file copying — instead of looking again immediately and reporting that nothing happened.",
+        "parameters": {
+            "type": "object",
+            "properties": {"seconds": {"type": "number", "description": "How long to wait. Default 2, maximum 10."}},
+        },
+    },
+    {
+        "name": "post_to_x",
+        "description": "Write a post on x.com and verify it went out. The browser must already be open at x.com and signed in — this does not navigate there, because posting is not something to do on a page nobody asked for. Returns a verdict you cannot shape: '[Post CONFIRMED' only when the exact text was found rendered on the timeline afterwards. Never report a post as made without that verdict; if it says NOT confirmed, check x.com before trying again or it goes out twice.",
+        "parameters": {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "The post, 280 characters or fewer."}},
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "open_app",
+        "description": "Launch a macOS application by name, or bring it to the front if it is already running ('Safari', 'Notes', 'System Settings'). Everything else on the desktop acts on the frontmost window, so this is the first step of any task in an app that is not already in front.",
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "The application's name, e.g. 'Notes'."}},
+            "required": ["name"],
         },
     },
     {
@@ -267,6 +503,18 @@ _TOOLS: list[dict[str, Any]] = [
                 "body": {"type": "string", "description": "Markdown content."},
             },
             "required": ["title", "body"],
+        },
+    },
+    {
+        "name": "recall",
+        "description": "Look up what you have already saved: your notes, your durable memory, the profile of your user, and past sessions. This is the READ side of your memory -- write_note and save_memory only put things in. Use it whenever the user refers to something you were told before ('what is my name', 'the proxy I mentioned', 'what did we decide'), and use it BEFORE saying you do not know something about them. Returns the matching entries with their titles; an empty result is a real answer (nothing saved matches) and is the only ground for saying you have nothing.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to look for, in the user's own words."},
+                "scope": {"type": "string", "description": "'memory' (notes, saved memory and profile; the default), 'sessions' (past conversations), or 'all'."},
+            },
+            "required": ["query"],
         },
     },
     {
@@ -582,6 +830,68 @@ _TOOLS: list[dict[str, Any]] = [
             "required": ["id", "description", "prompt", "requirements"],
         },
     },
+    {
+        "name": "tool_docs",
+        "description": (
+            "Get the exact arguments of the tools you do not have in front of you. "
+            "The catalog in your system prompt lists tool NAMES by family; this "
+            "returns the full JSON schema for a whole family ('file', 'code', "
+            "'shell', 'web', 'browser', 'desktop', 'memory', 'admin') or for "
+            "specific tools by name. Call it before using anything whose "
+            "arguments you are not certain of — one round spent asking beats an "
+            "attempt spent on a guessed argument name."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "family": {"type": "string", "description": "A tool family, e.g. 'browser'."},
+                "names": {"type": "string", "description": "Specific tool names, comma-separated."},
+            },
+        },
+    },
+    {
+        "name": "realign",
+        "description": (
+            "Examine your own fine-tuned weights against the golden set, find "
+            "which LoRA modules are responsible for anything failing, and "
+            "report the gentlest damping that would fix it. Diagnostic by "
+            "default: pass apply=true to actually change the weights, which "
+            "asks the user first. A change is only ever kept if the WHOLE "
+            "battery improves, so this cannot be used to weaken a check — "
+            "including the refusal checks. Use it when you are asked to "
+            "examine yourself, or when you have reason to think your own "
+            "training has gone wrong."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "apply": {
+                    "type": "boolean",
+                    "description": "Write the damping. Default false (report only).",
+                },
+            },
+        },
+    },
+    {
+        "name": "save_command",
+        "description": (
+            "Save a reusable slash command the user can then run by typing "
+            "/<name> in the chat. The body is a prompt template that becomes "
+            "their next message; write $ARGUMENTS where whatever they type "
+            "after the command name should be substituted. Use it when a "
+            "request is one they will clearly make again in the same shape "
+            "('every morning, summarize my notes and check the calendar')."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Command name, lowercase, no slash, e.g. 'standup'."},
+                "description": {"type": "string", "description": "One line shown in the command list."},
+                "body": {"type": "string", "description": "The prompt template. $ARGUMENTS is replaced with the user's arguments."},
+            },
+            "required": ["name", "body"],
+        },
+    },
 ]
 
 # Hermes name -> internal name (most are already the same).
@@ -596,6 +906,23 @@ _HERMES_NAME_MAP: dict[str, str] = {
     "search": "web_search",
     "web_search": "web_search",
     "google": "web_search",
+    # Looking something up in your OWN store. The model reaches for all of
+    # these spellings and, before recall existed, every one of them was an
+    # unknown tool -- so the lookup it had decided to make became a sentence
+    # saying it had no way to make it.
+    "recall": "recall",
+    # NOT "remember": that spelling is mapped to write_note further down, and
+    # in a dict literal the later key wins. "remember this: X" is a save.
+    "search_notes": "recall",
+    "notes_search": "recall",
+    "search_memory": "recall",
+    "memory_search": "recall",
+    "read_note": "recall",
+    "read_notes": "recall",
+    "get_note": "recall",
+    "list_notes": "recall",
+    "search_sessions": "recall",
+    "session_search": "recall",
     "read": "read_page",
     "read_page": "read_page",
     "fetch_html": "fetch_html",
@@ -603,6 +930,14 @@ _HERMES_NAME_MAP: dict[str, str] = {
     "raw_html": "fetch_html",
     "html": "fetch_html",
     "fetch": "read_page",
+    # The agent stack (symbio/tools.py) calls these "patch" and "web_extract",
+    # and the shared prompt and few-shot examples have to name ONE spelling for
+    # both. They name the agent stack's, because that registry resolves by
+    # exact name and has no alias table to teach; this one does, so the cost of
+    # agreeing lands here, in two lines, instead of in a prompt that is wrong
+    # for whichever stack it is not written for.
+    "patch": "edit_file",
+    "web_extract": "read_page",
     "browse": "browser_open",
     "open": "browser_open",
     "navigate": "browser_open",
@@ -638,6 +973,49 @@ _HERMES_NAME_MAP: dict[str, str] = {
     "save_note": "write_note",
     "write_note": "write_note",
     "remember": "write_note",
+    # Driving the machine itself. The names a model reaches for here come from
+    # the computer-use tools it has seen elsewhere -- "screenshot",
+    # "left_click", "key" -- and every one of them was an unknown tool, which
+    # is read back as "this assistant cannot use a computer".
+    "screenshot": "see_screen",
+    "take_screenshot": "see_screen",
+    "screen": "see_screen",
+    "look": "see_screen",
+    "see_screen": "see_screen",
+    "desktop_click": "desktop_click",
+    "left_click": "desktop_click",
+    "mouse_click": "desktop_click",
+    "click_element": "desktop_click",
+    "desktop_type": "desktop_type",
+    "desktop_press": "desktop_press",
+    "hotkey": "desktop_press",
+    "key": "desktop_press",
+    "keypress": "desktop_press",
+    "desktop_hotkey": "desktop_press",
+    "desktop_scroll": "desktop_scroll",
+    "desktop_drag": "desktop_drag",
+    "drag": "desktop_drag",
+    "left_click_drag": "desktop_drag",
+    "desktop_move": "desktop_move",
+    "mouse_move": "desktop_move",
+    "hover": "desktop_move",
+    "move_mouse": "desktop_move",
+    "desktop_wait": "desktop_wait",
+    "wait": "desktop_wait",
+    "sleep": "desktop_wait",
+    "open_app": "open_app",
+    "fill_form": "fill_form",
+    "fill_fields": "fill_form",
+    "fill_in_form": "fill_form",
+    "post_to_x": "post_to_x",
+    "tweet": "post_to_x",
+    "post_tweet": "post_to_x",
+    "send_tweet": "post_to_x",
+    "launch_app": "open_app",
+    "open_application": "open_app",
+    "switch_app": "open_app",
+    "activate_app": "open_app",
+    "focus_app": "open_app",
 }
 
 # Argument-name aliases: the model often emits natural argument names that
@@ -647,7 +1025,36 @@ _HERMES_NAME_MAP: dict[str, str] = {
 _ARG_ALIASES: dict[str, dict[str, str]] = {
     "run_command": {"cmd": "cmd", "command": "cmd", "shell": "cmd", "cmdline": "cmd"},
     "web_search": {"query": "query", "q": "query", "search": "query", "term": "query", "what": "query"},
+    "recall": {"query": "query", "q": "query", "search": "query", "term": "query",
+               "what": "query", "text": "query", "title": "query", "topic": "query",
+               "scope": "scope", "source": "scope", "where": "scope"},
     "read_page": {"url": "url", "link": "url", "page": "url", "site": "url", "address": "url"},
+    "desktop_click": {"element": "element", "index": "element", "id": "element",
+                      "number": "element", "target": "element", "x": "x", "y": "y",
+                      "button": "button", "clicks": "clicks", "count": "clicks"},
+    "desktop_type": {"text": "text", "value": "text", "content": "text",
+                     "element": "element", "index": "element", "field": "element",
+                     "target": "element", "press_enter": "press_enter",
+                     "enter": "press_enter", "submit": "press_enter"},
+    "desktop_press": {"key": "key", "keys": "key", "combo": "key",
+                      "hotkey": "key", "shortcut": "key"},
+    "desktop_scroll": {"direction": "direction", "dir": "direction",
+                       "amount": "amount", "clicks": "amount", "element": "element",
+                       "index": "element", "target": "element"},
+    "desktop_drag": {"from_element": "from_element", "to_element": "to_element",
+                     "from_x": "from_x", "from_y": "from_y", "to_x": "to_x",
+                     "to_y": "to_y", "start_x": "from_x", "start_y": "from_y",
+                     "end_x": "to_x", "end_y": "to_y", "x1": "from_x",
+                     "y1": "from_y", "x2": "to_x", "y2": "to_y",
+                     "source": "from_element", "destination": "to_element"},
+    "desktop_move": {"element": "element", "index": "element", "target": "element",
+                     "x": "x", "y": "y"},
+    "desktop_wait": {"seconds": "seconds", "duration": "seconds", "time": "seconds",
+                     "amount": "seconds"},
+    "post_to_x": {"text": "text", "message": "text", "content": "text",
+                  "body": "text", "tweet": "text", "status": "text"},
+    "open_app": {"name": "name", "app": "name", "application": "name",
+                 "app_name": "name", "target": "name"},
     "browser_open": {"url": "url", "link": "url", "page": "url", "site": "url", "address": "url", "to": "url"},
     "browser_click": {"target": "target", "text": "target", "selector": "target", "element": "target", "name": "target", "button": "target"},
     "browser_type": {"text": "text", "value": "text", "input": "text", "content": "text", "string": "text", "enter": "enter", "press_enter": "enter", "return": "enter"},
@@ -656,6 +1063,22 @@ _ARG_ALIASES: dict[str, dict[str, str]] = {
     "delegate_task": {"role": "role", "worker": "role", "agent": "role", "to": "role",
                       "task": "task", "prompt": "task", "instruction": "task", "query": "task"},
     "write_note": {"title": "title", "body": "body", "content": "body", "text": "body", "note": "body", "value": "body", "subject": "title"},
+    # old_text/new_text is what `patch` takes in the agent stack and what a
+    # model that has seen either stack will reach for. A rename here is free;
+    # the alternative is an edit that silently finds no match because the only
+    # thing wrong with it was the key's name.
+    "edit_file": {"path": "path", "file": "path", "old_string": "old_string",
+                  "old_text": "old_string", "old": "old_string",
+                  "new_string": "new_string", "new_text": "new_string",
+                  "new": "new_string", "replacement": "new_string",
+                  "backup": "backup"},
+    "read_file": {"path": "path", "file": "path", "filename": "path",
+                  "offset": "offset", "limit": "limit"},
+    "write_file": {"path": "path", "file": "path", "filename": "path",
+                   "content": "content", "text": "content", "body": "content",
+                   "data": "content", "backup": "backup"},
+    "execute_code": {"code": "code", "script": "code", "source": "code",
+                     "python": "code", "program": "code"},
 }
 
 
@@ -940,6 +1363,8 @@ def tool_group_enabled(name: str, groups: set[str] | None) -> bool:
     """Is `name` reachable with `groups` turned on? Unknown tools are allowed
     through here; the dispatcher decides what to do with a name it lacks."""
     group = tool_group(name)
+    if group in _ALWAYS_ENABLED_GROUPS:
+        return True
     if group is None or groups is None:
         return True
     if isinstance(group, tuple):
@@ -947,12 +1372,147 @@ def tool_group_enabled(name: str, groups: set[str] | None) -> bool:
     return group in groups
 
 
-def build_tools_block(groups: set[str] | None = None) -> str:
-    """Return the Hermes-style <tools> JSON block for the system prompt.
+# The built-ins as the CODE defines them, before any tools/*.md is folded in.
+# sync_tool_files edits _TOOLS in place -- that is what makes the directory
+# authoritative -- so without this copy there is nothing left to compare a
+# user's file against, and a description improved in code could never be
+# offered to an install that had already seeded the old one.
+_BUILTIN_TOOLS: list[dict[str, Any]] = copy.deepcopy(_TOOLS)
+_BUILTIN_BY_NAME: dict[str, dict[str, Any]] = {t["name"]: t for t in _BUILTIN_TOOLS}
+
+
+def refresh_tool_files(names: list[str] | None = None,
+                       force: bool = False) -> tuple[list[str], list[str]]:
+    """Bring tools/*.md back in step with the built-ins. See tool_docs.refresh."""
+    out = tool_docs.refresh(_BUILTIN_TOOLS, _TOOL_FAMILIES, _TOOL_GROUPS,
+                            _HERMES_NAME_MAP, names=names, force=force)
+    global _disk_signature
+    _disk_signature = None  # re-read on the next sync
+    return out
+
+
+# Tools whose full schema stays inline even in index mode: the ones an
+# ordinary turn reaches for without deliberating. Making these cost a
+# tool_docs round would trade ~2,200 prompt tokens for a round-trip on every
+# routine request, which is the wrong side of that trade.
+_CORE_SCHEMA_TOOLS = frozenset({
+    "terminal", "web_search", "execute_code", "read_file", "edit_file",
+    "browser_open", "write_note", "recall", "tool_docs",
+    # These two are here for their DESCRIPTIONS, not their frequency.
+    # browser_press's says that many web apps submit with cmd+enter and that
+    # plain enter posts nothing — a correction the model cannot know it needs
+    # until it has already pressed the wrong key. see_screen's is what the
+    # click/type failure messages tell it to call; a recovery path that starts
+    # with a schema lookup is a recovery path spent at the worst moment.
+    "browser_press", "see_screen",
+})
+
+# What the last sync read off disk, and the directory signature it was read
+# at. Re-globbing every turn is cheap; re-parsing 40 files every turn is not,
+# and the answer only changes when a file does.
+_disk_signature: tuple | None = None
+
+
+def _disk_state() -> tuple:
+    try:
+        return tuple(sorted(
+            (p.name, p.stat().st_mtime_ns, p.stat().st_size)
+            for p in constants.TOOLS_DIR.glob("*.md")))
+    except Exception:
+        return ()
+
+
+def sync_tool_files(seed: bool = True) -> None:
+    """Fold tools/*.md into the live catalog, seeding the directory first.
+
+    A file whose name matches a built-in tool REPLACES its description and
+    schema — that is what makes the directory editable — and a file with a new
+    name adds a tool. Adding one here does not make it runnable on its own: a
+    name the dispatcher does not know still comes back as an unknown tool. It
+    makes it describable, which is the half that used to need a code change.
+    """
+    global _disk_signature
+    state = _disk_state()
+    # Seed when the directory is missing (a fresh install) and also when it
+    # holds fewer files than there are built-in tools — which is what a tool
+    # added in code since the last seed looks like. Without the second case a
+    # new built-in would never get a file, and the directory would quietly
+    # stop being the place tools are defined. ensure_seeded never overwrites,
+    # so this cannot walk on an edit.
+    if seed and (len(state) < len(_TOOLS)
+                 or not (constants.TOOLS_DIR / "README").exists()):
+        tool_docs.ensure_seeded(_TOOLS, _TOOL_FAMILIES, _TOOL_GROUPS,
+                                _HERMES_NAME_MAP)
+        state = _disk_state()
+    if state == _disk_signature:
+        return
+    _disk_signature = state
+    by_name = {t["name"]: t for t in _TOOLS}
+    for parsed in tool_docs.load_tool_files():
+        name = parsed["name"]
+        schema = {"name": name, "description": parsed["description"],
+                  "parameters": parsed["parameters"]}
+        internal = _HERMES_NAME_MAP.get(name, name)
+        if parsed["_family"]:
+            _TOOL_FAMILIES.setdefault(internal, parsed["_family"])
+        if name in by_name:
+            by_name[name].update(schema)
+            _restore_dropped_properties(by_name[name])
+            continue
+        # A NEW tool file needs a group, or the catalog filter — which drops
+        # anything whose group is unknown — would leave it defined and never
+        # advertised. Writing the file is the opt-in, so one without a group
+        # of its own lands in "core", which is not gateable. A file that names
+        # a group is gated by it like any built-in.
+        _TOOL_GROUPS.setdefault(internal, parsed["_group"] or "core")
+        _TOOLS.append(schema)
+
+
+def _restore_dropped_properties(spec: dict[str, Any]) -> None:
+    """Put back an argument the built-in declares and the file has never heard of.
+
+    The file wins on wording — that is the whole point of an editable catalog —
+    but it cannot un-declare an argument the dispatcher reads. A file seeded
+    before a tool grew one is not an edit saying "remove this", it is a file
+    written earlier, and on 2026-09-16 that difference cost the desktop tools
+    their entire accessibility path: tools/desktop_click.md still advertised
+    {x, y} from 2026-09-14, so `element` — the numbered control that ax.py
+    exists to provide — could not be named in a tool call at all. The
+    capability was shipped, tested, and unreachable.
+    """
+    built_in = _BUILTIN_BY_NAME.get(spec["name"])
+    if not built_in:
+        return
+    theirs = (spec.get("parameters") or {}).get("properties")
+    ours = (built_in.get("parameters") or {}).get("properties") or {}
+    if theirs is None or not ours:
+        return
+    for key, prop in ours.items():
+        theirs.setdefault(key, prop)
+    # And it cannot demand more than the built-in does. desktop_click's file
+    # still required {x, y} from when coordinates were the only way to click;
+    # restoring `element` beside a required x would have advertised a control
+    # number the model was not allowed to send on its own. A file may RELAX a
+    # requirement — that is a legitimate edit — never add one back.
+    required = (spec.get("parameters") or {}).get("required")
+    ours_required = set((built_in.get("parameters") or {}).get("required") or [])
+    if required:
+        spec["parameters"]["required"] = [k for k in required if k in ours_required]
+
+
+def build_tools_block(groups: set[str] | None = None,
+                      mode: str = "index") -> str:
+    """Return the <tools> block for the system prompt.
+
+    mode="index" (the default) prints the families, the tool names in each and
+    the schemas of the handful used most often, and leaves the rest to be
+    fetched with tool_docs. mode="full" prints every schema, which is what
+    every version before this did — `/config set agent.tool_catalog full`
+    restores it.
 
     If `groups` is given, only tools whose group is in the set are included.
-    The JSON is emitted compactly (no indentation) to keep prompt length down.
     """
+    sync_tool_files()
     tools = _TOOLS
     if groups is not None:
         # Through the Hermes map, not the catalog name directly: the shell
@@ -964,6 +1524,8 @@ def build_tools_block(groups: set[str] | None = None) -> str:
                      _HERMES_NAME_MAP.get(t["name"], t["name"]), groups)
                  and tool_group(
                      _HERMES_NAME_MAP.get(t["name"], t["name"])) is not None]
+    if mode == "index":
+        return tool_docs.index_block(tools, tool_family, _CORE_SCHEMA_TOOLS)
     return "<tools>" + json.dumps(tools, ensure_ascii=False, separators=(",", ":")) + "</tools>"
 
 
@@ -1864,6 +2426,89 @@ def dropped_tool_calls(reply: str,
     return dropped
 
 
+# Words that mean the same thing to a model naming a tool. Without these the
+# overlap between `browser_read` and `browser_get_text` is the word "browser"
+# alone, which every browser tool shares equally, and the tie falls to
+# whichever name happens to look most like the invented one.
+_MATCH_SYNONYMS: dict[str, str] = {
+    "read": "get", "fetch": "get", "view": "get", "show": "get",
+    "text": "get", "content": "get", "contents": "get",
+    "lookup": "search", "find": "search", "query": "search",
+    "recall": "search", "remember": "search", "retrieve": "search",
+    "note": "notes", "memories": "memory", "shell": "command",
+    "cmd": "command", "terminal": "command", "run": "command",
+    "screenshot": "screen", "capture": "screen", "look": "screen",
+    "write": "save", "store": "save", "create": "save", "add": "save",
+    "press": "key", "keypress": "key",
+}
+
+
+def _match_words(name: str) -> set[str]:
+    """`name` as the set of concepts it is built from, synonyms folded."""
+    words = {w for w in re.split(r"[^a-z0-9]+", name.lower()) if w}
+    return {_MATCH_SYNONYMS.get(w, w) for w in words}
+
+
+def nearest_tools(name: str, enabled_groups: set[str] | None,
+                  limit: int = 3) -> list[str]:
+    """Real tool names closest to an invented one, best first.
+
+    A name the catalog does not hold is reported back as "no tool named X
+    exists, here are all 44 of them" -- a list the model has already read, in
+    the prompt, and disagreed with. What it needs is the one name it was
+    reaching for. `list_threads` is nothing; `search_notes` is `recall`;
+    `browser_read` is `browser_get_text`.
+
+    Matched on the WORDS as well as the characters: a model that invents a
+    name builds it out of the right vocabulary in the wrong order
+    ("notes_search" for "search_notes"), which difflib on the raw string
+    scores poorly and a token overlap scores exactly right.
+    """
+    candidates = enabled_tool_names(enabled_groups)
+    if not candidates:
+        return []
+    target = name.strip().lower()
+    target_words = _match_words(target)
+    scored: list[tuple[float, str]] = []
+    for cand in candidates:
+        low = cand.lower()
+        words = _match_words(low)
+        overlap = len(target_words & words) / max(1, len(target_words | words))
+        ratio = difflib.SequenceMatcher(None, target, low).ratio()
+        # Word overlap leads: it is the signal that survives a reordering,
+        # and character similarity alone ranks `read_file` above `recall`
+        # for `read_note`, which is the wrong half of the name to match.
+        # A shared WHOLE WORD is the floor, not a character-similarity score.
+        # Measured over the invented names in the logs, letters alone rank
+        # `read_file` first for `send_email` (0.53) and `list_cron_jobs` for
+        # `list_threads` (0.54) -- confident, adjacent, and wrong. An email
+        # tool does not exist here, and the useful answer is to say nothing
+        # and let the full catalog speak.
+        if overlap < 0.3:
+            continue
+        scored.append((overlap * 2 + ratio, cand))
+    scored.sort(key=lambda pair: (-pair[0], pair[1]))
+    return [cand for _score, cand in scored[:limit]]
+
+
+def schemas_for_names(names: list[str]) -> str:
+    """The JSON schemas of `names`, or "" -- what a correction should carry.
+
+    Naming the right tool without its arguments buys one round and spends the
+    next one on tool_docs. The schema is ~60 tokens and closes the loop in
+    the round that noticed the mistake.
+    """
+    sync_tool_files()
+    by_name = {t["name"]: t for t in _TOOLS}
+    wanted = [by_name[n] for n in names if n in by_name]
+    if not wanted:
+        return ""
+    return json.dumps(
+        [{"name": t["name"], "description": t["description"],
+          "parameters": t["parameters"]} for t in wanted],
+        ensure_ascii=False, separators=(",", ":"))
+
+
 def enabled_tool_names(enabled_groups: set[str] | None) -> list[str]:
     """The tool names the <tools> catalog advertises, filtered to what is on."""
     names = []
@@ -1946,6 +2591,7 @@ _PRIMARY_ARG: dict[str, str] = {
     "run_command": "cmd",
     "execute_code": "code",
     "web_search": "query",
+    "recall": "query",
     "read_page": "url",
     # Registering the primary arg is what makes <fetch_html>URL</fetch_html>
     # parse, via _ALIAS_TO_TOOL below. Without it the model emitted exactly
@@ -2477,3 +3123,146 @@ def redact_messages(messages: list[dict[str, str]] | None):
     if not messages:
         return messages
     return [{**m, "content": redact_secrets(m.get("content", ""))} for m in messages]
+
+
+# --- the call has to match the contract the prompt handed out ---------------
+#
+# Every tool in this file advertises a JSON schema, and until now nothing
+# checked a call against it. The dispatcher reads what it wants with
+# `params.get("cmd", "")`, so a call with the argument spelled wrong is not an
+# error: it is a call with an empty command. The model gets back whatever an
+# empty argument produces, which is rarely an error message and never the
+# schema, and its next attempt is a guess about the same guess. That is the
+# `reflex` mistake kind in learn.py -- a wrong SHAPE, not a wrong fact -- and
+# the cure for a wrong shape is being shown the right one.
+#
+# Borrowed from Atomic Agents, whose whole discipline is that every component
+# declares its input and output schema and nothing is wired by name and hope:
+# validate at the boundary, and hand back the contract that was broken.
+
+# Second spellings the dispatcher honours for an argument its schema names once.
+# The catalog advertises ONE name per argument on purpose — teaching a model
+# three ways to say the same thing is three ways for it to be inconsistent —
+# but the dispatcher has always accepted these, and a check that refused them
+# would break calls that work today. Found by scanning the dispatcher for the
+# argument names it reads; a test does that scan so the next alias added
+# without a line here is a failure rather than a silent refusal.
+#
+#   tool -> the declared argument -> the other spellings that satisfy it
+_ARGUMENT_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
+    "delete_note": {"title": ("query", "name")},
+    "fill_form": {"fields": ("values", "form")},
+    # Either identifies the control; the schema has to call one of them
+    # required or the model omits both.
+    "submit_form": {"target": ("selector",)},
+}
+
+# Arguments a schema calls required and the tool answers without anyway. The
+# schema keeps saying required because that is the pressure that makes a model
+# supply one; the dispatcher keeps its answer because "list_notes" parses to
+# `recall` with no query at all, and refusing that sends the model back to
+# "I cannot look" — the exact sentence recall was built to stop.
+_TOLERATES_ABSENT: dict[str, set[str]] = {
+    "recall": {"query"},
+}
+
+
+def _schema_for_call(name: str) -> dict[str, Any] | None:
+    """The advertised schema for a name the dispatcher was given.
+
+    The dispatcher works in INTERNAL names (`run_command`); the catalog is
+    written in advertised ones (`terminal`), and a dozen model spellings map
+    onto each. Look up both ways or every internal name validates as unknown
+    and the check quietly does nothing — see the guards that were dead in the
+    shipped config while their tests passed.
+    """
+    sync_tool_files()
+    for spec in _TOOLS:
+        advertised = spec["name"]
+        if name in (advertised, _HERMES_NAME_MAP.get(advertised, advertised)):
+            return spec
+    return None
+
+
+def _type_mismatch(expected: str, value: Any) -> str:
+    """A description of a clearly wrong type, or "" when it is acceptable.
+
+    Deliberately lenient. A model that sends 5 where the schema says "string"
+    has made no mistake worth a round trip — the dispatcher's own `str()` will
+    do exactly what was meant. A model that sends a whole object where a
+    command line belongs has made a different kind of mistake, and that one is
+    worth catching before the tool runs on the empty string it coerces to.
+    """
+    if expected in ("string", "integer", "number", "boolean"):
+        if isinstance(value, (dict, list)):
+            return f"a {type(value).__name__}, but {expected} is expected"
+    elif expected == "object" and not isinstance(value, dict):
+        return f"a {type(value).__name__}, but an object is expected"
+    elif expected == "array" and not isinstance(value, (list, tuple)):
+        return f"a {type(value).__name__}, but an array is expected"
+    return ""
+
+
+def validate_arguments(name: str, params: Any) -> tuple[bool, str]:
+    """Check one call against its advertised schema. (ok, what to say back).
+
+    The message is written to be the whole of the model's next move: what was
+    wrong, what the tool actually takes, and the schema itself. Naming the
+    fault without the schema buys one round and spends the next on tool_docs.
+    """
+    spec = _schema_for_call(name)
+    if spec is None:
+        # Not a catalog tool. Unknown names are answered by nearest_tools,
+        # which has more to say than this does.
+        return True, ""
+    schema = spec.get("parameters") or {}
+    properties = schema.get("properties") or {}
+    if not isinstance(params, dict):
+        return False, (
+            f"{name} takes a JSON object of arguments, not "
+            f"{type(params).__name__}. Schema: {schemas_for_names([spec['name']])}")
+    if not properties:
+        return True, ""
+
+    aliases = _ARGUMENT_ALIASES.get(spec["name"], {})
+    accepted = set(properties)
+    for spellings in aliases.values():
+        accepted.update(spellings)
+    # ABSENT, not empty. An empty string is a value the tool may have its own
+    # meaning for — `recall` with a blank query deliberately lists what exists
+    # — and refusing it here would break behaviour the prompt promises.
+    tolerated = _TOLERATES_ABSENT.get(spec["name"], set())
+    missing = [key for key in (schema.get("required") or [])
+               if key not in tolerated
+               and all(params.get(spelling) is None
+                       for spelling in (key, *aliases.get(key, ())))]
+    unknown = [key for key in params if key not in accepted]
+    wrong = [(key, _type_mismatch(str(properties[key].get("type", "")), value))
+             for key, value in params.items()
+             if key in properties and properties[key].get("type")]
+    wrong = [(key, why) for key, why in wrong if why]
+
+    if not (missing or unknown or wrong):
+        return True, ""
+
+    faults = []
+    if missing:
+        faults.append(f"{name} needs {_and_list(missing)}, and "
+                      f"{'they were' if len(missing) > 1 else 'it was'} not given")
+    if unknown:
+        faults.append(f"{name} has no argument {_and_list(unknown)}; it takes "
+                      f"{_and_list(sorted(accepted))}")
+    for key, why in wrong:
+        faults.append(f"{key} was given as {why}")
+    return False, (
+        "; ".join(faults) + ". This is the call, not the task: send it again "
+        "with the arguments this schema names, rather than trying a different "
+        f"tool. Schema: {schemas_for_names([spec['name']])}")
+
+
+def _and_list(items: list[str]) -> str:
+    """`a`, `a` and `b`, `a`, `b` and `c` — backticked, for an error line."""
+    quoted = [f"`{i}`" for i in items]
+    if len(quoted) <= 1:
+        return "".join(quoted)
+    return ", ".join(quoted[:-1]) + " and " + quoted[-1]

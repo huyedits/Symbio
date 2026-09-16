@@ -97,7 +97,7 @@ dev = [
 # of `symbio/computer.py` (half the size, months behind) that nothing imported.
 
 [tool.setuptools.packages.find]
-include = ["symbio*"]
+include = ["symbio*", "symbio_desktop*"]
 
 [tool.pytest.ini_options]
 # Only test_*.py, NOT pytest's default "*_test.py" as well.
@@ -113,4 +113,18 @@ include = ["symbio*"]
 # test_streaming, test_chat_stress and test_tool_call_repair, every one of them
 # passing in isolation and failing in the full run.
 python_files = ["test_*.py"]
-norecursedirs = [".git", ".claude", "venv", "adapters*", "spaces"]
+# backups/ holds the adapters.testbak.* directories an interrupted run left
+# behind, and scratch/ the one-off scripts; neither holds tests, and the
+# "adapters*" entry above does not reach inside backups/.
+norecursedirs = [".git", ".claude", "venv", "adapters*", "spaces",
+                 "backups", "scratch"]
+# The suite lives in tests/, so pytest's prepend import mode puts tests/ on
+# sys.path (that is what keeps `from test_utils import ...` resolving) but NOT
+# the project root -- so `import symbio` would only work when pytest happened
+# to be launched as `python -m pytest` from here. Name the root explicitly.
+#
+# scripts/ is named for the same reason: the standalone maintenance scripts
+# moved there out of the root, and test_archive_adapters.py imports one of
+# them directly (`import archive_adapters`) to test it rather than shelling
+# out. Without this the move turns that into a collection error.
+pythonpath = [".", "scripts"]

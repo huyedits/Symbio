@@ -125,6 +125,46 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # (3 was too few; 6 handled an ordinary moving API; raised to 15 on
         # 2026-08-31 after a 14B gave up mid-crack with rounds to spare.)
         "max_tool_rounds": 15,
+        # The same budget, split by toolset. One global count is spent
+        # first-come-first-served, so a browser sequence — click, re-read,
+        # scroll, click again — eats all fifteen rounds before the model ever
+        # reaches the search or the script that would have answered the
+        # question. Per-family caps leave rounds behind for a DIFFERENT
+        # approach, which is the only kind of retry worth having; when a
+        # family is spent the call comes back as a refusal that names what has
+        # not been tried yet, rather than silently doing nothing.
+        # "default" applies to any family without its own entry.
+        "tool_family_rounds": {
+            "default": 6,
+            # Browsing is genuinely multi-step — open, look, click, read — so
+            # it gets more than the rest without getting all of them.
+            "browser": 8,
+            # Saving a note or changing a setting is not an investigation.
+            "memory": 3,
+            "admin": 3,
+        },
+        # How many DISTINCT attempts a turn must make before it is allowed to
+        # end on a failure. Two identical calls are not two attempts: an
+        # attempt is one that changed something — a different tool, a
+        # different target, a decoded value. Below this, a turn that stops on
+        # a tool error is asked once for another approach and handed the list
+        # of tools it has not tried.
+        # "on" checks every tool call against the schema the prompt advertised
+        # for it and hands the schema back when it does not match; "audit"
+        # records what it WOULD have refused and lets the call through, which
+        # is how a live install is measured before a guard is switched on;
+        # "off" restores the old silent coercion, where a misspelled argument
+        # became an empty one and the tool answered about that instead.
+        "validate_tool_arguments": "on",
+        "min_distinct_attempts": 3,
+        # How many times one turn may challenge its own reasoning before it is
+        # allowed to stop. Each challenge costs a round, and the rungs escalate
+        # — the call, the approach, the assumptions, the evidence, the method,
+        # the problem itself (see app/persistence.py). The default is the
+        # length of that ladder: one challenge is a reminder, and the whole
+        # point is that the pressure moves inward as the failures pile up. 0
+        # switches the escalation off and leaves only the round budget.
+        "max_persistence_challenges": 6,
         # A cap on MESSAGES, over messages of unbounded size. 20 turns of
         # ordinary chat is a couple of thousand tokens; 20 turns of browser
         # automation is 20 x max_page_chars, and that is the arithmetic that
@@ -147,6 +187,25 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # turning quantisation on roughly quadruples the affordable context
         # without touching this number.
         "kv_budget_mb": 4000,
+        # kv_budget_mb is the budget for a machine that is otherwise idle, and
+        # this one is not: Chrome holding a page is 2-3 GB that was not there
+        # when 4000 was chosen, and spending the configured budget anyway is
+        # what froze the Mac on 2026-09-16 mid browser turn. This is the RAM
+        # that must stay free for everything that is neither cache nor weights
+        # — the browser, the compositor, the desktop — and the cap is taken
+        # from whichever of the two budgets is smaller, measured each turn.
+        # 0 switches the measurement off and trusts kv_budget_mb alone.
+        #
+        # 1.5, not 3: what is already resident — the weights, the browser, the
+        # desktop — is not free memory and so is not counted here twice. This
+        # reserve covers only what is still to come: the browser loading a
+        # page, the activations of a long generation, and enough margin that
+        # the OS does not reach for swap. Measured on this box with the 14B and
+        # Chrome up, 3.0 left a headroom of exactly 0 MB and would have pinned
+        # every prompt to the 4,096-token floor — below the system prompt
+        # itself, which is the region where the cap does more harm than the
+        # freeze it prevents.
+        "kv_budget_reserve_gb": 1.5,
         # Quantising the KV cache (4-bit) quarters the per-token cost, so the
         # same kv_budget_mb buys roughly four times the context. Off by
         # default: some models lose measurable quality below 8 bits, and the
@@ -223,6 +282,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # core plus what fits — or set an integer to pin it. See
         # prompts.prompt_budget_tokens.
         "prompt_budget_tokens": "auto",
+        # How the <tools> catalog is served. "index" lists every tool name by
+        # family, spells out the schemas of the few used most often, and lets
+        # the model fetch the rest with tool_docs — about 1,300 tokens instead
+        # of 5,100, on every single turn. "full" prints every schema inline,
+        # which is what every version before this did. The tool definitions
+        # themselves live in tools/*.md either way.
+        "tool_catalog": "index",
         # How hard the model is asked to think before answering: none, low,
         # medium or flurry (see chat.THINKING_LEVELS). Change it live with
         # /think. "none" ends the prompt with an empty closed think block, so
@@ -479,6 +545,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # it. A model that passes keeps its weights and the notes are
         # archived. Set False to go straight to training as before.
         "mistake_pretrain_check": True,
+        # Weight the mistake batch by what the held-out eval says is weak
+        # (curriculum.plan) instead of the linear boost path: each note is
+        # written once and repeated at train time via sample_weights, with
+        # iterations scaled to the weighted corpus. Only fires when the live
+        # call site can run an eval battery.
+        "curriculum_weighting": True,
         "batch_train_iters": 25,
         "iters_per_severity": 5,
         "max_batch_train_iters": 100,
@@ -494,6 +566,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "wildcard_max_tokens": 200,
         "golden_regression_threshold": 0,
         "golden_rollback_on_regression": True,
+        # Before rolling a regressed adapter back, find out WHICH LoRA modules
+        # caused it and switch just those off (see app/adapter_attrib.py).
+        # LoRA is additive per module, so this is an experiment rather than a
+        # guess, and it runs on the resident model — no reloads. A repair is
+        # only kept when the FULL battery passes with those modules off;
+        # otherwise the rollback happens exactly as before. False skips
+        # straight to the rollback.
+        "golden_repair_on_regression": True,
         "golden_retry_enabled": True,
         "golden_retry_max_extra_iters": 50,
         "golden_retry_samples_per_case": 3,

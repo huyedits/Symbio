@@ -15,10 +15,12 @@ from typing import Any
 
 from symbio import constants, safety
 from symbio.tools import tool_few_shots
+from symbio.app import persistence
 from symbio.app import (
     learn, local_telemetry, memory, prompts, skills, tooling, training, web,
 )
 from symbio.app.chat_constants import (
+    unmet_targets, unverified_tokens,
     _BROWSER_ACTION_TOOLS, _MAX_RATE_LIMIT_RETRIES, _MAX_RATE_LIMIT_WAIT,
     user_turn_floor,
     _MAX_TOOL_RETRIES, _WEB_TOOLS, _claims_completion, _claims_submission,
@@ -33,7 +35,71 @@ from symbio.app.chat_text import (
 
 
 class AgentTurnMixin:
+    # How much of a tool's result is shown as it happens. The model gets the
+    # whole thing; this is the line a person reads to know what the turn is
+    # doing, and a full file read or page dump pushed past it would bury the
+    # conversation instead.
+    _RESULT_PREVIEW_LINES = 3
+    _RESULT_PREVIEW_CHARS = 240
+
+    def _show_tool_result(self, name: str, observation: str) -> None:
+        """Print what a tool just returned, in short.
+
+        "[Tool: recall]" says a tool RAN. It does not say whether it found
+        anything, and a front-end that shows only the name leaves the turn
+        looking identical whether the search hit or missed -- which is the
+        whole question while waiting. The result went to the model and to the
+        log and to nothing a person could see.
+        """
+        if not self.config.get("agent", {}).get("show_tool_output", True):
+            return
+        text = " ".join(str(observation or "").split("\n")[:self._RESULT_PREVIEW_LINES])
+        text = " ".join(text.split()).strip()
+        if not text:
+            return
+        if len(text) > self._RESULT_PREVIEW_CHARS:
+            text = text[:self._RESULT_PREVIEW_CHARS].rstrip() + "…"
+        self.output_fn(f"  [Result] {text}")
+
     """The agent loop for ChatSession."""
+
+    def _family_budget(self, family: str) -> int:
+        """How many rounds one toolset may spend in a single turn.
+
+        Reads agent.tool_family_rounds, falling back to its "default" entry and
+        then to the whole-turn budget — a missing or malformed setting must
+        make the harness behave as it did before per-family budgets existed,
+        not lock a family out.
+        """
+        cfg = self.config.get("agent", {})
+        budgets = cfg.get("tool_family_rounds")
+        whole_turn = int(cfg.get("max_tool_rounds", 15) or 15)
+        if not isinstance(budgets, dict):
+            return whole_turn
+        value = budgets.get(family, budgets.get("default", whole_turn))
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return whole_turn
+        return value if value > 0 else whole_turn
+
+    def _challenge_budget(self) -> int:
+        """How many persistence challenges one turn may spend.
+
+        A challenge costs a round, and a round spent arguing is a round not
+        spent attempting — so this is bounded. It is bounded at the length of
+        the ladder rather than at one, because one challenge is a reminder and
+        the point here is that the pressure escalates: by the fourth failure
+        the question has moved from "which tool" to "what do you believe that
+        is not true", and it never gets there if the harness has already spent
+        its only word.
+        """
+        try:
+            value = int(self.config.get("agent", {}).get(
+                "max_persistence_challenges", len(persistence.LADDER)))
+        except (TypeError, ValueError):
+            return len(persistence.LADDER)
+        return max(0, value)
 
     def _agent_turn(self, user_input: str):
         # The boot system-prompt prefill may still be running on its background
@@ -298,6 +364,38 @@ class AgentTurnMixin:
         nudge_block = self._nudge_block(user_input)
 
         max_rounds = self.config["agent"]["max_tool_rounds"]
+        # Fixed for this turn; updated at the end of it from what actually ran.
+        turn_family = getattr(self, "_last_tool_family", None)
+        # An ATTEMPT is a call that changed something — a different tool, a
+        # different target, a decoded value. Two identical calls are one
+        # attempt, and the harness now says so out loud rather than dropping
+        # the repeat on the floor. This is the list the stop condition counts
+        # and the refusal messages quote.
+        distinct_attempts: list[tuple[str, dict]] = []
+        # Rounds spent per toolset, against agent.tool_family_rounds.
+        family_rounds: dict[str, int] = {}
+        # Names tried this turn, for untried_tools(). Names, not calls: having
+        # tried browser_click once means the browser has been tried.
+        attempted_names: set[str] = set()
+        # Distinct IDEAS, which is what the stop gate counts. A failure is
+        # keyed by its kind (persistence.failure_signature), so seven calls
+        # that fail the same way are one idea, not seven; a success is always
+        # its own idea because it moved the turn somewhere new.
+        ideas: set[str] = set()
+        # Every observation this turn, for the provenance check below: a value
+        # the model states that appears in none of them came out of its head.
+        observations_this_turn: list[str] = []
+        provenance_challenged = False
+        # How many tool calls have failed this turn, ever — not in a row. It
+        # is what picks the rung of the persistence ladder, and it only ever
+        # climbs: a model that has been wrong four times about this task is
+        # four-times wrong even if the third attempt happened to work.
+        failures_this_turn = 0
+        # How many rungs have been spent. Bounded, because a challenge costs a
+        # round and a round spent arguing is a round not spent attempting —
+        # but bounded at the length of the ladder rather than at one, which is
+        # what "do not give up easily" costs.
+        challenges_used = 0
         executed_calls: set[str] = set()
         # executed_calls is "calls not to repeat", and the retry path below
         # DISCARDS from it when a call fails and is still retry-eligible — so
@@ -345,6 +443,8 @@ class AgentTurnMixin:
         last_observation = ""
         unparsed_tag_nudged = False
         echo_retry_nudged = False
+        continuation_challenged = False
+        incapacity_challenged = False
         thinking_cut_retried = False
         # The round index used to select thinking (think=round_num > 0);
         # agent.thinking_level owns that now, so nothing reads the counter.
@@ -430,7 +530,11 @@ class AgentTurnMixin:
             # so the model never saw a worked <cmd>/<search> example and fell
             # back to giving manual steps. They are constant across turns, so
             # they fold into the cached system+few-shot prefix at no cost.
-            messages.extend(tool_few_shots(self.config))
+            # The examples follow the family the model itself last worked in,
+            # resolved once at the top of the turn and held for the whole turn:
+            # they sit in front of the history in the prompt, so changing them
+            # mid-turn would re-prefill the block on every round for nothing.
+            messages.extend(tool_few_shots(self.config, family=turn_family))
             messages.extend(working_history)
 
             # The assistant's own line. Styled only when a person is watching
@@ -738,6 +842,52 @@ class AgentTurnMixin:
                 if json.dumps([n, p], sort_keys=True) not in executed_calls
             ]
 
+            repeated_failures = [
+                (n, p) for n, p in tools
+                if json.dumps([n, p], sort_keys=True) in failed_calls
+            ]
+            if (tools and not fresh_tools and repeated_failures
+                    and challenges_used < self._challenge_budget()):
+                # Every call in this reply is one already made this turn. The
+                # old behaviour was to say nothing and let the loop fall
+                # through to "stop", so the model's last word was whatever
+                # prose sat beside the repeat — usually a claim that it had
+                # worked.
+                #
+                # What it gets back is not "no" but the next rung of the
+                # ladder, chosen by how many times this turn has now failed.
+                # Twice is a tool problem; six times is a belief problem, and
+                # the same "try a different tool" answered six times is
+                # answered the same way six times.
+                # The rung is driven by failures AND by challenges already
+                # spent. Counting executed failures alone froze the ladder: a
+                # refused repeat never runs, so the counter stopped moving and
+                # every challenge from the second one on was the same sentence
+                # — which is the exact failure the ladder exists to avoid. A
+                # repeat after a challenge is itself a failure of reasoning,
+                # and the most telling kind.
+                pressure = max(1, failures_this_turn + challenges_used)
+                challenges_used += 1
+                repeated = ", ".join(sorted({n for n, _ in repeated_failures}))
+                options = tooling.untried_tools(attempted_names, self.enabled_groups)
+                rung = persistence.challenge_for(
+                    pressure, options, attempts=len(ideas))
+                self.output_fn(
+                    f"  [Persist] {repeated} already failed with those exact "
+                    f"arguments — refusing it and challenging {rung.target}.")
+                self.history.append({"role": "assistant", "content": reply})
+                self.history.append({"role": "user", "content": persistence.observation(
+                    pressure, options,
+                    attempts=len(ideas),
+                    preamble=(
+                        f"That is the same call, with the same arguments, that "
+                        f"already FAILED this turn ({repeated}). It was NOT run "
+                        f"again — nothing about it changed, so nothing about the "
+                        f"result would have."),
+                )})
+                self._trim_history()
+                continue
+
             if not fresh_tools:
                 self.history.append({"role": "assistant", "content": reply})
                 self._trim_history()
@@ -761,6 +911,26 @@ class AgentTurnMixin:
                             f"No tool named {', '.join(unknown)} exists. The "
                             f"tools you can call are: "
                             f"{', '.join(tooling.enabled_tool_names(self.enabled_groups))}.")
+                        # The full list is what it already read in the prompt
+                        # and invented a name against, so repeating it is the
+                        # weakest half of this correction. The strong half is
+                        # the one name it was reaching for, with the arguments
+                        # attached: `browser_read` is browser_get_text,
+                        # `memory_lookup` is recall. Handing over the schema
+                        # here is what lets the retry land in THIS round
+                        # rather than spending the next one on tool_docs.
+                        near: list[str] = []
+                        for invented in unknown:
+                            for real in tooling.nearest_tools(
+                                    invented, self.enabled_groups):
+                                if real not in near:
+                                    near.append(real)
+                        schemas = tooling.schemas_for_names(near[:3])
+                        if schemas:
+                            detail.append(
+                                f"Closest real tools: {', '.join(near[:3])} — "
+                                f"here are their schemas, use one of these "
+                                f"exactly: {schemas}")
                     if disabled:
                         detail.append(
                             f"{', '.join(disabled)} is turned off in this "
@@ -1041,6 +1211,140 @@ class AgentTurnMixin:
                     )})
                     self._trim_history()
                     continue
+                # A value the model produced in its head, not with a tool.
+                #
+                # This is the one failure the persistence machinery cannot see,
+                # because nothing failed: live 2026-09-14 a file held
+                # C#O#R#M#O#R#A#N#T#-#7#7#4#1 with "remove every '#'", and the
+                # model did it mentally, re-checked, listed the letters
+                # correctly and answered "COROMORANT-7741". Seven tool calls,
+                # all successful, zero failures counted, a confident wrong
+                # answer. The prompt already forbids exactly this ("decode and
+                # hash with a tool, never by eye") and was read and ignored —
+                # which is where this codebase has learned to stop writing
+                # prompt and write a check.
+                #
+                # The test is PROVENANCE, not correctness: correctness is not
+                # checkable here, but "no tool output contains this value" is,
+                # and asking for it to be produced mechanically is the right
+                # answer either way.
+                if (not provenance_challenged
+                        and any_tool_ran
+                        and observations_this_turn
+                        and challenges_used < self._challenge_budget()
+                        and _is_substantive(display)):
+                    invented = unverified_tokens(
+                        display, observations_this_turn, user_input)
+                    if invented:
+                        provenance_challenged = True
+                        challenges_used += 1
+                        named = ", ".join(invented)
+                        self.output_fn(
+                            f"  [Provenance] {named} appears in no tool output "
+                            f"this turn — asking it to derive the value.")
+                        self.history.append({"role": "user", "content": (
+                            f"[System observation: your answer states {named}, "
+                            f"and no tool output this turn contains that value. "
+                            f"So it was produced in your head, not read off a "
+                            f"result — and a value transformed by eye is wrong "
+                            f"about as often as it is right. Produce it with a "
+                            f"tool: run the decode, the strip, the hash or the "
+                            f"arithmetic, and report exactly what it prints. If "
+                            f"it prints something different from what you just "
+                            f"said, the printed value is the answer.]"
+                        )})
+                        self._trim_history()
+                        continue
+
+                # Ending on a failed tool is the "dies too quickly" shape:
+                # one call, one error, a paragraph explaining the error, done.
+                # A stop is a legitimate move only once there is a list of
+                # distinct attempts behind it — and each time the model tries
+                # to stop short of that, the challenge it gets back climbs the
+                # ladder rather than repeating itself. The budget below is what
+                # keeps this from becoming the whole turn; it is deliberately
+                # the length of the ladder and not one.
+                min_attempts = int(self.config["agent"].get(
+                    "min_distinct_attempts", 3) or 0)
+                if (challenges_used < self._challenge_budget()
+                        and any_tool_ran
+                        and not user_refused_this_turn
+                        and last_observation
+                        and learn.sounds_like_tool_error(last_observation)
+                        and len(ideas) < min_attempts):
+                    pressure = max(1, failures_this_turn + challenges_used)
+                    challenges_used += 1
+                    options = tooling.untried_tools(
+                        attempted_names, self.enabled_groups)
+                    tried = ", ".join(n for n, _ in distinct_attempts)
+                    rung = persistence.challenge_for(
+                        pressure, options, attempts=len(ideas))
+                    self.output_fn(
+                        f"  [Persist] Trying to stop after {len(ideas)} "
+                        f"distinct approach(es) in {len(distinct_attempts)} "
+                        f"call(s) — challenging {rung.target}.")
+                    self.history.append({"role": "user", "content": persistence.observation(
+                        pressure, options,
+                        attempts=len(ideas),
+                        preamble=(
+                            f"You are ending this turn on a failure. You made "
+                            f"{len(distinct_attempts)} call(s) ({tried}), but "
+                            f"only {len(ideas)} of them were genuinely "
+                            f"different approaches — the rest failed the same "
+                            f"way as one another. That is not enough to know "
+                            f"you are stuck."),
+                    )})
+                    self._trim_history()
+                    continue
+                # Refusing on capability grounds, having tried nothing.
+                #
+                # The claim guard above catches a reply that says it DID work
+                # it never did. This is the inverse and it has no guard at all:
+                # a reply that says it CANNOT do work it can do ends the turn
+                # looking obedient. Live 2026-09-15, asked to tweet at @grok,
+                # the model reasoned that no Twitter tool was listed, invented
+                # a note from the user saying it could only generate text, and
+                # stopped — while holding the browser toolset that has posted
+                # to X before.
+                #
+                # Ordered after the nudges above on purpose: those are cheap
+                # string checks, and this one spends a generation. It runs only
+                # on a turn that asked for an action, ran no tool at all, and
+                # still produced a real reply — which is already the shape of
+                # the failure, so the judge is asked rarely.
+                if (not incapacity_challenged
+                        and action_req
+                        and not any_tool_ran
+                        and not user_refused_this_turn
+                        and challenges_used < self._challenge_budget()
+                        and _is_substantive(display)
+                        and self._claims_incapacity(display, user_input)):
+                    incapacity_challenged = True
+                    challenges_used += 1
+                    options = tooling.untried_tools(
+                        attempted_names, self.enabled_groups)
+                    self.output_fn(
+                        "  [Capability] Reply declines on grounds of ability, "
+                        "and no tool was tried — naming what is reachable.")
+                    self.history.append({"role": "user", "content": (
+                        "[System observation: you said you are unable to do "
+                        "this, and you called no tool this turn — so that is a "
+                        "belief about yourself, not a result. It is also "
+                        "usually wrong: a task has no dedicated tool named "
+                        "after it, and is still reachable through the general "
+                        "ones. Posting to a site is the browser, not a "
+                        "posting API. Reading a file is <py>, not a file "
+                        "service."
+                        + (f" Reachable right now: {', '.join(options)}."
+                           if options else "")
+                        + " Nothing in your instructions forbids this — do not "
+                        "cite a rule you cannot quote. Try the tool that "
+                        "actually fits, once. If it fails, report exactly what "
+                        "it returned; that is a result and this was not.]"
+                    )})
+                    self._trim_history()
+                    continue
+
                 # Normal turn (or pure repetition): stop.
                 # BUT: if the user asked for an action (open/click/type/etc.)
                 # and the model only talked about doing it without actually
@@ -1073,6 +1377,54 @@ class AgentTurnMixin:
                     )})
                     self._trim_history()
                     continue
+
+                # Stopping after a SUCCESS, with the request only part-done.
+                #
+                # Every other gate in this block reacts to something going
+                # wrong: the persistence ladder to a tool error, the claim
+                # guard to work asserted without a call, the provenance check
+                # to a value invented in the model's head. A turn that makes
+                # one clean tool call, invents nothing and writes a plausible
+                # paragraph trips none of them, so it falls straight out of
+                # the loop with thirteen rounds unspent. That is the shape of
+                # "one tool call per turn, then hands it back" — not a missing
+                # loop, a loop with no reason to take a second lap.
+                #
+                # The check is again provenance, not completeness: whether the
+                # work is done is not decidable here, but "the user named this
+                # file/URL and no tool output this turn mentions it" is. Only
+                # targets the user typed deliberately count, so a
+                # conversational turn names none and this never fires.
+                if (not continuation_challenged
+                        and any_tool_ran
+                        and not user_refused_this_turn
+                        and challenges_used < self._challenge_budget()
+                        and observations_this_turn
+                        and not (last_observation
+                                 and learn.sounds_like_tool_error(last_observation))
+                        and _is_substantive(display)):
+                    missed = unmet_targets(user_input, observations_this_turn)
+                    if missed:
+                        continuation_challenged = True
+                        challenges_used += 1
+                        named = ", ".join(missed)
+                        self.output_fn(
+                            f"  [Continue] {named} — named in the request, "
+                            f"touched by no tool this turn; asking it to "
+                            f"finish.")
+                        self.history.append({"role": "user", "content": (
+                            f"[System observation: your tool calls this turn "
+                            f"succeeded, but the request also named {named}, "
+                            f"and no tool output this turn mentions it — so "
+                            f"that part has not been done. You have rounds "
+                            f"left. Do it now with the tool that fits, and "
+                            f"report exactly what it returns. If it genuinely "
+                            f"cannot be done, or you already covered it under "
+                            f"another name, say which — plainly, in one "
+                            f"line.]"
+                        )})
+                        self._trim_history()
+                        continue
                 break
 
             # Only execute the first fresh tool per response. Multiple tools in
@@ -1113,6 +1465,17 @@ class AgentTurnMixin:
             name, params = fresh_tools[0]
             tool_key = json.dumps([name, params], sort_keys=True)
             executed_calls.add(tool_key)
+            call_family = tooling.tool_family(name)
+            family_rounds[call_family] = family_rounds.get(call_family, 0) + 1
+            # A call the family budget blocks is not an attempt: it never ran,
+            # so it cannot be one of the distinct things this turn has tried,
+            # and counting it would let a turn earn its way to a stop on calls
+            # that produced nothing.
+            over_family_budget = (
+                family_rounds[call_family] > self._family_budget(call_family))
+            if not over_family_budget:
+                distinct_attempts.append((name, params))
+                attempted_names.add(name)
             any_tool_ran = True
             extra = fresh_tools[1:]
 
@@ -1150,7 +1513,23 @@ class AgentTurnMixin:
                 # can't catch. Cap it per turn so the agent falls back to
                 # reading whatever is visible instead of scrolling into a
                 # loop that only stops when max_tool_rounds runs out.
-                if name == "browser_scroll" and scrolls_this_turn >= _MAX_SCROLLS_PER_TURN:
+                if over_family_budget:
+                    # The toolset is spent for this turn. Not an error and not
+                    # a refusal of the request — a redirection, with the other
+                    # approaches named, while there are still rounds left to
+                    # spend on them.
+                    options = tooling.untried_tools(
+                        attempted_names, self.enabled_groups)
+                    observation = (
+                        f"Budget for the '{call_family}' tools is spent for this "
+                        f"turn ({self._family_budget(call_family)} rounds). This "
+                        f"call did NOT run. Whatever you are after, reach it a "
+                        f"different way, or say plainly that you could not."
+                        + (f" Not tried yet this turn: {', '.join(options)}."
+                           if options else "")
+                    )
+                    self.output_fn(f"  [Budget] {observation}")
+                elif name == "browser_scroll" and scrolls_this_turn >= _MAX_SCROLLS_PER_TURN:
                     observation = (
                         f"Scrolled {scrolls_this_turn} times already this turn. "
                         f"Stop scrolling and work with the page text you can see. "
@@ -1165,6 +1544,7 @@ class AgentTurnMixin:
                         submit_confirmed = True
                 if learn.is_user_refusal(observation):
                     user_refused_this_turn = True
+                self._show_tool_result(name, observation)
             local_telemetry.log_event(
                 "tool", name=name, ok=not learn.sounds_like_tool_error(observation),
                 result=observation,
@@ -1197,11 +1577,17 @@ class AgentTurnMixin:
                 self.output_fn(f"  [Learn] Tool mistake captured: {path.name}")
                 learn.maybe_train_on_mistakes(
                     self.config, self.tokenizer, self.system_prompt,
-                    train_fn=self._guarded_train, check_fn=self._golden_check)
+                    train_fn=self._guarded_train, check_fn=self._golden_check,
+                    eval_fn=self._eval_battery_result)
             pending_tool_error = (
                 f"[System observation: {observation}]" if learn.sounds_like_tool_error(observation)
                 else None
             )
+            if learn.sounds_like_tool_error(observation):
+                failures_this_turn += 1
+                ideas.add(persistence.failure_signature(name, observation))
+            else:
+                ideas.add(f"ok:{tool_key}")
             # Anonymous tool-error counter for telemetry (no content, just +1).
             if learn.sounds_like_tool_error(observation):
                 try:
@@ -1268,6 +1654,7 @@ class AgentTurnMixin:
             # Kept past the loop for the end-of-turn soul pass, which needs to
             # know whether anything actually failed this turn.
             last_observation = observation
+            observations_this_turn.append(observation)
             self.output_fn(f"  [Observation] {observation.replace(chr(10), chr(10) + '  ')}")
             timings["tools_ms"] = (time.perf_counter() - gen_start) * 1000
             # Web results must ground the answer: tell the model to answer from
@@ -1334,6 +1721,13 @@ class AgentTurnMixin:
                    "is the result.)" if any_tool_ran else
                    "(No reply — the model returned only internal reasoning.)"))
             self.logger.info("Turn ended with no visible reply.")
+
+        # What the model actually worked on this turn decides which worked
+        # examples it is shown next turn (see tool_few_shots). The LAST tool it
+        # chose, not the first: a turn that opens a page and then writes a file
+        # is a file turn by the end of it.
+        if distinct_attempts:
+            self._last_tool_family = tooling.tool_family(distinct_attempts[-1][0])
 
         timings["total_ms"] = (time.perf_counter() - turn_start) * 1000
         self.last_turn_timings = timings

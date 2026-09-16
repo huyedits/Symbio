@@ -53,6 +53,23 @@ _MAX_LINE = 180
 # both "nothing observed yet" and the thing it had just observed.
 _PLACEHOLDER = "(nothing observed yet)"
 _DEFAULT_LIMIT = 2000
+# How far back to look for an earlier decline. The reflection pass itself reads
+# six turns; this is the same conversation, not a longer memory.
+_DECLINE_WINDOW = 12
+# The runtime appends its instructions to observations as "\n\n[...]" — the
+# declined-tool notice, the web-tool grounding rule, the skill note, the
+# security alert. Matched by SHAPE rather than by a list of openers, because
+# that list is in four files and would go stale silently. It is not anchored to
+# the end: the real history wraps the whole thing again as "[System
+# observation: ...]" and appends a <tool_response>, so an end-anchored pattern
+# matched nothing at all in production. The length floor keeps a short literal
+# list in a tool's own output ("\n\n[1, 2, 3]") out of it; a genuine paragraph
+# in brackets would be lost, and that is the cheaper mistake by a distance.
+# Both spellings of the newline: the same observation reaches history twice,
+# once as text and once JSON-encoded inside <tool_response>, where the break is
+# a literal backslash-n. Matching only the real newline stripped the first copy
+# and left the second, which is the copy the model reads most closely.
+_HARNESS_ASIDE_RE = re.compile(r"(?:\n\n|\\n\\n)\[[^\[\]]{15,}\]")
 
 # Character judgements, refused. The difference that matters is whether the
 # line names something OBSERVED or something imputed: "prefers fewer
@@ -215,6 +232,17 @@ def soul_block(config: dict[str, Any]) -> str:
 
 # ---------------------------------------------------------------- when to look
 
+def _already_declined(history: list[dict[str, str]]) -> bool:
+    """Has a tool already been declined in this stretch of conversation?"""
+    from symbio.app import learn
+
+    for turn in reversed(history[-_DECLINE_WINDOW:]):
+        body = str(turn.get("content") or "")
+        if "[System observation:" in body and learn.is_user_refusal(body):
+            return True
+    return False
+
+
 def is_drastic(user_text: str, observation: str, history: list[dict[str, str]],
                config: dict[str, Any]) -> bool:
     """Whether this turn is one that revises a read, rather than confirming it.
@@ -227,7 +255,16 @@ def is_drastic(user_text: str, observation: str, history: list[dict[str, str]],
     from symbio.app import learn
 
     if observation:
-        if learn.is_user_refusal(observation) or learn.sounds_like_tool_error(observation):
+        if learn.is_user_refusal(observation):
+            # Only the first one in this stretch. A declined tool is a fact
+            # about that one action, and six declines in ten minutes is one
+            # fact repeated — but each fired its own immediate reflection, and
+            # the store filled with "wants to avoid executing code" until the
+            # constitution held `caution` and `confirm` on the strength of a
+            # single testing sitting. Every later decline is still refused,
+            # logged and answered; it just stops being news about the user.
+            return not _already_declined(history)
+        if learn.sounds_like_tool_error(observation):
             return True
     try:
         return bool(learn.looks_like_correction(user_text, history, config))
@@ -269,10 +306,23 @@ def build_prompt(history: list[dict[str, str]], config: dict[str, Any],
     for turn in recent:
         who = ("them" if chat_constants.is_real_user_turn(turn)
                else "me" if turn.get("role") == "assistant" else "tool")
-        body = str(turn.get("content", ""))[:400].replace("\n", " ")
+        body = _without_harness_asides(str(turn.get("content", "")))
+        body = body[:400].replace("\n", " ")
         lines.append(f"{who}: {body}")
     return _PROMPT.format(user=config.get("user_name", "the user"),
                           conversation="\n".join(lines))
+
+
+def _without_harness_asides(text: str) -> str:
+    """Drop the bracketed instructions the harness appends to observations.
+
+    "[The user declined this. It did NOT happen...]" is the runtime talking to
+    the model, not the user talking and not the tool answering. Shown to the
+    reflection pass as if it were part of the conversation, it was read back as
+    a disposition — the same mistake as reading a security-telemetry line as a
+    finding about the user. Strip them and the pass sees the actual turn.
+    """
+    return _HARNESS_ASIDE_RE.sub("", (text or "").rstrip()).rstrip()
 
 
 def parse(reply: str) -> list[tuple[str, str]]:

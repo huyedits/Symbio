@@ -28,8 +28,16 @@ THINKING_LEVELS: dict[str, tuple[bool, int]] = {
     "low": (True, 128),
     "medium": (True, 384),
     "flurry": (True, 1024),
+    # The ceiling. A 14B asked to crack an API, drive a form, or repair its own
+    # emitted script does its useful work inside the think block, and "flurry"
+    # is where that work was getting cut off — the truncated-thinking path
+    # (unclosed <think> shown as the reply) is the budget running out, not the
+    # model choosing to stop. This is room for a long chain plus the answer;
+    # it costs generation time on every turn that uses it, which is the trade
+    # this level exists to make.
+    "max": (True, 4096),
 }
-THINKING_ORDER: tuple[str, ...] = ("none", "low", "medium", "flurry")
+THINKING_ORDER: tuple[str, ...] = ("none", "low", "medium", "flurry", "max")
 
 _QUIT = "quit"
 _HANDLED = "handled"
@@ -71,8 +79,12 @@ _MAX_RATE_LIMIT_WAIT = 5.0
 # front-end (e.g. Telegram) because they mutate state or run user-supplied code.
 _TELEGRAM_CONFIRM_TOOLS = frozenset({
     "execute_code", "run_command", "edit_file", "write_file", "digest_notes", "train_adapter",
+    "save_command", "realign",
     "schedule_job", "config_set", "delete_cron_job", "update_cron_job",
-    "delete_note", "submit_form",
+    "delete_note", "submit_form", "post_to_x",
+    # Driving the machine from a chat app on a phone: the window that receives
+    # this is not in front of whoever is sending it.
+    "desktop_click", "desktop_type", "desktop_press", "desktop_drag", "open_app",
 })
 
 # Map internal tool names back to Hermes-style names for <tool_response> labels.
@@ -207,6 +219,160 @@ _CLAIM_HEDGE = re.compile(
     r"here(?:'s| is) (?:a|the) script|to run this|if you)\b", re.I)
 
 
+# A value that looks like an artifact rather than prose: an identifier, a
+# token, a key, a hash. The shape rules exist to keep this off ordinary
+# English — "python3" and "3.12.1" are not artifacts, "CORMORANT-7741" and a
+# sha256 are.
+_TOKEN_SHAPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_+/=-]{5,}")
+# Dates and times are the one artifact-shaped thing a model states from the
+# clock rather than from a tool, and the prompt hands it the clock every turn.
+_DATELIKE_RE = re.compile(r"^\d{2,4}[-:/]\d{1,2}([-:/]\d{1,4})?$")
+
+
+def unverified_tokens(reply: str, observations: list[str],
+                      user_text: str = "", limit: int = 3) -> list[str]:
+    """Artifact-shaped values in `reply` that appear in no tool output.
+
+    The failure this catches, live 2026-09-14: a file held
+    `C#O#R#M#O#R#A#N#T#-#7#7#4#1` and said to remove every '#'. The model did
+    it in its head, re-checked, listed the letters correctly, and still
+    answered "COROMORANT-7741" — a phantom O — with no hedge. Every tool call
+    in that turn succeeded, so `failures_this_turn` stayed 0 and none of the
+    persistence machinery could see anything wrong. The harness reacts to
+    failure; this was incorrectness with a clean tool log.
+
+    The rule is deliberately about PROVENANCE, not correctness, because
+    provenance is checkable and correctness is not: a token that no tool
+    produced came out of the model's head, and the prompt already says not to
+    do that ("decode and hash with a tool, never by eye"). Asking it to
+    produce the value mechanically is the right answer whether or not the
+    value happens to be right.
+
+    Scoped hard, because this reads every answer: the token must carry both a
+    letter and a digit, must look like an identifier rather than a word, must
+    not be a date, and must not already appear in the user's own message —
+    they may have supplied it themselves.
+    """
+    haystack = "\n".join(observations).lower()
+    said = (user_text or "").lower()
+    out: list[str] = []
+    for match in _TOKEN_SHAPE_RE.finditer(reply or ""):
+        token = match.group(0).strip("-_+/=")
+        if len(token) < 6 or token.lower() in (t.lower() for t in out):
+            continue
+        if not (any(c.isdigit() for c in token) and any(c.isalpha() for c in token)):
+            continue
+        # An identifier, not a word with a number stuck on it.
+        if not (any(c.isupper() for c in token) or "-" in token
+                or "_" in token or len(token) >= 12):
+            continue
+        if _DATELIKE_RE.match(token):
+            continue
+        low = token.lower()
+        if low in haystack or low in said:
+            continue
+        out.append(token)
+        if len(out) >= limit:
+            break
+    return out
+
+
+# What the user's own message names as a thing to be acted on: a URL, a path,
+# a filename, or a literal they quoted. These are the targets a turn can be
+# measured against, because the user wrote them down.
+_TARGET_URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
+# A path has at least one separator with a real segment on each side, matched
+# whole: `notes/plan.md`, `./x/y`, `~/Downloads/agi`. Anchored on a segment
+# start so it cannot bite the `//example.com/api` out of the middle of a URL —
+# URLs are masked out before this runs, but the shape should stand alone.
+_TARGET_PATH_RE = re.compile(r"(?<![\w/])[~.]?[\w.\-]*(?:/[\w.\-]+)+/?")
+_TARGET_FILE_RE = re.compile(
+    r"\b[\w.\-]+\.(?:py|js|ts|jsx|tsx|json|md|txt|csv|tsv|ya?ml|toml|ini|cfg|"
+    r"sh|zsh|html|css|sql|log|pdf|png|jpe?g|gif|svg|zip|tar|gz)\b", re.I)
+_TARGET_QUOTED_RE = re.compile(r"[`\"']([^`\"'\n]{3,60})[`\"']")
+
+
+def request_targets(user_text: str, limit: int = 6) -> list[str]:
+    """The concrete things the user's message named.
+
+    Only shapes the user had to type deliberately: a URL, a path, a filename
+    with a real extension, or something they put in quotes or backticks.
+    Ordinary prose contributes nothing, which is the point — a target list
+    built from nouns would flag every conversational turn.
+    """
+    text = user_text or ""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _take(token: str) -> bool:
+        token = token.strip().strip(".,;:!?)]}")
+        if len(token) < 3:
+            return False
+        low = token.lower()
+        if low in seen:
+            return False
+        # `notes/plan.md` and `plan.md` are one target, not two: the file
+        # pattern re-matches the tail of every path the path pattern took.
+        if any(existing.lower().endswith("/" + low) for existing in out):
+            return False
+        seen.add(low)
+        out.append(token)
+        return len(out) >= limit
+
+    # URLs first, then masked out: a bare path regex run over an unmasked URL
+    # pulls `//example.com/api` out of the middle of one and reports it as a
+    # second, separate target that no observation will ever match.
+    for match in _TARGET_URL_RE.finditer(text):
+        if _take(match.group(0)):
+            return out
+    text = _TARGET_URL_RE.sub(" ", text)
+
+    for pattern in (_TARGET_PATH_RE, _TARGET_FILE_RE, _TARGET_QUOTED_RE):
+        for match in pattern.finditer(text):
+            token = (match.group(1) if pattern is _TARGET_QUOTED_RE
+                     else match.group(0))
+            if _take(token):
+                return out
+    return out
+
+
+def unmet_targets(user_text: str, observations: list[str],
+                  limit: int = 3) -> list[str]:
+    """Targets the user named that no tool output this turn mentions.
+
+    The success-side counterpart to the persistence ladder. That ladder reacts
+    to a tool ERROR, and `unverified_tokens` reacts to a value invented in the
+    model's head — so a turn whose one tool call SUCCEEDS and whose reply
+    invents nothing passes every gate and stops, however little of the request
+    it covered. One call, one clean result, a paragraph, done.
+
+    Provenance again, not correctness: whether the work is finished is not
+    checkable here, but "the user named this file and nothing this turn read
+    or wrote it" is. A URL matches on its host and path, so a redirect or a
+    trailing slash does not read as untouched.
+    """
+    haystack = "\n".join(observations).lower()
+    if not haystack:
+        return []
+    out: list[str] = []
+    for target in request_targets(user_text):
+        low = target.lower()
+        if low in haystack:
+            continue
+        # A URL is met when its host+path shows up, however it was normalized.
+        stripped = re.sub(r"^https?://(?:www\.)?", "", low).rstrip("/")
+        if stripped and stripped in haystack:
+            continue
+        # A path is met when the file at the end of it was touched.
+        tail = stripped.rsplit("/", 1)[-1]
+        if tail and len(tail) >= 4 and tail in haystack:
+            continue
+        out.append(target)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _claims_completion(text: str) -> bool:
     """Does this reply assert it already performed an action?
 
@@ -251,3 +417,70 @@ def _claims_submission(text: str) -> bool:
     if not text or _CLAIM_HEDGE.search(text):
         return False
     return bool(_SUBMISSION_CLAIM.search(text))
+
+
+# ---------------------------------------------------------------- commands
+#
+# Every built-in slash command, in one table, because three separate places
+# need the same list and until now none of them had it: the /help banner was a
+# hand-maintained string, the completer had nothing to complete against, and
+# "unknown command" could not suggest the name the user nearly typed. The
+# if/elif chain in chat_commands.py is still what runs them — this is what
+# they are CALLED, which is a different fact and the one the terminal needs.
+#
+# (name, argument hint, one line). Aliases are listed with their primary.
+BUILTIN_COMMANDS: tuple[tuple[str, str, str], ...] = (
+    ("help", "", "Show the banner and this command list"),
+    ("quit", "", "Leave the chat (aliases: /q, /exit)"),
+    ("status", "", "Model, adapter, notes, training data and timings"),
+    ("health", "", "Run the health checks"),
+    ("selfcheck", "", "Verify the features you have switched on"),
+    ("setup", "", "Re-run the setup wizard"),
+    ("config", "[set <key> <value>]", "Show or change a setting"),
+    ("think", "[none|low|medium|flurry|max]", "How hard the model reasons before answering"),
+    ("commands", "[new|rm|show] ...", "Your own slash commands, saved in commands/"),
+    ("tools", "[family|name|refresh]", "What tools exist, their exact arguments; refresh re-seeds unedited tool files"),
+    ("realign", "[--dry-run]",
+     "Find which learned weights are misaligned, and damp them"),
+    ("constitution", "[set|clear|axes|revise]",
+     "What I've concluded about how you want to be worked with"),
+    ("run", "<command>", "Run a shell command yourself"),
+    ("note", "[title]", "Save a note"),
+    ("notes", "", "List notes"),
+    ("note-history", "[name]", "What changed in a note, and when"),
+    ("index-notes", "[--force]", "Rebuild the note tag index"),
+    ("auto-index", "on|off", "Index notes in the background as they change"),
+    ("learn", "", "What the agent has learned from you lately"),
+    ("digest", "", "Turn notes into training samples"),
+    ("train", "", "Fine-tune on what has accumulated"),
+    ("retrain", "", "Rebuild the adapter from scratch"),
+    ("train_worker", "<role>", "Fine-tune one worker adapter"),
+    ("resume", "", "Pick up a fine-tune that was killed mid-run"),
+    ("golden", "[audit|prune]", "The regression battery, and corpus that fights it"),
+    ("tooleval", "[resilience|all]", "Can it reach a tool when nothing is named after the job"),
+    ("wildcards", "", "Golden cases the model has never seen"),
+    ("skills", "", "Saved procedures"),
+    ("new-skill", "<name> | <steps>", "Save a procedure and train a worker for it"),
+    ("skill-adapters", "", "Which skill adapters are live"),
+    ("build-mcp", "<name> | <description>", "Generate a custom MCP tool"),
+    ("mcp-tools", "", "List generated MCP tools"),
+    ("hosts", "", "Remote hosts you can run commands on"),
+    ("backup", "", "Back up the adapter"),
+    ("restore-adapter", "[name]", "Put a backed-up adapter back"),
+    ("archive", "", "Archive idle notes and adapters"),
+    ("restore", "<name>", "Restore something archived"),
+    ("history", "[n]", "The conversation so far"),
+    ("forget_last", "", "Drop the last exchange"),
+    ("save", "", "Save this conversation as training data"),
+    ("compact", "", "Summarize memory to shorten the prompt"),
+    ("prune", "", "Drop stale notes"),
+    ("tidy", "", "Tidy the stores"),
+    ("standing", "[instruction]", "Instructions that outlive the session"),
+    ("security", "", "The security policy and recent events"),
+    ("telemetry", "on|off", "Anonymous local telemetry"),
+    ("feedback", "<text>", "Send feedback"),
+    ("voice", "[name]", "Speak replies, in a voice you pick"),
+    ("cron", "", "Scheduled jobs"),
+)
+
+BUILTIN_COMMAND_NAMES: tuple[str, ...] = tuple(n for n, _, _ in BUILTIN_COMMANDS)

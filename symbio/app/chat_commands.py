@@ -16,17 +16,19 @@ from symbio import constants
 from symbio.config import adapter_weights_present
 from symbio.app import (
     cron, dispatch, golden, health, local_telemetry, memory, note_history,
-    pending, prompts, sandbox, security, sessions, setup, skills, tooling,
-    training,
+    pending, prompts, sandbox, security, sessions, setup, skills, tool_eval,
+    tooling, training,
 )
 from symbio.app.config import config_show, set_config_value
+from symbio.app import commands as custom_commands
 from symbio.app.chat_constants import (
-    _HANDLED, _QUIT, THINKING_LEVELS, THINKING_ORDER,
+    BUILTIN_COMMANDS, BUILTIN_COMMAND_NAMES, _HANDLED, _QUIT, THINKING_LEVELS,
+    THINKING_ORDER,
 )
 from symbio.app.chat_text import _gui_app_for
 from symbio.app.chat_ui import (
     _adapter_iters, _adapter_trained_at, _fmt_ago, learn_progress_line,
-    print_banner, rainbow,
+    print_banner, rainbow, term_width, two_column, wrapped_list,
 )
 
 
@@ -91,9 +93,451 @@ class CommandsMixin:
             return False
         return ans in ("y", "yes", "true", "1", "on")
 
+    def command_names(self) -> list[str]:
+        """Every command that can be typed here, built-in and user-defined.
+
+        The completer, the menu and the did-you-mean all read this, so a
+        command file dropped into commands/ is typeable, listed and suggestible
+        the moment it exists — without a restart and without being registered
+        anywhere."""
+        names = list(BUILTIN_COMMAND_NAMES)
+        names += [c.name for c in custom_commands.load_commands()
+                  if c.name not in names]
+        return sorted(names)
+
+    def _print_command_menu(self) -> None:
+        """What a bare "/" shows: everything typeable, custom commands first.
+
+        Custom ones lead because the built-ins are in the banner and in /help,
+        while a command the user wrote last week is the one they have forgotten
+        the name of."""
+        width = term_width()
+        mine = custom_commands.load_commands()
+        if mine:
+            self.output_fn("  " + rainbow("Your commands") + ":")
+            for c in mine:
+                desc = c.description or c.body.splitlines()[0]
+                if c.author != "user":
+                    desc += f" (written by {self.config['assistant_name']})"
+                for line in two_column(c.usage, desc, width=width):
+                    self.output_fn(line)
+            self.output_fn("")
+        self.output_fn("  " + rainbow("Built-in") + ":")
+        for name, hint, desc in BUILTIN_COMMANDS:
+            usage = f"/{name}" + (f" {hint}" if hint else "")
+            for line in two_column(usage, desc, width=width):
+                self.output_fn(line)
+        for line in two_column(
+                "", "Type / and press Tab to complete. Save your own with "
+                    "/commands new <name> | <description> | <prompt>.",
+                indent=2, gap=0, width=width):
+            self.output_fn(line)
+
+    def _run_custom_command(self, name: str, args: str) -> bool:
+        """Run a user-defined command as if they had typed its body. True if
+        there was one to run."""
+        cmd = custom_commands.get_command(name)
+        if cmd is None:
+            return False
+        message = custom_commands.render(cmd, args)
+        if not message:
+            self.output_fn(f"  /{name} has an empty body — nothing to send.")
+            return True
+        # A command body that is itself a slash command would recurse through
+        # the handler; it is a prompt, so send it as one.
+        message = message.lstrip("/") if message.lstrip().startswith("/") else message
+        self.output_fn(f"  [/{name}] {message.splitlines()[0][:120]}")
+        self._agent_turn(message)
+        return True
+
+    def _commands_command(self, rest: str) -> None:
+        """/commands — list, save, show and delete the user's own commands."""
+        action, _, tail = rest.strip().partition(" ")
+        action = action.strip().lower()
+        tail = tail.strip()
+
+        if not action or action == "list":
+            mine = custom_commands.load_commands()
+            if not mine:
+                self.output_fn(
+                    "  No commands of your own yet. Save one with:\n"
+                    "    /commands new standup | What moved and what is blocked "
+                    "| Read my notes from the last two days and give me three "
+                    "lines: what moved, what is blocked, what to start with.")
+                return
+            width = term_width()
+            self.output_fn(f"  {len(mine)} command(s) in {constants.COMMANDS_DIR.name}/:")
+            for c in mine:
+                desc = c.description or c.body.splitlines()[0]
+                for line in two_column(c.usage, f"{desc}  ({c.author})",
+                                       width=width):
+                    self.output_fn(line)
+            return
+
+        if action in ("new", "add", "save"):
+            # name | description | body, with the description optional — the
+            # same pipe convention /new-skill uses, because the body is prose
+            # and prose cannot be positional.
+            parts = [p.strip() for p in tail.split("|")]
+            if len(parts) == 2:
+                name, description, body = parts[0], "", parts[1]
+            elif len(parts) >= 3:
+                name, description, body = parts[0], parts[1], "|".join(parts[2:]).strip()
+            else:
+                name, description, body = (parts[0] if parts else ""), "", ""
+            if not name or not body:
+                self.output_fn(
+                    "  Usage: /commands new <name> | [description] | <prompt>")
+                self.output_fn(
+                    "  Write $ARGUMENTS where what you type after the command "
+                    "should go.")
+                return
+            try:
+                path = custom_commands.save_command(
+                    name, body, description=description, author="user")
+            except ValueError as e:
+                self.output_fn(f"  {e}")
+                return
+            self.output_fn(f"  Saved /{path.stem} — edit it any time at "
+                           f"{custom_commands.display_path(path)}.")
+            return
+
+        if action in ("rm", "remove", "delete"):
+            if not tail:
+                self.output_fn("  Usage: /commands rm <name>")
+                return
+            if custom_commands.delete_command(tail):
+                self.output_fn(f"  Deleted /{tail.lstrip('/')}.")
+            else:
+                self.output_fn(f"  No command called /{tail.lstrip('/')}.")
+            return
+
+        if action in ("show", "cat", "edit"):
+            cmd = custom_commands.get_command(tail or action)
+            if cmd is None:
+                self.output_fn(f"  No command called /{(tail or action).lstrip('/')}.")
+                return
+            self.output_fn(f"  {cmd.usage} — {cmd.description or '(no description)'}")
+            self.output_fn(f"  file: {custom_commands.display_path(cmd.path)}")
+            for line in cmd.body.splitlines():
+                self.output_fn(f"    {line}")
+            return
+
+        self.output_fn("  Usage: /commands [list|new|show|rm] ...")
+
+    def _constitution_command(self, rest: str) -> None:
+        """/constitution — what the assistant has concluded about how the user
+        wants to be worked with, and the user's own hand on it."""
+        from symbio.app import constitution
+
+        width = term_width()
+        action, _, tail = rest.strip().partition(" ")
+        action, tail = action.strip().lower(), tail.strip()
+
+        if action in ("axes", "list"):
+            self.output_fn("  " + rainbow("The questions it holds a stance on") + ":")
+            for axis in constitution.AXES:
+                for line in two_column(axis.key, axis.question, width=width):
+                    self.output_fn(line)
+                for pole, instruction in axis.poles.items():
+                    for line in two_column(f"  {pole}", instruction, indent=6,
+                                           width=width):
+                        self.output_fn(line)
+            return
+
+        if action == "set":
+            axis_key, _, rest2 = tail.partition(" ")
+            pole, _, note = rest2.strip().partition(" ")
+            if not axis_key or not pole:
+                self.output_fn(
+                    "  Usage: /constitution set <axis> <pole> [why]")
+                self.output_fn("  /constitution axes lists both.")
+                return
+            ok, what = constitution.set_stance(
+                axis_key.strip(), pole.strip(), self.config, note.strip())
+            self.output_fn(f"  {'[Constitution] ' if ok else '  '}{what}")
+            if ok:
+                self.output_fn(
+                    "  That is yours now — it will not be overwritten by "
+                    "anything I infer.")
+            return
+
+        if action in ("clear", "rm", "unset"):
+            if not tail:
+                self.output_fn("  Usage: /constitution clear <axis>")
+                return
+            if constitution.clear(tail, self.config):
+                self.output_fn(f"  [Constitution] Dropped {tail}.")
+            else:
+                self.output_fn(f"  Nothing held on {tail}.")
+            return
+
+        if action == "revise":
+            pending = constitution.pending_observations(self.config)
+            if not pending:
+                self.output_fn(
+                    "  [Constitution] Nothing new to fold in — every "
+                    "observation on file has already been counted.")
+                return
+            self.output_fn(
+                f"  [Constitution] Re-reading {len(pending)} observation(s)...")
+            changes = constitution.revise(
+                self.config, self._soul_generate, min_new=1)
+            if not changes:
+                self.output_fn(
+                    "  [Constitution] Nothing conclusive — the observations "
+                    "did not settle any of the questions.")
+            for change in changes:
+                self.output_fn(f"    {change}")
+            return
+
+        # Default: show it.
+        stances, _consumed = constitution.load()
+        if not stances:
+            self.output_fn(
+                "  [Constitution] Nothing concluded yet. It fills in from how "
+                "you actually work — or set one now:")
+            self.output_fn("    /constitution set answers_vs_control answers")
+            self.output_fn("  /constitution axes lists the questions.")
+            return
+        minimum = int(self.config.get("memory", {}).get(
+            "constitution_min_support", 2))
+        held = [s for s in stances.values() if s.is_held(minimum)]
+        forming = [s for s in stances.values() if not s.is_held(minimum)]
+        if held:
+            self.output_fn("  " + rainbow("Held") + " — this is in every prompt:")
+            for stance in sorted(held, key=lambda s: (-s.weight, s.axis)):
+                mine = "yours" if stance.source == constitution.STATED else \
+                    f"{stance.support} for/{stance.against} against"
+                for line in two_column(f"{stance.axis}: {stance.pole}",
+                                       f"{stance.instruction()} ({mine}, "
+                                       f"since {stance.since})", width=width):
+                    self.output_fn(line)
+                if stance.evidence:
+                    for line in two_column("", "from: " + "; ".join(stance.evidence),
+                                           indent=6, gap=0, width=width):
+                        self.output_fn(line)
+        if forming:
+            self.output_fn("  " + rainbow("Forming") + " — not served yet:")
+            for stance in sorted(forming, key=lambda s: s.axis):
+                for line in two_column(
+                        f"{stance.axis}: {stance.pole}",
+                        f"{stance.support} for/{stance.against} against",
+                        width=width):
+                    self.output_fn(line)
+        self.output_fn(
+            "  Correct any of it with /constitution set <axis> <pole>, or "
+            "/constitution clear <axis>.")
+
+    def _realign_command(self, rest: str) -> None:
+        """The slash command: run the shared core and print what it says."""
+        dry = "--dry-run" in rest or "dry" in rest.split()
+        for line in self.realign(dry_run=dry).splitlines():
+            self.output_fn("  " + line)
+
+    def realign(self, dry_run: bool = True) -> str:
+        """/realign — look at itself, find which LoRA modules are misaligned,
+        and damp them.
+
+        Attribution already existed but could only be reached by a training
+        rollback: the adapter had to regress DURING a run for anything to look
+        at it. An adapter can be misaligned without a run having just happened
+        — it was trained days ago, or the failure only shows on a case the
+        battery has since gained. This is that path, on demand.
+
+        Damping rather than switching off, and gentlest-first: a module that
+        misbehaves is rarely only wrong, and 0.75 that clears the failure keeps
+        more of what it learned than 0.0 that also clears it.
+        """
+        from symbio.app import adapter_attrib, golden
+
+        report: list[str] = []
+
+        def say(line):
+            report.append(line)
+
+        dry = dry_run
+        if self.model is None:
+            say("[Realign] No model resident.")
+            return "\n".join(report)
+        live = adapter_attrib.live_lora_modules(self.model)
+        if not live:
+            say("[Realign] No adapter is loaded — there are no learned "
+                "weights to adjust. Nothing to do.")
+            return "\n".join(report)
+
+        say("[Realign] Looking at myself against the golden set...")
+        before = golden.run_golden_set(
+            self.model, self.tokenizer, self.generate_fn, self.sampler,
+            self.system_prompt, self.config, self.enabled_groups)
+        failing = sorted(before.failing)
+        if not failing:
+            say(f"[Realign] {before.pass_count}/{before.total} passing — "
+                f"nothing is misaligned. Leaving the weights alone.")
+            return "\n".join(report)
+        say(f"[Realign] {len(failing)} case(s) failing: {', '.join(failing)}")
+
+        by_id = {c.id: c for c in golden.all_golden_cases()}
+        cases = [by_id[i] for i in failing if i in by_id]
+        candidates = sorted(live, key=lambda n: (
+            next((int(p) for p in n.split(".") if p.isdigit()), -1), n))
+
+        def _restores(dropped):
+            with adapter_attrib.scaled(
+                    self.model, {n: 0.0 for n in dropped}):
+                res = golden.run_golden_set(
+                    self.model, self.tokenizer, self.generate_fn, self.sampler,
+                    self.system_prompt, self.config, self.enabled_groups,
+                    cases=cases)
+            return not (set(failing) - res.passing)
+
+        culprits, spent = adapter_attrib.bisect_blame(candidates, _restores)
+        if not culprits:
+            say(f"[Realign] Not attributable to any module after {spent} "
+                f"evaluation(s): switching the whole adapter off does not fix "
+                f"these, so the weights are not what is misaligned. Look at "
+                f"the prompt, the notes or the cases themselves.")
+            return "\n".join(report)
+        say(f"[Realign] traced to {len(culprits)} module(s) in {spent} "
+            f"evaluation(s): {', '.join(culprits)}")
+
+        def _clear():
+            res = golden.run_golden_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config, self.enabled_groups,
+                cases=cases)
+            return not (set(failing) - res.passing)
+
+        factors, tried = adapter_attrib.minimal_damping(
+            self.model, culprits, _clear)
+        if not factors:
+            say("[Realign] No damping level clears it, including switching "
+                "them off entirely. Not touching the weights.")
+            return "\n".join(report)
+        level = next(iter(factors.values()))
+        say(f"[Realign] gentlest fix is scaling them to {level:g} "
+            f"({tried} level(s) tried)"
+            + (" — dry run, nothing written." if dry else ""))
+        if dry:
+            return "\n".join(report)
+
+        # Cases coming back is necessary, not sufficient: damping can cost
+        # something elsewhere, so the WHOLE battery decides.
+        with adapter_attrib.scaled(self.model, factors):
+            after = golden.run_golden_set(
+                self.model, self.tokenizer, self.generate_fn, self.sampler,
+                self.system_prompt, self.config, self.enabled_groups)
+        if after.pass_count <= before.pass_count:
+            say(f"[Realign] That damping fixes the failures but leaves the "
+                f"battery at {after.pass_count}/{after.total} versus "
+                f"{before.pass_count}/{before.total}. Not worth it — leaving "
+                f"the weights alone.")
+            return "\n".join(report)
+        if not self._yes_no(
+                f"  Scale {len(culprits)} module(s) to {level:g}? The battery "
+                f"goes {before.pass_count}/{before.total} -> "
+                f"{after.pass_count}/{after.total}. [y/N] "):
+            say("[Realign] Left the weights alone.")
+            return "\n".join(report)
+
+        file_names = adapter_attrib.modules(constants.ADAPTER_DIR)
+        mapped = adapter_attrib.match_file_names(culprits, file_names)
+        if len(mapped) != len(culprits):
+            say("[Realign] Could not locate every module in the adapter "
+                "file; refusing to write a change that would not survive a "
+                "restart.")
+            return "\n".join(report)
+        adapter_attrib.write_scaled(
+            constants.ADAPTER_DIR, constants.ADAPTER_DIR,
+            {mapped[n]: level for n in culprits})
+        adapter_attrib.record_quarantine(
+            constants.ADAPTER_DIR, culprits, failing,
+            datetime.now().strftime("%Y-%m-%d %H:%M"))
+        err = self._reload_model()
+        say(f"[Realign] Scaled to {level:g} and reloaded."
+            if not err else f"  [Realign] Written, but reload failed: {err}")
+        return "\n".join(report)
+
+    def _tools_command(self, rest: str) -> None:
+        """/tools — the same index the model is given, plus schemas on request."""
+        from symbio.app import tool_docs as _tool_docs
+
+        tooling.sync_tool_files()
+        groups = getattr(self, "enabled_groups", None)
+        schemas = [
+            t for t in tooling.tool_schemas()
+            if tooling.tool_group_enabled(
+                tooling._HERMES_NAME_MAP.get(t["name"], t["name"]), groups)]
+        rest = rest.strip()
+        if rest.split()[:1] == ["refresh"]:
+            # A tool file seeded before a description was improved keeps
+            # saying the old thing forever: the directory is authoritative, so
+            # the better wording in code never reaches the model. This offers
+            # the update and refuses to make it silently.
+            wanted = rest.split()[1:]
+            force = "--force" in wanted
+            wanted = [w for w in wanted if not w.startswith("-")]
+            rewritten, kept = tooling.refresh_tool_files(
+                names=wanted or None, force=force)
+            if rewritten:
+                self.output_fn("  Updated from the built-ins: "
+                               + ", ".join(sorted(rewritten)))
+            if kept:
+                self.output_fn(
+                    "  Left alone (edited here, or seeded before this check "
+                    "existed): " + ", ".join(sorted(kept)))
+                self.output_fn("  /tools refresh <name> rewrites one of those "
+                               "from the built-in; your version is lost.")
+            if not rewritten and not kept:
+                self.output_fn("  Every tool file already matches the built-ins.")
+            return
+        if not rest:
+            by_family: dict[str, list[str]] = {}
+            for t in schemas:
+                by_family.setdefault(tooling.tool_family(t["name"]), []).append(t["name"])
+            width = term_width()
+            self.output_fn(f"  {len(schemas)} tool(s), defined in "
+                           f"{constants.TOOLS_DIR.name}/*.md:")
+            for family in tooling.TOOL_FAMILY_ORDER + ("core", "other"):
+                names = sorted(by_family.get(family, []))
+                if not names:
+                    continue
+                for line in two_column(
+                        family, _tool_docs.FAMILY_BLURBS.get(family, ""),
+                        width=width):
+                    self.output_fn(line)
+                for line in wrapped_list(names, indent=6, width=width):
+                    self.output_fn(line)
+            self.output_fn("  /tools <family|name> prints the exact schemas.")
+            return
+        out = _tool_docs.docs_for(schemas, tooling.tool_family,
+                                 family=rest, names=rest)
+        # Pretty-printed rather than dumped as one very long line: this is the
+        # copy the PERSON reads, and it has to survive a narrow window. The
+        # model gets the compact form from the tool itself.
+        try:
+            parsed = json.loads(out)
+        except json.JSONDecodeError:
+            self.output_fn(f"  {out}")
+            return
+        width = term_width()
+        for schema in parsed:
+            for line in two_column(schema["name"], schema["description"],
+                                   width=width):
+                self.output_fn(line)
+            for line in json.dumps(schema["parameters"], indent=2).splitlines():
+                self.output_fn(f"      {line}")
+
     def _handle_command(self, user_input: str) -> str:
         """Handle a /command; returns _QUIT or _HANDLED."""
         cmd = user_input.lower()
+
+        # A bare slash is a request for the menu, which is the closest a
+        # readline prompt gets to the dropdown the user is expecting when they
+        # reach for "/".
+        if cmd.strip() == "/":
+            self._print_command_menu()
+            return _HANDLED
 
         if cmd in ("/quit", "/q", "/exit"):
             self._memory_flush()
@@ -189,6 +633,26 @@ class CommandsMixin:
                 self.output_fn(
                     "  [Golden] /golden audit checks whether the corpus itself "
                     "teaches against a failing case.")
+
+        elif cmd in ("/tooleval", "/tooleval resilience", "/tooleval all"):
+            # Two batteries, because they answer different questions. The
+            # default cases name their own tool ("run uname -s" -> run_command)
+            # and measure whether the call SHAPE resolves. The resilience cases
+            # name nothing ("what is my name?", "post this to x.com") and
+            # measure whether the model reaches at all -- which is the failure
+            # in the logs: a refusal written from the prompt, with no call
+            # behind it.
+            which = cmd.split()[1] if len(cmd.split()) > 1 else "resilience"
+            cases = (tool_eval.RESILIENCE_CASES if which == "resilience"
+                     else tool_eval.EXTENDED_CASES + tool_eval.RESILIENCE_CASES)
+            report = tool_eval.run_tool_cases(
+                self.model, self.tokenizer, self.system_prompt, self.config,
+                self.generate_fn, self.sampler, cases=cases,
+                enabled_groups=self.enabled_groups,
+                output_fn=self.output_fn)
+            self.output_fn(
+                f"  [ToolEval] {report['passed']}/{report['total']} complete "
+                f"round trips.")
 
         elif cmd == "/wildcards":
             from symbio.app import wildcards as _wild
@@ -574,9 +1038,15 @@ class CommandsMixin:
                     on, budget = THINKING_LEVELS[name]
                     marker = "*" if name == current else " "
                     room = f"+{budget} tokens to reason in" if on else "answer directly"
-                    label = rainbow(name) if name == current else name
-                    self.output_fn(f"    [{marker}] {label:<8} {room}")
-                self.output_fn("  Turn it with: /think none|low|medium|flurry")
+                    # Pad BEFORE colouring. rainbow() wraps each glyph in ANSI
+                    # escapes, and :<8 counts those bytes as width — so the one
+                    # row that is coloured, the current level, was the one row
+                    # that did not line up. Seen live with "max" selected.
+                    padded = f"{name:<8}"
+                    label = rainbow(padded) if name == current else padded
+                    self.output_fn(f"    [{marker}] {label} {room}")
+                self.output_fn(
+                    "  Turn it with: /think " + "|".join(THINKING_ORDER))
             else:
                 want = parts[1].strip().lower()
                 if want not in THINKING_LEVELS:
@@ -815,8 +1285,35 @@ class CommandsMixin:
             data_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0
             print_banner(self.config, self.adapter_loaded, data_size, output_fn=self.output_fn)
 
+        elif cmd.startswith("/commands"):
+            self._commands_command(user_input[len("/commands"):])
+
+        elif cmd.startswith("/tools"):
+            self._tools_command(user_input[len("/tools"):])
+
+        elif cmd.startswith("/realign"):
+            self._realign_command(user_input[len("/realign"):])
+
+        elif cmd.startswith("/constitution"):
+            self._constitution_command(user_input[len("/constitution"):])
+
         else:
-            self.output_fn("  Unknown command. Type /help for the command list.")
+            # Not a built-in: it may be one of theirs. The ORIGINAL text is
+            # what carries the arguments — `cmd` is lowercased for matching,
+            # and a command that renamed a file would have been handed the
+            # lowercase of a path.
+            name, _, args = user_input[1:].partition(" ")
+            if not self._run_custom_command(name.strip().lower(), args):
+                near = custom_commands.suggest(name, self.command_names())
+                if near:
+                    self.output_fn(
+                        "  No such command. Did you mean "
+                        + ", ".join(f"/{n}" for n in near) + "?")
+                else:
+                    self.output_fn(
+                        f"  No command called /{name}. Type / for the list, or "
+                        f"/commands new {name.lower() or '<name>'} | <prompt> "
+                        f"to make it one.")
 
         return _HANDLED
 
