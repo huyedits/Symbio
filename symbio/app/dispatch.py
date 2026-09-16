@@ -670,9 +670,10 @@ class WorkerPool:
         ChatSession._execute_tool's tool observations. The 'browser' role
         drives a multi-round click/type/scroll loop (see
         _run_browser_delegation) when a live BrowserSession is passed;
-        every other role is a single-shot generation. Both record their
-        (input, output) pairs as training samples for that worker, so real
-        usage accumulates the corpus guarded_train_worker draws on."""
+        every other role is a single-shot generation. Either may record its
+        (input, output) pair as a training sample for that worker — behind
+        dispatch.capture_worker_samples, off by default — so real usage can
+        accumulate the corpus guarded_train_worker draws on."""
         # Resolve the role before anything is unloaded for it. The headmaster
         # used to be put to sleep first and the catalog consulted second, so a
         # task delegated to a role that does not exist — a typo, or a skill
@@ -776,6 +777,18 @@ class WorkerPool:
                 self._status("  [Dispatch] Waking headmaster back up...")
                 self.after_worker_fn()
 
+    def _capture_browser_round(self, prompt_text: str, action: str, status: str,
+                               tokenizer: Any, system_prompt: str) -> None:
+        """Keep one browser round as a training sample, if it earned it."""
+        from symbio.app import learn
+
+        if not self._dispatch_cfg().get("capture_worker_samples", False):
+            return
+        if not action.strip() or learn.sounds_like_tool_error(status or ""):
+            return
+        training.append_chat_pair(prompt_text, action, tokenizer, system_prompt,
+                                  role="browser")
+
     def _run_browser_delegation(self, task: str, browser: Any, max_rounds: int) -> str:
         """Drive a bounded click/type/scroll loop on the 'browser' worker
         to accomplish `task` on the currently open page. Each round: worker
@@ -805,7 +818,6 @@ class WorkerPool:
                 return f"Worker 'browser' failed: {e}"
 
             last_action = action
-            training.append_chat_pair(prompt_text, action, tokenizer, system_prompt, role="browser")
             lowered = action.lower()
 
             if lowered.startswith("done"):
@@ -818,6 +830,17 @@ class WorkerPool:
                 last_status = browser.scroll("down")
             else:
                 return f"Worker gave an unrecognized action and stopped: {action}"
+            # Recorded AFTER the action ran, and only if it worked. Every other
+            # role writes its output back into its own corpus behind
+            # dispatch.capture_worker_samples, off by default, because a model
+            # graded only by itself drifts toward whatever it already does.
+            # This loop wrote every round unconditionally — the click that hit
+            # nothing, the unrecognised action it then stopped on — into the
+            # data the next retrain of this worker draws on. The flag gates it
+            # like everywhere else, and a failed action is not a demonstration
+            # of anything whatever the flag says.
+            self._capture_browser_round(
+                prompt_text, action, last_status, tokenizer, system_prompt)
 
             try:
                 page_text = browser.get_text()

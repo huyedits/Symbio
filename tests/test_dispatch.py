@@ -893,21 +893,74 @@ def test_browser_delegation_stops_on_unrecognized_action(monkeypatch, tmp_path):
     assert browser.calls == []
 
 
-def test_browser_delegation_records_training_samples(monkeypatch, tmp_path):
+def _browser_run(monkeypatch, tmp_path, actions, browser, dispatch_cfg):
+    """One delegated browser run, and whatever corpus it left behind."""
     _isolate_dirs(monkeypatch, tmp_path)
     _write_catalog(monkeypatch, tmp_path, {
         "b": {"model_name": "m/b", "role": "browser"},
     })
     monkeypatch.setattr(dispatch, "load", _fake_load_factory([]))
-    monkeypatch.setattr(dispatch, "generate", lambda *a, **k: "done: nothing to do")
+    scripted = iter(actions)
+    monkeypatch.setattr(dispatch, "generate", lambda *a, **k: next(scripted))
 
-    browser = FakeBrowser(pages=["empty page"])
-    pool = dispatch.WorkerPool({"dispatch": {}})
-    pool.run_delegated_task("browser", "Check the page", browser=browser)
+    pool = dispatch.WorkerPool({"dispatch": dispatch_cfg})
+    result = pool.run_delegated_task("browser", "Do the thing", browser=browser)
 
     train_file = constants.data_dir_for("browser") / "train.jsonl"
-    assert train_file.exists()
-    assert "done: nothing to do" in train_file.read_text()
+    return result, (train_file.read_text(encoding="utf-8")
+                    if train_file.exists() else "")
+
+
+def test_a_browser_round_that_worked_is_kept_when_capture_is_on(monkeypatch, tmp_path):
+    """Real usage accumulating the corpus is the point of the flag — this is
+    the case it is for."""
+    browser = FakeBrowser(pages=["Sign in link visible.", "Logged in."])
+
+    _, corpus = _browser_run(
+        monkeypatch, tmp_path, ["click: Sign in", "done: logged in"], browser,
+        {"capture_worker_samples": True})
+
+    assert "click: Sign in" in corpus
+
+
+def test_nothing_is_kept_by_default(monkeypatch, tmp_path):
+    """Every other role writes its own output back into its own corpus only
+    behind dispatch.capture_worker_samples, off by default, because a model
+    graded only by itself drifts toward whatever it already does. This loop
+    wrote every round unconditionally and was the one exception."""
+    browser = FakeBrowser(pages=["Sign in link visible.", "Logged in."])
+
+    _, corpus = _browser_run(
+        monkeypatch, tmp_path, ["click: Sign in", "done: logged in"], browser,
+        {})
+
+    assert corpus == ""
+
+
+def test_an_action_that_failed_is_not_a_demonstration(monkeypatch, tmp_path):
+    """The click that hit nothing was being written into the data the next
+    retrain of this worker draws on — teaching it the move that does not
+    work. Not kept, whatever the flag says."""
+    browser = FakeBrowser(
+        pages=["Sign in link visible.", "Sign in link visible."],
+        statuses={("click", "Sign in"): "Click failed: no element matches 'Sign in'."})
+
+    _, corpus = _browser_run(
+        monkeypatch, tmp_path, ["click: Sign in", "done: giving up"], browser,
+        {"capture_worker_samples": True})
+
+    assert corpus == ""
+
+
+def test_the_unrecognized_action_it_stops_on_is_not_kept(monkeypatch, tmp_path):
+    browser = FakeBrowser(pages=["page"])
+
+    result, corpus = _browser_run(
+        monkeypatch, tmp_path, ["I think I should look around"], browser,
+        {"capture_worker_samples": True})
+
+    assert "unrecognized" in result.lower()
+    assert corpus == ""
 
 
 def test_execute_tool_delegate_browser_role_passes_session_browser(monkeypatch, tmp_path):
