@@ -189,6 +189,14 @@ class Stance(NamedTuple):
     source: str
     since: str
     evidence: tuple[str, ...]
+    # The day an inferred observation last moved this count. A constitution is
+    # how someone works over weeks; one sitting may move an axis by one notch
+    # and no more. Six declined tools in ten minutes was six separate supports
+    # for `caution` and `confirm` — a testing session, read as a disposition,
+    # and then served back in every prompt as an instruction to hesitate.
+    # Empty on a stance written before this existed, which counts as "not
+    # today" and so behaves exactly as it did before.
+    counted: str = ""
 
     @property
     def weight(self) -> int:
@@ -218,6 +226,11 @@ def _enabled(config: dict[str, Any]) -> bool:
     return bool(config.get("memory", {}).get("constitution_enabled", True))
 
 
+def _dampen(config: dict[str, Any]) -> bool:
+    """Whether one day may move an axis more than one notch. Normally not."""
+    return bool(config.get("memory", {}).get("constitution_one_notch_a_day", True))
+
+
 def _min_support(config: dict[str, Any]) -> int:
     try:
         return max(1, int(config.get("memory", {}).get(
@@ -242,7 +255,8 @@ def _fingerprint(text: str) -> str:
 _STANCE_RE = re.compile(
     r"^-\s*(?P<axis>[a-z_]+)\s*:\s*(?P<pole>[a-z_]+)\s*\|\s*"
     r"support\s+(?P<support>\d+)\s*\|\s*against\s+(?P<against>\d+)\s*\|\s*"
-    r"(?P<source>inferred|stated)\s*\|\s*since\s+(?P<since>[\d-]+)\s*$")
+    r"(?P<source>inferred|stated)\s*\|\s*since\s+(?P<since>[\d-]+)"
+    r"(?:\s*\|\s*counted\s+(?P<counted>[\d-]+))?\s*$")
 
 
 def load() -> tuple[dict[str, Stance], list[str]]:
@@ -291,7 +305,8 @@ def load() -> tuple[dict[str, Stance], list[str]]:
         pending = Stance(
             axis=m.group("axis"), pole=m.group("pole"),
             support=int(m.group("support")), against=int(m.group("against")),
-            source=m.group("source"), since=m.group("since"), evidence=())
+            source=m.group("source"), since=m.group("since"), evidence=(),
+            counted=m.group("counted") or "")
         stances[pending.axis] = pending
     return stances, consumed[-_MAX_CONSUMED:]
 
@@ -310,8 +325,9 @@ def _render(stances: dict[str, Stance], consumed: list[str],
     def _block(items: list[Stance]) -> str:
         out = []
         for s in items:
-            out.append(f"- {s.axis}: {s.pole} | support {s.support} | "
-                       f"against {s.against} | {s.source} | since {s.since}")
+            line = (f"- {s.axis}: {s.pole} | support {s.support} | "
+                    f"against {s.against} | {s.source} | since {s.since}")
+            out.append(line + (f" | counted {s.counted}" if s.counted else ""))
             if s.evidence:
                 out.append("  evidence: " + "; ".join(s.evidence))
         return "\n".join(out) if out else "- (none yet)"
@@ -352,7 +368,7 @@ def acceptable_evidence(text: str) -> tuple[bool, str]:
 
 
 def record(axis_key: str, pole: str, evidence: str, config: dict[str, Any],
-           source: str = INFERRED) -> tuple[bool, str]:
+           source: str = INFERRED, today: str = "") -> tuple[bool, str]:
     """Fold one observation into the constitution.
 
     Returns (changed, what happened). The four cases are the whole design:
@@ -379,7 +395,10 @@ def record(axis_key: str, pole: str, evidence: str, config: dict[str, Any],
 
     evidence = tooling.redact_secrets((evidence or "").strip())
     stances, consumed = load()
-    today = datetime.now().strftime("%Y-%m-%d")
+    # A date, not a clock: the caller may say which day this observation
+    # belongs to, which is what makes the one-notch-a-day rule testable
+    # without moving the system clock.
+    today = today or datetime.now().strftime("%Y-%m-%d")
     current = stances.get(axis_key)
 
     if source == STATED:
@@ -391,28 +410,48 @@ def record(axis_key: str, pole: str, evidence: str, config: dict[str, Any],
             support=(current.support + 1) if same else 1,
             against=0, source=STATED,
             since=(current.since if same and current.source == STATED else today),
-            evidence=((evidence,) if evidence else ()))
+            evidence=((evidence,) if evidence else ()), counted=today)
         _save(stances, consumed, config)
         return True, f"{axis_key} set to {pole} (yours)"
 
     if current is None:
         stances[axis_key] = Stance(axis_key, pole, 1, 0, INFERRED, today,
-                                   (evidence,) if evidence else ())
+                                   (evidence,) if evidence else (), today)
         _save(stances, consumed, config)
         return True, f"{axis_key}: {pole} (new, forming)"
 
+    # One notch per axis per day. An observation that arrives after today's is
+    # still recorded as evidence — the phrasing is worth keeping — but it does
+    # not move the count. Without this an afternoon of similar turns can carry
+    # an axis on its own, which is how a run of declined tools installed
+    # `caution` and `confirm` as standing instructions in one evening.
+    counted_today = _dampen(config) and current.counted == today
+
     if current.pole == pole:
         merged = tuple(dict.fromkeys((*current.evidence, evidence)))[-_MAX_EVIDENCE:]
+        if counted_today:
+            stances[axis_key] = current._replace(evidence=merged)
+            _save(stances, consumed, config)
+            return True, f"{axis_key}: {pole} noted (already counted today)"
         stances[axis_key] = current._replace(
-            support=min(_MAX_SUPPORT, current.support + 1), evidence=merged)
+            support=min(_MAX_SUPPORT, current.support + 1), evidence=merged,
+            counted=today)
         _save(stances, consumed, config)
         return True, f"{axis_key}: {pole} reinforced"
 
     if current.source == STATED:
-        stances[axis_key] = current._replace(against=current.against + 1)
+        if counted_today:
+            return True, (f"{axis_key}: evidence points at {pole}; theirs "
+                          f"stands, and today's disagreement is already counted")
+        stances[axis_key] = current._replace(against=current.against + 1,
+                                             counted=today)
         _save(stances, consumed, config)
         return True, (f"{axis_key}: evidence points at {pole}, but {pole!r} "
                       f"is not mine to set — theirs stands")
+
+    if counted_today:
+        return True, (f"{axis_key}: {pole} noted against {current.pole} "
+                      f"(already counted today)")
 
     against = current.against + 1
     if against > current.support:
@@ -423,10 +462,10 @@ def record(axis_key: str, pole: str, evidence: str, config: dict[str, Any],
         # relationship by weeks.
         stances[axis_key] = Stance(
             axis_key, pole, against, 0, INFERRED, today,
-            ((evidence,) if evidence else ()))
+            ((evidence,) if evidence else ()), today)
         _save(stances, consumed, config)
         return True, f"{axis_key}: flipped to {pole} (was {current.pole})"
-    stances[axis_key] = current._replace(against=against)
+    stances[axis_key] = current._replace(against=against, counted=today)
     _save(stances, consumed, config)
     return True, f"{axis_key}: {pole} noted against {current.pole}"
 

@@ -143,6 +143,72 @@ def test_a_refused_tool_is_drastic():
         [], {"learn": {}, "agent": {}}) is True
 
 
+def test_the_second_refusal_in_a_sitting_is_not_drastic():
+    """2026-09-16: six declined tools in ten minutes, each firing its own
+    immediate reflection. The store filled with "wants to avoid executing
+    code", the constitution took `caution` and `confirm` off the back of it,
+    and both were served thereafter as instructions to hesitate. One decline is
+    a fact about one action; six is that fact repeated."""
+    declined = "Tool 'execute_code' was not approved (risk score 3/3: shell)."
+    history = [{"role": "user", "content":
+                "[System observation: Tool 'run_command' was not approved.]"}]
+
+    assert soul.is_drastic("do it", declined, [], {"learn": {}, "agent": {}}) is True
+    assert soul.is_drastic("do it", declined, history,
+                           {"learn": {}, "agent": {}}) is False
+
+
+def test_a_failed_tool_is_still_drastic_after_a_refusal():
+    """Only the refusal is rationed. A tool that BROKE is new information every
+    time, and that is the signal the mistake log is built on."""
+    history = [{"role": "user", "content":
+                "[System observation: Tool 'run_command' was not approved.]"}]
+
+    assert soul.is_drastic(
+        "read it", "read_file: Error: no such file or directory",
+        history, {"learn": {}, "agent": {}}) is True
+
+
+def test_the_harness_own_instructions_are_not_shown_to_the_reflection():
+    """"[The user declined this. It did NOT happen...]" is the runtime talking
+    to the model. Left in the conversation it was read back as a disposition —
+    the same mistake as reading a security-telemetry line as a finding."""
+    history = [{"role": "user", "content":
+                "[System observation: Tool 'execute_code' was not approved."
+                "\n\n[The user declined this. It did NOT happen. Say plainly "
+                "that you did not do it because they declined.]]"}]
+
+    prompt = soul.build_prompt(history, CFG)
+
+    assert "was not approved" in prompt
+    assert "It did NOT happen" not in prompt
+
+
+def test_the_json_copy_of_the_aside_goes_too():
+    """The same observation reaches history twice — once as text, once
+    JSON-encoded inside <tool_response> where the break is a literal
+    backslash-n. Stripping only the first left the second, which is the copy
+    the model reads most closely, and the whole fix did nothing."""
+    import json
+
+    obs = ("Tool 'run_command' was not approved.\n\n[The user declined this. "
+           "It did NOT happen. Say plainly that you did not do it.]")
+    turn = ("[System observation: " + obs + "]\n<tool_response>"
+            + json.dumps({"name": "run_command", "content": obs})
+            + "</tool_response>")
+
+    prompt = soul.build_prompt([{"role": "user", "content": turn}], CFG)
+
+    assert "was not approved" in prompt
+    assert "It did NOT happen" not in prompt
+
+
+def test_stripping_an_aside_leaves_an_ordinary_observation_alone():
+    assert soul._without_harness_asides("Saved note.") == "Saved note."
+    assert soul._without_harness_asides(
+        "results: [1, 2, 3]") == "results: [1, 2, 3]"
+
+
 def test_an_ordinary_turn_is_not():
     assert soul.is_drastic(
         "thanks", "Saved note.", [],
