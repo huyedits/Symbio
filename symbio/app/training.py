@@ -42,6 +42,38 @@ from symbio.app.tooling import (
 # Held for the whole lifetime of the child process, not just its spawn, so a
 # second caller waits for the first trainer to *exit* rather than joining it.
 TRAINER_LOCK = threading.Lock()
+
+# --- where the training log goes ----------------------------------------------
+#
+# Every line below was a bare print(), which in the daemon means the daemon's
+# own stdout — a log file nobody is watching. The person who started the
+# retrain saw the spinner and then a verdict, with the corpus construction, the
+# per-iteration losses, the plateau and the rollback all landing somewhere
+# else. Same shape as the spinner that animated into logs/daemon.log while the
+# client sat in silence.
+#
+# So the module has a sink. Unset, it prints exactly as before; a front-end
+# that owns a terminal sets it to its own output_fn for the duration of a run.
+_log_sink = None
+
+
+def set_log_sink(fn) -> None:
+    """Route this module's progress lines somewhere other than stdout."""
+    global _log_sink
+    _log_sink = fn
+
+
+def _say(message: str = "") -> None:
+    if _log_sink is not None:
+        try:
+            _log_sink(message)
+            return
+        except Exception:
+            # A front-end that breaks must not take the training run with it.
+            pass
+    print(message)
+
+
 CORPUS_LOCK = threading.RLock()
 
 def release_model() -> None:
@@ -1921,7 +1953,7 @@ def weighted_corpus(train_file: Path, weights: list[float] | None):
     # was most of the data", per this function's own docstring) or raised on a
     # length mismatch. Restore first, then measure.
     if backup.exists():
-        print(f"  [Train] Restoring {train_file.name} from an interrupted "
+        _say(f"  [Train] Restoring {train_file.name} from an interrupted "
               f"weighted run.")
         train_file.write_text(backup.read_text(encoding="utf-8"),
                               encoding="utf-8")
@@ -1945,7 +1977,7 @@ def weighted_corpus(train_file: Path, weights: list[float] | None):
             # curriculum.plan holds the same rule upstream.
             expanded.extend([line] * _weight_copies(weight))
         train_file.write_text("\n".join(expanded) + "\n", encoding="utf-8")
-        print(f"  [Train] Weighted corpus: {len(lines)} sample(s) -> "
+        _say(f"  [Train] Weighted corpus: {len(lines)} sample(s) -> "
               f"{len(expanded)} line(s) for this run.")
         yield train_file
     finally:
@@ -2018,7 +2050,7 @@ def run_training(config: dict[str, Any], iters: int | None = None,
     if iters is not None:
         scaled = scaled_weighted_iters(config, iters, sample_weights)
         if scaled != iters:
-            print(f"  [Train] Iterations {iters} scaled to {scaled} for the "
+            _say(f"  [Train] Iterations {iters} scaled to {scaled} for the "
                   f"weighted {len(sample_weights)}-sample corpus.")
             iters = scaled
     with weighted_corpus(_train_file_for(role), sample_weights):
@@ -2042,7 +2074,7 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     data_dir = train_file.parent
     adapter_dir = constants.adapter_dir_for(role)
     if not train_file.exists() or train_file.stat().st_size == 0:
-        print("  [System] No training data available.")
+        _say("  [System] No training data available.")
         return False
 
     # An adapter is only worth what the pairing between corpus and serving is
@@ -2058,7 +2090,7 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     served_level = str((config.get("agent") or {}).get("thinking_level", "none")).lower()
     served_thinking = THINKING_LEVELS.get(served_level, (False, 0))[0]
     if served_thinking != THINKING_ENABLED:
-        print(f"  [Train] WARNING: the corpus is rendered with thinking "
+        _say(f"  [Train] WARNING: the corpus is rendered with thinking "
               f"{'on' if THINKING_ENABLED else 'off'}, but agent.thinking_level "
               f"is '{served_level}' (thinking {'on' if served_thinking else 'off'}). "
               f"The adapter will be trained against a prompt shape this agent "
@@ -2081,12 +2113,12 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     # them from being copied into it — and a valid.jsonl left empty by this
     # sweep is then refilled from the cleaned training data.
     for path, linenos in drop_foreign_template_samples(_tok, role=role).items():
-        print(f"  [Train] Dropped {len(linenos)} sample(s) from {path} rendered "
+        _say(f"  [Train] Dropped {len(linenos)} sample(s) from {path} rendered "
               f"with a different chat template; they teach turn markers this "
               f"model never sees. Seeding will regenerate them.")
 
     if not train_file.exists() or train_file.stat().st_size == 0:
-        print("  [System] No training data left after the template check.")
+        _say("  [System] No training data left after the template check.")
         return False
     # Same class of guard, and before the split for the same reason as the
     # template sweep above: a broken <tool_call> envelope is corruption the
@@ -2096,9 +2128,9 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     # refilled -- the emptiness check below only looks at the training file.
     for path, entries in drop_broken_tool_call_samples(role=role).items():
         for lineno, reason in entries:
-            print(f"  [Train] Dropped sample with a broken tool call "
+            _say(f"  [Train] Dropped sample with a broken tool call "
                   f"{path}:{lineno}: {reason}")
-        print(f"  [Train] Removed {len(entries)} broken-tool-call sample(s) "
+        _say(f"  [Train] Removed {len(entries)} broken-tool-call sample(s) "
               f"from {path}.")
 
     ensure_validation_split(role=role)
@@ -2108,11 +2140,11 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     # in the run to garbage, so it has to be able to change the outcome.
     for path, entries in drop_degenerate_samples(_tok, role=role).items():
         for lineno, preview in entries:
-            print(f"  [Train] Dropped unusable sample {path}:{lineno}: {preview!r}")
-        print(f"  [Train] Removed {len(entries)} unusable sample(s) from {path}.")
+            _say(f"  [Train] Dropped unusable sample {path}:{lineno}: {preview!r}")
+        _say(f"  [Train] Removed {len(entries)} unusable sample(s) from {path}.")
 
     if not train_file.exists() or train_file.stat().st_size == 0:
-        print("  [System] No usable training data left after pre-flight checks.")
+        _say("  [System] No usable training data left after pre-flight checks.")
         return False
 
     # Say plainly how much of the corpus the window can actually reach. mlx_lm
@@ -2122,7 +2154,7 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
         stats = check_sample_lengths(_tok, config, role=role)
         warning = format_length_warning(stats)
         if warning:
-            print(f"  [Train] WARNING: {warning}")
+            _say(f"  [Train] WARNING: {warning}")
     except Exception:
         pass  # A diagnostic must never block the training it describes.
 
@@ -2150,11 +2182,11 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
         try:
             counts = upgrade_corpus_to_messages(_tok, role=role)
             if counts["upgraded"]:
-                print(f"  [Train] Upgraded {counts['upgraded']} legacy sample(s) "
+                _say(f"  [Train] Upgraded {counts['upgraded']} legacy sample(s) "
                       f"to structured messages for prompt masking.")
             mask_prompt = _supports_prompt_masking(role=role)
             if not mask_prompt and counts["left"]:
-                print(f"  [Train] {counts['left']} sample(s) could not be parsed "
+                _say(f"  [Train] {counts['left']} sample(s) could not be parsed "
                       f"back into messages; training without prompt masking so "
                       f"the mask cannot land on the wrong tokens.")
                 # When it is *every* sample, the corpus was almost certainly
@@ -2163,19 +2195,19 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
                 # because the run otherwise proceeds and teaches turn markers
                 # this model will never emit.
                 if not counts["upgraded"]:
-                    print(f"  [Train] Not one sample matched this model's chat "
+                    _say(f"  [Train] Not one sample matched this model's chat "
                           f"template. If you changed models, the corpus still "
                           f"belongs to the old one — delete train/valid.jsonl "
                           f"and let seeding rebuild it before trusting this "
                           f"adapter.")
         except Exception as e:
-            print(f"  [Train] Prompt-masking preflight failed ({e}); "
+            _say(f"  [Train] Prompt-masking preflight failed ({e}); "
                   f"training unmasked.")
             mask_prompt = False
 
-    print("\n  [System] Starting MLX LoRA Fine-Tuning\n")
+    _say("\n  [System] Starting MLX LoRA Fine-Tuning\n")
     if mask_prompt:
-        print("  [Train] Loss is masked to the assistant turn.")
+        _say("  [Train] Loss is masked to the assistant turn.")
 
     # mlx_lm only accepts rank/dropout/scale, the LoRA target keys, and
     # mask_prompt via a config file, not CLI flags.
@@ -2198,9 +2230,9 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
         problems = validate_lora_keys(
             keys, model_block_count(model_name or config.get("model_name")))
         for problem in problems:
-            print(f"  [Train] WARNING: lora.keys {problem}")
+            _say(f"  [Train] WARNING: lora.keys {problem}")
         lora_parameters["keys"] = list(keys)
-        print(f"  [Train] LoRA targets {len(keys)} module pattern(s) "
+        _say(f"  [Train] LoRA targets {len(keys)} module pattern(s) "
               f"instead of every projection.")
 
     lora_config = {
@@ -2227,7 +2259,7 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
         actual = (iters * max(1, int(lora["batch_size"])) / samples) if samples else 0
         asked = float(lora.get("epochs", 2))
         note = "" if abs(actual - asked) < 0.05 else f", capped from ~{asked:g}"
-        print(f"  [Train] {iters} iters for {samples} sample(s) at batch "
+        _say(f"  [Train] {iters} iters for {samples} sample(s) at batch "
               f"{lora['batch_size']} (~{actual:.2g} epochs{note}).")
 
     # Which trainer, decided in one place. On MLX this returns exactly the
@@ -2248,10 +2280,10 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
             adapter_dir, model_name or config["model_name"],
             lora["num_layers"], lora_parameters)
         if source is None:
-            print(f"  [Train] Cannot resume: {reason}. Training from scratch.")
+            _say(f"  [Train] Cannot resume: {reason}. Training from scratch.")
         else:
             cmd += ["--resume-adapter-file", str(source)]
-            print(f"  [Train] Resuming from the existing adapter ({reason}). "
+            _say(f"  [Train] Resuming from the existing adapter ({reason}). "
                   f"Optimiser state is not restored.")
 
     # Recompute activations in the backward pass instead of holding them.
@@ -2266,7 +2298,7 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     # CUDA branch has not already said it.
     if lora.get("grad_checkpoint", False) and "--grad-checkpoint" not in cmd:
         cmd.append("--grad-checkpoint")
-        print("  [Train] Gradient checkpointing on: less memory, slower steps.")
+        _say("  [Train] Gradient checkpointing on: less memory, slower steps.")
 
     early_stop = lora.get("early_stop_enabled", False)
     # One trainer at a time, and only with room for it. Both guards wrap the
@@ -2276,7 +2308,7 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     with TRAINER_LOCK:
         shortfall = _memory_shortfall(config, model_name)
         if shortfall:
-            print(f"  [Train] {shortfall}")
+            _say(f"  [Train] {shortfall}")
             try:
                 os.unlink(config_path)
             except OSError:
@@ -2292,10 +2324,10 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
                 subprocess.run(cmd, check=True)
                 trained = True
             except subprocess.CalledProcessError:
-                print("  [System] Training failed.")
+                _say("  [System] Training failed.")
                 trained = False
             except KeyboardInterrupt:
-                print("  [System] Training stopped.")
+                _say("  [System] Training stopped.")
                 trained = False
             finally:
                 try:
@@ -2319,7 +2351,7 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     weight_files = (list(adapter_dir.glob("adapters.*"))
                     + list(adapter_dir.glob("adapter_model.*")))
     if not config_file.exists() or not weight_files:
-        print("  [System] Adapter files missing after training.")
+        _say("  [System] Adapter files missing after training.")
         return False
 
     # A fresh run replaced the weights, so its steps are the adapter's whole
@@ -2347,7 +2379,7 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
         reseal_adapter(adapter_dir)
 
     adapter_kb = sum(f.stat().st_size for f in adapter_dir.iterdir() if f.is_file()) // 1024
-    print(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB "
+    _say(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB "
           f"({adapter_label(role)}, {total} total iters)")
     return trained
 
@@ -2664,7 +2696,7 @@ def _stop_trainer(process: subprocess.Popen, signalled: bool = False) -> None:
         return
     except subprocess.TimeoutExpired:
         pass
-    print("  [Train] Trainer did not exit after SIGINT; escalating.")
+    _say("  [Train] Trainer did not exit after SIGINT; escalating.")
     try:
         process.terminate()
         process.wait(timeout=10)
@@ -2741,13 +2773,13 @@ def _run_training_with_early_stop(
         if src is None or not src.exists():
             available = _checkpoints()
             if not available:
-                print("  [Train] No checkpoint to restore; keeping current adapter.")
+                _say("  [Train] No checkpoint to restore; keeping current adapter.")
                 return
             src = checkpoint_at_or_before(available, step)
-            print(f"  [Train] Best step {step} has no checkpoint; "
+            _say(f"  [Train] Best step {step} has no checkpoint; "
                   f"falling back to {src.name} (nearest at or before it).")
         shutil.copy2(src, dst)
-        print(f"  [Train] Restored checkpoint {src.name}.")
+        _say(f"  [Train] Restored checkpoint {src.name}.")
 
     try:
         process = subprocess.Popen(
@@ -2759,8 +2791,16 @@ def _run_training_with_early_stop(
         )
         assert process.stdout is not None
         for line in process.stdout:
-            sys.stdout.write(line)
-            sys.stdout.flush()
+            # The trainer's own per-iteration lines — "Iter 40: Train loss
+            # 0.612, Val loss 0.588, ..." — are the part of a retrain worth
+            # watching, and they went to this process's stdout, which in the
+            # daemon is a file. Through the sink they reach whoever asked for
+            # the training run.
+            if _log_sink is not None:
+                _say(line.rstrip("\n"))
+            else:
+                sys.stdout.write(line)
+                sys.stdout.flush()
 
             match = val_re.search(line)
             if match:
@@ -2778,7 +2818,7 @@ def _run_training_with_early_stop(
                     # verified sane. Whatever produced that number, an adapter
                     # built under it is not trustworthy, and the plateau logic
                     # would happily "improve" its way to a best checkpoint.
-                    print(f"  [Train] Implausible validation loss {loss!r} at "
+                    _say(f"  [Train] Implausible validation loss {loss!r} at "
                           f"iter {iteration}. Aborting; the adapter from this "
                           f"run is not trustworthy.")
                     _stop_trainer(process)
@@ -2791,7 +2831,7 @@ def _run_training_with_early_stop(
                 else:
                     steps_without_improvement += 1
 
-                print(
+                _say(
                     f"  [Train] Early stop monitor: iter={iteration} "
                     f"val_loss={loss:.4f} best={best_loss:.4f} "
                     f"patience={steps_without_improvement}/{patience}"
@@ -2801,13 +2841,13 @@ def _run_training_with_early_stop(
                     if not _checkpoints():
                         # Stopping now would leave the run with no weights at
                         # all. Let it reach the first save point instead.
-                        print(
+                        _say(
                             f"  [Train] Plateau at iter {iteration}, but no "
                             f"checkpoint saved yet (save_every={save_every}). "
                             f"Continuing until one exists."
                         )
                         continue
-                    print(
+                    _say(
                         f"  [Train] Validation loss stalled for {patience} eval steps. "
                         "Stopping early and keeping best checkpoint."
                     )
@@ -2828,7 +2868,7 @@ def _run_training_with_early_stop(
                 return False
             kept_iters = None          # ran the whole budget
     except KeyboardInterrupt:
-        print("  [System] Training stopped.")
+        _say("  [System] Training stopped.")
         if process is not None:
             # The child shares our process group, so it already took the same
             # SIGINT from the terminal and is unwinding. Sending another signal
@@ -3115,3 +3155,85 @@ def save_history_pairs(history: list[dict[str, str]], tokenizer, system_prompt: 
                 continue
         i += 1
     return saved_count
+
+
+def weight_delta_report(before_dir: Path | str | None,
+                        after_dir: Path | str | None = None,
+                        top: int = 3) -> str:
+    """How far the adapter's weights actually moved, as one line or three.
+
+    A retrain reports a loss curve and a golden score, and neither says whether
+    the weights moved at all. They are different questions: a run that trains
+    on a corpus the model already fits produces a respectable loss and an
+    adapter nearly identical to the one before it, and a run whose LoRA targets
+    matched nothing produces a perfect-looking log and an adapter that is
+    byte-for-byte the old one. Both have happened here.
+
+    Movement is Frobenius: ||after - before|| / ||before||, per tensor and
+    over the whole adapter. Anything that cannot be read — no previous
+    adapter, a shape that changed because the rank or the target keys changed —
+    is said plainly rather than guessed at, because "unknown" and "unchanged"
+    are the two answers that must never be confused.
+    """
+    import numpy as np
+    from safetensors.numpy import load_file
+
+    after_dir = Path(after_dir) if after_dir else constants.ADAPTER_DIR
+    after_file = Path(after_dir) / "adapters.safetensors"
+    if not after_file.is_file():
+        return "  [Train] Weight delta: no adapter was written."
+    try:
+        after = load_file(str(after_file))
+    except Exception as e:
+        return f"  [Train] Weight delta: the new adapter could not be read ({e})."
+
+    params = sum(int(np.prod(t.shape)) for t in after.values())
+    if not before_dir or not (Path(before_dir) / "adapters.safetensors").is_file():
+        return (f"  [Train] Weight delta: no previous adapter to compare — "
+                f"all {len(after)} tensor(s), {params / 1e6:.2f}M parameters, "
+                f"are new.")
+    try:
+        before = load_file(str(Path(before_dir) / "adapters.safetensors"))
+    except Exception as e:
+        return f"  [Train] Weight delta: the previous adapter could not be read ({e})."
+
+    moved: list[tuple[str, float]] = []
+    unchanged = 0
+    reshaped = 0
+    total_delta = 0.0
+    total_base = 0.0
+    for name, new in after.items():
+        old = before.get(name)
+        if old is None or old.shape != new.shape:
+            reshaped += 1
+            continue
+        d = float(np.linalg.norm((new - old).astype(np.float64)))
+        b = float(np.linalg.norm(old.astype(np.float64)))
+        total_delta += d ** 2
+        total_base += b ** 2
+        if d == 0.0:
+            unchanged += 1
+        elif b > 0:
+            moved.append((name, d / b))
+    overall = (total_delta ** 0.5) / (total_base ** 0.5) if total_base else 0.0
+
+    lines = [f"  [Train] Weight delta vs the pre-train adapter: {len(after)} "
+             f"tensor(s), {params / 1e6:.2f}M parameters, overall movement "
+             f"{overall * 100:.2f}%."]
+    if moved:
+        moved.sort(key=lambda kv: kv[1], reverse=True)
+        top_moved = ", ".join(f"{n.split('.')[-3] if n.count('.') >= 3 else n}"
+                              f".{n.split('.')[-1]} {v * 100:.1f}%"
+                              for n, v in moved[:max(1, top)])
+        lines.append(f"  [Train] Moved most: {top_moved}.")
+    if unchanged:
+        lines.append(
+            f"  [Train] {unchanged} of {len(after)} tensor(s) did not move at "
+            f"all — a target the run never reached is the usual cause, and it "
+            f"is invisible in the loss.")
+    if reshaped:
+        lines.append(
+            f"  [Train] {reshaped} tensor(s) had no comparable predecessor "
+            f"(the rank or the target keys changed), so their movement is "
+            f"unknown rather than zero.")
+    return "\n".join(lines)

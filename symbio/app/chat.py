@@ -2617,6 +2617,13 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             "train_headmaster", "training for the headmaster adapter",
             backup_dir=str(backup_dir) if backup_dir else None)
 
+        # Everything the training module says — the corpus it builds, the
+        # samples it drops, the trainer's own per-iteration losses, the plateau
+        # it stops on, the checkpoint it restores — went to this process's
+        # stdout, which under the daemon is a log file. Whoever asked for the
+        # retrain watched a spinner and then got a verdict. For the length of
+        # the run it goes where they are.
+        training.set_log_sink(self.output_fn)
         try:
             # sample_weights is only passed when present (same rule as the
             # _train_unloaded closure): stubs and old trainers bound as
@@ -2633,6 +2640,14 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 self._restore_model()
                 self._last_train_note = "Training skipped (no new data or failed)."
                 return trained
+
+            # What the loss curve cannot say: whether the weights moved, and
+            # which ones. A run whose LoRA targets matched nothing produces a
+            # clean log and an adapter identical to the one before it.
+            try:
+                self.output_fn(training.weight_delta_report(backup_dir))
+            except Exception as e:
+                self.output_fn(f"  [Train] Weight delta could not be measured ({e}).")
 
             self.output_fn("  [Train] Adapter trained. Reloading model...")
             err = self._reload_model()
@@ -2774,6 +2789,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             self.output_fn(f"  [Train] {adapter_status_value(self.config, self.adapter_loaded)}")
             return True
         finally:
+            # Back to stdout: the sink belongs to this run, not to the module.
+            training.set_log_sink(None)
             pending.finish(task_id)
             training.discard_adapter_backup(backup_dir)
 
