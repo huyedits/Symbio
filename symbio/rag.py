@@ -15,7 +15,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from symbio import safety
+from symbio import constants, safety
 
 try:
     from tag_rag import TagIndex
@@ -23,10 +23,25 @@ except Exception:
     TagIndex = None  # type: ignore
 
 
-PROJECT_DIR = Path(__file__).parent.resolve()
-NOTES_DIR = PROJECT_DIR / "notes"
-DATA_DIR = PROJECT_DIR / "training_data"
-TRAIN_FILE = DATA_DIR / "train.jsonl"
+# Taken from constants, not recomputed. This module used to live at the repo
+# root and kept `Path(__file__).parent` when it moved into the package, which
+# quietly moved every path here one directory down: NOTES_DIR became
+# symbio/notes, which has never existed, so _load_notes globbed an absent
+# directory and note retrieval returned nothing on every query ever made
+# against a real install. TRAIN_FILE went with it, so the training-sample
+# source was dead too.
+#
+# No test caught it because conftest assigns rag.NOTES_DIR = constants.NOTES_DIR
+# for the whole suite and test_rag patches all four onto a tmp_path — the
+# retrieval tests ran against directories that DID exist, and the shipped
+# module read one that did not. A feature that works in the suite and is dead
+# in the install is the exact shape this project keeps finding.
+#
+# Still module-level names, because the suite patches them by name.
+PROJECT_DIR = constants.PROJECT_DIR
+NOTES_DIR = constants.NOTES_DIR
+DATA_DIR = constants.DATA_DIR
+TRAIN_FILE = constants.TRAIN_FILE
 
 # Cap how much of train.jsonl is scanned per query. Most relevant samples are
 # near the recent end of the file; scanning the whole file is a common latency

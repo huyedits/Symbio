@@ -384,3 +384,48 @@ def test_the_context_header_instructs_application(base_config, tmp_path):
 
     assert "answer from this first" in ctx
     assert "use its content directly" in ctx
+
+
+# ---- the paths the SHIPPED module reads ----
+
+def test_the_module_reads_the_project_directory_not_its_own(tmp_path):
+    """symbio/rag.py used to compute `Path(__file__).parent`, which stopped
+    being the project root the day the module moved into the package. NOTES_DIR
+    became symbio/notes — a directory that has never existed — so _load_notes
+    globbed nothing and note retrieval returned zero hits on every query ever
+    made against a real install. TRAIN_FILE went the same way.
+
+    Checked in a SUBPROCESS on purpose. conftest assigns
+    rag.NOTES_DIR = constants.NOTES_DIR for the whole suite and the fixtures
+    here patch all four onto a tmp_path, so every in-process assertion about
+    these names is an assertion about the patch. This one sees what an install
+    sees, which is the only place the bug ever existed.
+    """
+    import subprocess
+    import sys
+
+    probe = (
+        "from symbio import constants, rag; "
+        "print(rag.PROJECT_DIR == constants.PROJECT_DIR, "
+        "rag.NOTES_DIR == constants.NOTES_DIR, "
+        "rag.DATA_DIR == constants.DATA_DIR, "
+        "rag.TRAIN_FILE == constants.TRAIN_FILE)"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                         text=True, cwd=str(tmp_path))
+
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["True", "True", "True", "True"], out.stdout
+
+
+def test_a_note_on_disk_is_retrievable(base_config, tmp_path):
+    """The end of the chain the path bug broke: a note saved is a note found.
+    Live on 2026-09-17 the model called recall for a note written minutes
+    earlier and answered "I don't have any saved information about" it."""
+    (tmp_path / "notes" / "kettle.md").write_text(
+        "# Descaling\nThe kettle is descaled with citric acid, 30g in a litre.",
+        encoding="utf-8")
+
+    hits = Retriever(base_config).search_notes("how do I descale the kettle")
+
+    assert [h["path"].split("/")[-1] for h in hits] == ["kettle.md"]
