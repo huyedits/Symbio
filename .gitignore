@@ -286,3 +286,9 @@ build/
 /prompt_ladder.json
 /grounding_bakeoff.json
 /emit_form_bakeoff.json
+
+# The reef environment: a 50-verb simulator, its task set and the self-teaching
+# driver. Research scaffolding like aws_sim was — nothing in the package
+# imports it and no install can use it. What it MEASURES belongs in the README;
+# the rig does not ship.
+/sim/
