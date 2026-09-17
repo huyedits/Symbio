@@ -274,3 +274,15 @@ build/
 # any of it, no test touches it, and an install cannot use it. What it
 # measured is in the README; the scaffolding is not the product.
 /aws_sim/
+
+# Bake-off and A/B run OUTPUT at the repo root: bakeoff_*.json,
+# thinking_ab*.json, prompt_ladder.json, grounding_bakeoff.json,
+# emit_form_bakeoff.json. 200 KB of one machine's comparisons, referenced by no
+# code and no document. They were removed once already and came back, because
+# nothing stopped the next run writing them here — these lines are what stops
+# it. The conclusions they supported are in the README.
+/bakeoff_*.json
+/thinking_ab*.json
+/prompt_ladder.json
+/grounding_bakeoff.json
+/emit_form_bakeoff.json
