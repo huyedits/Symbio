@@ -141,12 +141,32 @@ def rainbow(text: str) -> str:
     return "".join(out)
 
 
+# Where a spinner frame goes when this process is not the one with the
+# terminal. The daemon is exactly that case: its stdout is a log file, so
+# `sys.stdout.isatty()` is False and every spinner fell through to the one
+# static "thinking…" line — written into the log, where nobody is looking.
+# The client, which does have a terminal, got silence between the prompt and
+# the reply, for as long as a 14B takes. That silence is most of what "not
+# fluid" means; the colours are the smaller half.
+#
+# A sink takes the rendered frame, or None meaning "clear the line". Set by
+# `set_status_sink`; None restores writing straight to stdout.
+_status_sink = None
+
+
+def set_status_sink(fn) -> None:
+    """Route spinner frames somewhere other than this process's stdout."""
+    global _status_sink
+    _status_sink = fn
+
+
 class _Spinner:
-    """Terminal spinner shown while waiting for visible model output.
+    """Spinner shown while waiting for visible model output.
 
     Runs on a daemon thread and anchors itself with carriage returns; stop()
-    erases the line so streamed text can take its place. No-op when stdout
-    is not a TTY (tests, pipes, or non-terminal front-ends).
+    erases the line so streamed text can take its place. With no TTY and no
+    status sink it degrades to a single static line, because a turn that
+    prints nothing for tens of seconds reads as a hang.
     """
 
     _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏67"
@@ -155,7 +175,9 @@ class _Spinner:
         self.label = label
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        self.active = sys.stdout.isatty()
+        # A sink means somebody downstream has a terminal even though this
+        # process does not.
+        self.active = bool(_status_sink) or sys.stdout.isatty()
         self._start_time: float | None = None
         self._gen_tokens = 0
         self._lock = threading.Lock()
@@ -194,8 +216,11 @@ class _Spinner:
                     label = f"{self.label} ({int(elapsed)}s){tok_info}"
                 else:
                     label = f"{self.label}{tok_info}"
-                sys.stdout.write(f"\r{frame} {label}")
-                sys.stdout.flush()
+                if _status_sink is not None:
+                    _status_sink(f"{frame} {label}")
+                else:
+                    sys.stdout.write(f"\r{frame} {label}")
+                    sys.stdout.flush()
                 i += 1
 
         self._thread = threading.Thread(target=_spin, daemon=True)
@@ -207,6 +232,9 @@ class _Spinner:
         self._stop_event.set()
         self._thread.join()
         self._thread = None
+        if _status_sink is not None:
+            _status_sink(None)
+            return
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
 

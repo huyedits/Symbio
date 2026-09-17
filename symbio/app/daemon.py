@@ -23,6 +23,7 @@ import threading
 from typing import Any
 
 from symbio import constants
+from symbio.app import chat_style, chat_ui
 
 
 def daemon_running() -> tuple[bool, int | None]:
@@ -221,6 +222,14 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
             if msg.get("type") == "confirm":
                 return bool(msg.get("answer", False))
 
+    def status_fn(text) -> None:
+        # Its own frame type, not an output line: a spinner is drawn over
+        # itself and output is appended. Collapsing the two is what made the
+        # daemon's log a column of "thinking…" and the client's screen empty.
+        if client_gone.is_set():
+            return
+        send_msg({"type": "status", "text": text})
+
     def stream_chunk_fn(text: str) -> None:
         # Checked BEFORE the write, and raised rather than swallowed: this is
         # called once per token from inside the generation loop, so it is the
@@ -229,6 +238,7 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
             raise _ClientGone()
         send_msg({"type": "stream", "text": text})
 
+    chat_ui.set_status_sink(status_fn)
     session = ChatSession(
         config,
         model=model, tokenizer=tokenizer, adapter_loaded=adapter_loaded,
@@ -373,12 +383,18 @@ class DaemonClient:
                 except EOFError:
                     break
                 mtype = msg.get("type")
+                if mtype == "status":
+                    self._draw_status(msg.get("text"))
+                    continue
+                # Anything else lands on a fresh line: a half-drawn spinner
+                # frame is still on this one.
+                self._clear_status()
                 if mtype == "output":
-                    print(msg.get("text", ""))
+                    print(self._skin(msg.get("text", "")))
                 elif mtype == "stream":
                     print(msg.get("text", ""), end="", flush=True)
                 elif mtype == "input_prompt":
-                    prompt = msg.get("prompt", "")
+                    prompt = self._skin_prompt(msg.get("prompt", ""))
                     try:
                         text = input(prompt)
                     except (EOFError, KeyboardInterrupt):
@@ -393,6 +409,59 @@ class DaemonClient:
         finally:
             sock.close()
         return 0
+
+    def _draw_status(self, text) -> None:
+        """Draw one spinner frame over the last, or clear the line for None."""
+        if not self._can_animate():
+            return
+        if not text:
+            self._clear_status()
+            return
+        sys.stdout.write("\r\033[K" + text)
+        sys.stdout.flush()
+        self._status_drawn = True
+
+    def _clear_status(self) -> None:
+        if getattr(self, "_status_drawn", False):
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+            self._status_drawn = False
+
+    def _can_animate(self) -> bool:
+        try:
+            return sys.stdout.isatty()
+        except Exception:
+            return False
+
+    def _skin(self, text: str) -> str:
+        """Render a status line the way the local terminal would.
+
+        The skin lives in chat_style and `chat_loop` wires it into its own
+        `_cli_output` and nowhere else — correct, because the daemon's
+        output_fn feeds a socket and the text on that socket is a protocol.
+        But THIS process is the one with the terminal, and it was printing
+        every line raw. With the daemon up — which is most of the time, the
+        supervisor restarts it — the bullets, elbows and colours existed and
+        were never once drawn. Styling here keeps the wire plain and the
+        screen styled, which is what the split was for.
+
+        The assistant's own reply is not a status line and is left alone, by
+        the same prefix test `_cli_output` uses: it is prose, it can be many
+        lines, and a line of it shaped like "[Note] ..." is not a tag.
+        """
+        if not isinstance(text, str):
+            return text
+        prefix = f"{self.config.get('assistant_name', 'Assistant'):8}: "
+        if text.startswith(prefix):
+            return text
+        return chat_style.style_line(text)
+
+    def _skin_prompt(self, prompt: str) -> str:
+        """The line the person types on, styled to match the local session."""
+        plain = f"{self.config.get('user_name', 'You'):8}: "
+        if prompt == plain and chat_style.colors_enabled():
+            return chat_style.user_prompt()
+        return prompt
 
     @staticmethod
     def _read_yes_no(prompt: str) -> bool:
