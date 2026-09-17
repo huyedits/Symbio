@@ -216,11 +216,39 @@ The default 8B-class (or others - check the wizard) configuration is much more c
 
 ## Install
 
+Two ways, and you only need the repository for one of them.
+
+### Just run it
+
 ```bash
-cd symbio
+pip install "symbio-cli[mlx]"
+symb setup          # names, model, first-run checks
+symb chat
+```
+
+Nothing is written into your Python environment. Everything this install
+keeps — notes, adapters, training data, sessions, `config.json`, `prompt.md` —
+lives in a workspace at **`~/.symbio`**, and `SYMBIO_HOME` points it somewhere
+else if you would rather. Upgrading the package does not touch it; you can
+delete the virtualenv and the agent still remembers everything.
+
+The `[mlx]` extra is the inference and training engine. It is macOS/Apple
+Silicon only and deliberately optional, because `mlx` publishes no sdist and a
+hard dependency would make `pip install` fail during resolution on Linux
+before anyone saw an explanation.
+
+### Work on it
+
+```bash
 git clone https://github.com/huyedits/Symbio
+cd Symbio
 ./install.sh
 ```
+
+A checkout is its own workspace: run from a clone and the agent uses the clone,
+which is what you want while editing it. You need the repository for this and
+not for the above — the tests, the benchmark harness, the desktop app sources
+and the installer script are all development things.
 
 The installer:
 
@@ -787,6 +815,74 @@ rig — a fake cloud CLI, a self-teaching loop and a checkpoint scorer — that
 nothing in Symbio imports and that no install can use. What it measured is
 worth keeping and is written above; the rig itself was one machine's
 scaffolding, and the repository is lighter without it.
+
+# Teaching itself an environment it has never seen
+
+Measured 2026-09-17/18, Qwen3-14B-3bit on a 16 GB Mac, against a reef-keeping
+simulator: **50 verbs across 5 services**, `reef <service> <verb> --option
+value`, deliberately counter-familiar — a running organism is a `graft`, you
+do not create or delete anything, and every command needs `--basin`. **45
+tasks, 19 of them six steps deep.** The six-step shape is seal, settle, lift,
+bind, open, prime, and every step fails loudly if the one before it did not
+happen, so it cannot be brute-forced by emitting six plausible lines.
+
+Nothing in the corpus is written by hand. The model gets the task in English,
+emits commands, the simulator RUNS them, and the pair is kept only if the basin
+ends in the state the task described. The system prompt says what the world IS
+and nothing about how to spell a command.
+
+## One full cycle: earn, train, earn again
+
+| | base model | after training on what it earned |
+| --- | ---: | ---: |
+| tasks solved | **10/45** | **16/45** |
+| depth 1 | 6/8 | 7/8 |
+| depth 2 | 2/6 | 5/6 |
+| depth 3 | 1/5 | 1/5 |
+| depth 4 | 1/4 | 2/4 |
+| depth 5 | 0/3 | **1/3** |
+| depth 6 | 0/19 | 0/19 |
+
+Ten self-earned samples, 120 iterations, 7.075 GB peak, an adapter of 1,026 KB
+— and six more tasks solved, including the first five-step chain it has ever
+completed. **Depth 6 stayed at zero.** A model can bootstrap the vocabulary of
+an environment and the short compositions; the long precondition chain is not
+reachable from a corpus that contains no examples of one.
+
+The training log carries what a retrain should: samples rendered, iterations,
+train and validation loss, the early-stop monitor naming its best and its
+patience (`val_loss=0.0960 best=0.0530 patience=1/2`), each checkpoint saved,
+and the weight-delta report.
+
+## Three things the harness got wrong, found by running it
+
+**A task a do-nothing answer passed.** "Quarantine coral-a and then release it
+again" ends in the state it starts in. The driver logged `world SOLVED` for two
+commands the simulator had rejected, and wrote a training sample whose answer
+was empty. The harness now validates both ways before it grades anything —
+reference answers **45/45**, do-nothing answers **0/45** — and refuses any
+sample where not one command was accepted.
+
+**The harness rationed what the environment was handing over.** The simulator
+answers an unknown verb with every verb it has, which is the finding the
+previous environment paid for: discovery went 39/60 to 59/60 when the errors
+stopped being helpful-but-narrow. The driver then clipped that error to 200
+characters before feeding it back, cutting the list off exactly where `culture:
+brew` would have been. The model hunted for "create" for four rounds while the
+answer sat in a string the harness had already thrown away.
+
+**Vocabulary is not grammar.** With the full verb list restored it still wrote
+`reef culture plankton brew --potency 4` — noun where the verb goes — four
+rounds running. The list told it which words exist and nothing about where they
+go. One line added to the error text:
+
+> The order is `reef <service> <verb> --option value` — service first, verb
+> second, and every value passed as --option value. Example: `reef culture brew
+> --culture plankton --potency 4 --basin tide-1`.
+
+**1 solve in 27 became 6 in 8.** Same model, same tasks, same four rounds. Rigid
+means refusing wrong input, not rationing information — and that applies to the
+harness at least as much as to the environment it is testing.
 
 # Mixture of Agents
 
