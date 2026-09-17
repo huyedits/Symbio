@@ -267,3 +267,9 @@ build/
 # whose adapters did not exist on it — and the roster goes into the system
 # prompt, so the model believed it had them.
 /symbio/app/worker_models.json
+
+# The aws_sim research rig and everything it produced. A fake cloud CLI, a
+# self-teaching loop and a checkpoint scorer: nothing in the package imports
+# any of it, no test touches it, and an install cannot use it. What it
+# measured is in the README; the scaffolding is not the product.
+/aws_sim/
