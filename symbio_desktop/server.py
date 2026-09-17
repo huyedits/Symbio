@@ -830,7 +830,7 @@ class DaemonBridge:
     def _flush_prefix(self) -> None:
         """Release a turn that ended inside the label window.
 
-        A short reply -- "Hi Huy!" -- can finish before enough text arrives to
+        A short reply -- "Hi Sam!" -- can finish before enough text arrives to
         decide whether it started with a speaker label. Without this it would
         be held forever, which is to say silently swallowed.
         """

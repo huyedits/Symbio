@@ -44,7 +44,7 @@ BELIEF_DB_NAME = "beliefs.db"
 
 # How a belief's truth moves with time. The reactor supplies all four, which
 # is why a single decay curve is not enough:
-#   stable — timing is not part of the claim ("the user's name is Huy")
+#   stable — timing is not part of the claim ("the user's name is Sam")
 #   peaks  — false, true around the moment, false again (xenon concentration)
 #   decays — true now, less true as time passes (a fresh sensor reading)
 #   lags   — false now, true from the moment onward (recovery is reachable)

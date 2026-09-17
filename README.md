@@ -628,7 +628,7 @@ Example:
 
 # How much does it take to learn something new?
 
-Measured on 2026-09-15, Qwen3-14B on an M-series Mac, against `aws_sim/` — a
+Measured on 2026-09-15, Qwen3-14B on an M-series Mac, against a
 deliberately **counter-familiar** cloud CLI built so that pretrained knowledge
 actively misleads (`store`/`compute`/`access`, `--region` required on every
 command, no URI scheme, `Key:Value` labels, `tag/Key:Value` filters). The
@@ -651,7 +651,7 @@ iteration at 8.4 GB peak.
 
 ## The same loop on a harder battery: 16/19, and it wobbles
 
-`aws_sim/curve.json` holds a later run against **19 held-out tasks** rather
+A later run went against **19 held-out tasks** rather
 than 13 — the six extra are chained, multi-command ones. Same model, same
 self-earned loop (481 attempts, **82 kept**: a sample is earned only when the
 simulator's world changed the way the task asked, so 17% of tries paid). 14
@@ -782,13 +782,11 @@ load is indistinguishable from a model that learned nothing. The harness now
 reads the training run's own `adapter_config.json` and refuses to score a
 checkpoint whose tensors have nowhere to land.
 
-Reproduce with:
-
-```bash
-python aws_sim/self_teach.py 72        # model earns its own corpus
-python aws_sim/train_and_curve.py 1000 20   # train, then score 50 checkpoints
-python aws_sim/train_and_curve.py --score-only   # re-score without retraining
-```
+The harness that produced all of this is **not shipped**. It was a research
+rig — a fake cloud CLI, a self-teaching loop and a checkpoint scorer — that
+nothing in Symbio imports and that no install can use. What it measured is
+worth keeping and is written above; the rig itself was one machine's
+scaffolding, and the repository is lighter without it.
 
 # Mixture of Agents
 
@@ -1238,6 +1236,30 @@ symbio gateway status        # Check Telegram
 symbio gateway start         # Start Telegram
 symbio gateway stop          # Stop Telegram
 ```
+
+### Terminal interface
+
+Interactive chat uses a compact, Hermes / Claude Code-inspired layout: a warm
+welcome panel with the model and workspace, a clearly separated input line,
+and grouped tool calls/results. It stays in normal terminal scrollback rather
+than taking over the screen, so copying output and scrolling still work.
+
+* **Enter** sends; **Tab** completes slash commands in both local and daemon chat.
+* **`/`** opens the full command menu; **`/status`** shows detailed session state.
+* **`/quit`** exits. Existing readline editing and history keys are unchanged.
+* Narrow windows get a smaller layout; `NO_COLOR=1` or `TERM=dumb` retains the
+  plain-text interface. Piped output and non-terminal front ends stay plain.
+
+Preview the layout without loading a model, reading credentials, or running tools:
+
+```bash
+python symbio/app/chat_style.py --demo
+python symbio/app/chat_style.py --demo --width 48 --no-color
+```
+
+Restart a running resident daemon with `symbio daemon stop` followed by
+`symbio daemon start` to pick up the new welcome-panel metadata.
+
 ---
 
 # Slash commands

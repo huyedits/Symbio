@@ -176,7 +176,12 @@ def skill_note_body(name: str, steps: str) -> str:
 
 def _load_worker_catalog() -> dict[str, Any]:
     if not constants.WORKER_MODELS_FILE.exists():
-        return {}
+        # Seeds the built-in roster on a fresh install. Saving a skill into an
+        # empty dict would otherwise drop summarize/browser/second_opinion the
+        # first time anyone saved one.
+        from symbio.app import worker_defaults
+
+        return dict(worker_defaults.seed_worker_catalog())
     try:
         return json.loads(constants.WORKER_MODELS_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

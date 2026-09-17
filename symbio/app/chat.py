@@ -222,22 +222,29 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
       - input_fn(prompt) -> str  to replace builtins.input
       - output_fn(text)            to replace print for user-facing output
       - confirm_fn(prompt) -> bool for yes/no gates (blocked commands, domains)
+      - banner_fn(config, adapter_loaded, dataset_size) for client-side layout
     """
 
     def __init__(self, config: dict[str, Any], model=None, tokenizer=None,
                  adapter_loaded: bool | None = None,
                  input_fn=None, output_fn=None, confirm_fn=None,
                  generate_fn=None, stream_fn=None, stream_chunk_fn=None,
-                 stream_prefix: bool = True, owner: str | None = None):
+                 stream_prefix: bool = True, owner: str | None = None,
+                 confirm_policy: str = "risk", banner_fn=None):
         # Last URL successfully opened in the controllable browser; used to
         # auto-recover when a later click/type/scroll/press finds the browser
         # session was reset or never opened.
         self._last_browsed_url: str = ""
         self.config = config
         self.owner = owner
+        # Where the person is, not which front-end this is: a local window and
+        # a local terminal can both see what a click would hit; a phone cannot.
+        # See ToolsMixin.confirm_policy.
+        self._confirm_policy = confirm_policy
         self.input_fn = input_fn if input_fn is not None else input
         self.output_fn = output_fn if output_fn is not None else print
         self.confirm_fn = confirm_fn
+        self.banner_fn = banner_fn
         # Through the backend seam, not straight at mlx_lm. On MLX both of
         # these delegate to exactly the function that used to be called here,
         # with the same signature and the same kwargs — so an Apple Silicon
@@ -678,11 +685,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     # means the new look, colour off means EXACTLY the legacy text. Anything
     # that reads this output rather than looking at it — the pty harnesses in
     # tests/verify_transcript_fixes.py, the Telegram bridge, a piped log — waits on
-    # the literal "Huy     : " prompt, so a styled one hangs it forever. Off a
+    # the literal "Sam     : " prompt, so a styled one hangs it forever. Off a
     # terminal, or under NO_COLOR / SYMBIO_NO_COLOR, nothing changes at all.
     def assistant_prefix(self) -> str:
         """What precedes the assistant's streamed reply."""
-        if not chat_style.colors_enabled():
+        if self.input_fn is not input or not chat_style.colors_enabled():
             return f"{self.config['assistant_name']:8}: "
         return chat_style.assistant_prefix()
 
@@ -694,7 +701,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         background thread prints over it — have to agree, and they drifted
         apart once already when only one of them was changed.
         """
-        if not chat_style.colors_enabled():
+        if self.input_fn is not input or not chat_style.colors_enabled():
             return f"{self.config['user_name']:8}: "
         return chat_style.user_prompt()
 
@@ -2093,7 +2100,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         obedient while doing it.
 
         Live 2026-09-15, asked to tweet at @grok: "The tools listed don't
-        include a Twitter API tool... the previous note from Huy says they
+        include a Twitter API tool... the previous note from the user says they
         can't post tweets, only generate text." No such note exists anywhere in
         the install — the constraint was manufactured inside the reasoning
         block and then obeyed — and the browser toolset it was holding at the
@@ -3164,11 +3171,20 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
     def run(self):
         dataset_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0
-        print_banner(self.config, self.adapter_loaded, dataset_size, output_fn=self.output_fn)
+        if self.banner_fn is not None:
+            self.banner_fn(self.config, self.adapter_loaded, dataset_size)
+        else:
+            print_banner(self.config, self.adapter_loaded, dataset_size,
+                         output_fn=self.output_fn,
+                         terminal=self.input_fn is input and chat_style.colors_enabled())
 
         while True:
             try:
-                user_input = self.input_fn(self.user_prompt()).strip()
+                prompt = self.user_prompt()
+                if self.input_fn is input and chat_style.colors_enabled():
+                    self.output_fn(chat_style.prompt_context(self.config))
+                    prompt = chat_style.readline_prompt(prompt)
+                user_input = self.input_fn(prompt).strip()
             except (EOFError, KeyboardInterrupt):
                 self.output_fn("")
                 user_input = "/quit"
@@ -3208,57 +3224,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
 
 
 def _install_command_completion(session) -> bool:
-    """Make "/" complete against the commands that actually exist.
-
-    This is the terminal's half of the slash-command idea: a name is only
-    worth having if it can be recalled, and recall in a terminal is Tab. The
-    completer is rebuilt from the session on every keystroke rather than
-    captured once, so a command saved during the session — by the user or by
-    the assistant through save_command — is completable immediately.
-
-    readline is a standard-library module but not a guaranteed one (a stripped
-    Python, a non-tty front-end), and completion is a convenience: a failure
-    here costs Tab, never the session.
-    """
-    try:
-        import readline
-    except Exception:
-        return False
-    if not sys.stdin.isatty():
-        return False
-
-    def _complete(text: str, state: int):
-        try:
-            buffer = readline.get_line_buffer()
-            if not buffer.lstrip().startswith("/"):
-                return None
-            # Only the command word completes; arguments are free text.
-            if buffer.lstrip()[1:].find(" ") >= 0 and text != buffer.lstrip():
-                return None
-            typed = text.lstrip("/").lower()
-            matches = [f"/{n}" for n in session.command_names()
-                       if n.startswith(typed)]
-            return matches[state] if state < len(matches) else None
-        except Exception:
-            return None
-
-    try:
-        readline.set_completer(_complete)
-        # Slashes and hyphens are part of a command name, not delimiters, or
-        # "/new-skill" completes as if "skill" were its own word.
-        readline.set_completer_delims(" \t\n")
-        # libedit (the macOS system Python) speaks a different dialect of the
-        # same config language; bind for both rather than picking one.
-        if "libedit" in (getattr(readline, "__doc__", "") or ""):
-            readline.parse_and_bind("bind ^I rl_complete")
-        else:
-            readline.parse_and_bind("tab: complete")
-            # One Tab on an ambiguous prefix shows the candidates instead of
-            # waiting for a second — the menu is the point.
-            readline.parse_and_bind("set show-all-if-ambiguous on")
-    except Exception:
-        return False
-    return True
+    """Keep the public seam; both terminal paths use the same readline setup."""
+    return chat_style.install_command_completion(session.command_names)
 
 
 def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
@@ -3283,7 +3250,7 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
     _identity_filled = setup.ensure_identity_defaults(config)
     if output_fn is None:
         # The background note-indexer (and other daemon threads) call output_fn
-        # while the main thread is blocked in input() with the 'Huy : ' readline
+        # while the main thread is blocked in input() with the 'Sam : ' readline
         # prompt drawn. A bare print() clobbers that prompt and readline never
         # redraws it, so the terminal looks frozen after the [auto-index] line.
         # When a background thread prints, escape to a fresh line first and then

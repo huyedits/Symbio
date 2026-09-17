@@ -40,7 +40,7 @@ def make_sampler(*args, **kwargs):
 
 
 from symbio import constants
-from symbio.app import golden, pending, tooling, training
+from symbio.app import golden, pending, tooling, training, worker_defaults
 
 
 # (path, mtime_ns, size) -> parsed catalog. The file is small, but it is read
@@ -59,8 +59,12 @@ def load_catalog() -> dict[str, dict[str, Any]]:
     try:
         st = path.stat()
     except OSError:
+        # No catalog yet: a fresh install, or the first run after the shipped
+        # copy stopped being committed. Seed the built-in roster rather than
+        # answering "no workers configured" — that answer is how the model
+        # learns it has no specialists when it has three.
         _CATALOG_CACHE = None
-        return {}
+        return dict(worker_defaults.seed_worker_catalog())
     key = (str(path), st.st_mtime_ns, st.st_size)
     if _CATALOG_CACHE is not None and _CATALOG_CACHE[0] == key:
         return _CATALOG_CACHE[1]

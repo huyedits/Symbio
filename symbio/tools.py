@@ -720,7 +720,7 @@ def tool_few_shots(config: dict[str, Any],
         #
         # Live 2026-08-26, after a turn that used fetch_html and never touched
         # the browser at all:
-        #   Huy  : NOW READ THE PAGE AGAIN AND TELL ME THE STAR COUNT
+        #   Sam  : NOW READ THE PAGE AGAIN AND TELL ME THE STAR COUNT
         #   Caine: I don't see any GitHub repository open right now - the
         #          current page is Wikipedia's homepage.
         # That is not a hallucination; it is an accurate reading of a prompt

@@ -139,7 +139,7 @@ def _check_who_are_you(display: str, tools: list, config: dict) -> bool:
     if not user:
         return True
     # Reject clear self-reference / name-swap patterns, but allow benign
-    # references such as "Your name is Huy" or "My user is named Huy".
+    # references such as "Your name is Sam" or "My user is named Sam".
     swap_phrases = [
         f"i am {user}",
         f"i'm {user}",

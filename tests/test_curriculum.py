@@ -624,3 +624,108 @@ def test_a_clean_eval_set_is_recorded_as_held_out(tmp_path, monkeypatch):
     corpus.write_text(json.dumps({"text": "unrelated"}))
     monkeypatch.setattr(constants, "TRAIN_FILE", corpus)
     assert eval_mod._integrity_report(CONFIG, _cases())["held_out"] is True
+
+
+# ---- auto-train off: decide before spending anything ----
+
+def _batch(tmp_path, monkeypatch, notes=5):
+    """Five mistake notes, an isolated corpus, and nothing real to train."""
+    from symbio.app import learn
+
+    mistakes = tmp_path / "mistakes"
+    mistakes.mkdir()
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    monkeypatch.setattr(constants, "MISTAKES_DIR", mistakes)
+    monkeypatch.setattr(constants, "MISTAKES_ARCHIVE_DIR", archive)
+    corpus = tmp_path / "train.jsonl"
+    corpus.write_text(json.dumps({"text": "pre-existing"}) + "\n")
+    monkeypatch.setattr(constants, "TRAIN_FILE", corpus)
+    for i in range(notes):
+        (mistakes / f"n{i}.md").write_text(
+            "# c\n\n**Category:** general\n\n**Severity:** 1\n\n"
+            "**Original question:** why does the browser page not scroll\n\n"
+            "**Wrong answer:** it did\n\n**Correction:** c\n\n"
+            "**Correct answer:** the page did not scroll down\n")
+    written = []
+    monkeypatch.setattr(learn.training, "append_chat_pair",
+                        lambda u, a, tok, sp, **kw: written.append((u, a)))
+    monkeypatch.setattr(learn.training, "count_samples", lambda role=None: 1)
+    return learn, mistakes, written
+
+
+def _cfg(**learn_cfg):
+    config = CONFIG.copy()
+    config["learn"] = {
+        "enabled": True, "mistake_threshold": 5,
+        "scale_threshold_with_corpus": False,
+        "boost_factor": 3, "batch_train_iters": 25, "iters_per_severity": 5,
+        "max_batch_train_iters": 100, "curriculum_weighting": True,
+        "mistake_pretrain_check": True, "sample_half_life_days": 21,
+        **learn_cfg}
+    return config
+
+
+def test_auto_train_off_spends_no_battery(tmp_path, monkeypatch):
+    """It used to run the golden battery, run the held-out eval battery, build
+    a curriculum plan, digest AND archive the notes — and only then print
+    "Auto-train is disabled" and return False. Two full generation batteries
+    for a run that was never going to happen."""
+    learn, _mistakes, _written = _batch(tmp_path, monkeypatch)
+    called = []
+
+    result = learn.maybe_train_on_mistakes(
+        _cfg(auto_train=False), object(), "SYS",
+        train_fn=lambda *a, **k: called.append("train") or True,
+        check_fn=lambda: called.append("check") or (1, 1),
+        eval_fn=lambda: called.append("eval") or FakeEval([]))
+
+    assert result is False
+    assert called == [], "nothing that only serves an automatic run may run"
+
+
+def test_auto_train_off_still_leaves_the_corpus_ready_for_train(tmp_path,
+                                                                monkeypatch):
+    """The user runs /train by hand in this mode, so the material has to be
+    waiting when they do."""
+    learn, _mistakes, written = _batch(tmp_path, monkeypatch)
+
+    learn.maybe_train_on_mistakes(_cfg(auto_train=False), object(), "SYS",
+                                  train_fn=lambda *a, **k: True)
+
+    assert len(written) == 5 * 3, "five notes at boost 3, digested linearly"
+
+
+def test_auto_train_off_computes_no_weights(tmp_path, monkeypatch):
+    """Weights shape a run. There is no run."""
+    learn, _mistakes, _written = _batch(tmp_path, monkeypatch)
+    seen = {}
+
+    def train(cfg, iters=None, sample_weights=None):
+        seen["weights"] = sample_weights
+        return True
+
+    learn.maybe_train_on_mistakes(
+        _cfg(auto_train=False), object(), "SYS", train_fn=train,
+        eval_fn=lambda: FakeEval([{"id": "x", "passed": False, "error": None}]))
+
+    assert seen == {}, "train_fn is not called at all, so nothing is shaped"
+
+
+def test_auto_train_on_still_runs_the_eval_battery(tmp_path, monkeypatch):
+    """The other side of the gate: with it on, nothing was taken away.
+
+    check_fn is absent from `called` and that is correct, not a miss — the
+    golden pre-train check only fires on a batch that is ENTIRELY automatic
+    tool-error captures, and these notes carry a typed **Correction:**."""
+    learn, _mistakes, _written = _batch(tmp_path, monkeypatch)
+    called = []
+
+    learn.maybe_train_on_mistakes(
+        _cfg(auto_train=True), object(), "SYS",
+        train_fn=lambda *a, **k: True,
+        check_fn=lambda: called.append("check") or (0, 1),
+        eval_fn=lambda: called.append("eval") or FakeEval(
+            [{"id": "browser_read_site", "passed": False, "error": None}]))
+
+    assert called == ["eval"]

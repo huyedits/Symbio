@@ -322,6 +322,10 @@ class TelegramBot:
                     input_fn=lambda prompt="": self._telegram_input(chat_id, prompt),
                     output_fn=lambda text: self._telegram_output(chat_id, text),
                     confirm_fn=lambda prompt: self._telegram_confirm(chat_id, prompt),
+                    # The window a click lands in is not in front of whoever
+                    # sent it, so every tool in the list is gated by name here
+                    # regardless of what it scores.
+                    confirm_policy="name",
                     generate_fn=self._generate_on_infer_thread,
                     stream_prefix=False,
                     owner=f"telegram:{chat_id}",

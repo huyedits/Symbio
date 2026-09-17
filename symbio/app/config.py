@@ -514,7 +514,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # 16 GB Mac with a 14B resident, a big prompt is what tips the KV cache
         # into swap.
         "auto_compact_enabled": True,
-        # 0.75 sits in the band Huy asked for (~70-80%). A resident 14B alone is
+        # 0.75 sits in the band the operator asked for (~70-80%). A resident 14B alone is
         # already ~55%, so anything much lower would fire on every turn of a
         # normal session.
         "auto_compact_ram_fraction": 0.75,

@@ -40,9 +40,49 @@ def _isolate_dirs(monkeypatch, tmp_path):
 
 # ---- catalog ----
 
-def test_load_catalog_missing_file_returns_empty(monkeypatch, tmp_path):
-    monkeypatch.setattr(constants, "WORKER_MODELS_FILE", tmp_path / "nope.json")
-    assert dispatch.load_catalog() == {}
+def test_a_missing_catalog_is_seeded_with_the_built_in_workers(monkeypatch,
+                                                                tmp_path):
+    """It returned {} — "no workers configured" — on a fresh install, because
+    the only copy of the roster was a committed JSON file. That file is also
+    where saved skills are written, so the shipped copy had grown 21 of one
+    person's (Coffee Making, Bicycle Tuning, Pitch My Tent In Wind) and
+    advertised them to everyone. Defaults live in code now, like tools/ and
+    commands/, and the file is this install's."""
+    from symbio.app import worker_defaults
+
+    catalog_file = tmp_path / "worker_models.json"
+    monkeypatch.setattr(constants, "WORKER_MODELS_FILE", catalog_file)
+    monkeypatch.setattr(dispatch, "_CATALOG_CACHE", None)
+
+    catalog = dispatch.load_catalog()
+
+    assert sorted(catalog) == sorted(worker_defaults.BUILTIN_WORKERS)
+    assert [k for k, v in catalog.items() if v.get("is_skill")] == []
+    assert catalog_file.exists(), "seeded, so the next save does not drop them"
+
+
+def test_seeding_never_walks_on_an_existing_catalog(monkeypatch, tmp_path):
+    """A file that exists is this install's, skills and all."""
+    from symbio.app import worker_defaults
+
+    catalog_file = tmp_path / "worker_models.json"
+    catalog_file.write_text(json.dumps({"mine": {"role": "mine"}}),
+                            encoding="utf-8")
+    monkeypatch.setattr(constants, "WORKER_MODELS_FILE", catalog_file)
+
+    assert worker_defaults.seed_worker_catalog() == {"mine": {"role": "mine"}}
+
+
+def test_an_unreadable_catalog_is_still_empty(monkeypatch, tmp_path):
+    """Seeding is for absence. Corrupt is a different answer: refuse to guess
+    what was in it."""
+    from symbio.app import worker_defaults
+
+    catalog_file = tmp_path / "worker_models.json"
+    catalog_file.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(constants, "WORKER_MODELS_FILE", catalog_file)
+
+    assert worker_defaults.seed_worker_catalog() == {}
 
 
 def test_catalog_entry_for_role(monkeypatch, tmp_path):

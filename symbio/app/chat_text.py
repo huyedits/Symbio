@@ -347,7 +347,7 @@ def _repair_project_path_command(cmd: str) -> str | None:
     Telling the model was not enough. The observation already names the file,
     the directory the command ran in, and what to use instead — and live
     2026-08-25 the model answered "Let me re-try that using the correct path"
-    and reissued the identical /Users/huygpt/agi/... path it had just been
+    and reissued the identical /Users/you/agi/... path it had just been
     told was wrong. This is the same shape as the GUI-app launches: a repeated,
     unambiguous mistake that another sentence of prompt does not fix.
 
@@ -427,7 +427,7 @@ def _project_paths_in(cmd: str) -> list[str]:
         # Try the path as written, then progressively drop leading components.
         # A model that invents an absolute path usually gets the tail right and
         # the prefix wrong: live 2026-08-25 it asked for
-        # /Users/huygpt/agi/symbio/app/web.py — the real tree is under
+        # /Users/you/agi/symbio/app/web.py — the real tree is under
         # .../Downloads/agi — and on being told "no such file" reported that the
         # user's file did not exist. The suffix symbio/app/web.py names it
         # exactly.

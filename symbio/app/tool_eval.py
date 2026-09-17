@@ -335,8 +335,8 @@ RESILIENCE_CASES: tuple[ToolCase, ...] = (
         # The other honest route: grep the notes directory. Scored as a pass
         # because it IS one -- the failure being measured is calling nothing.
         also_accept=("run_command", "read_file", "execute_code"),
-        observation="1 match for 'my name': [note User_Identity.md] My user's name is Huy.",
-        check_final=_contains("huy"),
+        observation="1 match for 'my name': [note User_Identity.md] My user's name is Sam.",
+        check_final=_contains("sam"),
     ),
     ToolCase(
         id="recall_decision",
@@ -344,7 +344,7 @@ RESILIENCE_CASES: tuple[ToolCase, ...] = (
         prompt="What did we decide about the keyboard layout last week?",
         expect_tool="recall",
         also_accept=("run_command", "read_file", "execute_code"),
-        observation="1 match: [note Keyboard.md] Huy switched to Colemak on 2026-09-01.",
+        observation="1 match: [note Keyboard.md] Sam switched to Colemak on 2026-09-01.",
         check_final=_contains("colemak"),
     ),
     ToolCase(

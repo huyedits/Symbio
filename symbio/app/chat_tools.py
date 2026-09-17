@@ -24,7 +24,8 @@ from symbio.app import (
     security, tooling, training, web,
 )
 from symbio.app.config import config_show, set_config_value
-from symbio.app.chat_constants import _TELEGRAM_CONFIRM_TOOLS
+from symbio.app.chat_constants import (
+    _ALWAYS_CONFIRM_TOOLS, _LOCAL_TRUSTED_TOOLS, _TELEGRAM_CONFIRM_TOOLS)
 from symbio.app.chat_text import (
     _annotate_sandbox_cwd, _gui_app_for, _looks_like_shell_command,
     _queries_overlap, _repair_project_path_command,
@@ -224,8 +225,10 @@ class ToolsMixin:
         if not tooling.tool_group_enabled(name, enabled_groups):
             return f"Tool '{name}' is disabled."
 
-        # Non-terminal front-ends (Telegram) ask before state-mutating tools.
-        if self.confirm_fn is not None and name in _TELEGRAM_CONFIRM_TOOLS:
+        # Ask by name — before the risk scorer gets a say — for the actions
+        # whose cost does not depend on their arguments, and, when the person
+        # is somewhere else, for the ones they cannot judge from there.
+        if self.confirm_fn is not None and self._asks_by_name(name):
             prompt = self._tool_confirm_prompt(name, params)
             if not self.confirm_fn(prompt):
                 return f"Tool '{name}' was not approved."
@@ -1159,6 +1162,28 @@ class ToolsMixin:
             out += " " + computer.desktop_press("enter")
         self._last_ax = None
         return out
+
+    def confirm_policy(self) -> str:
+        """"risk" when the person is at this machine, "name" when they are not.
+
+        A front-end that is somewhere else — the Telegram gateway is the one
+        that exists — cannot see what a click would land on, so it gates the
+        whole list by name. A local one can, so it gates on what the call
+        actually scores. safety.confirm_policy in config overrides both, and
+        "name" restores the behaviour every front-end had before this split.
+        """
+        override = str(self.config.get("safety", {}).get(
+            "confirm_policy", "")).strip().lower()
+        if override in ("risk", "name"):
+            return override
+        policy = str(getattr(self, "_confirm_policy", "risk") or "risk").lower()
+        return policy if policy in ("risk", "name") else "risk"
+
+    def _asks_by_name(self, name: str) -> bool:
+        """Whether this tool stops for approval before it is even scored."""
+        if name in _ALWAYS_CONFIRM_TOOLS:
+            return True
+        return self.confirm_policy() == "name" and name in _LOCAL_TRUSTED_TOOLS
 
     def _dispatch_tool(self, name: str, params: dict[str, Any]) -> str:
         # The contract first. Everything below reads its arguments with

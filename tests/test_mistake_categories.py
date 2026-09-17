@@ -143,7 +143,17 @@ def test_no_directory_is_an_empty_breakdown(tmp_path, monkeypatch):
 # ---- the banner line ----
 
 def _config(**learn_cfg):
+    """A pinned threshold, so these tests are about the BREAKDOWN text.
+
+    The banner now reads the same dynamic_mistake_threshold the gate fires on,
+    and that number scales with the size of train.jsonl — which is the real
+    one here, 882 rows on the box this was written on. Left scaling, every
+    assertion below would also be an assertion about how much training data
+    the machine running the suite happens to have. The scaling itself is
+    tested underneath, with the corpus passed in.
+    """
     return {"learn": {"enabled": True, "mistake_threshold": 5,
+                      "scale_threshold_with_corpus": False,
                       "auto_train": True, **learn_cfg}}
 
 
@@ -193,3 +203,46 @@ def test_a_disabled_loop_says_nothing_about_categories(mistakes):
     write_note(mistakes, "a", "tool_error")
 
     assert chat_ui.learn_progress_line(_config(enabled=False)) == "learn: off"
+
+
+# ---- the banner counts to the bar that actually fires ----
+
+def test_the_banner_follows_the_dynamic_threshold_not_the_config(mistakes):
+    """It read learn.mistake_threshold straight out of config while
+    maybe_train_on_mistakes decided on dynamic_mistake_threshold. On this
+    install that is 5 against 6: /status said "3/5 to next tune" and nothing
+    happened at 5, because the counter the user watches was not the counter
+    that fires."""
+    write_note(mistakes, "a", "tool_error")
+    config = {"learn": {"enabled": True, "mistake_threshold": 5,
+                        "auto_train": True}}
+
+    threshold = learn.dynamic_mistake_threshold(
+        config, severity_total=learn.pending_severity_total())
+    line = chat_ui.learn_progress_line(config)
+
+    assert line.startswith(f"1/{threshold} mistakes")
+
+
+def test_a_bigger_corpus_raises_the_bar_the_banner_shows(mistakes, monkeypatch):
+    """Dilution: five boosted notes are most of an epoch against 50 samples
+    and a few percent of one against 882."""
+    write_note(mistakes, "a", "tool_error")
+    config = {"learn": {"enabled": True, "mistake_threshold": 5,
+                        "auto_train": True}}
+
+    monkeypatch.setattr(learn, "_training_sample_count", lambda: 50)
+    small = chat_ui.learn_progress_line(config)
+    monkeypatch.setattr(learn, "_training_sample_count", lambda: 5000)
+    large = chat_ui.learn_progress_line(config)
+
+    assert small == "1/3 mistakes to next tune (1 tool_error)"
+    assert large == "1/10 mistakes to next tune (1 tool_error)"
+
+
+def test_switching_the_scaling_off_shows_the_configured_number(mistakes,
+                                                               monkeypatch):
+    write_note(mistakes, "a", "tool_error")
+    monkeypatch.setattr(learn, "_training_sample_count", lambda: 5000)
+
+    assert chat_ui.learn_progress_line(_config()).startswith("1/5 mistakes")

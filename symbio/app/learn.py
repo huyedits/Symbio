@@ -18,7 +18,7 @@ import math
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from symbio import constants, safety
 from symbio.app import belief, curriculum, memory, training
@@ -1312,10 +1312,13 @@ def pending_mistakes_are_all_automatic() -> bool:
     return True
 
 
-def archive_mistake_notes() -> int:
-    """Move all unarchived mistake notes into notes/mistakes/archive/."""
+def archive_mistake_notes(paths: Iterable[Path] | None = None) -> int:
+    """Archive selected notes, or all pending notes when no paths are given."""
     archived = 0
-    for f in constants.MISTAKES_DIR.glob("*.md"):
+    candidates = (constants.MISTAKES_DIR.glob("*.md")
+                  if paths is None else (Path(path) for path in paths))
+    constants.MISTAKES_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    for f in candidates:
         if not f.is_file():
             continue
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1339,31 +1342,40 @@ def digest_mistakes_to_training(tokenizer, system_prompt: str, boost: int = 1) -
 
     added = 0
     total_severity = 0
-    for f in files:
-        content = f.read_text(encoding="utf-8").strip()
-        if not content:
-            continue
-        original_query = ""
-        correct_answer = ""
-        severity = 1
-        for line in content.splitlines():
-            if line.startswith("**Original question:**"):
-                original_query = line.split("**Original question:**", 1)[1].strip()
-            elif line.startswith("**Correct answer:**"):
-                correct_answer = line.split("**Correct answer:**", 1)[1].strip()
-            elif line.startswith("**Severity:**"):
-                try:
-                    severity = max(1, int(line.split("**Severity:**", 1)[1].strip()))
-                except ValueError:
-                    pass
-        if not original_query or not correct_answer:
-            continue
-        for _ in range(max(1, boost) * severity):
-            training.append_chat_pair(original_query, correct_answer, tokenizer, system_prompt)
-        added += 1
-        total_severity += severity
+    processed: list[Path] = []
+    with training.corpus_append_transaction():
+        for f in files:
+            try:
+                content = f.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                continue
+            if not content:
+                continue
+            original_query = ""
+            correct_answer = ""
+            severity = 1
+            for line in content.splitlines():
+                if line.startswith("**Original question:**"):
+                    original_query = line.split("**Original question:**", 1)[1].strip()
+                elif line.startswith("**Correct answer:**"):
+                    correct_answer = line.split("**Correct answer:**", 1)[1].strip()
+                elif line.startswith("**Severity:**"):
+                    try:
+                        severity = max(1, int(line.split("**Severity:**", 1)[1].strip()))
+                    except ValueError:
+                        pass
+            if not original_query or not correct_answer:
+                continue
+            for _ in range(max(1, boost) * severity):
+                training.append_chat_pair(original_query, correct_answer, tokenizer, system_prompt)
+            added += 1
+            total_severity += severity
+            processed.append(f)
 
-    archive_mistake_notes()
+    # A malformed note remains pending and visible rather than being moved as
+    # if the model had learned it. Valid notes are archived only after the
+    # complete append transaction succeeds.
+    archive_mistake_notes(processed)
     return added, total_severity
 
 
@@ -1597,7 +1609,20 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
               f"training after {threshold - count} more.")
         return False
 
-    if (check_fn is not None
+    # Decided here, not after the work. With auto-train off this function used
+    # to run the golden battery, run the held-out eval battery, build a
+    # curriculum plan, digest the notes AND ARCHIVE THEM — and only then print
+    # "Auto-train is disabled" and return. Two full generation batteries spent
+    # on a turn that was never going to train, and the notes gone from
+    # notes/mistakes/ before the user got to /train on them.
+    #
+    # What is still owed with it off is the corpus: /train has to have the
+    # material waiting. So the cheap linear digest still runs; everything that
+    # exists only to shape or justify an automatic run does not.
+    auto_train = bool(learn_cfg.get("auto_train", True))
+
+    if (auto_train
+            and check_fn is not None
             and learn_cfg.get("mistake_pretrain_check", True)
             and pending_mistakes_are_all_automatic()):
         print(f"\n  [Learn] {count} mistake note(s) reached, all captured "
@@ -1644,7 +1669,10 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
     sample_weights = None
     digested = 0
     total_severity = 0
-    if eval_fn is not None and learn_cfg.get("curriculum_weighting", True):
+    # `auto_train and` first: the plan only ever feeds train_fn, and weights
+    # computed for a run that will not happen are weights thrown away.
+    if (auto_train and eval_fn is not None
+            and learn_cfg.get("curriculum_weighting", True)):
         try:
             eval_result = eval_fn()
         except Exception as e:
@@ -1671,8 +1699,9 @@ def maybe_train_on_mistakes(config: dict[str, Any], tokenizer, system_prompt: st
         print(f"  [Learn] Digested {digested} mistake note(s) "
               f"(boost={boost}, total severity={total_severity}).")
 
-    if not learn_cfg.get("auto_train", True):
-        print("  [Learn] Auto-train is disabled. Run /train to fine-tune now.")
+    if not auto_train:
+        print(f"  [Learn] Auto-train is disabled. {digested} note(s) are in the "
+              f"training data; run /train to fine-tune now.")
         return False
 
     base_iters = int(recipe["iters"])

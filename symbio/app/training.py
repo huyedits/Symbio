@@ -17,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import yaml
 
@@ -42,6 +42,7 @@ from symbio.app.tooling import (
 # Held for the whole lifetime of the child process, not just its spawn, so a
 # second caller waits for the first trainer to *exit* rather than joining it.
 TRAINER_LOCK = threading.Lock()
+CORPUS_LOCK = threading.RLock()
 
 def release_model() -> None:
     """Hand freed model memory back to the system immediately.
@@ -225,9 +226,33 @@ def append_training_text(text: str, role: str | None = None,
     record: dict[str, Any] = {"text": text}
     if messages:
         record["messages"] = messages
-    with open(train_file, "a", encoding="utf-8") as f:
-        json.dump(record, f)
-        f.write("\n")
+    with CORPUS_LOCK:
+        with open(train_file, "a", encoding="utf-8") as f:
+            json.dump(record, f)
+            f.write("\n")
+
+
+@contextlib.contextmanager
+def corpus_append_transaction(role: str | None = None):
+    """Make a batch of corpus appends all-or-nothing within this process.
+
+    Learning digests several notes in one pass. If rendering the fourth note
+    fails after the first three were written, retrying the batch would duplicate
+    those three samples while the notes remained pending. The lock also keeps a
+    background writer from being erased by the rollback.
+    """
+    path = _train_file_for(role)
+    with CORPUS_LOCK:
+        existed = path.exists()
+        before = path.read_bytes() if existed else b""
+        try:
+            yield
+        except BaseException:
+            if existed:
+                path.write_bytes(before)
+            else:
+                path.unlink(missing_ok=True)
+            raise
 
 # Whether prompts invite a real Qwen3 reasoning block. Training and serving
 # MUST use the same value: the corpus rendered with False contains only empty
@@ -1640,7 +1665,7 @@ def clean_training_duplicates(train_file: Path | None = None,
     """Deduplicate training samples by the assistant's stripped reply text.
 
     Some conversation patterns and digested notes get saved many times (e.g.
-    "Opening Chrome" or "Huy likes coffee."). Keeping the first `max_copies`
+    "Opening Chrome" or "Sam likes coffee."). Keeping the first `max_copies`
     occurrences prevents the adapter from overfitting to high-frequency noise.
     Returns (kept, dropped).
     """
@@ -1722,18 +1747,85 @@ def count_samples(role: str | None = None) -> int:
     return sum(1 for line in path.read_text(encoding="utf-8").splitlines()
                if line.strip())
 
+def _record_key(line: str) -> str:
+    """Canonical identity for one JSONL record, with a text fallback."""
+    try:
+        return json.dumps(json.loads(line), sort_keys=True, separators=(",", ":"))
+    except (TypeError, json.JSONDecodeError):
+        return line.strip()
+
+
 def ensure_validation_split(every_nth: int = 10, max_samples: int = 24,
-                            role: str | None = None):
-    """mlx_lm silently skips evaluation when valid.jsonl is missing, which
-    makes steps_per_eval meaningless. Sample a small validation set from the
-    training data so eval loss is always reported."""
+                            role: str | None = None,
+                            sample_weights: list[float] | None = None
+                            ) -> list[float] | None:
+    """Ensure validation rows are real held-out rows, never train duplicates.
+
+    The old implementation copied rows into ``valid.jsonl`` and left the same
+    rows in training. Validation loss then measured memorisation and early
+    stopping selected checkpoints using data the optimizer had already seen.
+    Existing validation rows are retained and removed from training; a missing
+    split is sampled deterministically and removed from training as well.
+
+    When a weighted run supplies one weight per training row, the returned list
+    follows the rows that remain after the split. This keeps curriculum weights
+    attached to their original examples instead of shifting them by index.
+    """
     train_file = _train_file_for(role)
     valid_file = _valid_file_for(role)
+    if not train_file.exists():
+        valid_file.parent.mkdir(parents=True, exist_ok=True)
+        if not valid_file.exists():
+            valid_file.write_text("", encoding="utf-8")
+        return [] if sample_weights is not None else None
+
+    train_lines = [line for line in train_file.read_text(encoding="utf-8").splitlines()
+                   if line.strip()]
+    weights = list(sample_weights) if sample_weights is not None else None
+    if weights is not None and len(weights) != len(train_lines):
+        raise ValueError(
+            f"sample_weights has {len(weights)} entries for {len(train_lines)} "
+            "training rows before validation splitting")
+
+    valid_lines = []
     if valid_file.exists() and valid_file.stat().st_size > 0:
-        return
-    lines = [l for l in train_file.read_text(encoding="utf-8").splitlines() if l.strip()]
-    sample = lines[::every_nth][:max_samples] or lines[:1]
-    valid_file.write_text("\n".join(sample) + "\n", encoding="utf-8")
+        valid_lines = [line for line in valid_file.read_text(encoding="utf-8").splitlines()
+                       if line.strip()]
+
+    if valid_lines:
+        held_out = {_record_key(line) for line in valid_lines}
+        keep_indices = [i for i, line in enumerate(train_lines)
+                        if _record_key(line) not in held_out]
+        # A clean pre-existing split is left byte-stable. If rows overlap, the
+        # validation file is the source of truth and duplicate training rows
+        # are removed before the trainer sees them.
+        if len(keep_indices) != len(train_lines):
+            train_file.write_text("\n".join(train_lines[i] for i in keep_indices) +
+                                  ("\n" if keep_indices else ""), encoding="utf-8")
+        return ([weights[i] for i in keep_indices] if weights is not None else None)
+
+    # A one-row corpus cannot provide a held-out measurement without training
+    # on the validation row too. Leave validation empty and let the caller
+    # report that evaluation is unavailable rather than fabricating confidence.
+    if len(train_lines) < 2:
+        valid_file.parent.mkdir(parents=True, exist_ok=True)
+        valid_file.write_text("", encoding="utf-8")
+        return weights
+
+    selected_indices = list(range(0, len(train_lines), max(1, every_nth)))[:max_samples]
+    if not selected_indices:
+        selected_indices = [len(train_lines) - 1]
+    selected_keys = {_record_key(train_lines[i]) for i in selected_indices}
+    # Remove every duplicate of a held-out record; otherwise an exact duplicate
+    # would remain in train and invalidate the split just as surely.
+    keep_indices = [i for i, line in enumerate(train_lines)
+                    if _record_key(line) not in selected_keys]
+    valid_lines = [train_lines[i] for i in selected_indices]
+    valid_file.parent.mkdir(parents=True, exist_ok=True)
+    valid_file.write_text("\n".join(valid_lines) + "\n", encoding="utf-8")
+    train_file.write_text("\n".join(train_lines[i] for i in keep_indices) +
+                          ("\n" if keep_indices else ""), encoding="utf-8")
+    return ([weights[i] for i in keep_indices] if weights is not None else None)
 
 def checkpoint_step(checkpoint: Path) -> int:
     """The training iteration a checkpoint filename encodes."""
@@ -1851,7 +1943,7 @@ def weighted_corpus(train_file: Path, weights: list[float] | None):
             # Floored at one. A weight of zero would drop a sample from the run
             # entirely, and weighting must never be able to delete a lesson --
             # curriculum.plan holds the same rule upstream.
-            expanded.extend([line] * max(1, int(round(float(weight)))))
+            expanded.extend([line] * _weight_copies(weight))
         train_file.write_text("\n".join(expanded) + "\n", encoding="utf-8")
         print(f"  [Train] Weighted corpus: {len(lines)} sample(s) -> "
               f"{len(expanded)} line(s) for this run.")
@@ -1879,12 +1971,24 @@ def scaled_weighted_iters(config: dict[str, Any], base_iters: int | None,
     """
     if base_iters is None:
         return None
-    stretch = (sum(max(1, int(round(float(w)))) for w in weights)
+    stretch = (sum(_weight_copies(w) for w in weights)
                / max(1, len(weights)))
     scaled = math.ceil(base_iters * stretch)
     cap = max(base_iters, int(config.get("learn", {}).get(
         "max_batch_train_iters", 100)))
     return min(cap, scaled)
+
+
+def _weight_copies(weight: float) -> int:
+    """Convert one curriculum weight to a safe integer repeat count."""
+    try:
+        value = float(weight)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid sample weight {weight!r}") from exc
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(
+            f"sample weights must be finite and non-negative: {weight!r}")
+    return max(1, int(round(value)))
 
 
 def run_training(config: dict[str, Any], iters: int | None = None,
@@ -1909,7 +2013,8 @@ def run_training(config: dict[str, Any], iters: int | None = None,
     """
     if sample_weights is None:
         return _run_training(config, iters, role, model_name, resume)
-    ensure_validation_split(role=role)
+    sample_weights = ensure_validation_split(
+        role=role, sample_weights=sample_weights)
     if iters is not None:
         scaled = scaled_weighted_iters(config, iters, sample_weights)
         if scaled != iters:

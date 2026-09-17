@@ -296,7 +296,7 @@ def test_reaching_the_general_tool_passes():
     """No tool is named after "what is my name", and recall answers it."""
     case = next(c for c in tool_eval.RESILIENCE_CASES if c.id == "recall_name")
     report = run('<tool_call>{"name": "recall", "arguments": {"query": "my name"}}</tool_call>',
-                 "Your name is Huy.", case=case)
+                 "Your name is Sam.", case=case)
     assert report["passed"] == 1
 
 
@@ -304,6 +304,6 @@ def test_grepping_the_notes_is_scored_as_the_pass_it_is():
     """The failure being measured is calling NOTHING. A shell that reads the
     same file is a different route to the same honest answer."""
     case = next(c for c in tool_eval.RESILIENCE_CASES if c.id == "recall_name")
-    report = run("<cmd>grep -ril name notes/</cmd>", "Your name is Huy.",
+    report = run("<cmd>grep -ril name notes/</cmd>", "Your name is Sam.",
                  case=case)
     assert report["passed"] == 1
