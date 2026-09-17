@@ -648,6 +648,72 @@ samples.
 the compute, 23 of the 25.7 minutes — changed nothing. Training cost 1.5s per
 iteration at 8.4 GB peak.
 
+## The same loop on a harder battery: 16/19, and it wobbles
+
+`aws_sim/curve.json` holds a later run against **19 held-out tasks** rather
+than 13 — the six extra are chained, multi-command ones. Same model, same
+self-earned loop (481 attempts, **82 kept**: a sample is earned only when the
+simulator's world changed the way the task asked, so 17% of tries paid). 14
+checkpoints, every 20 iterations:
+
+| iter | 0 | 20 | 40 | 60 | 80 | 100 | 120 | 140 | 160 | 180 | **200** | 220 | 240 | 260 |
+| ---- | -: | -: | -: | -: | -: | --: | --: | --: | --: | --: | ------: | --: | --: | --: |
+| score | 0 | 6 | 6 | 7 | 13 | 12 | 11 | 15 | 8 | 13 | **16** | 13 | 13 | 16 |
+
+**Peak 16/19 at iteration 200, and the curve is not monotone**: 15 at 140, then
+**8 at 160**, then 16 at 200. A single checkpoint is not a measurement here.
+The 13/13 above is real and reproducible on the 13-verb battery; it does not
+survive being restated as "the model learned the CLI".
+
+### What is left at the peak is not syntax
+
+Reading what the best checkpoint actually emitted, rather than its score:
+
+| task | emitted at iter 200 | exit |
+| ---- | ------------------- | ---: |
+| `filter_nodes` | `compute list-nodes --region eu-2 --where tag/Env:prodd` | **0** |
+| `new_identity` | `access new-identity --region eu-2 --identity-name deployment-bot` | 1 |
+| `chain_three_step` | three commands, last one `--to-container nightly --to-path run.log` | **0** |
+
+Two of the three **succeed at the command line and still fail the task**. The
+grammar is learned: `--where tag/<Key>:<Value>` is exactly right, and `prodd`
+is a doubled character in the value. `chain_three_step` emits all three
+commands cleanly and copies into the wrong container — the task names two
+(`nightly`, `archive`) and the second one is dropped.
+
+`new_identity` looks like the one honest option error, and it is not.
+`--identity-name` is `--identity` with `-name` appended, and the environment
+answers it with `Options for 'new-identity': --identity, --region` every one of
+the eight times it appears. On the two checkpoints where the option is right
+(80, 120) the run still fails, because the value comes out as
+`name:deployment-bot` — the option's own name, glued to the front of its
+argument. It passed exactly once, at iteration 140.
+
+`filter_nodes` **never passed once in 14 checkpoints**, and what it emitted
+says why. The value it needs is `prod`. Across the nine checkpoints from 100
+on, it wrote `prodd` five times, `producers` three times, and once
+`proddumps/db.dump` — every one of them `prod` followed by characters that
+should not be there. It is not guessing the wrong value; it cannot stop
+emitting the right one. Eight of those nine exit 0 with correct grammar; the
+ninth is iteration 160, where the value ran on into an unrelated path and broke
+the syntax as well — the same checkpoint where the whole score collapsed to
+8/19.
+
+Put beside each other, the residual failures are one failure. `prod` becomes
+`prodd`. `--identity` becomes `--identity-name`. `deployment-bot` becomes
+`name:deployment-bot`. In every case the correct token is emitted and then not
+stopped — this is not a model that has learned the wrong thing, it is a model
+that cannot end a string. Same shape as the emitter bug that lost a 15-round
+crypto task to a variable whose name had a character dropped: the reasoning was
+right and the emission was not.
+
+That matters for what to do next, because it is the one failure more training
+data cannot reach. The flat `13/13 ×43` tail above and this run's wobble are
+both saying the same thing from opposite ends — the knowledge arrived early,
+and the iterations after it are spent on something that is not knowledge.
+Sampling (`repetition_penalty`, the stop conditions) and `lora.scale` are where
+this lives, and none of it is measured yet.
+
 ## The ceiling is what it DISCOVERED, not how long it trained
 
 Three runs, same model, same loop. Only the environment changed:
