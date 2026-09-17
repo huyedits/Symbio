@@ -78,6 +78,13 @@ class _StubPage:
     def evaluate(self, script, arg=None):
         if self._raises:
             raise RuntimeError("page closed")
+        if "'missing'" in script:
+            # _selector_state answers in words, not a bool: "holds",
+            # "differs", "missing", "unknown". A fake that still returns True
+            # here is a fake that has stopped mirroring the thing it stands in
+            # for — which is how this file passed while fill_form reported a
+            # filled form on a page with no inputs at all.
+            return "holds" if self._landed else "differs"
         return self._landed
 
     @property
@@ -252,6 +259,8 @@ class _KeyPage(_StubPage):
     def evaluate(self, script, arg=None):
         if self._raises:
             raise RuntimeError("page closed")
+        if "'missing'" in script:
+            return "holds" if self._landed else "differs"
         # Four scripts reach this now and two of them take no argument, so
         # dispatching on `arg is not None` alone silently answered the
         # pre-type focus check with the Enter-submitted flag. Read the script.
@@ -466,6 +475,13 @@ class _FillPage:
     def evaluate(self, script, arg=None):
         if self.raises:
             raise RuntimeError("page closed")
+        if "'missing'" in script:
+            # _selector_state speaks in words. `present` is whether the field
+            # is on the page at all; `keeps` is whether it still holds what
+            # was put in it — two different answers that used to be one bool.
+            if not self.present:
+                return "missing"
+            return "holds" if self.keeps else "differs"
         return self.keeps
 
 
@@ -1220,10 +1236,16 @@ class _FormPage:
         return object() if selector not in self.refuse else None
 
     def evaluate(self, script, arg=None):
-        # _SELECTOR_HOLDS_JS is given (selector, text).
+        # _selector_state is given (selector, text) and answers in words. The
+        # distinction this fake now has to make is the one the real page makes:
+        # a field that is ABSENT is not a field whose value merely differs, and
+        # conflating them is what let fill_form report a filled form on a
+        # logged-out page with no inputs on it at all.
         if isinstance(arg, (list, tuple)) and len(arg) == 2:
             selector, text = arg
-            return text in self.values.get(selector, "")
+            if self.query_selector(selector) is None:
+                return "missing"
+            return "holds" if text in self.values.get(selector, "") else "differs"
         return False
 
 

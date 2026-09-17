@@ -137,9 +137,14 @@ def _confirm_domain(domain: str, ask_fn=None) -> bool:
 class BrowserSession:
     """Manages a single Playwright browser/page session."""
 
+    # The one Playwright driver this process gets. See _init.
+    _driver: Any | None = None
+
     def __init__(self, confirm_fn=None, profile_dir=None, chrome_profile=None,
                  allowed_domains=None):
         self._playwright: Any | None = None
+        # Set on first use; see _init. Shared because the Playwright sync
+        # driver is a per-process thing however many sessions want one.
         self._browser: Any | None = None
         self._page: Any | None = None
         self._confirmed: set[str] = set(_DEFAULT_ALLOWLIST) | set(allowed_domains or [])
@@ -195,8 +200,24 @@ class BrowserSession:
         from playwright.sync_api import sync_playwright
 
         if self._playwright is None:
-            self._playwright = sync_playwright().start()
-            self._register_exit_cleanup()
+            # Process-wide, not per-instance. close() deliberately keeps the
+            # driver running so reopening is fast, but it kept it on the
+            # INSTANCE — so a second BrowserSession in the same process started
+            # a second sync driver beside the first and Playwright refused it:
+            #
+            #   Browser open error: It looks like you are using Playwright Sync
+            #   API inside the asyncio loop.
+            #
+            # After that the session has no page at all, and every browser tool
+            # answers "Browser is not open. Load the target URL first" — to a
+            # model that just loaded the URL. Reproduced by opening a page,
+            # closing it, and opening another: the second session was dead on
+            # arrival, which is the shape of a browser task that needs more
+            # than one visit.
+            if BrowserSession._driver is None:
+                BrowserSession._driver = sync_playwright().start()
+                self._register_exit_cleanup()
+            self._playwright = BrowserSession._driver
         # Prefer Google Chrome when available; fall back to bundled Chromium.
         # A specific channel request overrides the stored default.
         preferred = channel or self._channel or "chrome"
@@ -682,27 +703,46 @@ class BrowserSession:
             return True
 
     @staticmethod
-    def _selector_holds(page: Any, selector: str, text: str) -> bool:
-        """Does the element `selector` names actually contain `text` now?
+    def _selector_state(page: Any, selector: str, text: str) -> str:
+        """"holds", "differs", "missing", or "unknown" for what cannot be read.
 
         Best-effort in the same direction as every other check here: anything
-        it cannot answer counts as landed, so a verification that will not run
+        it cannot ANSWER counts as landed, so a verification that will not run
         never fails a type that worked. querySelector does not speak XPath, so
-        an XPath target raises and passes — which is the honest outcome, since
-        this cannot see it either way.
+        an XPath target is "unknown" — the honest outcome, since this cannot
+        see it either way.
+
+        What is NOT unknown is an element that is simply not there. `!el` used
+        to return true along with the unanswerable cases, and that is a
+        different claim: the selector was read, the document was searched, and
+        nothing matched. Driven against a logged-out Hacker News — a page whose
+        entire body is "You have to be logged in to submit." and which contains
+        zero <input> elements — fill_form answered "Filled 1/1 ... every field
+        was read back and holds its value". A false report on the one failure
+        that matters, in the shape of the click that reported a tweet it had
+        not sent.
         """
         try:
-            return bool(page.evaluate(
+            verdict = page.evaluate(
                 """([sel, t]) => {
-                    const el = document.querySelector(sel);
-                    if (!el) return true;
+                    let el;
+                    try { el = document.querySelector(sel); }
+                    catch (e) { return 'unknown'; }
+                    if (!el) return 'missing';
                     const v = el.value !== undefined && el.value !== null
                         ? el.value : el.innerText;
-                    return typeof v === 'string' ? v.includes(t) : true;
+                    if (typeof v !== 'string') return 'unknown';
+                    return v.includes(t) ? 'holds' : 'differs';
                 }""",
-                [selector, text]))
+                [selector, text])
         except Exception:
-            return True
+            return "unknown"
+        return str(verdict)
+
+    @classmethod
+    def _selector_holds(cls, page: Any, selector: str, text: str) -> bool:
+        """Whether the value may be reported as landed."""
+        return cls._selector_state(page, selector, text) in ("holds", "unknown")
 
     @staticmethod
     def _text_landed(page: Any, text: str) -> bool:
@@ -1050,8 +1090,15 @@ class BrowserSession:
             except Exception as e:
                 missed.append(f"{sel} ({_short_error(e)})")
                 continue
-            if self._selector_holds(page, sel, value):
+            state = self._selector_state(page, sel, value)
+            if state in ("holds", "unknown"):
                 done.append(sel)
+            elif state == "missing":
+                # Naming which of the two it is decides what the model does
+                # next: a field that is absent means the form is not on this
+                # page — a login wall, the wrong URL, a page that has not
+                # rendered — and re-typing into it will never work.
+                missed.append(f"{sel} (no element on this page matches it)")
             else:
                 missed.append(f"{sel} (the value is not in the field)")
         parts = []
