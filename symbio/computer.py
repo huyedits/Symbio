@@ -25,7 +25,14 @@ from typing import Any
 
 from symbio.constants import SCREENSHOTS_DIR
 
-SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Same reason constants.py swallows its own: an unwritable workspace — a
+    # bad SYMBIO_HOME, a read-only install — must not make `symb --help`
+    # raise. Whatever needs this directory reports that itself, at the point
+    # where it would have used it.
+    pass
 
 # Domains that do not require per-session confirmation.
 _DEFAULT_ALLOWLIST: frozenset[str] = frozenset({

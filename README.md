@@ -216,11 +216,39 @@ The default 8B-class (or others - check the wizard) configuration is much more c
 
 ## Install
 
+Two ways, and you only need the repository for one of them.
+
+### Just run it
+
 ```bash
-cd symbio
+pip install "symbio-cli[mlx]"
+symb setup          # names, model, first-run checks
+symb chat
+```
+
+Nothing is written into your Python environment. Everything this install
+keeps — notes, adapters, training data, sessions, `config.json`, `prompt.md` —
+lives in a workspace at **`~/.symbio`**, and `SYMBIO_HOME` points it somewhere
+else if you would rather. Upgrading the package does not touch it; you can
+delete the virtualenv and the agent still remembers everything.
+
+The `[mlx]` extra is the inference and training engine. It is macOS/Apple
+Silicon only and deliberately optional, because `mlx` publishes no sdist and a
+hard dependency would make `pip install` fail during resolution on Linux
+before anyone saw an explanation.
+
+### Work on it
+
+```bash
 git clone https://github.com/huyedits/Symbio
+cd Symbio
 ./install.sh
 ```
+
+A checkout is its own workspace: run from a clone and the agent uses the clone,
+which is what you want while editing it. You need the repository for this and
+not for the above — the tests, the benchmark harness, the desktop app sources
+and the installer script are all development things.
 
 The installer:
 

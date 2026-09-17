@@ -99,6 +99,13 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["symbio*", "symbio_desktop*"]
 
+# The shipped defaults. A wheel contains python packages and nothing else, so
+# models.json, the prompt default and the security default — all three of which
+# live at the repository root — were simply absent from every pip install.
+[tool.setuptools.package-data]
+symbio = ["defaults/*"]
+symbio_desktop = ["static/*"]
+
 [tool.pytest.ini_options]
 # Only test_*.py, NOT pytest's default "*_test.py" as well.
 #

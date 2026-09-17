@@ -1,9 +1,41 @@
 """Shared constants and default configuration for Symbio."""
 
+import os
 from pathlib import Path
 from typing import Any
 
-PROJECT_DIR = Path(__file__).parent.parent.resolve()
+
+def _default_project_dir() -> Path:
+    """Where this install keeps everything it writes.
+
+    This used to be `Path(__file__).parent.parent`, which is the repository
+    root when you are running from a clone and **site-packages** when you are
+    not. So `pip install symbio-cli` produced an agent that created notes/,
+    adapters/, training_data/, logs/, sessions/, config.json and prompt.md
+    inside site-packages: scattered across virtualenvs, destroyed by an
+    upgrade, and simply unwritable on a system Python. The package installed
+    fine and there was nowhere for the user's data to live.
+
+    Three answers, in order:
+
+    1. SYMBIO_HOME, for anyone who wants their workspace somewhere specific,
+       or who runs two of them.
+    2. The checkout, when the package sits in one — a directory holding both
+       pyproject.toml and symbio/. This is what `pip install -e .` and
+       ./install.sh produce, and it is why an existing clone keeps every path
+       it already had.
+    3. ~/.symbio, for a real install.
+    """
+    env = os.environ.get("SYMBIO_HOME", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    parent = Path(__file__).parent.parent.resolve()
+    if (parent / "pyproject.toml").is_file() and (parent / "symbio").is_dir():
+        return parent
+    return Path.home() / ".symbio"
+
+
+PROJECT_DIR = _default_project_dir()
 LOG_DIR = PROJECT_DIR / "logs"
 DATA_DIR = PROJECT_DIR / "training_data"
 TRAIN_FILE = DATA_DIR / "train.jsonl"
@@ -15,7 +47,16 @@ ADAPTER_DIR = PROJECT_DIR / "adapters"
 # treats ADAPTER_DIR's contents as disposable/local-only.
 WORKER_ADAPTERS_DIR = ADAPTER_DIR / "workers"
 ADAPTER_ARCHIVE_DIR = PROJECT_DIR / "adapters_archive"
-WORKER_MODELS_FILE = PROJECT_DIR / "symbio" / "app" / "worker_models.json"
+# The roster this install actually has. It lived inside the package while it
+# was committed; now that it is seeded from worker_defaults.py it belongs with
+# the rest of the writable state — a wheel's package directory is the wrong
+# place to write a file, and on a system Python it is not even writable. An
+# install that already has one in the old location keeps using it, because
+# moving somebody's 21 saved skills to prove a point is not an upgrade.
+_LEGACY_WORKER_MODELS_FILE = PROJECT_DIR / "symbio" / "app" / "worker_models.json"
+WORKER_MODELS_FILE = (_LEGACY_WORKER_MODELS_FILE
+                      if _LEGACY_WORKER_MODELS_FILE.is_file()
+                      else PROJECT_DIR / "worker_models.json")
 NOTES_DIR = PROJECT_DIR / "notes"
 # Bare hierarchical tag index for notes RAG. Stores only metadata + line ranges.
 TAG_INDEX_DB = NOTES_DIR / "tags.db"
@@ -37,7 +78,24 @@ SANDBOX_DIR = PROJECT_DIR / "sandbox"
 SCREENSHOTS_DIR = PROJECT_DIR / "screenshots"
 DIGEST_MANIFEST = DATA_DIR / "digest_manifest.json"
 CONFIG_FILE = PROJECT_DIR / "config.json"
-MODELS_FILE = PROJECT_DIR / "models.json"
+# Files the package ships so a wheel install has them: the workspace copy
+# wins when there is one (this is how an existing checkout keeps its edits),
+# and otherwise the packaged default is read straight out of site-packages.
+# Without this, `pip install symbio-cli` produced an install with no
+# models.json, no prompt default and no security default, because all three
+# live at the repository root and a wheel contains only python packages.
+PACKAGED_DEFAULTS_DIR = Path(__file__).parent / "defaults"
+
+
+def _workspace_or_packaged(name: str, packaged: str) -> Path:
+    """The workspace's copy of a shipped file, or the one inside the package."""
+    local = PROJECT_DIR / name
+    if local.is_file():
+        return local
+    return PACKAGED_DEFAULTS_DIR / packaged
+
+
+MODELS_FILE = _workspace_or_packaged("models.json", "models.json")
 GATEWAY_PID_FILE = PROJECT_DIR / "gateway.pid"
 # Resident-model daemon: keeps the headmaster loaded between `symb chat`
 # sessions so the 30s weight load is paid once, not every session. The socket
@@ -78,12 +136,13 @@ STANDING_FILE = PROJECT_DIR / "standing_instructions.md"
 SESSIONS_DIR = PROJECT_DIR / "sessions"
 # Snapshot of the last shipped default prompt; used to auto-update prompt.md
 # when the user has not customized it.
-PROMPT_DEFAULT_FILE = PROJECT_DIR / "prompt.md.default"
+PROMPT_DEFAULT_FILE = _workspace_or_packaged("prompt.md.default", "prompt.md")
 # The security policy: the instruction-hierarchy rules, kept in their own file
 # so nothing the assistant can reach at runtime is able to rewrite them. Read
 # first and placed at the top of every system prompt. See symbio.app.security.
 SECURITY_FILE = PROJECT_DIR / "security.md"
-SECURITY_DEFAULT_FILE = PROJECT_DIR / "security.md.default"
+SECURITY_DEFAULT_FILE = _workspace_or_packaged("security.md.default",
+                                               "security.md")
 GOLDEN_CASES_FILE = PROJECT_DIR / "golden_cases.json"
 # Warmed KV cache for the system+tools prefix, reused across restarts. Its own
 # directory rather than adapters/: it is large (hundreds of MB) and would
@@ -108,7 +167,13 @@ for d in (
     SCREENSHOTS_DIR,
     SESSIONS_DIR,
 ):
-    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # A read-only or unwritable workspace must not stop the import. The
+        # commands that need each directory say so when they cannot use it;
+        # failing here would make `symb --help` raise on a bad SYMBIO_HOME.
+        pass
 
 
 def adapter_archive_dir_for(role: str | None = None) -> Path:
