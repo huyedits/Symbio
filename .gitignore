@@ -252,3 +252,18 @@ build/
 # desktop app's own static files, which are served from symbio_desktop/static.
 /package.json
 /package-lock.json
+
+# Benchmark and probe OUTPUT. bench/*.py is the harness and belongs here; the
+# result files are one machine's runs — 34 of them, 824 KB, referenced by no
+# code and no doc, and nothing a fresh install can use. Anyone can regenerate
+# them with the harness. The measured numbers that matter are quoted in the
+# README, where they are read rather than parsed.
+/bench/*.json
+
+# This install's worker roster. The three built-in workers live in
+# symbio/app/worker_defaults.py and are seeded here on first use; every skill
+# the user saves is then written into the same file. The committed copy had
+# grown 21 of one person's skills, so a fresh install advertised specialists
+# whose adapters did not exist on it — and the roster goes into the system
+# prompt, so the model believed it had them.
+/symbio/app/worker_models.json
