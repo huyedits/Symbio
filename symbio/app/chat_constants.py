@@ -75,17 +75,41 @@ _MAX_RATE_LIMIT_RETRIES = 4
 # turn reads to the user as the CLI having hung.
 _MAX_RATE_LIMIT_WAIT = 5.0
 
-# Tools that require explicit approval when running from a non-terminal
-# front-end (e.g. Telegram) because they mutate state or run user-supplied code.
-_TELEGRAM_CONFIRM_TOOLS = frozenset({
-    "execute_code", "run_command", "edit_file", "write_file", "digest_notes", "train_adapter",
-    "save_command", "realign",
-    "schedule_job", "config_set", "delete_cron_job", "update_cron_job",
-    "delete_note", "submit_form", "post_to_x",
-    # Driving the machine from a chat app on a phone: the window that receives
-    # this is not in front of whoever is sending it.
+# Tools that ask before they run, whoever is asking and however safe the call
+# scores. Not "mutating" — the risk scorer already reads mutation, and reads it
+# per call rather than per name. These are the actions whose cost does not
+# depend on the arguments: they reach outside the machine, they rewrite what
+# the assistant is, or they schedule something to happen when nobody is
+# watching. There is no version of `post_to_x` that is fine unasked.
+_ALWAYS_CONFIRM_TOOLS = frozenset({
+    "post_to_x", "submit_form",
+    "train_adapter", "digest_notes", "realign",
+    "config_set",
+    "schedule_job", "delete_cron_job", "update_cron_job",
+    "delete_note",
+})
+
+# Tools that ask by NAME only when the person is somewhere else. Driving the
+# machine from a chat app on a phone is the case the blanket gate was written
+# for: the window that receives a click is not in front of whoever sent it, so
+# "click at 400,300" cannot be judged by the sender and has to be confirmed.
+#
+# In front of the machine that is not true, and the blanket gate was the whole
+# of "why does it ask permission to run `ls`". Measured on this box: `df -h`
+# scores 0/3 and `ls notes` scores 0/3, and both stopped for approval anyway,
+# because the gate never consulted the score. Every session on 2026-09-16 that
+# asked something ordinary — free disk space, the Python version, how many
+# notes there are — died on that prompt. Locally these fall through to the
+# risk scorer, which still asks for `rm -rf /` (3/3), a path escape (3/3) and a
+# sensitive file (3/3); it just stops asking for `ls`.
+_LOCAL_TRUSTED_TOOLS = frozenset({
+    "run_command", "execute_code",
+    "edit_file", "write_file", "save_command",
     "desktop_click", "desktop_type", "desktop_press", "desktop_drag", "open_app",
 })
+
+# The union, under its old name: what a remote front-end still gates by name.
+_TELEGRAM_CONFIRM_TOOLS = _ALWAYS_CONFIRM_TOOLS | _LOCAL_TRUSTED_TOOLS
 
 # Map internal tool names back to Hermes-style names for <tool_response> labels.
 _INTERNAL_TO_HERMES_NAME: dict[str, str] = {

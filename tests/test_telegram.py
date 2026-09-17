@@ -141,7 +141,13 @@ def test_config_show_redacts_telegram_token(base_config):
 
 
 def test_chat_session_telegram_confirmation_prompts(base_config):
-    """Tools in _TELEGRAM_CONFIRM_TOOLS ask for approval when confirm_fn is set."""
+    """Tools in _TELEGRAM_CONFIRM_TOOLS ask for approval on a session whose
+    person is somewhere else — which is what the gateway builds.
+
+    The policy is what decides now, not the presence of a confirm_fn: the
+    daemon supplies one too, and it serves the desktop window and the local
+    terminal, where asking to run `ls` is the behaviour that made the harness
+    feel dead. See tests/test_confirm_policy.py."""
     calls = []
 
     def fake_confirm(prompt):
@@ -152,6 +158,7 @@ def test_chat_session_telegram_confirmation_prompts(base_config):
     session = ChatSession.__new__(ChatSession)
     session.confirm_fn = fake_confirm
     session.config = base_config
+    session._confirm_policy = "name"
 
     result = session._execute_tool("execute_code", {"code": "print(1+1)"})
     assert len(calls) == 1
@@ -168,6 +175,24 @@ def test_chat_session_telegram_confirmation_prompts(base_config):
     assert len(calls) == 3
     assert "notes" in calls[2]
     assert "not approved" in result
+
+
+def test_the_same_session_in_front_of_the_machine_asks_far_less(base_config):
+    """The other half of the split, pinned beside the gateway's own case so
+    the two cannot drift apart unnoticed. digest_notes still asks: it rewrites
+    the corpus the next fine-tune reads, and that costs the same wherever the
+    person is standing."""
+    calls = []
+    session = ChatSession.__new__(ChatSession)
+    session.confirm_fn = lambda prompt: calls.append(prompt) or True
+    session.config = base_config
+    session._confirm_policy = "risk"
+
+    session._execute_tool("execute_code", {"code": "print(1+1)"})
+    assert calls == []
+
+    session._execute_tool("digest_notes", {})
+    assert len(calls) == 1
 
 
 def test_tools_menu_defaults(base_config):
