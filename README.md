@@ -1237,6 +1237,30 @@ symbio gateway status        # Check Telegram
 symbio gateway start         # Start Telegram
 symbio gateway stop          # Stop Telegram
 ```
+
+### Terminal interface
+
+Interactive chat uses a compact, Hermes / Claude Code-inspired layout: a warm
+welcome panel with the model and workspace, a clearly separated input line,
+and grouped tool calls/results. It stays in normal terminal scrollback rather
+than taking over the screen, so copying output and scrolling still work.
+
+* **Enter** sends; **Tab** completes slash commands in both local and daemon chat.
+* **`/`** opens the full command menu; **`/status`** shows detailed session state.
+* **`/quit`** exits. Existing readline editing and history keys are unchanged.
+* Narrow windows get a smaller layout; `NO_COLOR=1` or `TERM=dumb` retains the
+  plain-text interface. Piped output and non-terminal front ends stay plain.
+
+Preview the layout without loading a model, reading credentials, or running tools:
+
+```bash
+python symbio/app/chat_style.py --demo
+python symbio/app/chat_style.py --demo --width 48 --no-color
+```
+
+Restart a running resident daemon with `symbio daemon stop` followed by
+`symbio daemon start` to pick up the new welcome-panel metadata.
+
 ---
 
 # Slash commands

@@ -1,4 +1,4 @@
-"""Terminal presentation for the chat loop: the spinner, the rainbow banner,
+"""Terminal presentation for the chat loop: the spinner, the welcome banner,
 adapter/learning status lines, the per-session log handler, and the health
 report writer.
 
@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Any
 
 from symbio import constants
-from symbio.app import learn
+from symbio.app import chat_style, learn
 
 
 def _persist_health_report(session_id: str, report: dict[str, Any]):
@@ -169,7 +169,7 @@ class _Spinner:
     prints nothing for tens of seconds reads as a hang.
     """
 
-    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏67"
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
     def __init__(self, label: str = "thinking…"):
         self.label = label
@@ -177,7 +177,8 @@ class _Spinner:
         self._thread: threading.Thread | None = None
         # A sink means somebody downstream has a terminal even though this
         # process does not.
-        self.active = bool(_status_sink) or sys.stdout.isatty()
+        self.active = bool(_status_sink) or (
+            sys.stdout.isatty() and os.environ.get("TERM") != "dumb")
         self._start_time: float | None = None
         self._gen_tokens = 0
         self._lock = threading.Lock()
@@ -211,15 +212,16 @@ class _Spinner:
                 frame = self._FRAMES[i % len(self._FRAMES)]
                 with self._lock:
                     gen_tokens = self._gen_tokens
+                    current_label = self.label
                 tok_info = f" | generated {gen_tokens} tokens" if gen_tokens else ""
                 if elapsed >= 5:
-                    label = f"{self.label} ({int(elapsed)}s){tok_info}"
+                    label = f"{current_label} ({int(elapsed)}s){tok_info}"
                 else:
-                    label = f"{self.label}{tok_info}"
+                    label = f"{current_label}{tok_info}"
                 if _status_sink is not None:
                     _status_sink(f"{frame} {label}")
                 else:
-                    sys.stdout.write(f"\r{frame} {label}")
+                    sys.stdout.write("\r\033[K" + chat_style.status_frame(f"{frame} {label}"))
                     sys.stdout.flush()
                 i += 1
 
@@ -285,7 +287,14 @@ def learn_progress_line(config: dict[str, Any]) -> str:
     learn_cfg = config.get("learn", {}) or {}
     if not learn_cfg.get("enabled", True):
         return "learn: off"
-    threshold = max(1, int(learn_cfg.get("mistake_threshold", 5)))
+    # The same number the gate actually uses. This line read
+    # learn.mistake_threshold straight out of config while
+    # maybe_train_on_mistakes decided on dynamic_mistake_threshold, which
+    # scales with corpus size and mean severity — so /status said "3/5 to next
+    # tune" on an install whose real bar was 6, and the counter the user
+    # watches disagreed with the counter that fires.
+    threshold = max(1, int(learn.dynamic_mistake_threshold(
+        config, severity_total=learn.pending_severity_total())))
     count = learn.mistake_note_count()
     suffix = "" if learn_cfg.get("auto_train", True) else " (auto-train off)"
     # Name which kinds of mistake are stacking up, so the counter says what the
@@ -323,16 +332,45 @@ def adapter_status_value(config: dict[str, Any], adapter_loaded: bool) -> str:
     return f"loaded{detail} · {progress}"
 
 
-def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int,
-                 output_fn=print):
+def banner_data(config: dict[str, Any], adapter_loaded: bool,
+                dataset_size: int) -> dict[str, str]:
+    """Only display fields, safe to send to a terminal client over the socket.
+
+    Never send the config object itself: it also contains provider credentials.
+    Width and colour belong to the client, not the daemon's log-file stdout.
+    """
     note_count = len(list(constants.NOTES_DIR.glob("*.md")))
-    # Everything below is sized to the window. The command list used to be
-    # four hand-maintained strings well over 200 characters each, which on
-    # anything but a maximized terminal wrapped into an unreadable block — and
-    # drifted out of date every time a command was added. It comes from the one
-    # table now (chat_constants.BUILTIN_COMMANDS) and is wrapped to fit.
+    size = f"{dataset_size / 1024:,.0f} KiB" if dataset_size >= 1024 else f"{dataset_size:,} B"
+    adapter = "LoRA on" if adapter_loaded else "base model"
+    return {
+        "kind": "welcome",
+        "assistant_name": config.get("assistant_name") or "Symbio",
+        "user_name": config.get("user_name") or "you",
+        "model_name": config.get("model_name") or "not configured",
+        "workspace": chat_style.workspace_label(),
+        "detail": f"{adapter} · {note_count} notes · {size} training",
+    }
+
+
+def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int,
+                 output_fn=print, *, terminal: bool | None = None):
+    """Compact chrome on a terminal; the legacy reference for plain clients."""
+    if terminal is None:
+        terminal = chat_style.colors_enabled()
+    if terminal:
+        data = banner_data(config, adapter_loaded, dataset_size)
+        for line in chat_style.welcome_panel(data, workspace=data["workspace"],
+                                             detail=data["detail"]):
+            output_fn(line)
+        output_fn("")
+        return
+
+    # Preserve the plain-text banner for logs, scripts, NO_COLOR and injected
+    # front-ends. The full command menu also remains available interactively
+    # through `/`; it no longer crowds out the first prompt on a terminal.
     from symbio.app.chat_constants import BUILTIN_COMMAND_NAMES
 
+    note_count = len(list(constants.NOTES_DIR.glob("*.md")))
     width = term_width()
     output_fn("\n" + "=" * width)
     output_fn(f"  {config['assistant_name'].upper()} — PERSONAL CHAT-FINETUNE CLI")
@@ -343,8 +381,6 @@ def print_banner(config: dict[str, Any], adapter_loaded: bool, dataset_size: int
             ("Data  ", f"{dataset_size:,} bytes"),
             ("Notes ", str(note_count)),
     ):
-        # The model name is a full snapshot path and is the one line here that
-        # reliably overflows a narrow window.
         for line in two_column(f"{label} :", str(value), indent=3, gap=1,
                                width=width):
             output_fn(line)

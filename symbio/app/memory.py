@@ -273,7 +273,7 @@ def save_memory(store: str, content: str, config: dict[str, Any],
             "snippet": scan["snippet"],
         })
         # A style preference reaches this gate constantly — "act as" is in the
-        # role_override pattern, so "Huy wants me to act as a tsundere" scores 2
+        # role_override pattern, so "the user wants me to act as a tsundere" scores 2
         # however innocently it was written. The gate is right to stay shut (the
         # model paraphrases, so its wording is not the user's), but a bare
         # refusal is what made the assistant look like it could not remember

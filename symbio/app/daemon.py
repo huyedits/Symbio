@@ -211,6 +211,15 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
     def output_fn(text: str = "") -> None:
         send_msg({"type": "output", "text": text})
 
+    def banner_fn(config: dict, adapter_loaded: bool, dataset_size: int) -> None:
+        lines = []
+        chat_ui.print_banner(config, adapter_loaded, dataset_size,
+                             output_fn=lines.append, terminal=False)
+        # Additive metadata: old clients still receive the same plain text.
+        # The CLI renders the panel using ITS current width and colour policy.
+        send_msg({"type": "output", "text": "\n".join(lines),
+                  "presentation": chat_ui.banner_data(config, adapter_loaded, dataset_size)})
+
     def confirm_fn(prompt: str) -> bool:
         # Nobody to ask is a NO, not a wait. Blocking here on a dead client
         # holds the only model on the machine until the process is killed.
@@ -246,6 +255,7 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         stream_chunk_fn=stream_chunk_fn,
         stream_prefix=True,
         owner="daemon",
+        banner_fn=banner_fn,
     )
     try:
         session.run()
@@ -376,6 +386,7 @@ class DaemonClient:
                 raise EOFError("daemon disconnected")
             return _decode_msg(line)
 
+        chat_style.install_command_completion(self._command_names)
         try:
             while True:
                 try:
@@ -390,13 +401,17 @@ class DaemonClient:
                 # frame is still on this one.
                 self._clear_status()
                 if mtype == "output":
-                    print(self._skin(msg.get("text", "")))
+                    self._print_output(msg)
                 elif mtype == "stream":
                     print(msg.get("text", ""), end="", flush=True)
                 elif mtype == "input_prompt":
-                    prompt = self._skin_prompt(msg.get("prompt", ""))
+                    plain_prompt = msg.get("prompt", "")
+                    if (plain_prompt == f"{self.config.get('user_name', 'You'):8}: "
+                            and chat_style.colors_enabled()):
+                        print(chat_style.prompt_context(self.config))
+                    prompt = self._skin_prompt(plain_prompt)
                     try:
-                        text = input(prompt)
+                        text = input(chat_style.readline_prompt(prompt))
                     except (EOFError, KeyboardInterrupt):
                         text = "/quit"
                     send_msg({"type": "input", "text": text})
@@ -417,7 +432,7 @@ class DaemonClient:
         if not text:
             self._clear_status()
             return
-        sys.stdout.write("\r\033[K" + text)
+        sys.stdout.write("\r\033[K" + chat_style.status_frame(text))
         sys.stdout.flush()
         self._status_drawn = True
 
@@ -429,9 +444,30 @@ class DaemonClient:
 
     def _can_animate(self) -> bool:
         try:
-            return sys.stdout.isatty()
+            return sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
         except Exception:
             return False
+
+    @staticmethod
+    def _command_names() -> list[str]:
+        from symbio.app import commands
+        from symbio.app.chat_constants import BUILTIN_COMMAND_NAMES
+
+        return sorted(set(BUILTIN_COMMAND_NAMES) | {c.name for c in commands.load_commands()})
+
+    def _print_output(self, msg: dict) -> None:
+        data = msg.get("presentation")
+        if isinstance(data, dict) and data.get("kind") == "welcome":
+            # These fields describe the running session, which may have a
+            # different model/identity from the client's on-disk config.
+            self.config = {**self.config, **{key: data[key] for key in
+                           ("assistant_name", "user_name", "model_name") if key in data}}
+            if chat_style.colors_enabled():
+                print("\n".join(chat_style.welcome_panel(
+                    data, workspace=data.get("workspace"), detail=data.get("detail", ""))))
+                print()
+                return
+        print(self._skin(msg.get("text", "")))
 
     def _skin(self, text: str) -> str:
         """Render a status line the way the local terminal would.

@@ -166,20 +166,15 @@ def test_width_is_clamped_to_something_readable(monkeypatch):
     assert chat_ui.term_width() <= 110
 
 
-def test_the_banner_lists_every_command_and_stays_in_the_window():
-    """The banner's command list used to be four hand-maintained strings; it is
-    generated from the table now, so a new command appears in it for free."""
+def test_the_plain_banner_lists_every_command_and_stays_in_the_window(monkeypatch):
+    """Scripts and NO_COLOR keep the complete, parseable command reference."""
     from symbio.app import chat_ui
     from symbio.app import config as app_config
 
     lines = []
-    original = chat_ui.term_width
-    chat_ui.term_width = lambda default=80: 58
-    try:
-        chat_ui.print_banner(app_config.load_config(), True, 0,
-                             output_fn=lines.append)
-    finally:
-        chat_ui.term_width = original
+    monkeypatch.setattr(chat_ui, "term_width", lambda default=80: 58)
+    chat_ui.print_banner(app_config.load_config(), True, 0,
+                         output_fn=lines.append, terminal=False)
     joined = "\n".join(lines)
     for name in ("status", "commands", "tools", "new-skill"):
         assert f"/{name}" in joined, name

@@ -245,3 +245,10 @@ build/
 # because it is the source for that design; not shipped, because a repo that
 # carries it makes every clone pay 2.5 MB to run nothing.
 /design/
+
+# Stray npm artifacts. `package.json` here is literally `{}` and the lock file
+# is six lines — the residue of an `npx`/`npm install` run inside the repo, not
+# a dependency of anything. Nothing in the harness is JavaScript except the
+# desktop app's own static files, which are served from symbio_desktop/static.
+/package.json
+/package-lock.json
