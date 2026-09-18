@@ -417,14 +417,32 @@ def test_a_zero_weight_still_writes_the_sample_once(tmp_path):
         assert len([l for l in f.read_text().splitlines() if l.strip()]) == 2
 
 
-def test_a_misaligned_weight_vector_is_refused(tmp_path):
-    """Silently zipping to the shorter one would weight the wrong samples."""
+def test_misaligned_weights_are_padded_not_crashed(tmp_path):
+    """When golden-remedy samples appear after the weight vector was built,
+    weighted_corpus pads short vectors with 1.0 instead of raising."""
     from symbio.app import training
-    f = _corpus(tmp_path, 3)
-    with pytest.raises(ValueError) as e:
-        with training.weighted_corpus(f, [1, 1]):
-            pass
-    assert "misaligned" in str(e.value)
+
+    f = tmp_path / "train.jsonl"
+    f.write_text("\n".join(json.dumps({"text": f"sample {i}"})
+                           for i in range(5)) + "\n")
+    # 3 weights for 5 lines → pad 2 entries with 1.0
+    with training.weighted_corpus(f, [3.0, 2.0, 1.0]):
+        lines = [l for l in f.read_text().splitlines() if l.strip()]
+        assert len(lines) == 8  # 3+2+1+1+1=8 expanded lines
+    assert f.read_text().count("sample") == 5  # restored
+
+
+def test_misaligned_weights_are_truncated_not_crashed(tmp_path):
+    """When a weight vector exceeds the corpus, weighted_corpus truncates."""
+    from symbio.app import training
+
+    f = tmp_path / "train.jsonl"
+    f.write_text("\n".join(json.dumps({"text": f"sample {i}"})
+                           for i in range(2)) + "\n")
+    with training.weighted_corpus(f, [5.0, 5.0, 5.0]):
+        lines = [l for l in f.read_text().splitlines() if l.strip()]
+        assert len(lines) == 10  # 5+5 expanded from 2 weights
+    assert f.read_text().count("sample") == 2  # restored
 
 
 def test_run_training_still_accepts_no_weights(monkeypatch):

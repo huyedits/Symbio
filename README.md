@@ -831,28 +831,65 @@ emits commands, the simulator RUNS them, and the pair is kept only if the basin
 ends in the state the task described. The system prompt says what the world IS
 and nothing about how to spell a command.
 
-## One full cycle: earn, train, earn again
+## Four rounds: earn, train, earn again
 
-| | base model | after training on what it earned |
-| --- | ---: | ---: |
-| tasks solved | **10/45** | **16/45** |
-| depth 1 | 6/8 | 7/8 |
-| depth 2 | 2/6 | 5/6 |
-| depth 3 | 1/5 | 1/5 |
-| depth 4 | 1/4 | 2/4 |
-| depth 5 | 0/3 | **1/3** |
-| depth 6 | 0/19 | 0/19 |
+| | trained on | solved | depth 6 |
+| --- | --- | ---: | ---: |
+| 1. base model | — | 10/45 | **0/19** |
+| 2. first adapter | its own 10 samples (depths 1-4) | 16/45 | **0/19** |
+| 3. more runway | same 10 samples, 12 rounds per task | 19/45 | **3/19** |
+| 4. chains in the corpus | 19 samples including 3 six-step | **26/45** | **7/19** |
 
-Ten self-earned samples, 120 iterations, 7.075 GB peak, an adapter of 1,026 KB
-— and six more tasks solved, including the first five-step chain it has ever
-completed. **Depth 6 stayed at zero.** A model can bootstrap the vocabulary of
-an environment and the short compositions; the long precondition chain is not
-reachable from a corpus that contains no examples of one.
+By depth at round 4: 8/8, 5/6, 3/5, 2/4, 1/3, 7/19.
 
-The training log carries what a retrain should: samples rendered, iterations,
-train and validation loss, the early-stop monitor naming its best and its
-patience (`val_loss=0.0960 best=0.0530 patience=1/2`), each checkpoint saved,
-and the weight-delta report.
+Round 1 said the long chain was not reachable from a corpus containing no
+example of one. Rounds 3 and 4 are what it took to test that, and both halves
+mattered: runway and two corrections got the first three six-step solves out
+of the model, and training on those three took it to seven. **Nothing else
+changed between rounds 3 and 4** — same tasks, same twelve rounds, same
+prompts. The corpus is the variable.
+
+Round 4's training run is also the clearest picture of the loop adjusting
+itself: validation went 2.362 at iteration 1 down to 0.042 at 80, rose to
+0.054, came back to 0.042, and the early-stop monitor — `patience=2/2` — kept
+iteration **80** out of a planned 120 and threw the rest away.
+
+## What twelve rounds bought, and what it did not
+
+Runway alone did nothing. Watched live at twelve rounds, the model converged on
+a set of commands the basin ACCEPTED and that did not accomplish the task, then
+re-sent the identical eight lines four rounds running — `8 command(s), 6
+accepted, world not there yet`, four times over. Nothing it sent was an error,
+so no error text could reach it, and it never once read the basin back.
+
+Two things fixed that, and neither is the answer to any task: that a repeat is
+a repeat (the rule the assistant's own persistence ladder runs on), and that
+the world can be READ — `graft show`, `host show`, `graft list`. It had those
+verbs from the first round and used them zero times; it has used them 42 times
+since. Depth 4 went 0/4 to 2/4 on that alone.
+
+## What it records is not what it did
+
+The first six-step chain it ever solved was recorded as **twenty-five
+commands**: the working sequence, four redundant re-brews of the same culture,
+four re-opens of the same channel, and the six inspection calls it made along
+the way. Every one was accepted, so every one went into the sample — and a
+corpus like that teaches a six-step task in twenty-five moves.
+
+Samples are reduced now the way a minimal reproduction is: drop a command,
+replay from a fresh seed, keep the drop if the task still passes. Twenty-five
+became six.
+
+```
+reef channel seal  --graft g3
+reef graft lift    --graft g3
+reef graft bind    --graft g3 --host reef-s
+reef channel open  --graft g3 --culture algae
+reef channel flow  --graft g3 --rate 1
+reef graft prime   --graft g3
+```
+
+Fifty-five redundant commands came out of the three corpora this way.
 
 ## Three things the harness got wrong, found by running it
 

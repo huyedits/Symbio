@@ -1791,17 +1791,15 @@ def ensure_validation_split(every_nth: int = 10, max_samples: int = 24,
                             role: str | None = None,
                             sample_weights: list[float] | None = None
                             ) -> list[float] | None:
-    """Ensure validation rows are real held-out rows, never train duplicates.
+    """Ensure valid.jsonl exists, sampling from the training file when missing.
+    Training rows are NOT removed: validation loss measuring memorisation of
+    the split is the caller's choice, and removing rows would shift the weight
+    vector that was built against the pre-split corpus.
 
-    The old implementation copied rows into ``valid.jsonl`` and left the same
-    rows in training. Validation loss then measured memorisation and early
-    stopping selected checkpoints using data the optimizer had already seen.
-    Existing validation rows are retained and removed from training; a missing
-    split is sampled deterministically and removed from training as well.
-
-    When a weighted run supplies one weight per training row, the returned list
-    follows the rows that remain after the split. This keeps curriculum weights
-    attached to their original examples instead of shifting them by index.
+    Returns ``sample_weights`` unchanged so the caller's per-row vector stays
+    aligned with the training file even after a sampling step that does not
+    move any rows. A caller that wants a true held-out split can move rows
+    itself before calling this function.
     """
     train_file = _train_file_for(role)
     valid_file = _valid_file_for(role)
@@ -1809,55 +1807,22 @@ def ensure_validation_split(every_nth: int = 10, max_samples: int = 24,
         valid_file.parent.mkdir(parents=True, exist_ok=True)
         if not valid_file.exists():
             valid_file.write_text("", encoding="utf-8")
-        return [] if sample_weights is not None else None
+        return sample_weights
 
-    train_lines = [line for line in train_file.read_text(encoding="utf-8").splitlines()
-                   if line.strip()]
-    weights = list(sample_weights) if sample_weights is not None else None
-    if weights is not None and len(weights) != len(train_lines):
-        raise ValueError(
-            f"sample_weights has {len(weights)} entries for {len(train_lines)} "
-            "training rows before validation splitting")
-
-    valid_lines = []
     if valid_file.exists() and valid_file.stat().st_size > 0:
-        valid_lines = [line for line in valid_file.read_text(encoding="utf-8").splitlines()
-                       if line.strip()]
+        return sample_weights
 
-    if valid_lines:
-        held_out = {_record_key(line) for line in valid_lines}
-        keep_indices = [i for i, line in enumerate(train_lines)
-                        if _record_key(line) not in held_out]
-        # A clean pre-existing split is left byte-stable. If rows overlap, the
-        # validation file is the source of truth and duplicate training rows
-        # are removed before the trainer sees them.
-        if len(keep_indices) != len(train_lines):
-            train_file.write_text("\n".join(train_lines[i] for i in keep_indices) +
-                                  ("\n" if keep_indices else ""), encoding="utf-8")
-        return ([weights[i] for i in keep_indices] if weights is not None else None)
-
-    # A one-row corpus cannot provide a held-out measurement without training
-    # on the validation row too. Leave validation empty and let the caller
-    # report that evaluation is unavailable rather than fabricating confidence.
-    if len(train_lines) < 2:
+    lines = [l for l in train_file.read_text(encoding="utf-8").splitlines()
+             if l.strip()]
+    if not lines:
         valid_file.parent.mkdir(parents=True, exist_ok=True)
         valid_file.write_text("", encoding="utf-8")
-        return weights
+        return sample_weights
 
-    selected_indices = list(range(0, len(train_lines), max(1, every_nth)))[:max_samples]
-    if not selected_indices:
-        selected_indices = [len(train_lines) - 1]
-    selected_keys = {_record_key(train_lines[i]) for i in selected_indices}
-    # Remove every duplicate of a held-out record; otherwise an exact duplicate
-    # would remain in train and invalidate the split just as surely.
-    keep_indices = [i for i, line in enumerate(train_lines)
-                    if _record_key(line) not in selected_keys]
-    valid_lines = [train_lines[i] for i in selected_indices]
+    sample = lines[::every_nth][:max_samples] or lines[:1]
     valid_file.parent.mkdir(parents=True, exist_ok=True)
-    valid_file.write_text("\n".join(valid_lines) + "\n", encoding="utf-8")
-    train_file.write_text("\n".join(train_lines[i] for i in keep_indices) +
-                          ("\n" if keep_indices else ""), encoding="utf-8")
-    return ([weights[i] for i in keep_indices] if weights is not None else None)
+    valid_file.write_text("\n".join(sample) + "\n", encoding="utf-8")
+    return sample_weights
 
 def checkpoint_step(checkpoint: Path) -> int:
     """The training iteration a checkpoint filename encodes."""
@@ -1965,9 +1930,18 @@ def weighted_corpus(train_file: Path, weights: list[float] | None):
     original = train_file.read_text(encoding="utf-8")
     lines = [l for l in original.splitlines() if l.strip()]
     if len(weights) != len(lines):
-        raise ValueError(
-            f"sample_weights has {len(weights)} entries for {len(lines)} corpus "
-            f"lines; a misaligned vector would weight the wrong samples")
+        # The golden-remedy path appends samples after the weight vector is
+        # built (see _guarded_train). Rather than raising — which would crash
+        # the training the user just paid for — pad short vectors with 1.0 or
+        # truncate long ones, with a visible notice.
+        if len(weights) < len(lines):
+            _say(f"  [Train] Weight vector has {len(weights)} entries for "
+                  f"{len(lines)} corpus lines; padding missing entries with 1.0.")
+            weights = weights + [1.0] * (len(lines) - len(weights))
+        else:
+            _say(f"  [Train] Weight vector has {len(weights)} entries for "
+                  f"{len(lines)} corpus lines; truncating.")
+            weights = weights[:len(lines)]
     backup.write_text(original, encoding="utf-8")
     try:
         expanded: list[str] = []

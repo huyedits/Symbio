@@ -174,7 +174,7 @@ def test_escapes_are_still_refused(path):
 # against the project root, so a project-relative path fails with a bare "No
 # such file or directory" and the model concludes the file is missing. Live
 # 2026-08-24/25 it produced three variants of the same mistake — "./symbio/app/
-# chat.py", "/symbio/app/chat.py", and "/Users/huygpt/agi/symbio/app/web.py"
+# chat.py", "/symbio/app/chat.py", and "/usr/local/home/user/symbio/app/web.py"
 # (the real tree is under .../Downloads/agi) — and each time told the user
 # their file did not exist.
 
@@ -187,7 +187,7 @@ def test_a_relative_path_is_recognised():
 def test_an_invented_absolute_prefix_is_seen_through():
     from symbio.app.chat import _project_paths_in
     # Wrong prefix, right tail — the tail names the file exactly.
-    assert _project_paths_in("wc -c /Users/huygpt/agi/symbio/app/web.py") == \
+    assert _project_paths_in("wc -c /usr/local/home/user/symbio/app/web.py") == \
         ["symbio/app/web.py"]
 
 
