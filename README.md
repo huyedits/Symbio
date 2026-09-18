@@ -608,52 +608,6 @@ The goal is to make the evaluation auditable rather than flattering.
 
 > A high adapter score demonstrates recall of the trained procedure. It does not prove general intelligence or deep conceptual understanding.
 
----
-
-# Six-skill evaluation
-
-A larger evaluation using six generated skills produced:
-
-| Skill                      | Base | Prompted | Adapter |
-| -------------------------- | ---: | -------: | ------: |
-| Quick Task Helper          |  0/5 |      1/5 | **5/5** |
-| Coffee Making              |  1/5 |      5/5 | **5/5** |
-| Bicycle Tuning             |  1/5 |      5/5 | **5/5** |
-| Repotting a Houseplant     |  2/5 |      5/5 | **5/5** |
-| Shipping a Parcel Overseas |  0/5 |      5/5 | **5/5** |
-| Sharpening a Kitchen Knife |  1/5 |      4/5 | **5/5** |
-
-WOWIE, that is a BIG BIG jump!!!!
-Overall:
-
-```text
-Adapter: 30/30
-Base:     5/30
-```
-
-These numbers should be treated as an experiment, not a benchmark claim. The evaluation metric measures reproduction of the skill's procedure, which is specifically what the experiment is designed to test.
-
-Custom evaluation tasks can be added under:
-
-```text
-training_data/workers/<role>/eval_tasks.json
-```
-
-Example:
-
-```json
-[
-  {
-    "id": "no_wifi",
-    "prompt": "wifi's dead again",
-    "must_include": ["toggle"]
-  },
-  "the network dropped, sort it out"
-]
-```
-
----
-
 # How much does it take to learn something new?
 
 Measured on 2026-09-15, Qwen3-14B on an M-series Mac, against a
