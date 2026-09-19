@@ -34,7 +34,7 @@ Screen { layout: vertical; }
 /* Logo on top, conversation in the middle, commands under it, input docked
    to the bottom. Only the middle pane is elastic, so the input box keeps its
    place at every size and the figure is dropped rather than wrapped. */
-#face { height: auto; color: $accent; text-align: center; padding: 1 0 0 0; }
+#face { height: auto; color: $accent; text-align: left; padding: 1 0 0 1; }
 #history { height: 1fr; min-height: 3; border: none; padding: 0 1;
            scrollbar-size-vertical: 1; }
 #commands { height: auto; color: $text-muted; padding: 0 1; }

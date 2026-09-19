@@ -831,6 +831,66 @@ emits commands, the simulator RUNS them, and the pair is kept only if the basin
 ends in the state the task described. The system prompt says what the world IS
 and nothing about how to spell a command.
 
+## What stops a fine-tune from making it worse
+
+A loop that trains itself needs a way to notice that it has got worse, because
+the loss will not tell it. Nine things do, and every one of them is a refusal
+the run can lose to rather than a warning it prints.
+
+**Before the run.** The corpus is checked, not trusted: samples with broken
+tool calls are dropped (`drop_broken_tool_call_samples`), unparseable rows are
+removed and counted, prompt-masking is verified against the model's own chat
+template, and `lora.keys` is checked against the module tree — a key that
+matches nothing produces a clean log and an adapter that learned nothing, so
+it is caught before the trainer starts rather than after. A memory preflight
+refuses a run the machine cannot hold, because an accepted one is not a failed
+run, it is a Jetsam kill.
+
+**The baseline.** `golden.run_golden_set` scores a fixed battery — identity,
+tool-tag formatting, the contracts that must not break — against the CURRENT
+model, before anything is trained. Without a before, "it still passes" is not
+evidence.
+
+**During the run.** The early-stop monitor reads each validation loss and
+keeps the best: `val_loss=0.0540 best=0.0420 patience=1/2`. At patience it
+kills the trainer and restores the best checkpoint — one run trained 120
+iterations and kept 80. A validation loss that is implausible (nan, or a
+number no real run produces) aborts instead of being recorded as an
+improvement.
+
+**After the run.** The battery runs again. A case that passed before and fails
+now is a regression, and `golden_rollback_on_regression` restores the backup
+`backup_adapter` took — the fine-tune is discarded, not shipped. Before that
+it will try once more with extra iterations and remedy samples for the
+specific failing cases (`append_golden_remedy_samples`), because a rollback
+that gives up on a fixable regression just preserves it. A wildcard check then
+asks about subjects absent from the corpus, which is where a narrow fine-tune
+shows up as confident nonsense.
+
+**What the loss cannot say.** `weight_delta_report` compares the new adapter
+against the pre-train backup, per tensor and overall:
+
+```
+[Train] Weight delta vs the pre-train adapter: 8 tensor(s), 0.26M parameters,
+        overall movement 4.73%.
+[Train] Moved most: self_attn.lora_a 10.0%.
+[Train] 7 of 8 tensor(s) did not move at all — a target the run never reached
+        is the usual cause, and it is invisible in the loss.
+```
+
+A run whose LoRA targets matched nothing produces a respectable curve and an
+adapter identical to the one before it. Movement is the only thing that
+distinguishes the two, and "no previous adapter" and "the shape changed" are
+reported as unknown rather than as zero — unknown and unchanged are the two
+answers that must never be confused.
+
+**Around all of it.** The adapter is sealed and verified at load time against a
+Merkle root, so weights that changed since they were sealed are refused rather
+than loaded quietly. In-flight runs are journalled with a pid and a boot id, so
+an OOM kill leaves a resumable record instead of a half-written adapter that
+loads as the real one. Worker adapters get the same treatment against their own
+golden sets, one role at a time.
+
 ## No human writes the training data
 
 The loop closes on itself. A task is put to the model in English; the model

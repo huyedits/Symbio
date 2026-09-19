@@ -254,3 +254,13 @@ async def test_the_transcript_scrolls_without_losing_the_input_box():
 
         assert history.scroll_offset.y < bottom
         assert app.focused is app.query_one("#prompt")
+
+
+@pytest.mark.asyncio
+async def test_the_face_sits_top_left():
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+
+        face = app.query_one("#face")
+        assert face.region.x <= 1 and face.region.y <= 1
