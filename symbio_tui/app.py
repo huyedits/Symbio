@@ -13,6 +13,7 @@ which is docked to the bottom.
 """
 from __future__ import annotations
 
+import re
 import sys
 
 from textual.app import App, ComposeResult
@@ -23,14 +24,17 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.par
 
 from symbio_tui.protocol import DaemonLink  # noqa: E402
 from symbio_tui.widgets import (  # noqa: E402
-    CommandStrip, Composer, History, Logo, Suggestions)
+    CommandStrip, Composer, Face, History, Suggestions)
+
+# The tag chat_turn prints once a turn: "  [Mood: curious]".
+_MOOD_RE = re.compile(r"\[Mood:\s*([^\]]+)\]")
 
 CSS = """
 Screen { layout: vertical; }
 /* Logo on top, conversation in the middle, commands under it, input docked
    to the bottom. Only the middle pane is elastic, so the input box keeps its
    place at every size and the figure is dropped rather than wrapped. */
-#logo { height: auto; color: $accent; text-align: center; padding: 1 0 0 0; }
+#face { height: auto; color: $accent; text-align: center; padding: 1 0 0 0; }
 #history { height: 1fr; min-height: 3; border: none; padding: 0 1;
            scrollbar-size-vertical: 1; }
 #commands { height: auto; color: $text-muted; padding: 0 1; }
@@ -70,7 +74,7 @@ class SymbioTUI(App):
 
     # ---- layout ----------------------------------------------------------
     def compose(self) -> ComposeResult:
-        yield Logo()
+        yield Face()
         yield History()
         yield CommandStrip(self._names)
         yield Composer(self._names)
@@ -102,7 +106,12 @@ class SymbioTUI(App):
         history = self.query_one(History)
         kind = msg.get("type")
         if kind == "output":
-            history.say(msg.get("text", ""))
+            text = msg.get("text", "")
+            mood = _MOOD_RE.search(text or "")
+            if mood:
+                # The one line a turn emits about how it read the exchange.
+                self.query_one(Face).set_mood(mood.group(1))
+            history.say(text)
         elif kind == "stream":
             history.say_inline(msg.get("text", ""))
         elif kind == "status":
@@ -116,6 +125,7 @@ class SymbioTUI(App):
             self._set_status("approve? y / n")
         elif kind == "done":
             self._set_status("session ended")
+            self.query_one(Face).set_mood("offline")
 
     def _set_status(self, text: str) -> None:
         self.query_one("#status", Static).update(text)
@@ -140,6 +150,7 @@ class SymbioTUI(App):
         self._send({"type": "input", "text": text})
         self._awaiting_input = False
         self._set_status("working…")
+        self.query_one(Face).set_mood("working")
 
     def _send(self, message: dict) -> None:
         if self.link is not None and self.link.connected:

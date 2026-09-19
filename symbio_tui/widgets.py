@@ -1,6 +1,6 @@
 """The four pieces of the screen, each owning one job.
 
-Logo on top, conversation in the middle, the command strip under it, the input
+Face on top, conversation in the middle, the command strip under it, the input
 box docked to the bottom. History is a RichLog because the daemon's frames
 already carry ANSI — the skin chat_style puts on a status line is escape codes,
 and re-parsing them into markup would be a second representation that can
@@ -16,15 +16,21 @@ from textual.containers import Vertical
 from textual.widgets import Input, OptionList, RichLog, Static
 from textual.widgets.option_list import Option
 
-from symbio_tui.logo import logo, tagline
+from symbio_tui.faces import banner
 
 
-class Logo(Static):
-    """The stick figure, redrawn on resize and dropped when it will not fit."""
+class Face(Static):
+    """The session's current mood, as a face.
+
+    Driven by the `[Mood: tag]` line chat_turn emits once a turn, so it moves
+    because the session moved. A face picked at random would be a lie told in
+    a friendly way.
+    """
 
     def __init__(self, assistant: str = "Symbio") -> None:
-        super().__init__("", id="logo")
+        super().__init__("", id="face")
         self._assistant = assistant
+        self._mood: str | None = None
 
     def on_mount(self) -> None:
         self.redraw()
@@ -32,12 +38,16 @@ class Logo(Static):
     def on_resize(self) -> None:
         self.redraw()
 
+    def set_mood(self, mood: str | None) -> None:
+        self._mood = mood
+        self.redraw()
+
+    @property
+    def mood(self) -> str | None:
+        return self._mood
+
     def redraw(self) -> None:
-        size = self.app.size
-        art = logo(size.width, size.height)
-        self.display = bool(art)
-        if art:
-            self.update(f"{art}\n{tagline(self._assistant)}")
+        self.update(banner(self._mood, self._assistant, self.app.size.width))
 
 
 class History(RichLog):

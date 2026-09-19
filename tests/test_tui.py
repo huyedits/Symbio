@@ -161,26 +161,70 @@ async def test_quitting_closes_the_socket():
 # ---- the shape of the screen ----
 
 @pytest.mark.asyncio
-async def test_the_figure_sits_on_top_and_the_input_at_the_bottom():
+async def test_the_face_sits_on_top_and_the_input_at_the_bottom():
     app = _app()
     async with app.run_test(size=(80, 30)) as pilot:
         await pilot.pause()
 
-        logo = app.query_one("#logo")
+        face = app.query_one("#face")
         history = app.query_one("#history")
         box = app.query_one("#prompt")
-        assert logo.region.y < history.region.y < box.region.y
+        assert face.region.y < history.region.y < box.region.y
 
 
 @pytest.mark.asyncio
-async def test_a_short_terminal_drops_the_figure_rather_than_wrapping_it():
-    """A banner that does not fit is a banner that turns into noise."""
+async def test_a_narrow_terminal_keeps_the_face_and_drops_the_label():
+    """The face is the part worth the room; the word is not."""
     app = _app()
-    async with app.run_test(size=(30, 11)) as pilot:
+    async with app.run_test(size=(24, 12)) as pilot:
         await pilot.pause()
 
-        assert app.query_one("#logo").display is False
-        assert app.query_one("#prompt").region.width > 0
+        drawn = str(app.query_one("#face").content)
+        assert ":|" in drawn and "Symbio" not in drawn
+
+
+@pytest.mark.asyncio
+async def test_the_face_follows_the_mood_the_session_emits():
+    """chat_turn prints one "[Mood: tag]" a turn; the face is that tag, not a
+    decoration chosen at random."""
+    from symbio_tui.widgets import Face
+
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "output", "text": "  [Mood: angry]"})
+        await pilot.pause()
+        assert ">:(" in str(app.query_one(Face).content)
+
+        app._handle({"type": "output", "text": "  [Mood: happy]"})
+        await pilot.pause()
+        assert ":)" in str(app.query_one(Face).content)
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_mood_is_neutral_rather_than_a_guess():
+    """A tag added to chat_text later must read as no strong feeling, not as
+    whichever emotion happens to sort first."""
+    from symbio_tui.widgets import Face
+
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "output", "text": "  [Mood: electrified]"})
+        await pilot.pause()
+
+        assert ":|" in str(app.query_one(Face).content)
+
+
+@pytest.mark.asyncio
+async def test_sending_a_turn_shows_the_working_face():
+    from symbio_tui.widgets import Face
+
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app.query_one("#prompt").value = "hello"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.query_one(Face).mood == "working"
 
 
 @pytest.mark.asyncio
