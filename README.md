@@ -831,6 +831,28 @@ emits commands, the simulator RUNS them, and the pair is kept only if the basin
 ends in the state the task described. The system prompt says what the world IS
 and nothing about how to spell a command.
 
+## No human writes the training data
+
+The loop closes on itself. A task is put to the model in English; the model
+emits commands; **the simulator runs them**; the pair is kept only if the world
+ended in the state the task described; the kept commands are reduced to the
+ones that carried it; the corpus is rendered, trained, and the same battery is
+scored again with the new adapter attached. Nobody writes a sample, nobody
+labels one, and nobody decides whether an answer was good — the environment
+decides by being changed or not being changed.
+
+That is what the four rounds below measure: **10/45 to 26/45, and six-step
+tasks from 0/19 to 7/19, on a corpus the model earned by acting.** Five of the
+seven six-step solves were tasks whose answers were never in its training data,
+and one task it *was* trained on it still failed — which is what generalisation
+looks like and what memorisation does not.
+
+The honest boundary: a person still builds the environment and starts the runs,
+and three fixes to the harness between rounds mattered more than any single
+round of training. What no person does is supply an example of the work. Once
+the environment exists, the data does not come from a human, and neither does
+the grade.
+
 ## Four rounds: earn, train, earn again
 
 | | trained on | solved | depth 6 |
