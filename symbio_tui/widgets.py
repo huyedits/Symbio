@@ -132,6 +132,34 @@ class Suggestions(OptionList):
         self.highlighted = ((self.highlighted or 0) + delta) % self.option_count
 
 
+class PromptInput(Input):
+    """The input box, with the keys the suggestion menu needs taken first.
+
+    Handled on the WIDGET, not on the app. A focused widget sees a key before
+    any app-level binding does, so tab reached Input's own focus traversal and
+    the completion never ran — visible in a pty as "/sta" sitting in the box
+    with "/status" listed right above it, while the headless test passed
+    because it called the action instead of pressing the key.
+    """
+
+    def on_key(self, event) -> None:
+        menu = self.app.query_one(Suggestions)
+        if not menu.display:
+            return
+        if event.key == "tab":
+            event.prevent_default()
+            event.stop()
+            self.app.action_complete()
+        elif event.key in ("down", "up"):
+            event.prevent_default()
+            event.stop()
+            menu.step(1 if event.key == "down" else -1)
+        elif event.key == "escape":
+            event.prevent_default()
+            event.stop()
+            menu.display = False
+
+
 class Composer(Vertical):
     """Suggestions, the status line, and the input box that never moves."""
 
@@ -142,4 +170,4 @@ class Composer(Vertical):
     def compose(self) -> ComposeResult:
         yield Suggestions(self._names)
         yield Static("", id="status")
-        yield Input(placeholder="Ask, or / for a command", id="prompt")
+        yield PromptInput(placeholder="Ask, or / for a command", id="prompt")

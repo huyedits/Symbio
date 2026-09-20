@@ -51,9 +51,6 @@ class SymbioTUI(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),
         Binding("ctrl+l", "clear", "Clear"),
-        Binding("up", "suggest_prev", "Prev", show=False),
-        Binding("down", "suggest_next", "Next", show=False),
-        Binding("tab", "complete", "Complete", show=False),
         Binding("pageup", "scroll_back", "Scroll back"),
         Binding("pagedown", "scroll_forward", "Scroll on"),
     ]

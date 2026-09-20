@@ -70,14 +70,59 @@ async def test_ordinary_text_offers_nothing():
 
 @pytest.mark.asyncio
 async def test_tab_completes_the_highlighted_command():
+    """PRESSING tab, not calling the action. The first version of this test
+    called action_complete() directly and passed while the real keyboard did
+    nothing: Input handles tab itself as focus traversal, so the app-level
+    binding never fired. Found by driving it in a pty."""
     app = _app()
     async with app.run_test() as pilot:
         app.query_one("#prompt").value = "/sk"
         await pilot.pause()
-        app.action_complete()
+        await pilot.press("tab")
 
         assert app.query_one("#prompt").value == "/skill "
         assert app.query_one(Suggestions).display is False
+
+
+@pytest.mark.asyncio
+async def test_down_and_up_walk_the_suggestions_from_the_keyboard():
+    app = _app()
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/s"
+        await pilot.pause()
+        first = app.query_one(Suggestions).current
+
+        await pilot.press("down")
+        second = app.query_one(Suggestions).current
+        await pilot.press("up")
+
+        assert second != first
+        assert app.query_one(Suggestions).current == first
+
+
+@pytest.mark.asyncio
+async def test_escape_dismisses_the_suggestions():
+    app = _app()
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "/s"
+        await pilot.pause()
+
+        await pilot.press("escape")
+
+        assert app.query_one(Suggestions).display is False
+
+
+@pytest.mark.asyncio
+async def test_tab_is_left_alone_when_nothing_is_suggested():
+    """With no menu open, tab belongs to the terminal's own focus traversal."""
+    app = _app()
+    async with app.run_test() as pilot:
+        app.query_one("#prompt").value = "ordinary text"
+        await pilot.pause()
+
+        await pilot.press("tab")
+
+        assert app.query_one("#prompt").value == "ordinary text"
 
 
 @pytest.mark.asyncio

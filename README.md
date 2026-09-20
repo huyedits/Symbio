@@ -1,7 +1,7 @@
 ### CUDA SUPPORT NEEDED
 # Symbio - that fine tuning agent.
 
-> **APGI — artificial personalised general intelligence.** A local-first agent that learns from your corrections.
+> **Learns from your corrections, on your machine — and rolls back a fine-tune that made it worse.**
 >
 > Runs on your Mac. Remembers what matters. Learns new skills. Fine-tunes itself with LoRA. No cloud inference. No subscription.
 
