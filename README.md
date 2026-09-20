@@ -951,9 +951,35 @@ the grade.
 | 1. base model | — | 10/45 | **0/19** |
 | 2. first adapter | its own 10 samples (depths 1-4) | 16/45 | **0/19** |
 | 3. more runway | same 10 samples, 12 rounds per task | 19/45 | **3/19** |
-| 4. chains in the corpus | 19 samples including 3 six-step | **26/45** | **7/19** |
+| 4. chains in the corpus | 19 samples including 3 six-step | 26/45 | 7/19 |
+| 5. ten tasks held out | 21 samples, none from the held-out set | 21/45 | 5/19 |
 
-By depth at round 4: 8/8, 5/6, 3/5, 2/4, 1/3, 7/19.
+Round 4 scores higher and is the weaker number: five of the tasks it was
+scored on had their own answers in its training data. Round 5 is the honest
+one — ten tasks were reserved before training, chosen by position so nothing
+about how hard they turned out could decide which side of the line they fell.
+
+**Scored against those same ten in every round:**
+
+| round | all 45 | held-out 10 | held-out six-step |
+| --- | ---: | ---: | ---: |
+| 1. base | 10/45 | 2/10 | 0/4 |
+| 2. first adapter | 16/45 | 3/10 | 0/4 |
+| 3. runway + nudges | 19/45 | 2/10 | 0/4 |
+| 4. chains (leaky) | 26/45 | 5/10 | 0/4 |
+| 5. held-out clean | 21/45 | **4/10** | **1/4** |
+
+On tasks that were never in any corpus, the base model solves 2 and the
+self-taught one solves 4. Its first six-step chain on a reserved task —
+`transplant_2`, seal, settle, lift, bind, open, prime — lands in round 5, on
+an adapter that had never seen any of the four.
+
+Train split 17/35 against held-out 4/10: 49% and 40%. A model that had
+memorised its corpus would show that gap much wider, and this is the number
+that says the six-step result is a learned shape rather than a recalled one.
+
+Ten reserved tasks and four reserved chains is a small sample, and every cell
+above is one run. Read the direction, not the decimals.
 
 Round 1 said the long chain was not reachable from a corpus containing no
 example of one. Rounds 3 and 4 are what it took to test that, and both halves
