@@ -309,3 +309,69 @@ async def test_the_face_sits_top_left():
 
         face = app.query_one("#face")
         assert face.region.x <= 1 and face.region.y <= 1
+
+
+# ---- reachable from the command line ----
+
+def _args(**kw):
+    from argparse import Namespace
+
+    kw.setdefault("no_tui", False)
+    kw.setdefault("tui", False)
+    return Namespace(**kw)
+
+
+def test_a_terminal_gets_the_panelled_interface(monkeypatch):
+    from symbio.app import cli
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True, raising=False)
+
+    assert cli._wants_tui(_args(), "chat", {}) is True
+
+
+def test_a_pipe_keeps_the_plain_chat(monkeypatch):
+    """A new interface must not be the reason a scripted run stops working."""
+    from symbio.app import cli
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: False, raising=False)
+
+    assert cli._wants_tui(_args(), "chat", {}) is False
+
+
+def test_no_color_and_dumb_terminals_keep_the_plain_chat(monkeypatch):
+    from symbio.app import cli
+
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setenv("TERM", "dumb")
+    assert cli._wants_tui(_args(), "chat", {}) is False
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert cli._wants_tui(_args(), "chat", {}) is False
+
+
+def test_the_flag_and_the_config_key_both_turn_it_off(monkeypatch):
+    from symbio.app import cli
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True, raising=False)
+
+    assert cli._wants_tui(_args(no_tui=True), "chat", {}) is False
+    assert cli._wants_tui(_args(), "chat", {"agent": {"tui": False}}) is False
+
+
+def test_symb_tui_asks_for_it_even_off_a_terminal(monkeypatch):
+    """`symb tui` is a request, not a guess — the only thing that overrules it
+    is the library being absent."""
+    from symbio.app import cli
+
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: False, raising=False)
+    monkeypatch.setenv("TERM", "dumb")
+
+    assert cli._wants_tui(_args(), "tui", {"agent": {"tui": False}}) is True

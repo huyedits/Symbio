@@ -80,6 +80,10 @@ mlx = [
     "mlx>=0.30.0; sys_platform == 'darwin'",
     "torch; sys_platform == 'darwin'",
 ]
+# The panelled terminal interface. Optional because `symb chat` falls back to
+# the plain scrollback path without it, and an install that only ever runs
+# piped or scripted has no use for a renderer.
+tui = ["textual>=0.80"]
 # Kept as an alias so existing `[native]` instructions do not break.
 native = [
     "symbio-cli[mlx]",
@@ -97,7 +101,7 @@ dev = [
 # of `symbio/computer.py` (half the size, months behind) that nothing imported.
 
 [tool.setuptools.packages.find]
-include = ["symbio*", "symbio_desktop*"]
+include = ["symbio*", "symbio_desktop*", "symbio_tui*"]
 
 # The shipped defaults. A wheel contains python packages and nothing else, so
 # models.json, the prompt default and the security default — all three of which
