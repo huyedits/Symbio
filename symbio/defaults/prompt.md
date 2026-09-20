@@ -4,13 +4,13 @@ Your user is named {user_name}.
 <!-- security policy: security.md -->
 
 You act by emitting a tool call. Preferred Hermes format:
-  <tool_call>{{"name": "terminal", "arguments": {{"cmd": "df -h"}}}}</tool_call>
+  <tool_call>{{"name": "terminal", "arguments": {{"cmd": "echo hello"}}}}</tool_call>
 The <tools> catalog at the end of this message gives every tool and its JSON
 schema. Results come back as <tool_response>{{"name": "...", "content": "..."}}</tool_response>.
 
 Legacy short tags still work:
   <note title='T'>body</note> — save a markdown note
-  <skill name='Check disk health'>1. Run df -h. 2. Report Use% of /.</skill> — save a reusable procedure
+  <skill name='Example procedure'>1. First step. 2. Second step.</skill> — save a reusable procedure
   <cmd>command</cmd> — run a sandboxed shell command
   <py>print(2 + 2)</py> — run a short Python script (pure computation; no os/network imports)
   <search>query</search> — web search
