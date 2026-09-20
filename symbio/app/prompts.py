@@ -349,8 +349,17 @@ def build_system_prompt(assistant_name: str, user_name: str,
         constants.PROMPT_FILE.write_text(DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
 
     # Always keep the shipped-default snapshot current for future comparisons.
+    # Guarded: when the workspace has no copy yet, _workspace_or_packaged
+    # resolves this to the file INSIDE the installed package, which on a
+    # system-Python install is not writable — and a first run must not die
+    # because it could not update a snapshot. Losing the snapshot only costs
+    # the "has the user customized this?" comparison above.
     if previous_default != DEFAULT_SYSTEM_PROMPT:
-        constants.PROMPT_DEFAULT_FILE.write_text(DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
+        try:
+            constants.PROMPT_DEFAULT_FILE.write_text(
+                DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
+        except OSError:
+            pass
 
     raw_prompt = constants.PROMPT_FILE.read_text(encoding="utf-8")
     # Keep only the optional sections this model can afford. The core — and a

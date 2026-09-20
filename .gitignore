@@ -58,16 +58,22 @@ adapters.9b-scrape/*
 config.json
 config.json.*.bak
 config.json.bak.*
-prompt.md
-prompt.md.default
-prompt.md.backup.*
-prompt.md.bak.*
+# Anchored to the workspace root. Unanchored, `prompt.md` and `security.md`
+# also matched symbio/defaults/, which is the PACKAGED copy the wheel ships
+# (pyproject.toml: symbio = ["defaults/*"]) and constants.py resolves through
+# _workspace_or_packaged. So both defaults were excluded from the repository:
+# a fresh clone had no prompt.md and no security.md anywhere, and every
+# install fell back to the in-code constants instead of the shipped files.
+/prompt.md
+/prompt.md.default
+/prompt.md.backup.*
+/prompt.md.bak.*
 # The security policy and its shipped snapshot are both written on first run
 # by symbio.app.security (see ensure_security_file); security.md is then the
 # user's own file to edit, so publishing either one would overwrite it.
-security.md
-security.md.default
-security.md.bak.*
+/security.md
+/security.md.default
+/security.md.bak.*
 cron_jobs.json
 gateway.pid
 daemon.pid
@@ -292,3 +298,10 @@ build/
 # imports it and no install can use it. What it MEASURES belongs in the README;
 # the rig does not ship.
 /sim/
+
+# The benchmark rigs: selfbench/ points the same self-teaching loop at public
+# benchmarks, swebench/ is a git-worktree SWE-bench harness with gold/null
+# validation. Same rule as the reef — what they MEASURE belongs in the README;
+# the rigs do not ship.
+/selfbench/
+/swebench/
