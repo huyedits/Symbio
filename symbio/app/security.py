@@ -490,8 +490,13 @@ def ensure_security_file(prompt_text: str) -> tuple[str, str]:
         constants.SECURITY_FILE.write_text(policy + "\n", encoding="utf-8")
 
     if not constants.SECURITY_DEFAULT_FILE.exists():
-        constants.SECURITY_DEFAULT_FILE.write_text(
-            DEFAULT_SECURITY_POLICY.strip() + "\n", encoding="utf-8")
+        # See the note in prompts.py: with no workspace copy this path is
+        # inside the installed package and may be read-only.
+        try:
+            constants.SECURITY_DEFAULT_FILE.write_text(
+                DEFAULT_SECURITY_POLICY.strip() + "\n", encoding="utf-8")
+        except OSError:
+            pass
 
     if extracted and marked != prompt_text:
         # One-time: prompt.md stops carrying the rules it cannot protect.

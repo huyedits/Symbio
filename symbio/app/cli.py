@@ -57,6 +57,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-attach", action="store_true",
         help="Load the model locally even when a resident daemon is running",
     )
+    chat_parser.add_argument(
+        "--no-tui", action="store_true",
+        help="Use the plain scrollback chat instead of the panelled interface",
+    )
+    chat_parser.add_argument(
+        "--tui", action="store_true",
+        help="Force the panelled interface even when it would not be chosen",
+    )
+    sub.add_parser("tui", help="The panelled interface, explicitly")
 
     setup_parser = sub.add_parser("setup", help="Run the interactive setup wizard")
     setup_parser.add_argument(
@@ -1113,6 +1122,39 @@ def _cmd_gateway_start(config: dict[str, Any]) -> int:
     return 0
 
 
+def _wants_tui(args, command: str, config: dict) -> bool:
+    """Whether to draw the panelled interface for this invocation.
+
+    Every "no" here is a case where the plain path is the right answer rather
+    than a degraded one: piped output has no terminal to draw on, NO_COLOR and
+    TERM=dumb are explicit requests for plain text, and textual is an optional
+    extra an install is allowed not to have. `symb tui` says yes to all of
+    that except a missing library.
+    """
+    import os
+    import sys
+
+    if getattr(args, "no_tui", False):
+        return False
+    if command != "tui":
+        if not config.get("agent", {}).get("tui", True):
+            return False
+        if os.environ.get("NO_COLOR") or os.environ.get("TERM", "") in ("", "dumb"):
+            return False
+        try:
+            if not (sys.stdout.isatty() and sys.stdin.isatty()):
+                return False
+        except Exception:
+            return False
+    try:
+        import textual  # noqa: F401
+    except ImportError:
+        if command == "tui" or getattr(args, "tui", False):
+            print("The panelled interface needs textual: pip install textual")
+        return False
+    return True
+
+
 def _resolve_command(args: argparse.Namespace) -> str:
     if args.telegram:
         return "gateway"
@@ -1128,7 +1170,7 @@ def main(argv: list[str] | None = None) -> int:
 
     command = _resolve_command(args)
 
-    if command == "chat":
+    if command in ("chat", "tui"):
         if is_first_run(config) or getattr(args, "force", False):
             config = run_setup_wizard(config)
         # Safety gate: never send telemetry until the user has answered the
@@ -1141,6 +1183,26 @@ def main(argv: list[str] | None = None) -> int:
         # is paid once and every session after the first starts warm. --no-attach
         # forces the local load path (and a daemon that is still loading, with
         # no socket yet, falls through to it too).
+        # The panelled interface, when this is a terminal and it is available.
+        # It is a CLIENT of the daemon and nothing else — no model is loaded
+        # here — so it is offered only when there is a resident one to talk to,
+        # and every other case falls through to the path that has always
+        # worked: a pipe, NO_COLOR, TERM=dumb, textual not installed, --no-tui,
+        # or no daemon. A new interface must not be the reason a scripted run
+        # or a plain terminal stops working.
+        if _wants_tui(args, command, config):
+            from symbio.app import daemon as _daemon
+
+            if _daemon.daemon_ready():
+                from symbio_tui.app import SymbioTUI
+
+                SymbioTUI().run(inline=True)
+                return 0
+            if command == "tui":
+                print("The panelled interface needs a resident model. "
+                      "Start one with `symb daemon start`.")
+                return 1
+
         if not getattr(args, "no_attach", False):
             from symbio.app import daemon
             if daemon.daemon_ready():

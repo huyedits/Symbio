@@ -1,7 +1,7 @@
 ### CUDA SUPPORT NEEDED
 # Symbio - that fine tuning agent.
 
-> **A local-first AI agent that learns from your corrections.**
+> **Learns from your corrections, on your machine — and rolls back a fine-tune that made it worse.**
 >
 > Runs on your Mac. Remembers what matters. Learns new skills. Fine-tunes itself with LoRA. No cloud inference. No subscription.
 
@@ -12,6 +12,37 @@
 **[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)** 
 
 ---
+
+## APGI — artificial personalised general intelligence
+
+A term coined for this project, because the thing being built is not on the
+road to AGI and is not trying to be.
+
+AGI is one mind that is general across everyone. **APGI is one mind that is
+general across everything YOU do** — the same breadth of capability, narrowed
+to a single person, a single machine, and the particular way they work. It is
+not a smaller AGI. It is a different target, and most of what makes it hard is
+different too.
+
+What it implies in practice, all of which this repository is an attempt at:
+
+- **The weights change for you, not for a population.** A correction becomes a
+  LoRA update on your machine, guarded by a battery that rolls it back if it
+  made anything worse. Nobody else's install gets it.
+- **It learns an environment by acting in it.** Given a world it has never seen
+  it earns its own corpus: it acts, the world grades it by changing or not
+  changing, and only what worked is kept. Measured here at 10/45 to 26/45, and
+  six-step chains from 0/19 to 7/19, with no human writing a sample.
+- **It is one installation, not a service.** No cloud inference, no shared
+  fine-tune, no telemetry on by default. What it learns about you cannot leak
+  into anyone else's copy, because there is no anyone else's copy.
+- **Personalisation is the general capability.** The skills, the soul store,
+  the constitution and the per-skill adapters exist to make it general across
+  YOUR work rather than average across everyone's.
+
+The honest limits are in this README too, measured rather than asserted: what
+it cannot bootstrap, where the harness was the thing in its way, and which
+numbers are one run rather than a result.
 
 ## What is Symbio?
 
@@ -785,6 +816,66 @@ emits commands, the simulator RUNS them, and the pair is kept only if the basin
 ends in the state the task described. The system prompt says what the world IS
 and nothing about how to spell a command.
 
+## What stops a fine-tune from making it worse
+
+A loop that trains itself needs a way to notice that it has got worse, because
+the loss will not tell it. Nine things do, and every one of them is a refusal
+the run can lose to rather than a warning it prints.
+
+**Before the run.** The corpus is checked, not trusted: samples with broken
+tool calls are dropped (`drop_broken_tool_call_samples`), unparseable rows are
+removed and counted, prompt-masking is verified against the model's own chat
+template, and `lora.keys` is checked against the module tree — a key that
+matches nothing produces a clean log and an adapter that learned nothing, so
+it is caught before the trainer starts rather than after. A memory preflight
+refuses a run the machine cannot hold, because an accepted one is not a failed
+run, it is a Jetsam kill.
+
+**The baseline.** `golden.run_golden_set` scores a fixed battery — identity,
+tool-tag formatting, the contracts that must not break — against the CURRENT
+model, before anything is trained. Without a before, "it still passes" is not
+evidence.
+
+**During the run.** The early-stop monitor reads each validation loss and
+keeps the best: `val_loss=0.0540 best=0.0420 patience=1/2`. At patience it
+kills the trainer and restores the best checkpoint — one run trained 120
+iterations and kept 80. A validation loss that is implausible (nan, or a
+number no real run produces) aborts instead of being recorded as an
+improvement.
+
+**After the run.** The battery runs again. A case that passed before and fails
+now is a regression, and `golden_rollback_on_regression` restores the backup
+`backup_adapter` took — the fine-tune is discarded, not shipped. Before that
+it will try once more with extra iterations and remedy samples for the
+specific failing cases (`append_golden_remedy_samples`), because a rollback
+that gives up on a fixable regression just preserves it. A wildcard check then
+asks about subjects absent from the corpus, which is where a narrow fine-tune
+shows up as confident nonsense.
+
+**What the loss cannot say.** `weight_delta_report` compares the new adapter
+against the pre-train backup, per tensor and overall:
+
+```
+[Train] Weight delta vs the pre-train adapter: 8 tensor(s), 0.26M parameters,
+        overall movement 4.73%.
+[Train] Moved most: self_attn.lora_a 10.0%.
+[Train] 7 of 8 tensor(s) did not move at all — a target the run never reached
+        is the usual cause, and it is invisible in the loss.
+```
+
+A run whose LoRA targets matched nothing produces a respectable curve and an
+adapter identical to the one before it. Movement is the only thing that
+distinguishes the two, and "no previous adapter" and "the shape changed" are
+reported as unknown rather than as zero — unknown and unchanged are the two
+answers that must never be confused.
+
+**Around all of it.** The adapter is sealed and verified at load time against a
+Merkle root, so weights that changed since they were sealed are refused rather
+than loaded quietly. In-flight runs are journalled with a pid and a boot id, so
+an OOM kill leaves a resumable record instead of a half-written adapter that
+loads as the real one. Worker adapters get the same treatment against their own
+golden sets, one role at a time.
+
 ## No human writes the training data
 
 The loop closes on itself. A task is put to the model in English; the model
@@ -814,9 +905,35 @@ the grade.
 | 1. base model | — | 10/45 | **0/19** |
 | 2. first adapter | its own 10 samples (depths 1-4) | 16/45 | **0/19** |
 | 3. more runway | same 10 samples, 12 rounds per task | 19/45 | **3/19** |
-| 4. chains in the corpus | 19 samples including 3 six-step | **26/45** | **7/19** |
+| 4. chains in the corpus | 19 samples including 3 six-step | 26/45 | 7/19 |
+| 5. ten tasks held out | 21 samples, none from the held-out set | 21/45 | 5/19 |
 
-By depth at round 4: 8/8, 5/6, 3/5, 2/4, 1/3, 7/19.
+Round 4 scores higher and is the weaker number: five of the tasks it was
+scored on had their own answers in its training data. Round 5 is the honest
+one — ten tasks were reserved before training, chosen by position so nothing
+about how hard they turned out could decide which side of the line they fell.
+
+**Scored against those same ten in every round:**
+
+| round | all 45 | held-out 10 | held-out six-step |
+| --- | ---: | ---: | ---: |
+| 1. base | 10/45 | 2/10 | 0/4 |
+| 2. first adapter | 16/45 | 3/10 | 0/4 |
+| 3. runway + nudges | 19/45 | 2/10 | 0/4 |
+| 4. chains (leaky) | 26/45 | 5/10 | 0/4 |
+| 5. held-out clean | 21/45 | **4/10** | **1/4** |
+
+On tasks that were never in any corpus, the base model solves 2 and the
+self-taught one solves 4. Its first six-step chain on a reserved task —
+`transplant_2`, seal, settle, lift, bind, open, prime — lands in round 5, on
+an adapter that had never seen any of the four.
+
+Train split 17/35 against held-out 4/10: 49% and 40%. A model that had
+memorised its corpus would show that gap much wider, and this is the number
+that says the six-step result is a learned shape rather than a recalled one.
+
+Ten reserved tasks and four reserved chains is a small sample, and every cell
+above is one run. Read the direction, not the decimals.
 
 Round 1 said the long chain was not reachable from a corpus containing no
 example of one. Rounds 3 and 4 are what it took to test that, and both halves

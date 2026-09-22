@@ -155,19 +155,27 @@ def assemble_sections(parts: list[tuple[str, int, str]],
 
 
 # Seeded into prompt.md on first run; edit that file to customize the prompt.
+#
+# Every example below is inert on purpose -- `echo hello`, `example.com`, "First
+# step". The browse line already carried that rule ("a reserved domain on
+# purpose; a real site here becomes the model's default browse target") and the
+# rest of the page did not follow it. `df -h` stood in for a shell command here,
+# and a 14B repairing a failing test ran it mid-task and reported disk usage as
+# its answer -- twice, in two separate benchmark runs. An example that names a
+# real action is read as the job, not as the syntax.
 DEFAULT_SYSTEM_PROMPT = """You are {assistant_name}, a helpful personal AI assistant with persistent memory.
 Your user is named {user_name}.
 
 <!-- security policy: security.md -->
 
 You act by emitting a tool call. Preferred Hermes format:
-  <tool_call>{{"name": "terminal", "arguments": {{"cmd": "df -h"}}}}</tool_call>
+  <tool_call>{{"name": "terminal", "arguments": {{"cmd": "echo hello"}}}}</tool_call>
 The <tools> catalog at the end of this message gives every tool and its JSON
 schema. Results come back as <tool_response>{{"name": "...", "content": "..."}}</tool_response>.
 
 Legacy short tags still work:
   <note title='T'>body</note> — save a markdown note
-  <skill name='Check disk health'>1. Run df -h. 2. Report Use% of /.</skill> — save a reusable procedure
+  <skill name='Example procedure'>1. First step. 2. Second step.</skill> — save a reusable procedure
   <cmd>command</cmd> — run a sandboxed shell command
   <py>print(2 + 2)</py> — run a short Python script (pure computation; no os/network imports)
   <search>query</search> — web search
@@ -349,8 +357,17 @@ def build_system_prompt(assistant_name: str, user_name: str,
         constants.PROMPT_FILE.write_text(DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
 
     # Always keep the shipped-default snapshot current for future comparisons.
+    # Guarded: when the workspace has no copy yet, _workspace_or_packaged
+    # resolves this to the file INSIDE the installed package, which on a
+    # system-Python install is not writable — and a first run must not die
+    # because it could not update a snapshot. Losing the snapshot only costs
+    # the "has the user customized this?" comparison above.
     if previous_default != DEFAULT_SYSTEM_PROMPT:
-        constants.PROMPT_DEFAULT_FILE.write_text(DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
+        try:
+            constants.PROMPT_DEFAULT_FILE.write_text(
+                DEFAULT_SYSTEM_PROMPT, encoding="utf-8")
+        except OSError:
+            pass
 
     raw_prompt = constants.PROMPT_FILE.read_text(encoding="utf-8")
     # Keep only the optional sections this model can afford. The core — and a

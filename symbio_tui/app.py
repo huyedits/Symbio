@@ -18,30 +18,40 @@ import sys
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.widgets import Footer, Input, Static
+from textual.widgets import Input, Static
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
 from symbio_tui.protocol import DaemonLink  # noqa: E402
 from symbio_tui.widgets import (  # noqa: E402
-    CommandStrip, Composer, Face, History, Suggestions)
+    HOOK, CommandStrip, Composer, Face, History, StatusLine, Suggestions)
 
 # The tag chat_turn prints once a turn: "  [Mood: curious]".
 _MOOD_RE = re.compile(r"\[Mood:\s*([^\]]+)\]")
 
 CSS = """
-Screen { layout: vertical; }
-/* Logo on top, conversation in the middle, commands under it, input docked
-   to the bottom. Only the middle pane is elastic, so the input box keeps its
-   place at every size and the figure is dropped rather than wrapped. */
-#face { height: auto; color: $accent; text-align: center; padding: 1 0 0 0; }
-#history { height: 1fr; min-height: 3; border: none; padding: 0 1;
+/* Claude Code's proportions: a quiet header, an elastic transcript, and a
+   composer docked to the bottom that never moves at any size. The accent is
+   one colour (#d97757) and it is used for exactly three things — the turn
+   bullet, the spinner and the box you type in — so what is accented is what
+   is live. */
+Screen { layout: vertical; background: $surface; }
+#face { height: auto; color: #d97757; text-align: left; padding: 1 0 0 2; }
+#history { height: 1fr; min-height: 3; border: none; padding: 0 2;
            scrollbar-size-vertical: 1; }
-#commands { height: auto; color: $text-muted; padding: 0 1; }
-#composer { dock: bottom; height: auto; }
-#suggestions { max-height: 8; border: round $accent; display: none; }
-#status { height: auto; color: $text-muted; padding: 0 1; }
-#prompt { border: round $accent; }
+#commands { height: auto; color: $text-muted; padding: 0 2; }
+#composer { dock: bottom; height: auto; padding: 0 1; }
+#suggestions { max-height: 8; border: round #d97757; display: none; }
+#status { height: auto; padding: 0 1; }
+/* The box: the border belongs to the ROW so the chevron sits inside it, the
+   way a prompt does. An Input that draws its own border can hold nothing but
+   text. */
+#promptrow { height: auto; border: round #d97757; padding: 0 1; }
+#chevron { width: 2; height: 1; color: #d97757; }
+#prompt { border: none; background: transparent; padding: 0; height: 1;
+          width: 1fr; }
+#prompt:focus { border: none; background: transparent; }
+#hints { height: auto; color: $text-muted; padding: 0 1; }
 """
 
 
@@ -51,9 +61,6 @@ class SymbioTUI(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),
         Binding("ctrl+l", "clear", "Clear"),
-        Binding("up", "suggest_prev", "Prev", show=False),
-        Binding("down", "suggest_next", "Next", show=False),
-        Binding("tab", "complete", "Complete", show=False),
         Binding("pageup", "scroll_back", "Scroll back"),
         Binding("pagedown", "scroll_forward", "Scroll on"),
     ]
@@ -78,7 +85,6 @@ class SymbioTUI(App):
         yield History()
         yield CommandStrip(self._names)
         yield Composer(self._names)
-        yield Footer()
 
     def on_mount(self) -> None:
         if self.is_inline:
@@ -90,7 +96,7 @@ class SymbioTUI(App):
         problem = self.link.connect()
         history = self.query_one(History)
         if problem:
-            history.say(problem)
+            history.say_tool(problem)
             self._set_status("not connected")
         else:
             self._set_status("connected to the resident model")
@@ -111,24 +117,51 @@ class SymbioTUI(App):
             if mood:
                 # The one line a turn emits about how it read the exchange.
                 self.query_one(Face).set_mood(mood.group(1))
-            history.say(text)
+            # The mood tag is what the face is drawn from; printing it as
+            # well would say the same thing twice, once as a face and once as
+            # a machine tag in the middle of the prose.
+            # rstrip only: the LEADING whitespace is what marks a line as a
+            # tool result rather than as the assistant speaking, and stripping
+            # it here would send every indented frame through as prose.
+            self._show_output(history, _MOOD_RE.sub("", text).rstrip())
+            self._set_status("")
         elif kind == "stream":
             history.say_inline(msg.get("text", ""))
         elif kind == "status":
-            self._set_status(msg.get("text") or "")
+            # Status frames are the daemon working: spinner on.
+            self._set_status(msg.get("text") or "", busy=True)
         elif kind == "input_prompt":
             self._awaiting_input = True
             self._set_status("waiting for you")
         elif kind == "confirm":
             self._pending_confirm = True
-            history.say(msg.get("prompt", "Allow this?"))
+            history.say_tool(msg.get("prompt", "Allow this?"))
             self._set_status("approve? y / n")
         elif kind == "done":
             self._set_status("session ended")
             self.query_one(Face).set_mood("offline")
 
-    def _set_status(self, text: str) -> None:
-        self.query_one("#status", Static).update(text)
+    def _show_output(self, history: History, text: str) -> None:
+        """Route one frame to the mark that describes it.
+
+        The daemon sends a turn's prose and its tool output down the same
+        channel, so the shape of the line is what tells them apart: anything
+        chat_style has already coloured keeps its own ANSI untouched, an
+        indented or hooked line is a consequence, and the rest is the
+        assistant speaking and gets the bullet. Guessing wrong costs a mark,
+        not a message — nothing here drops or rewrites what arrived.
+        """
+        if not text:
+            return
+        if "\x1b[" in text:
+            history.say(text)
+        elif text.startswith((" ", "\t", HOOK)) or text.lstrip().startswith(HOOK):
+            history.say_tool(text.strip())
+        else:
+            history.say_agent(text)
+
+    def _set_status(self, text: str, busy: bool = False) -> None:
+        self.query_one(StatusLine).show(text, busy=busy)
 
     # ---- input -----------------------------------------------------------
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -146,17 +179,17 @@ class SymbioTUI(App):
             self._send({"type": "confirm", "answer": answer})
             self._set_status("approved" if answer else "declined")
             return
-        self.query_one(History).say(f"› {text}")
+        self.query_one(History).say_user(text)
         self._send({"type": "input", "text": text})
         self._awaiting_input = False
-        self._set_status("working…")
+        self._set_status("Thinking…", busy=True)
         self.query_one(Face).set_mood("working")
 
     def _send(self, message: dict) -> None:
         if self.link is not None and self.link.connected:
             self.link.send(message)
         else:
-            self.query_one(History).say("Not connected to a daemon.")
+            self.query_one(History).say_tool("Not connected to a daemon.")
 
     # ---- actions ---------------------------------------------------------
     def action_complete(self) -> None:
