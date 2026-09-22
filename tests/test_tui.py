@@ -375,3 +375,123 @@ def test_symb_tui_asks_for_it_even_off_a_terminal(monkeypatch):
     monkeypatch.setenv("TERM", "dumb")
 
     assert cli._wants_tui(_args(), "tui", {"agent": {"tui": False}}) is True
+
+
+# ---- the shape Claude Code reads in ----
+
+def _lines(app) -> list[str]:
+    """The transcript as plain text, however each line was styled."""
+    return [line.text if hasattr(line, "text") else str(line)
+            for line in app.query_one(History).lines]
+
+
+@pytest.mark.asyncio
+async def test_what_you_typed_is_echoed_under_a_chevron():
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app.query_one("#prompt").value = "post this for me"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert any(line.startswith("> post this for me") for line in _lines(app))
+
+
+@pytest.mark.asyncio
+async def test_a_turn_is_marked_with_the_bullet():
+    """One mark per event, so a screenful of scrollback can be skimmed for the
+    one you are looking for instead of read."""
+    from symbio_tui.widgets import BULLET
+
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "output", "text": "I posted it."})
+        await pilot.pause()
+
+        assert any(line.startswith(f"{BULLET} I posted it.") for line in _lines(app))
+
+
+@pytest.mark.asyncio
+async def test_an_indented_frame_reads_as_a_result_not_as_speech():
+    """The daemon sends prose and tool output down one channel; the shape of
+    the line is what tells them apart."""
+    from symbio_tui.widgets import HOOK
+
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "output", "text": "  (180, 120)  Submit button"})
+        await pilot.pause()
+
+        assert any(HOOK in line for line in _lines(app))
+
+
+@pytest.mark.asyncio
+async def test_a_coloured_frame_keeps_its_own_ansi():
+    """chat_style's skin is escape codes. Re-marking it would be a second
+    representation of the same line that can drift from the real one."""
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "output", "text": "\x1b[36mthinking… (6s)\x1b[0m"})
+        await pilot.pause()
+
+        assert any("thinking" in line for line in _lines(app))
+
+
+@pytest.mark.asyncio
+async def test_the_mood_tag_is_the_face_and_not_also_a_line():
+    """Saying it twice — once as a face, once as a machine tag mid-prose — is
+    the tag leaking into the conversation."""
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "output", "text": "Done.\n  [Mood: happy]"})
+        await pilot.pause()
+
+        assert app.query_one("#face").mood == "happy"
+        assert not any("[Mood:" in line for line in _lines(app))
+
+
+@pytest.mark.asyncio
+async def test_a_status_frame_spins_and_an_idle_one_does_not():
+    """A status that cannot be told apart from a frozen one is the thing
+    people reach for ctrl-c over."""
+    from symbio_tui.widgets import SPINNER, StatusLine
+
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "status", "text": "looking (4s)"})
+        await pilot.pause()
+        busy = str(app.query_one(StatusLine).content)
+
+        app._handle({"type": "output", "text": "I looked."})
+        await pilot.pause()
+
+        assert any(frame in busy for frame in SPINNER)
+        assert "looking (4s)" in busy
+        assert str(app.query_one(StatusLine).content).strip() == ""
+
+
+@pytest.mark.asyncio
+async def test_the_chevron_sits_inside_the_box_with_the_input():
+    """A prompt drawn outside the border is a decoration; inside it, it is a
+    prompt. An Input that draws its own border cannot hold one."""
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+
+        row = app.query_one("#promptrow")
+        chevron = app.query_one("#chevron")
+        box = app.query_one("#prompt")
+
+        assert chevron.region.x < box.region.x
+        assert row.region.y <= chevron.region.y
+        assert row.region.height >= 3, "the row is what carries the border"
+
+
+@pytest.mark.asyncio
+async def test_the_keys_are_on_the_screen_under_the_box():
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+
+        hints = app.query_one("#hints")
+        assert "ctrl+c" in str(hints.content)
+        assert hints.region.y > app.query_one("#prompt").region.y
