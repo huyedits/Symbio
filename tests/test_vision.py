@@ -408,3 +408,75 @@ def test_an_empty_target_asks_nothing(monkeypatch, tmp_path):
     monkeypatch.setattr(vision, "_generate",
                         lambda *a, **k: pytest.fail("nothing was asked for"))
     assert vision.find_in_blobs(_shot(tmp_path), "   ") == []
+
+
+# ---- the hybrid: the model picks, the pixels measure ----
+
+def test_a_drifted_box_snaps_onto_the_region_it_overlaps(tmp_path):
+    """locate's recorded drift is evenly-spaced positions with fabricated x,
+    off by more than a full icon across a row. A box that lands ON something
+    structural takes that thing's measured bounds."""
+    path = _shot(tmp_path)
+    drifted = [{"label": "Submit", "box": (120, 118, 280, 158),
+                "center": (200, 138)}]
+
+    snapped = vision.snap_to_blobs(path, drifted)
+
+    assert snapped[0]["snapped"] is True
+    # The measured bounds of the drawn button, within the dilation's pixel.
+    assert snapped[0]["box"] == (99, 99, 261, 141)
+    assert snapped[0]["center"] == (180, 120)
+    assert snapped[0]["label"] == "Submit", "the model still says what it is"
+
+
+def test_a_box_over_empty_space_keeps_its_numbers_and_is_marked(tmp_path):
+    """A coordinate over nothing structural is what a fabricated one looks
+    like. Say so rather than silently moving it to the nearest real thing —
+    the nearest real thing may be a dock icon, and clicking it launches an
+    application."""
+    path = _shot(tmp_path)
+    invented = [{"label": "update banner", "box": (900, 600, 1000, 650),
+                 "center": (950, 625)}]
+
+    snapped = vision.snap_to_blobs(path, invented)
+
+    assert snapped[0]["snapped"] is False
+    assert snapped[0]["center"] == (950, 625)
+
+
+def test_a_box_drawn_around_a_control_and_its_label_still_agrees(tmp_path):
+    """The model's box and the measured region are the same thing described
+    at two sizes; either centre inside the other is agreement."""
+    path = _shot(tmp_path)
+    loose = [{"label": "the form", "box": (380, 280, 800, 380),
+              "center": (590, 330)}]
+
+    assert vision.snap_to_blobs(path, loose)[0]["snapped"] is True
+
+
+def test_snapping_survives_an_image_it_cannot_read():
+    """Best-effort like every other check here: a broken correction must not
+    discard a usable coordinate."""
+    elements = [{"label": "x", "box": (1, 2, 3, 4), "center": (2, 3)}]
+    assert vision.snap_to_blobs("nope.png", elements) == elements
+
+
+def test_an_element_without_a_box_passes_through(tmp_path):
+    elements = [{"label": "x"}]
+    assert vision.snap_to_blobs(_shot(tmp_path), elements) == elements
+
+
+def test_grounded_boxes_come_back_corrected(monkeypatch, tmp_path):
+    """The whole point of the hybrid, end to end: one generation says what is
+    there, the edge map says where."""
+    path = _shot(tmp_path)
+    monkeypatch.setattr(
+        vision, "_generate",
+        lambda *a, **k: '[{"bbox_2d": [100, 148, 233, 197], "label": "Submit"}]')
+    monkeypatch.setattr(vision, "_verify_element", lambda *a, **k: True)
+
+    found = vision.locate(path, "the Submit button")
+
+    assert found[0]["box"] == (99, 99, 261, 141)
+    assert found[0]["center"] == (180, 120)
+    assert found[0]["snapped"] is True
