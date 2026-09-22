@@ -325,11 +325,7 @@ def locate(
     """Find things on screen and return them with clickable pixel centres.
 
     Each element is {"label", "box": (x1,y1,x2,y2), "center": (x,y)} in
-    ORIGINAL-image pixels, already rescaled out of the model's 0-1000 space,
-    and then corrected against the regions measured off the pixels — see
-    snap_to_blobs. The model says what a thing is; the edge map says where it
-    is. `snapped: False` marks an element whose box landed on nothing
-    structural, which is what a fabricated coordinate looks like.
+    ORIGINAL-image pixels, already rescaled out of the model's 0-1000 space.
 
     ASK FOR WHAT YOU WANT. Measured 2026-09-07 on a real 1920x1080 macOS
     desktop (VS Code, a terminal, a notification, a full dock):
@@ -365,7 +361,7 @@ def locate(
     targets = what.strip() or _GENERIC_TARGETS
     raw = _generate(path, _LOCATE_PROMPT.format(what=targets),
                     max_tokens, model_name(config))
-    found = snap_to_blobs(path, _parse_elements(raw, width, height))
+    found = _parse_elements(raw, width, height)
     if found and targeted:
         if verify:
             found = [e for e in found if _verify_element(path, e, targets, config)]
@@ -399,7 +395,7 @@ def locate(
     # layout.
     raw = _generate(path, _LOCATE_PROMPT.format(what=_GENERIC_TARGETS),
                     max_tokens, model_name(config))
-    swept = snap_to_blobs(path, _parse_elements(raw, width, height))
+    swept = _parse_elements(raw, width, height)
     if swept:
         return swept
     # Still nothing. A whole-screen ask is the wrong instrument here — see
@@ -486,87 +482,6 @@ def read_blobs(
             "score": region.get("score", 0.0),
         })
     return found
-
-
-# How much of a generated box has to land on a measured region before the two
-# are taken to be the same thing. Low on purpose: the model's box is usually
-# the right element seen loosely, so a tenth of an overlap is plenty of
-# evidence to snap it, while a coordinate invented over empty space overlaps
-# nothing at all.
-_SNAP_OVERLAP = 0.1
-
-
-def _overlap_area(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> int:
-    width = min(a[2], b[2]) - max(a[0], b[0])
-    height = min(a[3], b[3]) - max(a[1], b[1])
-    return max(0, width) * max(0, height)
-
-
-def _inside(point: tuple[int, int], box: tuple[int, int, int, int]) -> bool:
-    return box[0] <= point[0] <= box[2] and box[1] <= point[1] <= box[3]
-
-
-def snap_to_blobs(
-    image_path: str | Path,
-    elements: list[dict[str, Any]],
-    limit: int = 60,
-) -> list[dict[str, Any]]:
-    """Correct generated boxes against the ones measured off the pixels.
-
-    The hybrid. Whole-screen grounding is one generation and knows what things
-    ARE; the edge map is arithmetic and knows where they are. Used alone each
-    has a recorded failure: the model drifts (evenly-spaced dock positions with
-    fabricated x, off by more than a full icon) and the blobs cannot say which
-    region is the one you asked for. Together, the model picks and the pixels
-    measure.
-
-    Each element keeps its label and takes the box of the region it lands on,
-    chosen by overlap. An element that overlaps nothing structural keeps its
-    own numbers and is marked `snapped: False` — that is the case worth
-    reading twice, because a coordinate over empty space is what a fabricated
-    one looks like.
-    """
-    from symbio import blobs as _blobs
-
-    if not elements:
-        return elements
-    try:
-        regions = _blobs.salient_regions(str(image_path), limit=max(0, limit))
-    except Exception as e:  # pragma: no cover - Pillow failure on a bad file
-        logger.debug("blob segmentation failed on %s: %s", image_path, e)
-        return elements
-    if not regions:
-        return elements
-
-    out: list[dict[str, Any]] = []
-    for element in elements:
-        box = tuple(element.get("box") or ())
-        if len(box) != 4:
-            out.append(element)
-            continue
-        area = max(1, (box[2] - box[0]) * (box[3] - box[1]))
-        best, best_score = None, 0.0
-        for region in regions:
-            overlap = _overlap_area(box, region["box"])
-            score = overlap / area
-            if _inside(region["center"], box) or _inside(element.get("center", (-1, -1)),
-                                                         region["box"]):
-                # Either centre inside the other box counts as agreement even
-                # when the rectangles barely overlap: a model box drawn around
-                # a control plus its label, and the control itself, are the
-                # same thing described at two sizes.
-                score = max(score, _SNAP_OVERLAP)
-            if score > best_score:
-                best, best_score = region, score
-        snapped = dict(element)
-        if best is not None and best_score >= _SNAP_OVERLAP:
-            snapped["box"] = best["box"]
-            snapped["center"] = best["center"]
-            snapped["snapped"] = True
-        else:
-            snapped["snapped"] = False
-        out.append(snapped)
-    return out
 
 
 def _name_crop(path: str, box: tuple[int, int, int, int], name: str,
