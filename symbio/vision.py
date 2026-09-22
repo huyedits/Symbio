@@ -608,6 +608,17 @@ def find_in_blobs(
 _PRESENCE_PROMPT = "Is {target} visible anywhere on this screen? Answer only yes or no."
 
 
+def on_screen(image_path: str | Path, target: str,
+              config: dict[str, Any] | None = None) -> bool:
+    """Public form of the screen-level presence question.
+
+    Callers that want the answer WITHOUT a grounding pass use this: a look that
+    reports "not present" and a look that failed to ground are different facts
+    and have to be told apart before either is reported to the model.
+    """
+    return _on_screen(str(image_path), target, config)
+
+
 def _on_screen(path: str, target: str, config: dict[str, Any] | None) -> bool:
     """Is the thing being asked for on this screen at all?
 

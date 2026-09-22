@@ -806,12 +806,15 @@ class ToolsMixin:
             # element by confidently pointing at something else, so an empty
             # result must not read as a failed look.
             #
-            # But only when the DOM was actually consulted. On the desktop
-            # there is none to consult, and in the browser a read that threw
-            # looks identical to one that found nothing — asserting absence
-            # off the back of that inverts the correction the note above
-            # exists to make, about the same small control it was written for.
-            if dom_read or where == "the desktop":
+            # But only on evidence. Two things count: the DOM was actually
+            # consulted and did not have it, or the screen itself was asked
+            # and said no. Neither is "vision returned no boxes" — a read that
+            # threw looks identical to one that found nothing, and on the
+            # desktop there is no DOM to consult at all, so the old
+            # `dom_read or where == "the desktop"` asserted absence off a
+            # vision miss and nothing else, which inverts the correction the
+            # note above exists to make about that same small control.
+            if dom_read or getattr(self, "_last_look_absent", False):
                 lines.append(
                     "\nI could not locate that on screen. Treat it as NOT "
                     "present rather than as a failed look — do not click "
@@ -877,14 +880,29 @@ class ToolsMixin:
                 and callable(sleep_fn) and callable(wake_fn)):
             sleep_fn()
             slept = True
+        # Reset per look: a stale "it is not there" from the previous question
+        # is exactly the claim that must never be carried forward.
+        self._last_look_absent = False
         try:
             description = vision.describe(shot, question, self.config)
             try:
+                if question.strip():
+                    # Ask the screen first. An empty element list means two
+                    # different things — the thing is not there, or grounding
+                    # failed — and only one of them may be reported as absence.
+                    # Measured 2026-09-23 over four surfaces: asked of the
+                    # whole screen this answers 11/12 absent targets correctly,
+                    # against 3/12 for the per-crop check it replaced.
+                    if not vision.on_screen(shot, question, self.config):
+                        self._last_look_absent = True
+                        return description, []
                 # Ground what was asked about. A generic "find every
                 # interactive element" sweep returns nothing at all on a dense
                 # real desktop, while naming the target lands within a few
-                # pixels — see vision.locate.
-                elements = vision.locate(shot, question, config=self.config)
+                # pixels — see vision.locate. verify=False because the screen
+                # was just asked; locate would otherwise ask it again.
+                elements = vision.locate(shot, question, config=self.config,
+                                         verify=False)
             except Exception:
                 # A description with no coordinates is still worth having;
                 # losing the whole look because grounding failed is not.
