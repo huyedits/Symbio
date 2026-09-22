@@ -251,3 +251,160 @@ def test_a_check_that_cannot_run_keeps_the_coordinate():
 
 def test_an_element_with_no_box_is_not_checked():
     assert vision._verify_element("nope.png", {}, "x", {}) is True
+
+
+# ---- reading a screen as blobs rather than as one picture ----
+
+def _shot(tmp_path):
+    """A gradient wallpaper with two controls on it, saved."""
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGB", (1200, 800))
+    draw = ImageDraw.Draw(im)
+    for y in range(800):
+        draw.line([(0, y), (1200, y)], fill=(40 + y // 12, 60 + y // 20, 90))
+    draw.rectangle([100, 100, 260, 140], fill=(240, 240, 240), outline=(20, 20, 20))
+    draw.text((120, 115), "Submit", fill=(0, 0, 0))
+    draw.rectangle([400, 300, 760, 340], fill=(255, 255, 255), outline=(120, 120, 120))
+    draw.text((410, 315), "type here", fill=(30, 30, 30))
+    path = tmp_path / "shot.png"
+    im.save(path)
+    return str(path)
+
+
+def test_blobs_name_the_regions_the_pixels_found(monkeypatch, tmp_path):
+    """One crop, one question, one name. The crop is chosen by arithmetic; the
+    model only supplies the label."""
+    seen = []
+
+    def fake_generate(path, question, max_tokens, name):
+        seen.append(question)
+        return "Submit button" if len(seen) == 1 else "text field reading type here"
+
+    monkeypatch.setattr(vision, "_generate", fake_generate)
+    found = vision.read_blobs(_shot(tmp_path))
+
+    assert [e["label"] for e in found] == ["Submit button",
+                                           "text field reading type here"]
+    assert all("crop" in q for q in seen)
+
+
+def test_blob_coordinates_come_from_the_pixels_not_the_model(monkeypatch, tmp_path):
+    """locate's known failure is fabricating plausible positions for rows of
+    near-identical controls. A box measured off the edge map cannot drift."""
+    monkeypatch.setattr(vision, "_generate",
+                        lambda *a, **k: "a button at (999, 999)")
+    found = vision.read_blobs(_shot(tmp_path))
+
+    boxes = {e["box"] for e in found}
+    assert boxes, "the controls must be found"
+    for left, top, right, bottom in boxes:
+        assert 90 <= left <= 420 and 90 <= top <= 350
+
+
+def test_a_crop_that_is_only_background_is_dropped(monkeypatch, tmp_path):
+    """Wallpaper offered as something to click is worse than a short list."""
+    monkeypatch.setattr(vision, "_generate",
+                        lambda *a, **k: "nothing — this is just the wallpaper")
+    assert vision.read_blobs(_shot(tmp_path)) == []
+
+
+def test_a_blank_screen_costs_no_generations(monkeypatch, tmp_path):
+    """The segmentation runs first and finds nothing, so the VLM is never
+    asked. A screen with no structure in it is answered in 30ms."""
+    from PIL import Image
+
+    path = tmp_path / "blank.png"
+    Image.new("RGB", (1280, 800), (252, 252, 252)).save(path)
+    monkeypatch.setattr(vision, "_generate",
+                        lambda *a, **k: pytest.fail("nothing to name"))
+
+    assert vision.read_blobs(str(path)) == []
+
+
+def test_the_number_of_crops_is_capped(monkeypatch, tmp_path):
+    """Each crop is a generation. Twelve of them is a look that takes half a
+    minute, on a machine where the headmaster is asleep for the whole of it."""
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGB", (1200, 800), (30, 60, 90))
+    draw = ImageDraw.Draw(im)
+    for index in range(12):
+        x, y = 60 + (index % 4) * 280, 80 + (index // 4) * 220
+        draw.rectangle([x, y, x + 180, y + 60], fill=(255, 255, 255), outline=(0, 0, 0))
+        draw.text((x + 10, y + 20), f"button {index}", fill=(0, 0, 0))
+    path = tmp_path / "many.png"
+    im.save(path)
+
+    calls = []
+    monkeypatch.setattr(vision, "_generate",
+                        lambda *a, **k: calls.append(1) or "a button")
+
+    assert len(vision.read_blobs(str(path), limit=3)) == 3
+    assert len(calls) == 3
+
+
+def test_blob_reading_can_be_turned_off(monkeypatch, tmp_path):
+    monkeypatch.setattr(vision, "_generate",
+                        lambda *a, **k: pytest.fail("disabled"))
+    assert vision.read_blobs(_shot(tmp_path), config={"vision": {"blobs": False}}) == []
+
+
+def test_a_sweep_that_finds_nothing_falls_through_to_blobs(monkeypatch, tmp_path):
+    """The measured failure this exists for: on a dense desktop the generic
+    "find every interactive element" sweep returned nothing at all, and the
+    screen was reported as empty while a full dock was on it."""
+    path = _shot(tmp_path)
+    answers = ["Nothing here.", "Submit button", "text field"]
+
+    def fake_generate(image, question, max_tokens, name):
+        return answers.pop(0) if answers else "a control"
+
+    monkeypatch.setattr(vision, "_generate", fake_generate)
+    found = vision.locate(path)
+
+    assert [e["label"] for e in found] == ["Submit button", "text field"]
+
+
+# ---- finding one named thing among the blobs ----
+
+def test_the_crop_the_model_says_yes_to_is_the_one_returned(monkeypatch, tmp_path):
+    """The model is never asked for a position — only whether the crop it is
+    shown is the thing. Positions come from the edge map."""
+    path = _shot(tmp_path)
+    answers = []
+
+    def fake_generate(image, question, max_tokens, name):
+        answers.append(question)
+        return "yes" if len(answers) == 2 else "no"
+
+    monkeypatch.setattr(vision, "_generate", fake_generate)
+    hits = vision.find_in_blobs(path, "the text field")
+
+    assert len(hits) == 1
+    assert hits[0]["label"] == "the text field"
+    assert all("Answer only yes or no" in q for q in answers)
+
+
+def test_a_thing_that_is_not_there_finds_nothing(monkeypatch, tmp_path):
+    """locate's recorded failure is a confident coordinate for something else
+    — a dock icon offered as a dismissed banner. A closed question about a
+    crop cannot produce that."""
+    monkeypatch.setattr(vision, "_generate", lambda *a, **k: "no")
+    assert vision.find_in_blobs(_shot(tmp_path), "a video player") == []
+
+
+def test_hits_come_back_best_scoring_first(monkeypatch, tmp_path):
+    """A caller taking [0] should get the most prominent match, not an
+    arbitrary one."""
+    monkeypatch.setattr(vision, "_generate", lambda *a, **k: "Yes.")
+    hits = vision.find_in_blobs(_shot(tmp_path), "a control")
+
+    assert len(hits) == 2
+    assert hits[0]["score"] >= hits[1]["score"]
+
+
+def test_an_empty_target_asks_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(vision, "_generate",
+                        lambda *a, **k: pytest.fail("nothing was asked for"))
+    assert vision.find_in_blobs(_shot(tmp_path), "   ") == []

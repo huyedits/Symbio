@@ -750,6 +750,24 @@ class ToolsMixin:
                           else "browser_click_at")
             lines.append(f"\nClickable elements — pass these to {click_tool}:")
             lines.append(vision.format_elements(elements))
+            if len(elements) > 1:
+                # More than one answer to the same question means the list is
+                # candidates, not a verdict, and how to use candidates is not
+                # obvious: the first one is only the most PROMINENT. Measured
+                # on x.com, the two things matching "the box you write a post
+                # in" were the sidebar trends heading (scored highest) and the
+                # composer (second), and the two matching "a button labelled
+                # Post" were the sidebar button that opens a fresh composer
+                # and the one that sends what you just typed. Both wrong
+                # choices are recoverable, but only if the model knows to try
+                # the next one rather than to conclude the screen is broken.
+                lines.append(
+                    "These are CANDIDATES, best-guess first. If typing after a "
+                    "click is refused because nothing is focused, click the "
+                    "NEXT one rather than giving up — the refusal is the "
+                    "check working. When several match and one has to send "
+                    "what you just typed, pick the one nearest the text you "
+                    "typed, not the highest in this list.")
         if controls:
             # The selectors, not just the coordinates. Vision cannot ground a
             # control thinner than one 32px patch — x.com's composer is 28px,

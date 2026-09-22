@@ -31,6 +31,17 @@ pixels. Nothing here should "helpfully" also try the resized-pixel or token-
 grid interpretations — they were both checked and both wrong, and a click
 aimed by a wrong scale is worse than no click at all.
 
+Whole screens and blobs
+-----------------------
+`locate` reads the screen whole: one pass, attention spread evenly over
+uniform patches of a picture that is mostly wallpaper. That is why the generic
+sweep returns nothing on a dense desktop. `read_blobs` reads it the other way
+— `symbio.blobs` measures where the structure actually is (edges, contrast, a
+fill inside a border) with no model at all, and each of those regions is then
+shown to the VLM on its own to be named. Wallpaper produces no regions, so it
+costs nothing to skip; the coordinates come from the pixels rather than from
+generated numbers, which is the one part of grounding this model gets wrong.
+
 Memory
 ------
 This is a second model on a 16 GB machine that already hard-freezes when the
@@ -354,23 +365,237 @@ def locate(
     if found and targeted:
         if verify:
             found = [e for e in found if _verify_element(path, e, targets, config)]
-        # Everything it pointed at turned out to be something else, which is
-        # the answer: the thing asked about is not on screen. Do NOT sweep
-        # generically here. Observed 2026-09-07 when that fallback was
+        if found:
+            return found
+        # Everything it pointed at turned out to be something else. Do NOT
+        # sweep generically here. Observed 2026-09-07 when that fallback was
         # unconditional: the check correctly rejected a fabricated location for
         # a dismissed notification, the sweep then returned a single box
         # labelled "interactive element" at the dead centre of the screen, and
         # it was handed to the model under "clickable elements". A meaningless
         # coordinate offered as a click target is worse than an empty list.
+        #
+        # What IS allowed is asking the same question a different way: not
+        # "where is it" — the question that produced the fabrication — but
+        # "is this it?", once per region the edge map found. Nothing there is
+        # generated, every candidate is checked on its own, and an absent
+        # target still comes back empty because every crop answers no.
+        return find_in_blobs(path, targets, config=config)
+    if found:
         return found
-    if found or not targeted:
-        return found
+    if not targeted:
+        # A generic sweep that came back empty. Do NOT run it again — the
+        # fallback IS the generic sweep, and a second 15-second generation
+        # gives the same answer. Read the screen as blobs instead: a different
+        # instrument, and the one that works on the dense desktop where this
+        # sweep is known to return nothing.
+        return read_blobs(path, config=config)
     # The targeted phrasing produced no boxes at all — which can just mean it
     # was worded awkwardly. Sweep generically so the caller still learns the
     # layout.
     raw = _generate(path, _LOCATE_PROMPT.format(what=_GENERIC_TARGETS),
                     max_tokens, model_name(config))
-    return _parse_elements(raw, width, height)
+    swept = _parse_elements(raw, width, height)
+    if swept:
+        return swept
+    # Still nothing. A whole-screen ask is the wrong instrument here — see
+    # read_blobs — so find the regions that carry structure and name those.
+    return read_blobs(path, config=config)
+
+
+# ------------------------------------------------------------------- blobs
+
+# How much of its surroundings a blob crop carries. A control cropped exactly
+# to its own edges loses the thing that says what it is: "Post" in a box is a
+# button, the same word bare is a word.
+_BLOB_PAD = 12
+
+# What a crop comes back as when there is nothing nameable in it. Kept as a
+# prefix check rather than an equality one because the model answers "nothing
+# — this is part of the wallpaper" as readily as "nothing".
+_BLOB_NOTHING = ("nothing", "background", "wallpaper", "empty", "none",
+                 "blank", "no ", "n/a")
+
+_BLOB_PROMPT = (
+    "This is a small crop of a computer screen. Name the single interface "
+    "element at the centre of it in at most eight words, including its "
+    "visible text — for example 'Post button', 'search field reading london', "
+    "'Wi-Fi menu bar icon'. If the crop is only background, wallpaper or "
+    "decoration with no control or text in it, answer exactly: nothing."
+)
+
+
+def read_blobs(
+    image_path: str | Path,
+    config: dict[str, Any] | None = None,
+    limit: int = 8,
+    max_tokens: int = 40,
+) -> list[dict[str, Any]]:
+    """Read a screen as blobs: find what stands out, then name each one.
+
+    `locate` hands the model a whole screenshot and asks it to ground every
+    control in one pass. On a dense desktop that returns nothing at all
+    (measured 2026-09-07), and the reason is the ask: a screen is mostly
+    wallpaper, and one pass spread evenly over uniform patches of a picture
+    that is 95% nothing has no reason to land on the 28px composer in it.
+
+    So split the work. `symbio.blobs` finds the regions that carry structure —
+    edges, contrast, a border around a fill — with arithmetic, no model, in
+    about 30ms; a flat wallpaper produces none of them. Each of those regions
+    is then cropped and shown to the VLM on its own, which is the ask it is
+    good at: one small picture, one thing in the middle, name it.
+
+    The coordinates come from the pixels, not from the model. That is the
+    other half of the point: `locate`'s known failure is fabricating plausible
+    positions for rows of near-identical controls, and a box measured off the
+    edge map cannot drift across a dock the way a generated number can. The
+    model only ever supplies the label.
+
+    Returns the same shape as `locate` — {"label", "box", "center"} in
+    original-image pixels — plus "score", so a caller can tell how much the
+    region stood out. Empty when nothing on screen has any structure in it,
+    which for a blank or solid-colour screen is the true answer.
+    """
+    from symbio import blobs as _blobs
+
+    if not (config or {}).get("vision", {}).get("blobs", True):
+        return []
+    path = str(image_path)
+    try:
+        regions = _blobs.salient_regions(path, limit=max(0, limit))
+    except Exception as e:  # pragma: no cover - Pillow failure on a bad file
+        logger.debug("blob segmentation failed on %s: %s", path, e)
+        return []
+    if not regions:
+        return []
+
+    name = model_name(config)
+    found: list[dict[str, Any]] = []
+    for region in regions:
+        label = _name_crop(path, region["box"], name, max_tokens)
+        if not label:
+            continue
+        found.append({
+            "label": label,
+            "box": region["box"],
+            "center": region["center"],
+            "score": region.get("score", 0.0),
+        })
+    return found
+
+
+def _name_crop(path: str, box: tuple[int, int, int, int], name: str,
+               max_tokens: int) -> str:
+    """Ask what one region is, or "" for background and for any failure."""
+    answer = _ask_crop(path, box, _BLOB_PROMPT, name, max_tokens)
+    lowered = answer.lower().lstrip("\"'*- ")
+    if not answer or lowered.startswith(_BLOB_NOTHING):
+        return ""
+    # One line, whatever it wrapped the name in.
+    return answer.splitlines()[0].strip().strip('"').strip()
+
+
+def _ask_crop(path: str, box: tuple[int, int, int, int], question: str,
+              name: str, max_tokens: int) -> str:
+    """Put one region in front of the model on its own. "" if anything fails.
+
+    The padding matters: a control cropped exactly to its own edges loses what
+    says what it is. "Post" inside a rounded blue box is a button; the same
+    word bare is a word.
+    """
+    from PIL import Image
+
+    temp = ""
+    try:
+        with Image.open(path) as im:
+            left, top, right, bottom = box
+            crop = im.crop((max(0, left - _BLOB_PAD), max(0, top - _BLOB_PAD),
+                            min(im.width, right + _BLOB_PAD),
+                            min(im.height, bottom + _BLOB_PAD)))
+            if not crop.width or not crop.height:
+                return ""
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
+                temp = fh.name
+            crop.save(temp)
+        return _generate(temp, question, max_tokens, name).strip()
+    except Exception as e:
+        logger.debug("could not read blob %s: %s", box, e)
+        return ""
+    finally:
+        if temp:
+            with contextlib.suppress(OSError):
+                os.unlink(temp)
+
+
+def find_in_blobs(
+    image_path: str | Path,
+    what: str,
+    config: dict[str, Any] | None = None,
+    limit: int = 32,
+    max_tokens: int = 8,
+    stop_after: int = 3,
+) -> list[dict[str, Any]]:
+    """Find one named thing by checking the regions the pixels found, one by one.
+
+    This is `locate` turned inside out. `locate` asks the model where something
+    is and takes the numbers it writes down — and the recorded failure of that
+    is a confident coordinate for something else entirely (a dock icon offered
+    as a dismissed notification, 2026-09-07), because a model asked "where is
+    X" will answer even when X is not there. Here the model is never asked for
+    a position at all. The candidate positions come from the edge map, and the
+    model is shown each candidate and asked one closed question about it: is
+    this the thing? A wrong answer costs one wrong crop, not a click on the
+    other side of the screen.
+
+    It is also what reaches the controls `locate` cannot ground: x.com's
+    composer at 28px is below the VLM's patch floor as part of a full screen,
+    but as a padded crop of its own it fills the picture.
+
+    Best-scoring region first, so a caller taking [0] gets the most prominent
+    match rather than an arbitrary one. Every hit is in ORIGINAL-image pixels.
+
+    `limit` is deliberately generous. What is being looked for is usually NOT
+    the most eye-catching thing on the screen — measured on x.com's home
+    timeline, sixteen ad cards, headlines and photos outscored the post
+    composer, because an empty text box is exactly what an edge detector finds
+    least interesting. `stop_after` is what keeps that affordable: checking
+    stops at the first few matches rather than at the end of the list.
+    """
+    from symbio import blobs as _blobs
+
+    if not (config or {}).get("vision", {}).get("blobs", True):
+        return []
+    path = str(image_path)
+    target = what.strip()
+    if not target:
+        return []
+    try:
+        regions = _blobs.salient_regions(path, limit=max(0, limit))
+    except Exception as e:  # pragma: no cover - Pillow failure on a bad file
+        logger.debug("blob segmentation failed on %s: %s", path, e)
+        return []
+
+    name = model_name(config)
+    question = (f"Does this crop of a screen show {target}? "
+                f"Answer only yes or no.")
+    hits: list[dict[str, Any]] = []
+    for region in regions:
+        answer = _ask_crop(path, region["box"], question, name, max_tokens)
+        if not answer.strip().lower().lstrip("\"'*- ").startswith("yes"):
+            continue
+        hits.append({
+            "label": target,
+            "box": region["box"],
+            "center": region["center"],
+            "score": region.get("score", 0.0),
+        })
+        if stop_after and len(hits) >= stop_after:
+            # Enough to act on, and a hit costs a generation. The list is in
+            # score order, so the first few are the prominent ones; going on
+            # to check thirty regions for a fourth match is twenty seconds
+            # spent on candidates nobody will click.
+            break
+    return hits
 
 
 # How much context to include around a located box when checking it. A box
