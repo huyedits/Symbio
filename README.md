@@ -86,6 +86,9 @@ Everything can stay on your machine, nothing phones "home"
 *  **Self-corrects tool mistakes** — successful recovery from a failed command can become a training example.
 *  **Learnable skills** — create a skill as a Markdown procedure and train a dedicated worker adapter for it.
 *  **LoRA fine-tuning** — only small adapter weights are trained; the base model stays frozen.
+*  **Fine-tunes itself when it decides to** — besides training automatically once enough examples pile up, the model can call its own `train_adapter` tool mid-conversation. With default settings that runs without asking you; it is logged, and the golden set still rolls back a run that made things worse.
+*  **Watches its own weights change** — `scripts/weight_delta.py` shows, module by module, how far each fine-tune moved the weights, and how much the latest run moved them compared with the one before.
+*  **Looks inside the model (experimental)** — record which neurons fire on your own traffic, and grow new neurons that start at exactly zero change. See [Looking inside the weights](#looking-inside-the-weights).
 *  **Mixture of Agents** — a headmaster can delegate bounded tasks to smaller worker models.
 *  **Local memory** — notes, sessions, training data, adapters and caches live locally.
 *  **RAG retrieval** — relevant notes can be retrieved and supplied as context.
@@ -1210,6 +1213,71 @@ Discard it:
 ```
 
 Training is **not automatically restarted after a crash**. This prevents a machine from repeatedly entering an out-of-memory cycle.
+
+---
+
+## Looking inside the weights
+
+### It decides when to train
+
+Training starts two ways. The automatic way: corrections and recovered
+mistakes collect as examples, and once enough accumulate a LoRA run starts on
+its own. The other way: the model itself can call `train_adapter` (keep
+training on what it has) or `retrain_adapter` (rebuild from scratch) whenever
+it judges a fine-tune is due. At the default `safety.require_confirm_score`
+of 3 these score 2/3, so they run without a prompt and land in the security
+log. Raise the bar to 2 if you want to approve every self-started run.
+Either way the golden set still grades the result and rolls it back if it
+got worse.
+
+### Seeing what a fine-tune changed
+
+LoRA never rewrites the base model. Each module it touches becomes
+`W + scale · (lora_a @ lora_b)`, so the change is readable straight from the
+adapter file:
+
+```bash
+venv/bin/python scripts/weight_delta.py adapters/ --base mlx-community/Qwen3-14B-3bit
+```
+
+```text
+module                              |dW|      rel
+model.layers.38.self_attn.q_proj     11.616  10.181%  ########################
+model.layers.38.self_attn.v_proj      6.225   9.342%  ############
+model.layers.39.self_attn.q_proj     10.995   9.757%  ######################
+model.layers.39.self_attn.v_proj      5.969   9.635%  ############
+```
+
+That is the live 14B adapter on one machine: four attention modules in the
+last two layers, each moved by about a tenth of its own size. `--since OLD`
+compares two adapters (two checkpoints of one run, or before and after a
+retrain) and prints how much the latest training moved each module.
+
+### Which neurons fire, and growing new ones (experimental)
+
+`bench/activation_recorder.py` hooks every layer and MLP of the headmaster,
+records which neurons fire on one set of prompts, then tests on a second set
+whether that recording means anything, by pruning with it and with a random
+choice. On Qwen3-14B-3bit, measured as how often the pruned model still picks
+the full model's next token:
+
+| cut | chosen by the recording | chosen at random |
+|---|---|---|
+| switch off 10% of neurons | 0.875 | 0.776 |
+| switch off 50% of neurons | 0.584 | 0.200 |
+| drop 8 of 40 layers | 0.478 | 0.484 |
+
+Neuron firing is a real signal. Layer "influence" is not; it did no better
+than random.
+
+`bench/neuron_adapter.py` adds weights instead: new MLP neurons beside the
+frozen base, whose output starts at exactly zero, so at step 0 the model is
+bit-for-bit unchanged. On Qwen3-0.6B, four examples taught it a fact it could
+not have known, and it answered a phrasing it never saw. Left switched on for
+everything, the new neurons also bent unrelated answers (the capital of
+Australia turned into Vancouver). Switched on only for their own skill, the
+same way skill adapters are triggered, unrelated replies were identical to
+the base model's. Neither of these is wired into the agent yet.
 
 ---
 

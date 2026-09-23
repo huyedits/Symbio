@@ -145,10 +145,17 @@ def test_an_empty_target_falls_back_to_the_generic_sweep(monkeypatch):
     assert vision._GENERIC_TARGETS in asked[0]
 
 
+def _present(monkeypatch):
+    """The screen pre-check says yes, so grounding runs. Its own behaviour is
+    tested separately below."""
+    monkeypatch.setattr(vision, "_on_screen", lambda *a, **k: True)
+
+
 def test_a_question_is_grounded_directly(monkeypatch):
     """Measured on a real 1920x1080 desktop: the generic sweep returned
     nothing at all, while naming the target landed within a few pixels. The
     caller's question therefore has to reach the grounding pass."""
+    _present(monkeypatch)
     asked = []
 
     def fake_generate(path, question, max_tokens, name):
@@ -165,6 +172,7 @@ def test_a_question_is_grounded_directly(monkeypatch):
 
 def test_a_targeted_query_that_finds_nothing_falls_back(monkeypatch):
     """Rather than reporting a screen with nothing on it."""
+    _present(monkeypatch)
     asked = []
 
     def fake_generate(path, question, max_tokens, name):
@@ -198,59 +206,74 @@ def test_a_generic_sweep_that_finds_nothing_does_not_retry_itself(monkeypatch):
 
 # ---- a coordinate for something that is not there ----
 
-def test_a_located_box_that_fails_checking_is_dropped(monkeypatch):
-    """Asked for something absent, the model returns a confident coordinate
-    for something else. Measured 2026-09-07: asked for a macOS update banner
+def test_a_target_the_screen_does_not_have_is_not_grounded(monkeypatch):
+    """Asked for something absent, the model returns a confident coordinate for
+    something else. Measured 2026-09-07: asked for a macOS update banner
     dismissed minutes earlier, it pointed at (624, 1029) — a dock icon.
     desktop_click there launches an application, so on the desktop a wrong
-    coordinate is not a missed click but a different action."""
-    monkeypatch.setattr(vision, "_image_size", lambda p: (100, 100))
-    monkeypatch.setattr(vision, "_generate",
-                        lambda *a, **k: '[{"bbox_2d": [1, 2, 3, 4], "label": "x"}]')
-    monkeypatch.setattr(vision, "_verify_element", lambda *a, **k: False)
+    coordinate is not a missed click but a different action.
 
-    assert vision.locate("shot.png", "the update banner") == []
-
-
-def test_a_rejected_target_does_not_fall_back_to_a_generic_sweep(monkeypatch):
-    """The sweep answered a rejected target with a box labelled "interactive
-    element" at the dead centre of the screen, handed to the model as
-    something to click. An empty list is the honest answer."""
+    The check that catches it asks the SCREEN, not a crop, and asks BEFORE
+    grounding — so an absent target costs one 6-token generation and no
+    coordinate is produced at all."""
     calls = []
 
     def fake_generate(path, question, max_tokens, name):
         calls.append(question)
-        return '[{"bbox_2d": [1, 2, 3, 4], "label": "x"}]'
+        return "No." if "visible anywhere" in question else \
+            '[{"bbox_2d": [1, 2, 3, 4], "label": "x"}]'
 
     monkeypatch.setattr(vision, "_image_size", lambda p: (100, 100))
     monkeypatch.setattr(vision, "_generate", fake_generate)
-    monkeypatch.setattr(vision, "_verify_element", lambda *a, **k: False)
-    vision.locate("shot.png", "the update banner")
 
-    assert len(calls) == 1, f"no second sweep after a rejection, got {calls}"
+    assert vision.locate("shot.png", "the update banner") == []
+    assert len(calls) == 1, f"no grounding pass for an absent target, got {calls}"
+
+
+def test_a_rejected_target_does_not_fall_back_to_anything(monkeypatch):
+    """The sweep answered a rejected target with a box labelled "interactive
+    element" at the dead centre of the screen, handed to the model as something
+    to click. An empty list is the honest answer."""
+    monkeypatch.setattr(vision, "_image_size", lambda p: (100, 100))
+    monkeypatch.setattr(vision, "_generate", lambda *a, **k: "no")
+    monkeypatch.setattr(vision, "find_in_blobs",
+                        lambda *a, **k: pytest.fail("no blob sweep either"))
+    monkeypatch.setattr(vision, "read_blobs",
+                        lambda *a, **k: pytest.fail("no blob sweep either"))
+
+    assert vision.locate("shot.png", "the update banner") == []
 
 
 def test_checking_is_skipped_for_the_generic_sweep(monkeypatch):
-    """There is no specific target to check a crop against."""
+    """There is no specific target to ask the screen about."""
     monkeypatch.setattr(vision, "_image_size", lambda p: (100, 100))
     monkeypatch.setattr(vision, "_generate",
                         lambda *a, **k: '[{"bbox_2d": [1, 2, 3, 4], "label": "x"}]')
-    monkeypatch.setattr(vision, "_verify_element",
-                        lambda *a, **k: pytest.fail("should not verify a sweep"))
+    monkeypatch.setattr(vision, "_on_screen",
+                        lambda *a, **k: pytest.fail("should not pre-check a sweep"))
 
     assert len(vision.locate("shot.png")) == 1
 
 
-def test_a_check_that_cannot_run_keeps_the_coordinate():
-    """Best-effort, like every other check here: a broken verification must
-    never discard a good coordinate."""
-    # A path that cannot be opened is the simplest form of "the check could
-    # not run".
-    assert vision._verify_element("nope.png", {"box": (1, 2, 3, 4)}, "x", {}) is True
+def test_a_check_that_cannot_run_reports_present(monkeypatch):
+    """Best-effort, like every other check here. The failure direction matters:
+    a broken check must never turn into a screen reported as empty."""
+    def broken(*a, **k):
+        raise RuntimeError("no model")
+
+    monkeypatch.setattr(vision, "_generate", broken)
+    assert vision._on_screen("nope.png", "a button", {}) is True
 
 
-def test_an_element_with_no_box_is_not_checked():
-    assert vision._verify_element("nope.png", {}, "x", {}) is True
+def test_an_empty_target_is_not_asked_about(monkeypatch):
+    monkeypatch.setattr(vision, "_generate",
+                        lambda *a, **k: pytest.fail("nothing was asked for"))
+    assert vision._on_screen("nope.png", "   ", {}) is True
+
+
+def test_a_yes_from_the_screen_lets_grounding_run(monkeypatch):
+    monkeypatch.setattr(vision, "_generate", lambda *a, **k: "Yes, top right.")
+    assert vision._on_screen("shot.png", "the search box", {}) is True
 
 
 # ---- reading a screen as blobs rather than as one picture ----

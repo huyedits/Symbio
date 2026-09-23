@@ -359,28 +359,16 @@ def locate(
     width, height = _image_size(path)
     targeted = bool(what.strip())
     targets = what.strip() or _GENERIC_TARGETS
+    if targeted and verify and not _on_screen(path, targets, config):
+        # Not there. Say so and stop: no grounding pass, no blob sweep, no
+        # fallback. A model asked "where is X" answers even when X is absent,
+        # and every fallback from here produces another plausible coordinate
+        # for something else. An empty list is the honest answer and it is
+        # what the caller has to be able to act on.
+        return []
     raw = _generate(path, _LOCATE_PROMPT.format(what=targets),
                     max_tokens, model_name(config))
     found = _parse_elements(raw, width, height)
-    if found and targeted:
-        if verify:
-            found = [e for e in found if _verify_element(path, e, targets, config)]
-        if found:
-            return found
-        # Everything it pointed at turned out to be something else. Do NOT
-        # sweep generically here. Observed 2026-09-07 when that fallback was
-        # unconditional: the check correctly rejected a fabricated location for
-        # a dismissed notification, the sweep then returned a single box
-        # labelled "interactive element" at the dead centre of the screen, and
-        # it was handed to the model under "clickable elements". A meaningless
-        # coordinate offered as a click target is worse than an empty list.
-        #
-        # What IS allowed is asking the same question a different way: not
-        # "where is it" — the question that produced the fabrication — but
-        # "is this it?", once per region the edge map found. Nothing there is
-        # generated, every candidate is checked on its own, and an absent
-        # target still comes back empty because every crop answers no.
-        return find_in_blobs(path, targets, config=config)
     if found:
         return found
     if not targeted:
@@ -598,56 +586,58 @@ def find_in_blobs(
     return hits
 
 
-# How much context to include around a located box when checking it. A box
-# cropped exactly to its own bounds is hard to recognise out of context.
-_VERIFY_PAD = 40
+# Asked whether a CROP shows the target, this model is close to useless: over
+# four surfaces (x.com signed in, x.com mid-compose, a macOS desktop with VS
+# Code and a full dock, a plain HTML page) the crop check rejected 3 of 13
+# correctly grounded elements and caught only 3 of 12 targets that were not on
+# screen at all. Asked the same question about the WHOLE SCREEN it answers
+# well: 13/17 yes on things that are there, 1/12 yes on things that are not.
+#
+# The difference is not the model's eyesight, it is the question. Absence is a
+# property of the screen, and a crop of a control cannot show that the control
+# is missing — whatever pixels the crop contains, something is in it. So ask
+# before grounding, not after: one 6-token generation for the whole look,
+# replacing one generation per located element, and the answer arrives in time
+# to skip the grounding pass entirely when the thing is not there.
+#
+# Measured 2026-09-23 over 29 present/absent cases:
+#   crop check (as shipped)      13 correct
+#   no check at all              13 correct
+#   crop check, repaired prompt  14 correct
+#   this, asked of the screen    23 correct
+_PRESENCE_PROMPT = "Is {target} visible anywhere on this screen? Answer only yes or no."
 
 
-def _verify_element(path: str, element: dict[str, Any], target: str,
-                    config: dict[str, Any] | None) -> bool:
-    """Crop what was located and ask whether it really shows the target.
+def on_screen(image_path: str | Path, target: str,
+              config: dict[str, Any] | None = None) -> bool:
+    """Public form of the screen-level presence question.
 
-    Asked to find something that is NOT on screen, the model does not say so —
-    it returns a confident coordinate for something else. Measured 2026-09-07:
-    asked for a macOS update banner that had been dismissed minutes earlier, it
-    described a sidebar badge and returned (624, 1029), which is a dock icon.
-    `desktop_click` on that launches an application. On the desktop the wrong
-    coordinate is not a missed click, it is a different action entirely.
-
-    So look again at just the box it pointed to. Cheap (0.5-2.3s on a small
-    crop) and it separates the two cases cleanly: the dock crop came back "no",
-    the genuinely-located editor tab came back "yes".
-
-    Best-effort in the same direction as everything else here: anything that
-    goes wrong counts as verified, so a broken check never discards a good
-    coordinate.
+    Callers that want the answer WITHOUT a grounding pass use this: a look that
+    reports "not present" and a look that failed to ground are different facts
+    and have to be told apart before either is reported to the model.
     """
-    box = element.get("box")
-    if not box:
+    return _on_screen(str(image_path), target, config)
+
+
+def _on_screen(path: str, target: str, config: dict[str, Any] | None) -> bool:
+    """Is the thing being asked for on this screen at all?
+
+    Called BEFORE grounding. A "no" is the honest answer to "where is the
+    update banner" when the banner was dismissed minutes ago — the incident
+    this check exists for, where the model answered with a dock icon at
+    (624, 1029) and `desktop_click` on that launches an application.
+
+    Best-effort like everything else here: anything that goes wrong counts as
+    present, so a broken check never turns into a screen reported as empty.
+    """
+    if not target.strip():
         return True
     try:
-        from PIL import Image
-
-        with Image.open(path) as im:
-            left, top, right, bottom = box
-            crop = im.crop((max(0, left - _VERIFY_PAD), max(0, top - _VERIFY_PAD),
-                            min(im.width, right + _VERIFY_PAD),
-                            min(im.height, bottom + _VERIFY_PAD)))
-            if not crop.width or not crop.height:
-                return True
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as fh:
-                temp = fh.name
-            crop.save(temp)
-        try:
-            answer = _generate(
-                temp, f"Does this image show {target}? Answer only yes or no.",
-                12, model_name(config))
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(temp)
+        answer = _generate(path, _PRESENCE_PROMPT.format(target=target.strip()),
+                           6, model_name(config))
     except Exception:
         return True
-    return not answer.strip().lower().startswith("no")
+    return not answer.strip().lower().lstrip("\"'*- ").startswith("no")
 
 
 def _image_size(path: str) -> tuple[int, int]:

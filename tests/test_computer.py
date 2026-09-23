@@ -906,6 +906,78 @@ def test_absence_is_still_reported_when_nothing_contradicts_it():
     assert "Treat it as NOT present" in out
 
 
+def test_a_browser_miss_with_no_dom_read_is_a_failed_look_not_an_absence():
+    """A DOM read that threw looks identical to one that found nothing. Only
+    one of those is evidence."""
+    session = _look_session([], [])
+    session.browser.controls_read = lambda limit=25: ([], False)
+    out = session._see_screen({"question": "where is the Slack window?"})
+
+    assert "Treat it as NOT present" not in out
+    assert "NOT evidence the thing is missing" in out
+
+
+def test_absence_is_claimed_when_the_screen_itself_said_no():
+    """The evidence that replaced the per-crop check: vision.on_screen asked
+    the whole screen and answered no. That IS an absence, and it is reported as
+    one even with no DOM behind it."""
+    session = _look_session([], [])
+    session.browser.controls_read = lambda limit=25: ([], False)
+    session._last_look_absent = True
+    out = session._see_screen({"question": "where is the Slack window?"})
+
+    assert "Treat it as NOT present" in out
+
+
+def _bare_session():
+    """A session with the REAL _run_vision — _look_session stubs it out."""
+    from symbio.app import chat_tools
+    from symbio.app.config import DEFAULT_CONFIG
+
+    class S(chat_tools.ToolsMixin):
+        config = {**DEFAULT_CONFIG, "browser": {"enabled": True}, "dispatch": {}}
+
+        def _status(self, m):
+            pass
+
+    return S()
+
+
+def test_a_stale_absence_does_not_survive_into_the_next_look(monkeypatch):
+    """_last_look_absent is set per look. Carried forward, it would answer the
+    next question with the previous question's verdict."""
+    from symbio import vision
+
+    monkeypatch.setattr(vision, "describe", lambda *a, **k: "a screen")
+    monkeypatch.setattr(vision, "on_screen", lambda *a, **k: True)
+    monkeypatch.setattr(vision, "locate", lambda *a, **k: [])
+    monkeypatch.setattr(vision, "release", lambda: False)
+
+    session = _bare_session()
+    session._last_look_absent = True
+    session._run_vision("shot.png", "where is the composer?")
+
+    assert session._last_look_absent is False
+
+
+def test_a_screen_that_says_no_costs_no_grounding_pass(monkeypatch):
+    """An absent target should not pay for a grounding generation whose answer
+    cannot be used."""
+    from symbio import vision
+
+    monkeypatch.setattr(vision, "describe", lambda *a, **k: "a screen")
+    monkeypatch.setattr(vision, "on_screen", lambda *a, **k: False)
+    monkeypatch.setattr(vision, "locate",
+                        lambda *a, **k: pytest.fail("no grounding for an absent target"))
+    monkeypatch.setattr(vision, "release", lambda: False)
+
+    session = _bare_session()
+    description, elements = session._run_vision("shot.png", "the update banner")
+
+    assert elements == []
+    assert session._last_look_absent is True
+
+
 def test_a_successful_grounding_adds_no_disclaimer():
     located = [{"label": "Post button", "box": (0, 0, 10, 10), "center": (5, 5)}]
     out = _look_session([_COMPOSER], located)._see_screen({"question": "where?"})
