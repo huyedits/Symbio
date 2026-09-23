@@ -32,9 +32,14 @@ Measured 2026-09-23, Qwen3-0.6B, +64 neurons per layer (5.5M weights, a
      switched to Chinese. Always-on new neurons touch every token. The
      project already measured the same thing for adapters (triggered 59/60,
      always-on lost to the base) — the next version gates these per skill.
+  4. gated (--gated): the same trained neurons switched off for the six
+     unrelated prompts gave 6/6 replies identical to the base model, and
+     switched on still answered the paraphrase with Colemak. Identical is
+     by construction — the gate removes the new term — so the risk moves
+     entirely to whatever decides when the gate is on.
 
 Usage: venv/bin/python bench/neuron_adapter.py [model] [--neurons N] [--steps S]
-           [--lr LR] [--replay]
+           [--lr LR] [--replay] [--gated]
 """
 
 from __future__ import annotations
@@ -53,6 +58,16 @@ from mlx_lm.models.activations import swiglu
 MODEL = "Qwen/Qwen3-0.6B"
 
 
+class Gate:
+    """One switch for every grown MLP: the new neurons run only while it is on.
+
+    This is the triggered-adapter idea applied to neurons: whatever routes a
+    request to the skill turns the switch on for that request, and every
+    other request sees the base model exactly.
+    """
+    on = True
+
+
 class GrownMLP(nn.Module):
     """The old MLP plus `extra` new neurons whose output starts at zero."""
 
@@ -66,6 +81,8 @@ class GrownMLP(nn.Module):
 
     def __call__(self, x):
         out = self.base(x)
+        if not Gate.on:
+            return out
         # Cast back: the new weights are float32 for training, and adding a
         # float32 zero to a bf16 output promotes everything after it to
         # float32 — different rounding, and the "exactly unchanged at init"
@@ -204,6 +221,18 @@ def main(argv: list[str]) -> int:
         n_total += n
         print(f"   identical first {prefix:2}/{n} tokens   {q[:40]!r} -> {after[q][:50]!r}")
     print(f"   token agreement on unrelated prompts: {same_total}/{n_total}")
+
+    if "--gated" in argv:
+        # The same trained neurons, switched off for the unrelated prompts —
+        # as a triggered skill adapter is when the router picks another skill.
+        Gate.on = False
+        gated = {q: reply_to(model, tok, q) for q in UNRELATED}
+        Gate.on = True
+        identical = sum(gated[q] == before[q] for q in UNRELATED)
+        print(f"\n4. gated: new neurons off for the unrelated prompts -> "
+              f"{identical}/{len(UNRELATED)} replies identical to the base model")
+        fact = reply_to(model, tok, HELD_OUT)
+        print(f"   gate on for the skill's own question: {fact[:60]!r}")
 
     weights = new_weights(model)
     mx.save_safetensors(str(out / "neurons.safetensors"), weights)
