@@ -20,10 +20,27 @@ above the terminal panel" landed on the Terminal menu because "terminal" and
 first pass, it is a second source of fabricated coordinates. So matching now
 weighs each word by how rare it is ON THIS SCREEN — "problems" appears once,
 "terminal" three times — breaks a tie on the query's own casing, and when the
-best two runs still tie, it declines rather than guessing. Same set: 12/17
-found, 0 wrong, 3 declined as ambiguous (x.com has two "Post" buttons), 2
-icon-only controls with no text at all. Those rules were fitted on this set,
-so 0 wrong is an in-sample number; a held-out surface is the next check.
+best two runs still tie, it declines rather than guessing. That scored 12/17
+found and 0 wrong on the set it was fitted to — and then, held out on live
+pages (DOM boxes as truth, 1280x800 at 2x), returned a wrong box for 49 of
+167 labelled controls. Two causes: OCR reads a nav bar or a byline as one
+line, and a sentence that mentions a word is not the control named by it.
+
+So a line is now cut at separator characters, a segment only counts when
+the query accounts for most of its words, and the box returned is the
+matched words', not the segment's. Held out, same frozen captures:
+
+                        found  wrong  declined  absent-says-absent
+    8 sites (tuned on)    68      1      44        63/64
+    6 unseen sites        26      4      38        47/48
+    earlier matcher       99     56      26       107/112   (all 14 sites)
+
+"found" includes picking one of two controls with the same label. Of the
+four unseen wrong answers, two are a query naming more than the matched text
+("Search GOV.UK" -> "Search") and two are the label's word drawn somewhere
+that is not the control (a "CLOUDFLARE" wordmark). The matched text is in
+the reply, so the model can see the mismatch. The truth set above is now
+11/17 found, 0 wrong.
 
 Declining is the contract. None of this answers "is it absent": an icon-only
 control has no text to read, so an empty result means "ask the vision model",
@@ -61,8 +78,24 @@ def available() -> bool:
     return True
 
 
+# Characters a UI draws BETWEEN controls. OCR reads a nav bar as one line —
+# "new | past | comments | ask | show | jobs" — and the line's centre is not
+# where any of those links is.
+_SEPARATORS = frozenset("|•·—–/")
+
+
 def read_text(image_path: str | Path) -> list[dict[str, Any]]:
-    """Every text run on the image as {"text", "box"} in top-left pixels.
+    """Every text segment on the image as {"text", "box"} in top-left pixels.
+
+    A segment is not an OCR line. Vision groups a whole toolbar into one
+    observation, so each line is split at separator characters, and every
+    piece gets its own box. On HN's header the line's centre is 500px from
+    "jobs". Not at wide gaps: the per-word boxes Vision reports are spaced
+    evenly by character (every gap measured 0.12-0.13 of the line height,
+    toolbar or prose), so a gap in them carries no information.
+
+    Each segment keeps its words with their boxes, so a match can point at
+    the words it matched instead of the middle of the segment.
 
     Vision reports boxes normalised with the origin at the BOTTOM-left; they
     are converted here so they share a space with vision.locate's elements.
@@ -83,20 +116,62 @@ def read_text(image_path: str | Path) -> list[dict[str, Any]]:
     request.setUsesLanguageCorrection_(False)
     handler.performRequests_error_([request], None)
 
-    runs = []
+    def to_pixels(rect):
+        x, y = rect.origin.x, rect.origin.y
+        w, h = rect.size.width, rect.size.height
+        return (round(x * width), round((1 - y - h) * height),
+                round((x + w) * width), round((1 - y) * height))
+
+    segments: list[dict[str, Any]] = []
     for obs in (request.results() or []):
         best = obs.topCandidates_(1)
         if not best:
             continue
-        rect = obs.boundingBox()
-        x, y = rect.origin.x, rect.origin.y
-        w, h = rect.size.width, rect.size.height
-        runs.append({
-            "text": str(best[0].string()),
-            "box": (round(x * width), round((1 - y - h) * height),
-                    round((x + w) * width), round((1 - y) * height)),
-        })
-    return runs
+        candidate = best[0]
+        line = str(candidate.string())
+        words = []
+        for m in re.finditer(r"\S+", line):
+            try:
+                found = candidate.boundingBoxForRange_error_(
+                    (m.start(), m.end() - m.start()), None)
+                found = found[0] if isinstance(found, tuple) else found
+                words.append((m.group(), to_pixels(found.boundingBox())))
+            except Exception:
+                words = []
+                break
+        if not words:
+            # No per-word boxes: keep the line whole rather than guess where
+            # its words are. match() still declines it if it reads as prose.
+            segments.append({"text": line, "box": to_pixels(obs.boundingBox())})
+            continue
+        segments.extend(_split_line(words))
+    return segments
+
+
+def _union(boxes):
+    boxes = list(boxes)
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def _split_line(words):
+    """Cut one OCR line into segments at separator characters."""
+    out, current = [], []
+
+    def flush():
+        if current:
+            out.append({"text": " ".join(w for w, _ in current),
+                        "box": _union(b for _, b in current),
+                        "words": list(current)})
+            current.clear()
+
+    for word, box in words:
+        if word in _SEPARATORS:
+            flush()
+        else:
+            current.append((word, box))
+    flush()
+    return out
 
 
 def _words(text: str) -> set[str]:
@@ -105,15 +180,22 @@ def _words(text: str) -> set[str]:
 
 
 def match(runs: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
-    """The one text run the query names, or None when none or several do.
+    """The one text segment the query names, or None when none or several do.
 
-    Each shared word counts 1/(number of runs containing it), so the word
-    that singles out one run outweighs the word half the screen carries.
-    Equal scores go to the run whose words match the query's own casing —
-    "the Terminal menu" is "Terminal", not the panel's "TERMINAL" — then to
-    the strictly shorter run: "Post" as a button beats "Post" inside a
-    sentence. Two runs that still tie are ambiguous, and the answer is None,
-    not the first one found.
+    A segment qualifies only when the query accounts for MOST of its words.
+    A label is short and the query quotes it; a sentence that happens to
+    contain the word is a mention, not the control. Held out on live sites,
+    "the Wikipedia link" had landed on "Wikipedia is free to use, but not
+    free to provide" and "the Change language button" on "programming
+    language." Inline links inside prose are declined too, which is the
+    price: a decline goes to the vision model, a wrong box goes to a click.
+
+    Each shared word counts 1/(number of segments containing it), so the
+    word that singles out one segment outweighs the word half the screen
+    carries. Equal scores go to the segment whose words match the query's
+    own casing — "the Terminal menu" is "Terminal", not the panel's
+    "TERMINAL" — then to the strictly shorter one. Two that still tie are
+    ambiguous, and the answer is None, not the first one found.
     """
     want = _words(query)
     if not want:
@@ -125,16 +207,24 @@ def match(runs: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
     scored = []
     for run, have in zip(runs, run_words):
         shared = want & have
-        if shared:
-            weight = sum(1.0 / frequency[w] for w in shared)
-            same_case = len(as_written & set(re.findall(r"[A-Za-z0-9]+", run["text"])))
-            scored.append((round(weight, 6), same_case, -len(run["text"]), run))
+        if not shared or len(shared) * 2 <= len(have):
+            continue
+        weight = sum(1.0 / frequency[w] for w in shared)
+        same_case = len(as_written & set(re.findall(r"[A-Za-z0-9]+", run["text"])))
+        scored.append((round(weight, 6), same_case, -len(run["text"]), run))
     if not scored:
         return None
     scored.sort(key=lambda s: s[:3], reverse=True)
     if len(scored) > 1 and scored[0][:3] == scored[1][:3]:
         return None
-    return scored[0][3]
+    best = scored[0][3]
+    # Point at the words that matched. "the anyone can edit link" is three
+    # words at the end of "the free encyclopedia that anyone can edit", and
+    # the segment's centre is on "encyclopedia".
+    hit = [box for word, box in best.get("words", ()) if _words(word) & want]
+    if hit:
+        best = {**best, "box": _union(hit)}
+    return best
 
 
 def find(image_path: str | Path, query: str) -> list[dict[str, Any]]:

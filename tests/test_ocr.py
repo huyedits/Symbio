@@ -52,6 +52,40 @@ def test_the_shorter_run_wins_when_it_is_the_label():
     assert ocr.match(runs, "the Post button")["text"] == "Post"
 
 
+def test_a_sentence_that_mentions_the_word_is_not_the_control():
+    """Held out on Wikipedia: "the Wikipedia link" landed on a sentence in
+    the donation banner, and on pypi "the Change language button" on
+    "programming language." A decline goes to the vision model; a wrong box
+    goes to a click."""
+    runs = [_run("Wikipedia is free to use, but not free to provide"),
+            _run("the most widely used programming language.")]
+
+    assert ocr.match(runs, "the Wikipedia link") is None
+    assert ocr.match(runs, "the Change language button") is None
+
+
+def test_a_nav_bar_line_is_cut_at_its_separators():
+    """OCR reads HN's header as one line; its centre is 500px from "jobs"."""
+    words = [("new", (462, 30, 526, 60)), ("|", (530, 30, 541, 60)),
+             ("past", (545, 30, 612, 60)), ("|", (616, 30, 631, 60)),
+             ("jobs", (980, 30, 1047, 60))]
+
+    segments = ocr._split_line(words)
+
+    assert [s["text"] for s in segments] == ["new", "past", "jobs"]
+    assert ocr.match(segments, "the jobs link")["box"] == (980, 30, 1047, 60)
+
+
+def test_the_box_is_the_matched_words_not_the_segment():
+    words = [(w, (i * 100, 0, i * 100 + 90, 30)) for i, w in
+             enumerate("the free encyclopedia that anyone can edit".split())]
+    segment = ocr._split_line(words)
+
+    got = ocr.match(segment, "the anyone can edit link")
+
+    assert got["box"] == (400, 0, 690, 30)
+
+
 def test_nothing_is_returned_for_text_that_is_not_on_screen():
     runs = [_run("Submit Query"), _run("Open Details")]
 
