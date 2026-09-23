@@ -79,6 +79,7 @@ mlx = [
     "mlx-lm>=0.21.0; sys_platform == 'darwin'",
     "mlx>=0.30.0; sys_platform == 'darwin'",
     "torch; sys_platform == 'darwin'",
+    "pyobjc-framework-Vision>=10.0; sys_platform == 'darwin'",
 ]
 # The panelled terminal interface. Optional because `symb chat` falls back to
 # the plain scrollback path without it, and an install that only ever runs

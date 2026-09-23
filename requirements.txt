@@ -1,6 +1,9 @@
 mlx-lm>=0.21.0
 # Vision: lets the assistant see screenshots instead of guessing from page text.
 mlx-vlm>=0.6.0
+# Reads a screenshot's text before the VLM is woken (symbio/ocr.py). macOS only;
+# without it see_screen goes straight to the vision model.
+pyobjc-framework-Vision>=10.0; sys_platform == "darwin"
 transformers>=4.40.0
 torch
 safetensors>=0.4.0

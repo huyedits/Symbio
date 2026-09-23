@@ -738,6 +738,31 @@ class ToolsMixin:
                 shot = self.browser.screenshot_path(full_page=False)
             except Exception as e:
                 return f"Could not capture the page: {e}"
+
+        # Read the screenshot's text before waking anything. A named control
+        # usually carries its name, and the OS reads that in well under a
+        # second with an exact box — where the VLM costs the headmaster's
+        # unload and reload plus ~6s a question. ocr.find declines anything
+        # ambiguous, and a decline or a miss (an icon has no text) falls
+        # through to vision: it never means "not there".
+        if question and self.config.get("vision", {}).get("ocr", True):
+            from symbio import ocr
+
+            hits = ocr.find(shot, question)
+            if hits:
+                self._status("  [Vision] Found it by reading the screen's "
+                             "text (no vision model needed).")
+                click_tool = ("desktop_click" if where == "the desktop"
+                              else "browser_click_at")
+                return self._wrap_look("\n".join([
+                    f"Read the text on {where} ({shot.name}); exactly one "
+                    f"piece of text matches what you asked about:",
+                    vision.format_elements(hits),
+                    f"\nPass its centre to {click_tool}. If this text is not "
+                    f"the control you meant, say how it differs and look "
+                    f"again with a question naming what sets it apart.",
+                ]))
+
         self._status(f"  [Vision] Looking at {where}...")
         try:
             description, elements = self._run_vision(shot, question)
