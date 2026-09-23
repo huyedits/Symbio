@@ -30,6 +30,18 @@ def test_the_word_that_singles_a_run_out_outweighs_the_common_one():
     assert got["text"] == "PROBLEMS"
 
 
+def test_a_capitalised_word_the_text_lacks_means_a_different_control():
+    """Held out on GOV.UK: "the Search GOV.UK button" answered by the bare
+    "Search" of a different box. Shown the mismatch side by side, the 14B
+    clicked it anyway, so the matcher has to refuse it."""
+    runs = [_run("Search", (316, 1276, 443, 1310))]
+
+    assert ocr.match(runs, "the Search GOV.UK button") is None
+    assert ocr.match(runs, "the Search button")["text"] == "Search"
+    assert ocr.match(runs, "Find the search box") is not None, \
+        "a sentence's opening capital is not a quoted label"
+
+
 def test_a_tie_goes_to_the_casing_the_query_used():
     runs = [_run("TERMINAL", (636, 491, 695, 505)),
             _run("Terminal", (396, 8, 458, 23))]
@@ -159,6 +171,52 @@ def test_a_text_hit_answers_without_the_vision_model(monkeypatch):
 
     assert calls == [], "the VLM must not run when the text answered"
     assert "(247, 144)" in out and "browser_click_at" in out
+
+
+def test_the_reply_shows_what_was_asked_next_to_what_was_read(monkeypatch):
+    """Held out, one text match in eight was the wrong control, usually
+    visibly so: "Search GOV.UK" answered by a bare "Search"."""
+    hit = [{"label": "Search", "box": (316, 1276, 443, 1310), "center": (379, 1293)}]
+    session, _ = _session(monkeypatch, hit)
+
+    out = session._see_screen({"question": "the Search GOV.UK button"})
+
+    assert "You asked for: the Search GOV.UK button" in out
+    assert "The text there reads: Search" in out
+    assert "not checked by the vision model" in out
+
+
+def test_asking_the_same_question_again_overrules_the_text_match(monkeypatch):
+    hit = [{"label": "Search", "box": (0, 0, 10, 10), "center": (5, 5)}]
+    session, calls = _session(monkeypatch, hit)
+
+    session._see_screen({"question": "the Search GOV.UK button"})
+    assert calls == []
+    session._see_screen({"question": "  the search GOV.UK   button"})
+
+    assert calls == ["the search GOV.UK   button"], "the repeat must reach the vision model"
+
+
+def test_the_overrule_is_spent_once_used(monkeypatch):
+    """One repeat buys one vision look. A third ask of the same question is a
+    new look at a screen that may have changed, and gets the fast path."""
+    hit = [{"label": "Search", "box": (0, 0, 10, 10), "center": (5, 5)}]
+    session, calls = _session(monkeypatch, hit)
+
+    for _ in range(3):
+        session._see_screen({"question": "the Search button"})
+
+    assert len(calls) == 1
+
+
+def test_a_different_question_still_gets_the_text_match(monkeypatch):
+    hit = [{"label": "Search", "box": (0, 0, 10, 10), "center": (5, 5)}]
+    session, calls = _session(monkeypatch, hit)
+
+    session._see_screen({"question": "the Search button"})
+    session._see_screen({"question": "the Log in link"})
+
+    assert calls == []
 
 
 def test_a_text_miss_falls_through_to_vision_and_is_not_absence(monkeypatch):

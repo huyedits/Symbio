@@ -36,11 +36,23 @@ matched words', not the segment's. Held out, same frozen captures:
     earlier matcher       99     56      26       107/112   (all 14 sites)
 
 "found" includes picking one of two controls with the same label. Of the
-four unseen wrong answers, two are a query naming more than the matched text
-("Search GOV.UK" -> "Search") and two are the label's word drawn somewhere
-that is not the control (a "CLOUDFLARE" wordmark). The matched text is in
-the reply, so the model can see the mismatch. The truth set above is now
-11/17 found, 0 wrong.
+four unseen wrong answers, two were a query naming more than the matched text
+("Search GOV.UK" -> "Search") and two the label's word drawn somewhere that
+is not the control (a "CLOUDFLARE" wordmark).
+
+The first kind was meant to be caught by the model: the reply shows what
+was asked next to what was read. Measured with the 14B, it was not — shown
+"You asked for: the Search GOV.UK button / The text there reads: Search",
+it clicked, thinking on or off. So the code checks instead: every word the
+query capitalises must be in the segment. After that, same captures:
+
+                        found  wrong  declined  absent-says-absent
+    8 sites               65      1      47        63/64
+    6 more sites          25      2      41        47/48
+
+The 6 are no longer unseen — GOV.UK is where the capitalised-word rule came
+from. The two wrong answers left there are both the second kind, which no
+reading of the text can tell apart. The truth set above: 11/17, 0 wrong.
 
 Declining is the contract. None of this answers "is it absent": an icon-only
 control has no text to read, so an empty result means "ask the vision model",
@@ -201,13 +213,21 @@ def match(runs: list[dict[str, Any]], query: str) -> dict[str, Any] | None:
     if not want:
         return None
     as_written = set(re.findall(r"[A-Za-z0-9]+", query))
+    # Words the query capitalises are the label it is quoting ("the Search
+    # GOV.UK button"). A segment missing one of them is a different control,
+    # however well the rest matches: "Search" alone is the site search, not
+    # the GOV.UK one. The first word is skipped because a sentence starts
+    # with a capital whatever it names ("Find the Post button").
+    tokens = re.findall(r"[A-Za-z0-9]+", query)
+    named = {t.lower() for t in tokens[1:]
+             if t[:1].isupper() and t.lower() not in _STOP and len(t) > 1}
     run_words = [_words(r["text"]) for r in runs]
     frequency = {w: sum(w in have for have in run_words) for w in want}
 
     scored = []
     for run, have in zip(runs, run_words):
         shared = want & have
-        if not shared or len(shared) * 2 <= len(have):
+        if not shared or len(shared) * 2 <= len(have) or not named <= have:
             continue
         weight = sum(1.0 / frequency[w] for w in shared)
         same_case = len(as_written & set(re.findall(r"[A-Za-z0-9]+", run["text"])))

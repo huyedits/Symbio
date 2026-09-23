@@ -486,6 +486,11 @@ class ToolsMixin:
     # has never looked still reads cleanly rather than raising AttributeError.
     _last_desktop_shot_size: tuple[int, int] = (0, 0)
 
+    # The (where, question) the last look answered from the screen's text
+    # alone. Asking the same thing again is the model saying that answer was
+    # the wrong control, so the repeat goes to the vision model instead.
+    _last_text_answer: tuple[str, str] | None = None
+
     # Failures that mean "I could not find or reach the thing", as opposed to
     # "the browser is gone" or "the page rejected it". These are the ones the
     # page's own control list actually answers.
@@ -745,23 +750,48 @@ class ToolsMixin:
         # unload and reload plus ~6s a question. ocr.find declines anything
         # ambiguous, and a decline or a miss (an icon has no text) falls
         # through to vision: it never means "not there".
-        if question and self.config.get("vision", {}).get("ocr", True):
+        #
+        # It is still a suggestion, not a verdict. Held out on live sites a
+        # few text matches in a hundred are the wrong control — a label's
+        # word printed in a logo — so the reply marks it unchecked and shows
+        # what was asked next to what was read, and asking the same question
+        # again goes to the vision model (no new parameter, so it works with
+        # every installed tools/*.md). Do not count on the model to use
+        # that: shown "asked for: the Search GOV.UK button / reads: Search",
+        # the 14B clicked it, thinking on or off. The mismatch it missed is
+        # now caught in ocr.match; the repeat is for when the user or a
+        # failed click says the answer was wrong.
+        asked = (where, " ".join(question.lower().split()))
+        overruled = asked == self._last_text_answer
+        self._last_text_answer = None
+        if (question and not overruled
+                and self.config.get("vision", {}).get("ocr", True)):
             from symbio import ocr
 
             hits = ocr.find(shot, question)
             if hits:
-                self._status("  [Vision] Found it by reading the screen's "
-                             "text (no vision model needed).")
+                self._last_text_answer = asked
+                self._status("  [Vision] Matched it by the screen's text "
+                             "(vision model not used).")
                 click_tool = ("desktop_click" if where == "the desktop"
                               else "browser_click_at")
                 return self._wrap_look("\n".join([
-                    f"Read the text on {where} ({shot.name}); exactly one "
-                    f"piece of text matches what you asked about:",
+                    f"Read the text on {where} ({shot.name}). One piece of "
+                    f"text matches — a text match, not checked by the "
+                    f"vision model:",
                     vision.format_elements(hits),
-                    f"\nPass its centre to {click_tool}. If this text is not "
-                    f"the control you meant, say how it differs and look "
-                    f"again with a question naming what sets it apart.",
+                    f"\nYou asked for: {question}",
+                    f"The text there reads: {hits[0]['label']}",
+                    f"\nIf that reads as the control you meant, pass its "
+                    f"centre to {click_tool}. If it does not — the words "
+                    f"differ, or it could be a heading or a logo rather "
+                    f"than the control — call see_screen again with the "
+                    f"SAME question: a repeat skips the text match and asks "
+                    f"the vision model.",
                 ]))
+        elif overruled:
+            self._status("  [Vision] Same question again — asking the "
+                         "vision model instead of the text match.")
 
         self._status(f"  [Vision] Looking at {where}...")
         try:
