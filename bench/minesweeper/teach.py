@@ -12,8 +12,8 @@ The game then continues with one of the model's own sound proposals. When none
 of the k proposals was sound, the game stops there rather than being pushed on
 with a move the model did not find — the corpus holds only what it produced.
 
-Training seeds are 0..games-1; play.py evaluates on 1000+, so no board is
-both taught and tested.
+Training seeds are seed0..seed0+games-1 (--seed0, default 0); play.py
+evaluates on 1000+, so no board is both taught and tested.
 """
 
 from __future__ import annotations
@@ -41,12 +41,13 @@ def main(argv):
     games = int(argv[1]) if len(argv) > 1 and argv[1].isdigit() else 30
     adapter = argv[argv.index("--adapter") + 1] if "--adapter" in argv else None
     k = int(argv[argv.index("--k") + 1]) if "--k" in argv else 6
+    seed0 = int(argv[argv.index("--seed0") + 1]) if "--seed0" in argv else 0
     model, tok = load(MODEL, adapter_path=adapter)
     sampler = make_sampler(temp=1.0)
     rng = random.Random(0)
     stats = Counter()
     kept = 0
-    for seed in range(games):
+    for seed in range(seed0, seed0 + games):
         game = Game(seed=seed)
         game.play("reveal", (4, 4))
         last = ""
