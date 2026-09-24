@@ -41,7 +41,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from game import Game  # noqa: E402
-from play import MODEL, SYSTEM, user_turn  # noqa: E402
+import play  # noqa: E402
+from play import MODEL, user_turn  # noqa: E402
 
 MAX_POSITIONS = 25
 
@@ -56,6 +57,7 @@ def main(argv):
     adapter = argv[argv.index("--adapter") + 1] if "--adapter" in argv else None
     k = int(argv[argv.index("--k") + 1]) if "--k" in argv else 6
     seed0 = int(argv[argv.index("--seed0") + 1]) if "--seed0" in argv else 0
+    play.CONSTRAINTS = "--constraints" in argv
     model, tok = load(MODEL, adapter_path=adapter)
     sampler = make_sampler(temp=1.0)
     rng = random.Random(0)
@@ -73,7 +75,8 @@ def main(argv):
             convs = []
             for i in range(k):
                 user = user_turn(game, last, order=(seed * 100 + position) * 100 + i)
-                convs.append([{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}])
+                convs.append([{"role": "system", "content": play.system_prompt()},
+                              {"role": "user", "content": user}])
             prompts = [tok.apply_chat_template(c, add_generation_prompt=True, enable_thinking=False)
                        for c in convs]
             texts = batch_generate(model, tok, prompts, max_tokens=12, sampler=sampler).texts

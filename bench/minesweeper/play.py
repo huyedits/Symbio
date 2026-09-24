@@ -88,8 +88,53 @@ def user_turn(game: Game, last: str, order: int = 0) -> str:
               if (r, c) not in game.shown and (r, c) not in game.flags]
     random.Random(order).shuffle(hidden)
     board = labeled(game) if LABELED else game.render()
-    return (f"{note}Board:\n{board}\n"
+    extra = f"Numbers touching hidden cells:\n{constraints(game, order)}\n" if CONSTRAINTS else ""
+    return (f"{note}Board:\n{board}\n{extra}"
             f"Hidden cells: {' '.join(hidden)}\nYour move?")
+
+
+# Set by --constraints (option 1). Every revealed number that touches hidden
+# cells, with those cells and its flags listed. This is what reading the grid
+# produces; what it does NOT do is the arithmetic — which cells are mines or
+# safe is still the model's to work out. Lines are shuffled by `order`, like
+# the hidden list, so "take the first line" is not a strategy.
+CONSTRAINTS = False
+
+SYSTEM_CONSTRAINTS = (
+    "You are playing Minesweeper on a 9x9 board with 10 mines. Rows are letters A-I, "
+    "columns 1-9. You are given each revealed number that touches hidden cells, which "
+    "hidden cells touch it, and which flags touch it.\n"
+    "For one number: mines left = the number minus its flags.\n"
+    "- If mines left equals how many hidden cells it touches, every one of them is a mine: flag one.\n"
+    "- If mines left is 0, every hidden cell it touches is safe: reveal one.\n"
+    "Only make a move one of the numbers proves. Reply with exactly one move and nothing "
+    "else: 'reveal <cell>' or 'flag <cell>', for example: reveal C4"
+)
+
+
+def constraints(game: Game, order: int = 0) -> str:
+    import random
+
+    lines = []
+    for r in range(game.height):
+        for c in range(game.width):
+            if (r, c) not in game.shown or not game.count(r, c):
+                continue
+            hidden = [game.name(*n) for n in game.neighbours(r, c)
+                      if n not in game.shown and n not in game.flags]
+            if not hidden:
+                continue
+            flags = [game.name(*n) for n in game.neighbours(r, c) if n in game.flags]
+            lines.append(f"{game.name(r, c)} shows {game.count(r, c)}: hidden {' '.join(hidden)}; "
+                         f"flags {' '.join(flags) if flags else 'none'}")
+    random.Random(order + 7).shuffle(lines)
+    return "\n".join(lines)
+
+
+def system_prompt(think: int = 0) -> str:
+    if think:
+        return SYSTEM_THINK
+    return SYSTEM_CONSTRAINTS if CONSTRAINTS else SYSTEM
 
 
 # Set by --labeled. Reading its own think, the model spent most of a 900-token
@@ -165,7 +210,7 @@ def play_game(model, tok, seed: int, sampler, log_path: Path | None = None,
     grades = Counter()
     while game.state == "playing" and game.moves < MAX_MOVES:
         board = game.render()
-        messages = [{"role": "system", "content": SYSTEM_THINK if think else SYSTEM},
+        messages = [{"role": "system", "content": system_prompt(think)},
                     {"role": "user", "content": user_turn(game, last, order=seed * 1000 + game.moves)}]
         if think:
             reply, used, forced = ask_think(model, tok, messages, sampler, think)
@@ -207,8 +252,9 @@ def main(argv):
     seed0 = int(argv[argv.index("--seed0") + 1]) if "--seed0" in argv else 1000
     log = Path(argv[argv.index("--log") + 1]) if "--log" in argv else None
     think = int(argv[argv.index("--think") + 1]) if "--think" in argv else 0
-    global LABELED
+    global LABELED, CONSTRAINTS
     LABELED = "--labeled" in argv
+    CONSTRAINTS = "--constraints" in argv
     import mlx.core as mx
 
     mx.random.seed(0)
@@ -228,7 +274,7 @@ def main(argv):
     forced = totals.pop("forced_close", 0)
     graded = sum(totals.values())
     label = (("adapter " + adapter if adapter else "base") + (f", think {think}" if think else "")
-             + (", labeled" if LABELED else ""))
+             + (", labeled" if LABELED else "") + (", constraints" if CONSTRAINTS else ""))
     print(f"\n{label}: won {wins}/{games}; "
           f"moves: " + ", ".join(f"{k} {v} ({100 * v // max(1, graded)}%)" for k, v in totals.most_common())
           + (f"; avg think {think_tokens // max(1, graded)} tok, forced close {forced}/{graded}" if think else "")
