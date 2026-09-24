@@ -14,6 +14,20 @@ with a move the model did not find — the corpus holds only what it produced.
 
 Training seeds are seed0..seed0+games-1 (--seed0, default 0); play.py
 evaluates on 1000+, so no board is both taught and tested.
+
+Measured 2026-09-24, Qwen3-14B-3bit, beginner boards, 10 unseen test boards:
+
+                    won   opened cells   sound (all / on hidden)   proven mine
+    base            0/10      78%          8% / 42%                  4%
+    round 1 (112)   0/10      10%         21% / 24%                 32%
+    round 2 (398)   0/10       0%         18% / 18%                 40%
+
+What training taught was the FORM of a move, not the logic: opened-cell
+clicks went 78% -> 0% while the share of sound choices among hidden cells
+fell from 42% to 18%, and proven mines rose to 40%. Every earned row is a
+sound move, yet the policy it learned is "pick a hidden cell next to a
+number", which is exactly where mines are. Two rounds and ~400 rows did not
+move the model to reading the numbers.
 """
 
 from __future__ import annotations
