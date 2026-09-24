@@ -1,4 +1,3 @@
-### CUDA SUPPORT NEEDED
 # Symbio - that fine tuning agent.
 
 > **Learns from your corrections, on your machine — and rolls back a fine-tune that made it worse.**
