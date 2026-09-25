@@ -20,8 +20,8 @@
     </button>
   </div>
 
-  <div class="sidebar-section">
-    <div class="sidebar-label">Chats</div>
+  <div class="sidebar-section recents">
+    <div class="sidebar-label">Recents</div>
     <div id="chat-list" class="chat-list"></div>
   </div>
 
@@ -50,34 +50,42 @@
       <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" fill="none" stroke-width="1.3"/><line x1="6" y1="2.5" x2="6" y2="13.5" stroke="currentColor" stroke-width="1.3"/></svg>
     </button>
     <div class="topbar-title" id="conversation-title">New chat</div>
-    <div class="topbar-right">
-      <span class="chip" id="model-chip">—</span>
-    </div>
+    <div class="topbar-right"></div>
   </header>
 
   <div id="thread" class="thread">
     <div class="welcome" id="welcome">
-      <h1 id="welcome-title">Symbio</h1>
-      <p class="welcome-sub">A local agent that trains itself on what you correct.</p>
-      <div class="suggestions">
-        <button class="suggestion" data-send="What do you know about me?">What do you know about me?</button>
-        <button class="suggestion" data-send="Look at my screen and tell me what's in front.">Look at my screen</button>
-        <button class="suggestion" data-send="What skills have you trained adapters for?">List your trained skills</button>
-      </div>
+      <h1 class="greeting"><span class="mark" aria-hidden="true"></span><span id="welcome-title">Symbio</span></h1>
     </div>
   </div>
 
+  <button class="to-bottom" id="btn-to-bottom" type="button" aria-label="Scroll to the latest message" hidden>
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M8 3v10M4 9l4 4 4-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+  </button>
+
   <div class="composer-wrap">
+    <div class="notice" id="notice" hidden>
+      <span class="notice-text" id="notice-text"></span>
+      <button class="icon-btn" id="btn-notice-close" type="button" aria-label="Dismiss">✕</button>
+    </div>
     <div class="read-only-banner" id="read-only-banner" hidden>
       Reading a saved transcript. <button class="link-btn" id="btn-back-live">Back to the live chat</button>
     </div>
     <form class="composer" id="composer">
-      <textarea id="input" rows="1" placeholder="Message Symbio…" autofocus></textarea>
-      <button type="submit" id="btn-send" disabled aria-label="Send">
-        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 13V3M4 7l4-4 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
-      </button>
+      <textarea id="input" rows="1" placeholder="How can I help you today?" autofocus></textarea>
+      <div class="composer-bar">
+        <span class="composer-note">Runs on this Mac</span>
+        <span class="chip model-chip" id="model-chip" title="The resident model">—</span>
+        <button type="submit" id="btn-send" disabled aria-label="Send">
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M8 13V3M4 7l4-4 4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+        </button>
+      </div>
     </form>
-    <div class="composer-hint">Enter to send · Shift+Enter for a new line · runs entirely on this Mac</div>
+    <div class="suggestions" id="suggestions">
+      <button class="suggestion" data-send="What do you know about me?">What do you know about me?</button>
+      <button class="suggestion" data-send="Look at my screen and tell me what's in front.">Look at my screen</button>
+      <button class="suggestion" data-send="What skills have you trained adapters for?">My trained skills</button>
+    </div>
   </div>
 </main>
 
