@@ -515,6 +515,17 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
             "readonly": False,
             "run": lambda params, a=agent: _tool_desktop(a, "open_app", params),
         },
+        {
+            "name": "obs_record",
+            "description": "Start, stop or check an OBS Studio screen recording; stop it as the last step of a recorded task.",
+            "parameters": {
+                "type": "object",
+                "properties": {"action": {"type": "string", "enum": ["start", "stop", "status"]}},
+                "required": ["action"],
+            },
+            "readonly": False,
+            "run": lambda params, a=agent: _tool_desktop(a, "obs_record", params),
+        },
     ]
 
 

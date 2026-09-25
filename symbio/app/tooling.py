@@ -61,6 +61,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "desktop_move": "desktop",
     "desktop_wait": "desktop",
     "open_app": "desktop",
+    "obs_record": "desktop",
     "save_memory": "memory",
     "compact_memory": "memory",
     "set_standing_instruction": "memory",
@@ -135,6 +136,7 @@ _TOOL_FAMILIES: dict[str, str] = {
     "desktop_move": "desktop",
     "desktop_wait": "desktop",
     "open_app": "desktop",
+    "obs_record": "desktop",
     "post_to_x": "browser",
     "write_note": "memory",
     "recall": "memory",
@@ -491,6 +493,15 @@ _TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {"name": {"type": "string", "description": "The application's name, e.g. 'Notes'."}},
             "required": ["name"],
+        },
+    },
+    {
+        "name": "obs_record",
+        "description": "Start, stop or check an OBS Studio screen recording. When the user is recording a task, finish the task first, then call this with action 'stop' as the last step; the answer names the file OBS saved, and only says STOPPED once OBS itself confirms no recording is running.",
+        "parameters": {
+            "type": "object",
+            "properties": {"action": {"type": "string", "enum": ["start", "stop", "status"], "description": "'stop' to end the recording, 'start' to begin one, 'status' to check."}},
+            "required": ["action"],
         },
     },
     {

@@ -738,6 +738,12 @@ def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any],
     # clicks would put a confirmation in front of every look.
     if name in ("desktop_move", "desktop_scroll", "open_app"):
         return {"risk_score": 1, "flags": ["desktop_action"]}
+    # Starting a recording captures everything on screen from then on, other
+    # windows included; stopping or checking one captures nothing.
+    if name == "obs_record":
+        if str(params.get("action", "")).strip().lower() == "start":
+            return {"risk_score": 2, "flags": ["screen_capture", "records_screen"]}
+        return {"risk_score": 1, "flags": ["desktop_action"]}
     if name == "desktop_wait":
         return {"risk_score": 0, "flags": []}
     # Reading the screen is not acting on it, but it does pull whatever is on
@@ -809,6 +815,9 @@ PROVENANCE_SENSITIVE = frozenset({
     # here for the same reason execute_code does, and especially so because
     # see_screen puts attacker-controlled page text into the same turn.
     "desktop_type", "desktop_press", "desktop_click", "desktop_drag",
+    # A recording the user did not ask for is the model filming the screen on
+    # its own initiative; ask, the same as for a keystroke nobody requested.
+    "obs_record",
 })
 
 
