@@ -194,6 +194,64 @@ def cmd_ane(n: int) -> None:
           f"{1000 * t / n:.0f}ms per board")
 
 
+def cmd_ane_play(games: int) -> None:
+    """Eyes and brain split: the Neural Engine reads the picture, the 14B moves.
+
+    The 14B never sees the game's own state — only what the ANE read off the
+    rendered image, written back out as a grid and a shuffled hidden list,
+    the same prompt that scored best in text (42% sound on hidden cells).
+    """
+    import random
+
+    from mlx_lm import generate, load
+    from mlx_lm.sample_utils import make_sampler
+
+    import play
+
+    model, tok = load(play.MODEL)
+    sampler = make_sampler(temp=0.0)
+    totals, wins, misread = Counter(), 0, 0
+    t0 = time.time()
+    for seed in range(1000, 1000 + games):
+        g = Game(seed=seed)
+        g.play("reveal", (4, 4))
+        grades, invalid, last = Counter(), 0, ""
+        while g.state == "playing" and g.moves < 60:
+            render_png(g, SHOT)
+            seen = ane_read(SHOT)
+            misread += sum(seen[r][c] != w for r, row in enumerate(truth_rows(g)) for c, w in enumerate(row))
+            grid = "   " + " ".join(str(c + 1) for c in range(9)) + "\n" + "\n".join(
+                f"{'ABCDEFGHI'[r]}  " + " ".join(seen[r]) for r in range(9))
+            hidden = [f"{'ABCDEFGHI'[r]}{c + 1}" for r in range(9) for c in range(9) if seen[r][c] == "#"]
+            random.Random(seed * 1000 + g.moves).shuffle(hidden)
+            note = f"Last move: {last}\n" if last else ""
+            user = f"{note}Board:\n{grid}\nHidden cells: {' '.join(hidden)}\nYour move?"
+            msgs = [{"role": "system", "content": play.SYSTEM}, {"role": "user", "content": user}]
+            prompt = tok.apply_chat_template(msgs, add_generation_prompt=True, enable_thinking=False)
+            reply = generate(model, tok, prompt=prompt, max_tokens=16, sampler=sampler, verbose=False)
+            move = g.parse(reply)
+            if move is None:
+                grades["unparsed"] += 1
+                invalid += 1
+                if invalid >= 3:
+                    break
+                continue
+            verb, cell = move
+            grade = g.grade_move(verb, cell)
+            outcome = g.play(verb, cell)
+            if "already" in outcome or "flagged" in outcome:
+                grade = "wasted"
+            grades[grade] += 1
+            last = f"{verb} {g.name(*cell)} -> {outcome}"
+        wins += g.state == "won"
+        totals.update(grades)
+        print(f"  seed {seed}: {g.state:7} revealed {len(g.shown)}/71 {dict(grades)}", flush=True)
+    graded = sum(totals.values())
+    print(f"\nANE eyes + 14B: won {wins}/{games}; moves: "
+          + ", ".join(f"{k} {v} ({100 * v // max(1, graded)}%)" for k, v in totals.most_common())
+          + f"; misread cells across all looks {misread}; {time.time() - t0:.0f}s")
+
+
 def cmd_play(games: int) -> None:
     totals, wins = Counter(), 0
     t0 = time.time()
@@ -231,4 +289,4 @@ def cmd_play(games: int) -> None:
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else "read"
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 10
-    {"read": cmd_read, "play": cmd_play, "ane": cmd_ane}[mode](n)
+    {"read": cmd_read, "play": cmd_play, "ane": cmd_ane, "ane_play": cmd_ane_play}[mode](n)
