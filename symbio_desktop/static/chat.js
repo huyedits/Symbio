@@ -144,22 +144,44 @@ function setTitle(text) {
 
 // ── rendering ───────────────────────────────────────────────────────
 
+/* The empty window is a greeting with the composer under it, in the middle
+ * of the page; the first message moves the composer to the bottom where a
+ * conversation needs it. One function owns each direction, so no path can
+ * leave the greeting on screen above a reply. */
+function greetingText() {
+  const h = new Date().getHours();
+  const part = h < 5 ? 'Up late' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+  const name = window.__userName && window.__userName !== 'user' ? `, ${window.__userName}` : '';
+  return `${part}${name}`;
+}
+
+function showWelcome() {
+  thread.innerHTML = `<div class="welcome">
+    <h1 class="greeting"><span class="mark" aria-hidden="true"></span><span>${escHtml(greetingText())}</span></h1>
+  </div>`;
+  document.getElementById('main').classList.add('empty');
+}
+
+function clearWelcome() {
+  const welcome = thread.querySelector('.welcome');
+  if (welcome) welcome.remove();
+  document.getElementById('main').classList.remove('empty');
+}
+
 function renderThread(messages) {
   thread.innerHTML = '';
   if (!messages.length) {
-    thread.innerHTML = `<div class="welcome">
-      <h1>${escHtml(window.__assistantName || 'Symbio')}</h1>
-      <p class="welcome-sub">A local agent that trains itself on what you correct.</p>
-    </div>`;
+    showWelcome();
     return;
   }
+  document.getElementById('main').classList.remove('empty');
   for (const m of messages) addBubble(m.role, m.text, false, m.thought);
+  markLastAssistant();
   scrollToEnd();
 }
 
 function addBubble(role, text, store = true, thought = '') {
-  const welcome = thread.querySelector('.welcome');
-  if (welcome) welcome.remove();
+  clearWelcome();
   const el = document.createElement('div');
   el.className = `msg ${role}`;
   // The reasoning is KEPT, not dropped: it is the most interesting thing a
@@ -168,13 +190,16 @@ function addBubble(role, text, store = true, thought = '') {
   const lines = thought ? thought.trim().split(/\s+/).length : 0;
   el.innerHTML =
     (thought
-      ? `<details class="thought"><summary>Thought for ${lines} words</summary>`
+      ? `<details class="thought"><summary>Thought process · ${lines} words</summary>`
         + `<div class="thought-body">${escHtml(thought.trim())}</div></details>`
       : '')
     + `<div class="msg-body">${renderMarkdown(text)}</div>`;
   if (role === 'assistant') {
+    const actions = document.createElement('div');
+    actions.className = 'msg-actions';
     const copy = document.createElement('button');
     copy.className = 'copy-btn';
+    copy.type = 'button';
     copy.textContent = 'Copy';
     copy.addEventListener('click', () => {
       navigator.clipboard.writeText(text).then(() => {
@@ -182,7 +207,14 @@ function addBubble(role, text, store = true, thought = '') {
         setTimeout(() => { copy.textContent = 'Copy'; }, 1200);
       });
     });
-    el.appendChild(copy);
+    const retry = document.createElement('button');
+    retry.className = 'retry-btn';
+    retry.type = 'button';
+    retry.textContent = 'Retry';
+    retry.title = 'Ask the same thing again';
+    retry.addEventListener('click', retryLast);
+    actions.append(copy, retry);
+    el.appendChild(actions);
   }
   thread.appendChild(el);
   if (store && viewingId === null) {
@@ -213,8 +245,7 @@ let lastFrameAt = 0;
 function startWaiting() {
   waitStarted = Date.now();
   lastFrameAt = Date.now();
-  const welcome = thread.querySelector('.welcome');
-  if (welcome) welcome.remove();
+  clearWelcome();
   let pending = document.getElementById('pending');
   if (!pending) {
     pending = document.createElement('div');
@@ -261,8 +292,7 @@ function stopWaiting() {
 function ensureStream() {
   stopWaiting();
   if (streamEl) return streamEl;
-  const welcome = thread.querySelector('.welcome');
-  if (welcome) welcome.remove();
+  clearWelcome();
   streamText = '';
   streamEl = document.createElement('div');
   streamEl.className = 'msg assistant streaming';
@@ -303,6 +333,21 @@ function appendToken(text) {
   scrollToEnd();
 }
 
+function markLastAssistant() {
+  thread.querySelectorAll('.msg.assistant').forEach(m => m.classList.remove('last'));
+  const all = thread.querySelectorAll('.msg.assistant');
+  if (all.length) all[all.length - 1].classList.add('last');
+}
+
+function retryLast() {
+  if (document.body.classList.contains('busy') || viewingId !== null) return;
+  const lastUser = [...live.messages].reverse().find(m => m.role === 'user');
+  if (!lastUser) return;
+  input.value = lastUser.text;
+  input.dispatchEvent(new Event('input'));
+  submit();
+}
+
 function finishStream(finalText) {
   const raw = finalText || streamText || '';
   const split = splitReasoning(raw);
@@ -320,15 +365,22 @@ function finishStream(finalText) {
     activityCard = null;
   }
   if (text || split.thought) addBubble('assistant', text, true, split.thought);
+  markLastAssistant();
 }
 
 // Everything the turn did on its way to the answer, folded into one line.
 function addActivity(text) {
   const clean = (text || '').replace(/\s+$/, '');
   if (!clean.trim()) return;
+  // A message that arrives with no turn in flight — "no resident model is
+  // running" on connect — is about the window, not about a reply. As a card
+  // it pushed the greeting off an empty window; it belongs above the composer.
+  if (!document.body.classList.contains('busy') && !activityCard) {
+    showNotice(clean);
+    return;
+  }
   if (!activityCard) {
-    const welcome = thread.querySelector('.welcome');
-    if (welcome) welcome.remove();
+    clearWelcome();
     activityCard = document.createElement('div');
     activityCard.className = 'activity';
     activityCard.innerHTML = `
@@ -351,6 +403,16 @@ function addActivity(text) {
   activityCard.querySelector('.activity-label').textContent =
     label.length > 80 ? label.slice(0, 80) + '…' : label;
   scrollToEnd();
+}
+
+function showNotice(text) {
+  const box = document.getElementById('notice');
+  document.getElementById('notice-text').innerHTML = renderMarkdown(text.trim());
+  box.hidden = false;
+}
+
+function hideNotice() {
+  document.getElementById('notice').hidden = true;
 }
 
 function showConfirm(prompt) {
@@ -377,8 +439,20 @@ function showConfirm(prompt) {
   card.querySelector('.deny').addEventListener('click', () => answer(false));
 }
 
-function scrollToEnd() {
-  thread.scrollTop = thread.scrollHeight;
+function nearBottom() {
+  return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80;
+}
+
+function scrollToEnd(force = false) {
+  if (force || nearBottom() || !document.body.classList.contains('busy')) {
+    thread.scrollTop = thread.scrollHeight;
+  }
+  updateToBottom();
+}
+
+function updateToBottom() {
+  const btn = document.getElementById('btn-to-bottom');
+  if (btn) btn.hidden = nearBottom();
 }
 
 function setStatus(state, text) {
@@ -404,7 +478,9 @@ function renderMarkdown(src) {
   let out = escHtml(src || '');
   const blocks = [];
   out = out.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
-    blocks.push(`<pre class="code"${lang ? ` data-lang="${lang}"` : ''}><code>${code.replace(/\n$/, '')}</code></pre>`);
+    blocks.push(`<div class="code-block"><div class="code-head"><span>${lang || 'code'}</span>`
+      + `<button type="button" class="code-copy">Copy</button></div>`
+      + `<pre class="code"${lang ? ` data-lang="${lang}"` : ''}><code>${code.replace(/\n$/, '')}</code></pre></div>`);
     return ` ${blocks.length - 1} `;
   });
   out = out.replace(/`([^`\n]+)`/g, '<code>$1</code>');
@@ -420,7 +496,7 @@ function renderMarkdown(src) {
     return `<ul>${lis}</ul>`;
   });
   out = out.split(/\n{2,}/).map(part =>
-    /^\s*<(h\d|ul|pre| )/.test(part) || part.includes(' ')
+    /^\s*<(h\d|ul|pre|div| )/.test(part) || part.includes(' ')
       ? part : `<p>${part.replace(/\n/g, '<br>')}</p>`).join('');
   return out.replace(/ (\d+) /g, (_m, i) => blocks[Number(i)]);
 }
@@ -443,13 +519,12 @@ function connect() {
     switch (data.type) {
       case 'connected':
         window.__assistantName = data.assistant_name || 'Symbio';
+        window.__userName = data.user_name || '';
+        input.placeholder = `Message ${window.__assistantName}…`;
         document.getElementById('model-chip').textContent =
           (data.model_name || '').split('/').pop() || '—';
         setStatus('ok', `${data.assistant_name} · ready`);
-        if (!live.messages.length) {
-          const title = document.querySelector('.welcome h1');
-          if (title) title.textContent = window.__assistantName;
-        }
+        if (!live.messages.length && viewingId === null) showWelcome();
         break;
       case 'token':   appendToken(data.text); break;
       case 'system':
@@ -524,6 +599,13 @@ document.getElementById('composer').addEventListener('submit', (e) => {
   submit();
 });
 
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    submit();
+  }
+});
+
 input.addEventListener('input', () => {
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 200) + 'px';
@@ -531,6 +613,26 @@ input.addEventListener('input', () => {
 });
 
 document.getElementById('btn-new-chat').addEventListener('click', newChat);
+thread.addEventListener('scroll', updateToBottom);
+document.getElementById('btn-notice-close').addEventListener('click', hideNotice);
+document.getElementById('btn-to-bottom').addEventListener('click', () => scrollToEnd(true));
+thread.addEventListener('click', (e) => {
+  const btn = e.target.closest('.code-copy');
+  if (!btn) return;
+  const code = btn.closest('.code-block').querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(() => {
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+  });
+});
+document.addEventListener('keydown', (e) => {
+  // Cmd/Ctrl+K: new chat, the shortcut the desktop chat apps share.
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    newChat();
+    input.focus();
+  }
+});
 document.getElementById('btn-back-live').addEventListener('click', backToLive);
 
 document.querySelectorAll('.suggestion').forEach(btn => {
