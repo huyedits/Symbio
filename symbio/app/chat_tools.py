@@ -1013,6 +1013,14 @@ class ToolsMixin:
             self._last_ax = None
             return out
 
+        if name == "obs_record":
+            # Over OBS's own WebSocket server, not a hotkey or a click on its
+            # window: nothing is pulled in front of what is being recorded,
+            # and the answer is OBS's own report of what happened.
+            from symbio import obs
+
+            return obs.record(str(params.get("action") or "status"), self.config)
+
         if name == "desktop_wait":
             try:
                 seconds = min(10.0, max(0.0, float(params.get("seconds") or 2)))
@@ -1546,7 +1554,7 @@ class ToolsMixin:
 
         if name in ("desktop_click", "desktop_type", "desktop_press",
                     "desktop_scroll", "desktop_drag", "desktop_move",
-                    "desktop_wait", "open_app"):
+                    "desktop_wait", "open_app", "obs_record"):
             return self._desktop_action(name, params)
 
         if name == "browser_open":

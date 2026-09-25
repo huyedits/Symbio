@@ -1333,6 +1333,32 @@ Save information for future retrieval:
 
 Search the web and save useful discoveries as local `Learned:` notes.
 
+### Screen recording (OBS)
+
+`obs_record` starts, stops or checks an OBS Studio recording, so a task you
+are filming can end itself: Symbio finishes the job, then stops the
+recording, and the clip ends on the result instead of on you reaching for
+the mouse.
+
+It talks to OBS's built-in WebSocket server (OBS 28 and later), not a hotkey
+or a click on the OBS window, so nothing is pulled in front of what is being
+recorded, and every answer is OBS's own report: `stop` names the file OBS
+saved, and only says STOPPED once OBS confirms no recording is running.
+
+One-time setup: in OBS, **Tools → WebSocket Server Settings → Enable
+WebSocket server**. The port and password are read from OBS's own settings on
+the same Mac; set `obs.host`, `obs.port` or `obs.password` in `config.json`
+(or `SYMBIO_OBS_PASSWORD`) to point it elsewhere. Starting a recording is
+scored as a screen capture, so on a turn where you did not ask for it, it
+asks first.
+
+```text
+You: Submit the Show HN post, then stop the recording.
+     ... browser steps, the Allow card for the post ...
+     [Submit CONFIRMED ... /item?id=...]
+     [Recording STOPPED] Saved to ~/Movies/2026-09-25 14-02-11.mov
+```
+
 ### Telegram
 
 Run the same agent through a Telegram gateway.
