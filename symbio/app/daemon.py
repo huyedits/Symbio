@@ -368,26 +368,6 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         except Exception:
             pass
         conn.close()
-        # Re-warm for the next session. The hand-over is one-shot by design —
-        # a second session inheriting the first's prefix diff would corrupt it
-        # — which left every session after the first paying the 387MB
-        # persisted-file read at boot, or worse, a full in-session prefill when
-        # the file was stale. The model is idle exactly between sessions; the
-        # re-warm (~30s at this machine's measured prefill rate) hides in that
-        # idle window, and the next connect takes a fresh hand-over.
-        # warm["prefix"] is the same slot _serve_connection pops; refill it.
-        # One at a time: a short session chain could otherwise stack re-warm
-        # threads, and two concurrent prefills is the double-residency this
-        # project keeps paying for.
-        if warm is not None:
-            def _rewarm():
-                warmed = _warm_prefix(config, model, tokenizer, adapter_loaded)
-                if warmed is not None:
-                    warm["prefix"] = warmed
-            if not any(t.name == "daemon-rewarm" and t.is_alive()
-                       for t in threading.enumerate()):
-                threading.Thread(target=_rewarm, daemon=True,
-                                 name="daemon-rewarm").start()
 
 
 def daemon_main(config: dict[str, Any]) -> int:
@@ -443,8 +423,49 @@ def daemon_main(config: dict[str, Any]) -> int:
     # while the daemon was healthy and mid-turn. Queue them instead.
     sock.listen(16)
 
+    # The idle window between sessions is where the prefix re-warm belongs.
+    # It used to run on a background thread right after a session ended —
+    # which put a prefill on the model CONCURRENTLY with the next session's
+    # first turn: live 2026-09-26, the desktop's "hi" measured 45s TTFT with
+    # the re-warm running under it, two live KV caches on one model. Now the
+    # re-warm runs only when accept() has been idle for IDLE_REWARM_S — the
+    # model is provably not needed that second — and a connection arriving
+    # mid-wait aborts the wait and is served at once. The re-warm itself
+    # holds a flag the loop checks before serving: if a client connects
+    # while the ~35s prefill runs, it waits for it to finish and then takes
+    # a fresh hand-over — one long wait instead of a corrupted model.
+    #
+    # Sessions that connect before the idle window closes take the persisted
+    # FILE path instead (a ~10s read at session boot, before the user types —
+    # verified 21:03: file hit at 21:03:51.165, first message 21:03:58.990).
+    # That path is strictly safe: it loads a snapshot, not shared live state.
+    IDLE_REWARM_S = 45.0
+    _rewarming = {"active": False}
+
+    def _rewarm_if_idle() -> None:
+        """Wait out an idle window, then rebuild the hand-over in place."""
+        import select
+
+        while True:
+            ready, _, _ = select.select([sock], [], [], IDLE_REWARM_S)
+            if ready:
+                return                     # a client is waiting: serve it
+            _rewarming["active"] = True
+            try:
+                warmed = _warm_prefix(config, model, tokenizer, adapter_loaded)
+                if warmed is not None:
+                    warm["prefix"] = warmed
+                    print("Re-warmed for the next session.", flush=True)
+            except Exception as e:
+                print(f"Re-warm failed ({e!r}); next session uses the "
+                      f"persisted cache.", flush=True)
+            finally:
+                _rewarming["active"] = False
+
     try:
         while True:
+            if warm is not None:
+                _rewarm_if_idle()
             conn, _ = sock.accept()
             try:
                 _serve_connection(conn, config, model, tokenizer,
