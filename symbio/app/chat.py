@@ -376,12 +376,12 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # read it, and must not be overwritten after _run_post_load_self_check().
         self._health_report: dict[str, Any] = {"healthy": True, "errors": [], "warnings": []}
         # If a caller already handed us a loaded model, do all the post-load
-        # setup immediately (same behavior as before lazy loading).
-        if self._model_loaded:
-            if adapter_loaded is None:
-                self.adapter_loaded = adapter_weights_present()
-            self._finish_model_setup()
-            self._run_post_load_self_check()
+        # setup — but only once the logger exists. _finish_model_setup logs its
+        # cache decisions (handed-over warm, persisted-file hit, refusals)
+        # through _log_info, and every one of those lines was dropped when the
+        # setup ran here, 60 lines ahead of the assignment: a working warm was
+        # indistinguishable from a silently refused one. The assignment below
+        # is why the daemon's first-turn cache path now says what it did.
 
         self.history: list[dict[str, str]] = []
         self.session_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S-%f}"
@@ -486,6 +486,21 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # purpose: they are the two things that generate off the main thread,
         # and they must never do it at the same time.
         threading.Thread(target=self._soul_worker, daemon=True).start()
+
+        # The post-load setup, deferred to here — after the logger exists (see
+        # the note at the _model_loaded check) and after the background workers
+        # know _indexing_now exists. _prefill_system_prompt_cache sets it, and
+        # _accept_warmed_prefix runs inside _finish_model_setup; either order
+        # against the workers raced an unset attribute when a thread won.
+        if self._model_loaded:
+            if adapter_loaded is None:
+                self.adapter_loaded = adapter_weights_present()
+            self._finish_model_setup()
+            self._run_post_load_self_check()
+        # If a caller already handed us a loaded model, the self-check ran
+        # before session_id existed; re-persist now that we have one.
+        if self._model_loaded and self._health_report.get("_persisted") is None:
+            self._run_post_load_self_check()
 
     # ---- Infrastructure ----
 
@@ -1330,9 +1345,12 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # the daemon computed travels WITH the cache — the session re-derives
         # only what it can check from disk right now.
         want = self._prompt_cache_signature(ids)
-        if have is None or have.get("adapter_sig") != want["adapter_sig"] \
-                or have.get("kv_sig") != want["kv_sig"] \
-                or have.get("model_name") != want["model_name"]:
+        mismatch = [k for k in ("model_name", "adapter_sig", "kv_sig")
+                    if have.get(k) != want[k]]
+        if mismatch:
+            self._log_info(
+                "warmed prefix refused: " + ", ".join(
+                    f"{k} {have.get(k)!r} != {want[k]!r}" for k in mismatch))
             self._warmed_prefix = None
             return False
         try:
