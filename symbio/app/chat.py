@@ -1698,7 +1698,25 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if not think:
             return think, budget
         mode = str(self.config.get("agent", {}).get("think_when", "auto")).lower()
-        if mode == "always" or working or needs_thinking(user_input):
+        if mode == "always" or working:
+            return think, budget
+        # The decision model (symbio/app/decider.py): Apple Intelligence when
+        # it is on, else a vote over Apple's on-device embedding, else the
+        # regex. Held out, the vote got think/no-think right 28/31 against
+        # the regex's 19/31, at ~7 ms a message off the GPU.
+        try:
+            from symbio.app import decider
+
+            decision = decider.decide(user_input, self.config)
+        except Exception:
+            decision = {"think": needs_thinking(user_input), "source": "regex"}
+        self._last_decision = decision
+        # Logged as a label: the decision model can only be graded, or later
+        # trained on this user's own turns, if its calls are on record.
+        self._log_info("Decision: " + ", ".join(
+            f"{k}={decision[k] if not isinstance(decision[k], float) else round(decision[k], 3)}"
+            for k in ("label", "think", "source", "margin", "ms") if k in decision))
+        if decision.get("think"):
             return think, budget
         return False, 0
 

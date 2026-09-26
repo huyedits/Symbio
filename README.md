@@ -299,6 +299,25 @@ same answer. `SYMBIO_NO_FLASH_ATTENTION=1` turns it off.
 An adapter whose training went to nan is now refused when it is loaded, and the
 base model answers instead: loaded, it made every reply a row of `!`.
 
+**Side models on the Neural Engine.** `symbio_ane/ane_helper.swift` is a small
+Swift program (built on first use with the command-line tools' `swiftc`, kept
+running, ~108 MB) that does three jobs off the GPU the 14B generates on:
+
+- **OCR**: Vision's text recognizer, pinned to the Neural Engine — ~120 ms for a
+  1080p screen once warm. `see_screen` answers questions about *words* from it
+  and no longer wakes the 4 GB vision model (or sleeps the 14B) to read text;
+  every VLM look also gets the exact text alongside. A blob with words in it is
+  named by its words, not by a VLM generation.
+- **Decision model**: think first or answer now, from a nearest-neighbour vote
+  over Apple's on-device contextual embedding (~7 ms). Held out, it made the
+  think/no-think call right 30/31 against the regex's 19/31. Every decision is
+  logged as a label. With Apple Intelligence turned on it asks Apple's
+  on-device model to fill in a routing schema instead.
+- **Vision requests**: saliency and scene labels on the Neural Engine
+  (`ane.vision`), for callers that want candidate regions without a model.
+
+`ane.enabled: false` turns it all off; every call falls back to the old path.
+
 **Replies in seconds, not half a minute.** Measured on the 14B, same prompts,
 before → after: "hey, how's it going?" 18.3 s → 8.8 s; "what's 17 times 23?"
 30.2 s → 4.5 s; follow-ups 4-5 s. Four changes:

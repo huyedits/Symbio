@@ -172,3 +172,22 @@ def fixture_worker_catalog():
     test_skill_adapters.py's isolated_skill_env for the pattern)."""
     path = constants.PROJECT_DIR / "tests" / "fixtures" / "worker_models.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "uses_ane: runs the real Neural Engine helper (macOS)")
+
+
+@pytest.fixture(autouse=True)
+def no_neural_engine_helper(request, monkeypatch):
+    """Keep the Swift helper out of the suite unless a test asks for it.
+
+    symbio/app/ane.py compiles and starts symbio_ane on first use; a test that
+    merely runs a turn would otherwise build a binary and spawn a process as a
+    side effect. Tests of the helper itself mark themselves `uses_ane`.
+    """
+    if request.node.get_closest_marker("uses_ane"):
+        return
+    from symbio.app import ane
+
+    monkeypatch.setattr(ane, "enabled", lambda config=None: False)

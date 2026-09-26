@@ -362,6 +362,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # other value loads unquantized.
         "load_in_bits": 4,
     },
+    # The side models on the Apple Neural Engine (symbio/app/ane.py): the
+    # decision model that picks think/no-think, and OCR for see_screen. Off
+    # the GPU the headmaster generates on. macOS only.
+    "ane": {
+        "enabled": True,
+        "decide": True,
+    },
     "vision": {
         # A vision-language model that looks at screenshots and reports what is
         # on screen, with pixel coordinates you can click. On by default: the

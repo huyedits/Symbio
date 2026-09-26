@@ -460,7 +460,7 @@ def read_blobs(
     name = model_name(config)
     found: list[dict[str, Any]] = []
     for region in regions:
-        label = _name_crop(path, region["box"], name, max_tokens)
+        label = _name_crop(path, region["box"], name, max_tokens, config)
         if not label:
             continue
         found.append({
@@ -473,8 +473,23 @@ def read_blobs(
 
 
 def _name_crop(path: str, box: tuple[int, int, int, int], name: str,
-               max_tokens: int) -> str:
-    """Ask what one region is, or "" for background and for any failure."""
+               max_tokens: int, config: dict[str, Any] | None = None) -> str:
+    """Ask what one region is, or "" for background and for any failure.
+
+    A region with words in it is named by its words, read on the Neural
+    Engine (~0.1 s) — the VLM generation it replaces is several seconds on the
+    GPU the headmaster needs back. Only a region with no text (an icon, an
+    image) is shown to the VLM.
+    """
+    try:
+        from symbio.app import ane
+
+        if ane.enabled(config) and (config or {}).get("vision", {}).get("ocr_labels", True):
+            text = ane.read_crop(path, box)
+            if len(text) >= 2:
+                return f'"{text[:80]}" (text)'
+    except Exception as e:  # pragma: no cover - the helper failing is a fallback, not an error
+        logger.debug("ANE crop read failed on %s: %s", box, e)
     answer = _ask_crop(path, box, _BLOB_PROMPT, name, max_tokens)
     lowered = answer.lower().lstrip("\"'*- ")
     if not answer or lowered.startswith(_BLOB_NOTHING):

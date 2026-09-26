@@ -450,6 +450,7 @@ class AgentTurnMixin:
         incapacity_challenged = False
         thinking_cut_retried = False
         turn_think = False           # what this round was actually served with
+        turn_decision = None         # (think, budget), decided on the first round
         # The round index used to select thinking (think=round_num > 0);
         # agent.thinking_level owns that now, so nothing reads the counter.
         for _round_num in range(max_rounds):
@@ -568,6 +569,13 @@ class AgentTurnMixin:
             # resolved once at the top of the turn and held for the whole turn:
             # they sit in front of the history in the prompt, so changing them
             # mid-turn would re-prefill the block on every round for nothing.
+            # After the few-shots, not before: the session's warmed prefix is
+            # the system prompt plus the full few-shot set, and a first turn
+            # with the standing block ahead of the few-shots re-prefilled both
+            # (measured: 1,198 fresh tokens, 11.6 s, against 542 and 6.3 s).
+            # The cost is the turn after the model first uses a tool, when the
+            # few-shots rotate to that tool's family and everything after them
+            # is prefilled once more.
             messages.extend(tool_few_shots(self.config, family=turn_family))
             if stable_block:
                 messages.extend([
@@ -591,8 +599,13 @@ class AgentTurnMixin:
                 # or the handler below can never tell.
                 _had_prompt_cache = self._prompt_cache is not None
                 try:
-                    _think, _budget = self.turn_thinking(
-                        user_input, working=bool(executed_calls or consecutive_tool_rounds))
+                    # Decided once per turn, not per round: a quick question the
+                    # model answered with one tool call used to flip to full
+                    # thinking on the follow-up round (measured: "what's 17
+                    # times 23?" ran a code tool, then reasoned 85 words, 19 s).
+                    if turn_decision is None:
+                        turn_decision = self.turn_thinking(user_input)
+                    _think, _budget = turn_decision
                     turn_think = _think
                     raw_reply, streamed_live = self._generate_reply(
                         messages, chunk_prefix=chunk_prefix, timings=timings,

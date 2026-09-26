@@ -307,6 +307,15 @@ def daemon_main(config: dict[str, Any]) -> int:
 
     apply_gpu_limits(config)
     wired = keep_model_resident(model, config)
+    # The Neural Engine side (decision model, OCR) starts now, off the GPU and
+    # in the background, so the first turn does not pay for it.
+    try:
+        from symbio.app import ane, decider
+
+        if ane.enabled(config):
+            threading.Thread(target=decider.warm, daemon=True).start()
+    except Exception:
+        pass
     if wired:
         print(f"Keeping {wired / 2**30:.1f} GB wired: the model stays in RAM "
               f"between turns.", flush=True)
