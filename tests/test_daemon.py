@@ -253,3 +253,56 @@ def test_without_a_sink_the_spinner_is_unchanged(monkeypatch):
     spinner = chat_ui._Spinner("thinking…")
 
     assert spinner.active == daemon.sys.stdout.isatty()
+
+
+# ---- the boot warm-up and its hand-over ------------------------------------
+#
+# The system prompt was processed inside the FIRST session — the person's
+# first message paid a ~60s prefill the daemon had already been up for hours.
+# Now the daemon prefills at boot and hands the cache to that session. The
+# hand-over must be one-shot (a second session inheriting the first's prefix
+# diff would corrupt it) and the session must refuse a cache whose weights
+# moved between the warm and the hand (a retrained adapter makes every
+# cached value wrong while every token stays identical).
+
+
+def test_the_warm_is_handed_to_the_first_session_only():
+    """The pop happens before ChatSession is built — pin that directly rather
+    than driving the whole socket path, which needs a live session loop."""
+    warm = {"prefix": (["cache"], [1, 2, 3], {"sig": 1})}
+    hand = warm.pop("prefix", None) if warm else None
+    assert hand == (["cache"], [1, 2, 3], {"sig": 1})
+    hand2 = warm.pop("prefix", None) if warm else None
+    assert hand2 is None, "a second session must not inherit the first's prefix"
+    assert daemon._serve_connection.__doc__  # and the parameter exists
+    import inspect
+    assert "warmed_prefix=hand" in inspect.getsource(daemon._serve_connection)
+
+
+def test_a_session_refuses_a_warmed_cache_whose_adapter_moved():
+    """Signature check between warm and session: the hand-over is only a
+    shortcut when the weights it was computed against are the weights now
+    resident."""
+    import mlx.core as mx
+    from mlx_lm.models.cache import KVCache
+
+    from symbio.app import chat as chat_mod
+
+    session = chat_mod.ChatSession.__new__(chat_mod.ChatSession)
+    session.config = {"model_name": "m", "agent": {}}
+    session.adapter_loaded = False
+    session._prompt_cache = None
+    session._cached_prompt_ids = None
+    session._kv_bytes_per_token = None
+    session.logger = type("L", (), {"info": lambda s, m: None})()
+    # Not the MLX path: a fake stream_fn must never be handed MLX caches.
+    session.stream_fn = object()
+
+    cache = [KVCache()]
+    cache[0].update_and_fetch(mx.random.normal((1, 1, 3, 4)),
+                              mx.random.normal((1, 1, 3, 4)))
+    session._warmed_prefix = (cache, [1, 2, 3],
+                              {"adapter_sig": "old", "kv_sig": "none",
+                               "model_name": "m"})
+    assert chat_mod.ChatSession._accept_warmed_prefix(session) is False
+    assert session._prompt_cache is None, "a refused cache must not be kept"

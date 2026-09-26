@@ -230,7 +230,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                  input_fn=None, output_fn=None, confirm_fn=None,
                  generate_fn=None, stream_fn=None, stream_chunk_fn=None,
                  stream_prefix: bool = True, owner: str | None = None,
-                 confirm_policy: str = "risk", banner_fn=None):
+                 confirm_policy: str = "risk", banner_fn=None,
+                 warmed_prefix: tuple[list, list[int]] | None = None):
         # Last URL successfully opened in the controllable browser; used to
         # auto-recover when a later click/type/scroll/press finds the browser
         # session was reset or never opened.
@@ -306,6 +307,16 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # joins it before any generation (so the model is never used by two
         # threads at once).
         self._prefill_thread: threading.Thread | None = None
+        # A cache warmed by another holder of these same weights — the daemon
+        # prefills the system prefix at boot, before any client connects, and
+        # hands it to the first session. (cache, ids) or None. Accepted only on
+        # the real MLX path and only when nothing is loaded yet from disk: a
+        # persisted file already covers this exact prefix, and its own load
+        # path weighs and logs it. _finish_model_setup skips the prefill when
+        # this lands, which is the whole point — the ~4.4k-token prefix used to
+        # be processed inside the FIRST session, so the person's first message
+        # paid for the boot the daemon had already finished.
+        self._warmed_prefix = warmed_prefix
         # A persisted prompt cache is over a gigabyte of safetensors, and
         # reading it used to start only once load() had finished — so the two
         # slowest parts of boot ran back to back when they have nothing to say
@@ -804,7 +815,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # re-processing it. This is guarded so fake-model tests skip it.
         # No inner spinner: when called from _ensure_model_loaded() the outer
         # 'Waking model...' spinner is already active.
-        self._prefill_system_prompt_cache(show_spinner=False)
+        if not self._accept_warmed_prefix():
+            self._prefill_system_prompt_cache(show_spinner=False)
 
     def _self_prune(self, dry_run: bool = False,
                     announce: bool = True) -> dict[str, Any]:
@@ -1285,6 +1297,53 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                                **kv_kw):
             pass
         return model_cache + draft_cache
+
+    def _accept_warmed_prefix(self) -> bool:
+        """Install a hand-over cache, or say why not. True when installed.
+
+        The daemon prefills the system prefix at boot and hands it to the
+        first session, so that session's first turn feeds only the user's
+        message. Three refusals, each on the record:
+
+        - not the real MLX path (tests, front-ends) — a foreign cache is
+          exactly what _mlx_generation() exists to keep away from generation;
+        - the weights on disk differ from those this session was handed —
+          the same rule _prompt_cache_signature applies to the persisted
+          file, checked here against the live adapter signature instead;
+        - a cache already arrived from disk — it is weighed and logged by
+          its own path, and two warmups would waste the RAM of one.
+        """
+        hand = getattr(self, "_warmed_prefix", None)
+        if not hand or not self._mlx_generation():
+            return False
+        cache, ids = hand
+        if self._prompt_cache is not None or self._cached_prompt_ids:
+            return False
+        # The hand-over assumed these weights. Adapter fingerprints move
+        # between the warm and the session; a stale hand-over is a silently
+        # wrong model, which is worse than a slow first turn.
+        want = self._prompt_cache_signature(ids)
+        have = getattr(self, "_warmed_prefix_signature", None)
+        if have is None or have.get("adapter_sig") != want["adapter_sig"] \
+                or have.get("kv_sig") != want["kv_sig"] \
+                or have.get("model_name") != want["model_name"]:
+            self._warmed_prefix = None
+            return False
+        try:
+            _mx().eval([c.state for c in cache])
+        except Exception as e:
+            self._log_info(f"warmed prefix unusable, prefilling instead: {e}")
+            self._warmed_prefix = None
+            return False
+        self._prompt_cache = cache
+        self._cached_prompt_ids = list(ids)
+        # Weigh it here, so the very first turn sizes its cap against the
+        # live measurement rather than the fallback constant — the same
+        # reason both prefill paths weigh.
+        self._measure_kv_cost(len(ids))
+        self._log_info(f"Warmed prefix handed over: {len(ids)} tokens")
+        self._warmed_prefix = None
+        return True
 
     def _prefill_system_prompt_cache(self, show_spinner: bool = True):
         """Process the system prompt through the model once at boot so the

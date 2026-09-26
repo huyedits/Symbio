@@ -43,6 +43,35 @@ _REAL_NOTES = (constants.PROJECT_DIR / "notes").resolve()
 _REAL_SESSIONS = (constants.PROJECT_DIR / "sessions").resolve()
 
 
+def pytest_configure(config):
+    """The `ram_heavy` marker: a test that loads model weights of its own.
+
+    A resident daemon already holds the headmaster; a test that calls
+    mlx_lm.load directly maps a SECOND copy beside it, which on a 16 GB Mac
+    is the out-of-memory kill (measured 2026-09-26: test_deferred_learn hung
+    the whole box mid-suite, swapping under the daemon's ~9 GB). Such tests
+    are deselected by default and run only when asked for, alongside — never
+    during — the daemon:
+
+        pytest -m ram_heavy          # only these
+        pytest -m ""                 # everything else (default deselects them)
+    """
+    config.addinivalue_line(
+        "markers", "ram_heavy: loads real model weights (deselected by default)")
+
+
+def pytest_collection_modifyitems(config, items):
+    # Only filter when the caller did not ask for a marker expression of
+    # their own - `pytest -m ram_heavy` must select, not deselect.
+    if config.getoption("markexpr"):
+        return
+    skip = pytest.mark.skip(reason="ram_heavy: loads weights beside the "
+                                   "resident daemon; run with `-m ram_heavy`")
+    for item in items:
+        if "ram_heavy" in item.keywords:
+            item.add_marker(skip)
+
+
 def _guard(fn, target, label):
     """Wrap a pruner so it refuses to run against the user's real store.
 
