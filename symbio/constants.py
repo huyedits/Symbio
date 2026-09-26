@@ -103,6 +103,11 @@ GATEWAY_PID_FILE = PROJECT_DIR / "gateway.pid"
 # file is for stop/status.
 DAEMON_SOCKET = PROJECT_DIR / "daemon.sock"
 DAEMON_PID_FILE = PROJECT_DIR / "daemon.pid"
+# The fine-tune in progress, as one JSON file under LOG_DIR for anything
+# outside the training process that wants to watch it (symbio_pet draws it).
+# Written by symbio/app/training_live.py. A name rather than a path: the suite
+# moves LOG_DIR after import, and a path bound here would stay behind.
+TRAINING_LIVE_NAME = "training_live.json"
 # Paths used by the tag-based agent in symbio.app.
 PROMPT_FILE = PROJECT_DIR / "prompt.md"
 CRON_FILE = PROJECT_DIR / "cron_jobs.json"

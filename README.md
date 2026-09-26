@@ -178,6 +178,39 @@ every endpoint**, against the 200-400 MB an Electron shell starts at.
 in this process and costs about 400 MB all told, which is why it is off by
 default.
 
+### The pet
+
+```bash
+symbio-pet                 # a cat on your desktop, watching this install
+symbio-pet --demo          # the same cat playing a scripted run; nothing is trained
+```
+
+A tilcayo — *Leopardus tilcayo*, the newest cat species, described on
+17 September 2026: light-brown coat, big irregular rosettes, short round ears.
+It is the fine-tune, drawn:
+
+- **The cat is the base model.** It is the same cat before and after every run.
+- **The charm on its collar is the LoRA adapter** — a small thing hung on the
+  model, not a change to it. A fresh run starts it from nothing (LoRA's B
+  matrices start at zero) and it grows with every step: gold for the
+  headmaster, cyan for a skill.
+- **Each fish treat is a couple of training steps**, thrown at the pace the
+  trainer reports them.
+- **The tail is the loss**: lashing while the loss is high against where the
+  run started, settling as it converges. The sparkline above it is the curve.
+- **The golden gate rules**: the charm locks on with a sparkle when the adapter
+  is kept, and the cat swats it off its collar when it is rolled back.
+
+Between runs it sleeps while no model is loaded, thinks while the model works,
+and strolls along the top of the Dock now and then. Drag it anywhere,
+double-click it for the chat window, right-click to stop it wandering.
+
+It never imports `symbio`. Training writes `logs/training_live.json` from the
+trainer's own lines and the gate's verdict; the pet reads that, the daemon's
+pid and socket, and `ps`. Measured: about 80 MB resident, 4.5% of one core
+sitting and 3% asleep, more while it walks or eats. It needs PyObjC
+(`pip install "symbio-cli[pet]"`) and runs on macOS only.
+
 ### Staying online
 
 ```bash
