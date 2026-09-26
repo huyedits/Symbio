@@ -209,6 +209,9 @@ function addBubble(role, text, store = true, thought = '') {
 let waitTimer = null;
 let waitStarted = 0;
 let lastFrameAt = 0;
+// While the model loads, what the wait is actually for. The server sends a
+// `waking` line every couple of seconds; it wins over the guesses below.
+let wakingText = '';
 
 function startWaiting() {
   waitStarted = Date.now();
@@ -234,6 +237,12 @@ function startWaiting() {
 function tickWaiting() {
   const seconds = Math.round((Date.now() - waitStarted) / 1000);
   const quiet = Math.round((Date.now() - lastFrameAt) / 1000);
+  if (wakingText) {
+    setStatus('busy', wakingText);
+    const waking = document.querySelector('#pending .wait-label');
+    if (waking) waking.textContent = `${wakingText} — your message goes as soon as it is up`;
+    return;
+  }
   setStatus('busy', `Thinking… ${seconds}s`);
   const label = document.querySelector('#pending .wait-label');
   if (!label) return;
@@ -277,10 +286,28 @@ function ensureStream() {
  * the reply — the same failure as a truncated <think> block being shown as
  * the answer — so it is split off and folded away, with the answer left as
  * the message. */
-function splitReasoning(text) {
-  if (!text.startsWith('[Reasoning]')) return { thought: '', answer: text };
+function splitReasoning(text, final = false) {
+  // The session's marker is "  [Reasoning] " — indented, as the terminal
+  // prints it. Tested for flush left, it never matched, and the whole
+  // thought was shown as the reply.
+  const lead = text.match(/^\s*/)[0].length;
+  if (!text.startsWith('[Reasoning]', lead)) return { thought: '', answer: text };
+  text = text.slice(lead);
+  // The answer starts at the speaker label the session prints after the
+  // reasoning ("Symbio : Hi!"). Splitting at the first blank line instead
+  // showed every paragraph of reasoning after the first as the reply — seen
+  // live 2026-09-26, with the label left in the middle of the bubble.
+  const name = (window.__assistantName || 'Symbio').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const label = new RegExp(`\\n\\s*${name}\\s*:\\s*`);
+  const found = label.exec(text);
+  if (found) {
+    return { thought: text.slice('[Reasoning]'.length, found.index).trim(),
+             answer: text.slice(found.index + found[0].length) };
+  }
+  // No label yet: still thinking, unless the turn is over — then the old
+  // first-blank-line split is the best guess there is.
   const end = text.indexOf('\n\n');
-  if (end === -1) return { thought: text.slice('[Reasoning]'.length), answer: '' };
+  if (!final || end === -1) return { thought: text.slice('[Reasoning]'.length).trim(), answer: '' };
   return {
     thought: text.slice('[Reasoning]'.length, end).trim(),
     answer: text.slice(end + 2),
@@ -305,7 +332,7 @@ function appendToken(text) {
 
 function finishStream(finalText) {
   const raw = finalText || streamText || '';
-  const split = splitReasoning(raw);
+  const split = splitReasoning(raw, true);
   // The reasoning is kept out of the stored transcript as well: it is not
   // what was said, and replaying it as the assistant's message would teach
   // the next read of this conversation that it was.
@@ -445,17 +472,33 @@ function connect() {
         window.__assistantName = data.assistant_name || 'Symbio';
         document.getElementById('model-chip').textContent =
           (data.model_name || '').split('/').pop() || '—';
-        setStatus('ok', `${data.assistant_name} · ready`);
+        // Asleep is not an error: the first message wakes it.
+        if (data.model_state === 'down') {
+          setStatus('off', `${data.assistant_name} · asleep — waking up`);
+        } else if (data.model_state === 'loading') {
+          setStatus('busy', `${data.assistant_name} · waking up`);
+        } else {
+          setStatus('ok', `${data.assistant_name} · ready`);
+        }
         if (!live.messages.length) {
           const title = document.querySelector('.welcome h1');
           if (title) title.textContent = window.__assistantName;
         }
         break;
-      case 'token':   appendToken(data.text); break;
+      case 'token':   wakingText = ''; appendToken(data.text); break;
+      case 'waking':
+        wakingText = data.text || 'Waking Symbio…';
+        if (waitTimer) tickWaiting(); else setStatus('busy', wakingText);
+        break;
+      case 'awake':
+        wakingText = '';
+        if (!waitTimer) setStatus('ok', `${window.__assistantName || 'Symbio'} · ready`);
+        break;
       case 'system':
       case 'progress': addActivity(data.text); break;
       case 'confirm': showConfirm(data.prompt); break;
       case 'done':
+        wakingText = '';
         stopWaiting();
         finishStream(data.text);
         setStatus('ok', `Ready · last reply took ${Math.round((Date.now() - waitStarted) / 1000)}s`);

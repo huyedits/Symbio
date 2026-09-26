@@ -107,7 +107,7 @@ def status_line(snap: Snapshot) -> str:
     if snap.activity == "fainted":
         return f"The {label} run's process died mid-run (killed or crashed)."
     if snap.presence == "asleep":
-        return "Asleep — no model loaded. `symb daemon start` wakes me."
+        return "Asleep. Double-click to chat — your first message wakes me."
     if snap.presence == "waking":
         return "Waking up — the model is loading."
     if snap.busy:

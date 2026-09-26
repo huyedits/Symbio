@@ -14,17 +14,19 @@ process would pull the headmaster's weights into it — ~10 GB — and the deskt
 would be the largest thing on the Mac. `symb daemon` already keeps one loaded
 copy behind a Unix socket, so this process is a bridge: browser WebSocket on
 one side, daemon socket on the other, nothing resident in between. With no
-daemon running it says so and names the command, rather than quietly loading a
-second copy of a 14B model.
+daemon running it starts one (`symb daemon start`, in its own process) and
+holds the message until the model has loaded, rather than telling the reader
+to go and run a command, or quietly loading a second copy of a 14B model here.
 
 **Nothing is imported that is not needed to answer.** The API handlers read
 JSON off disk; `symbio.app.dispatch` is imported inside the one handler that
 needs the catalog. Importing the agent stack at module scope would drag mlx in
 behind it.
 
-The wire protocol is unchanged from the FastAPI version, so the frontend did
-not have to know any of this happened: {type: connected|token|system|progress|
-confirm|done|error} out, {type: chat|confirm_response|ping} in.
+The wire protocol is the FastAPI version's plus one frame: {type: connected|
+token|system|progress|confirm|done|error|waking} out, {type: chat|
+confirm_response|ping} in. `waking` is the model loading; a page that does not
+know it ignores it.
 """
 
 from __future__ import annotations
@@ -33,11 +35,14 @@ import base64
 import hashlib
 import json
 import mimetypes
+import fcntl
 import os
 import re
 import socket
 import sqlite3
 import struct
+import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -501,6 +506,118 @@ def ws_read_message(sock: socket.socket) -> tuple[int, bytes]:
             return first_opcode or opcode, bytes(payload)
 
 
+# ── waking the resident model ────────────────────────────────────────
+
+# How long a message waits for the model to load. A 14B maps in about half a
+# minute from a warm disk; a cold disk or a Mac under memory pressure is slower.
+DAEMON_START_S = 300.0
+# Between progress lines while it loads.
+_WAKE_REPORT_S = 2.0
+_WAKE_LOCK = threading.Lock()
+
+
+def daemon_state() -> str:
+    """"ready" (a live pid and its socket), "loading" (a live pid, no socket
+    yet: the socket is bound only once the weights are in) or "down"."""
+    try:
+        pid = int(constants.DAEMON_PID_FILE.read_text(encoding="utf-8").strip())
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        return "down"
+    return "ready" if constants.DAEMON_SOCKET.exists() else "loading"
+
+
+def _is_our_daemon(pid: int) -> bool:
+    """A pid file outlives an OOM kill, and the pid can come back as someone
+    else's process — which would read as "loading" forever."""
+    try:
+        command = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                                 capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True                      # cannot tell: believe the pid file
+    return "symbio" in command and "daemon" in command
+
+
+def _daemon_log_tail(lines: int = 4) -> str:
+    try:
+        text = (constants.LOG_DIR / "daemon.log").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    noise = ("MallocStackLogging", "Fetching ", "it/s]")
+    keep = [line.strip() for line in text.splitlines()
+            if line.strip() and not any(n in line for n in noise)]
+    return "\n".join(keep[-lines:])
+
+
+def wake_daemon(report=None, timeout: float = DAEMON_START_S) -> tuple[bool, str]:
+    """The resident model up and answering, started if it has to be.
+
+    One starter at a time, across processes as well as threads: the check and
+    `symb daemon start` run under an flock on PROJECT_DIR/daemon.start.lock,
+    and `start` returns only once the new pid file is written. Two windows, or
+    a window and an ACP host, that both saw "down" would otherwise both start
+    one — two copies of a 14B, the out-of-memory kill this Mac keeps having.
+
+    `report(text)` gets a progress line every couple of seconds while it loads.
+    A load that dies (usually memory) is reported when it dies, with the end
+    of daemon.log, not after the whole timeout.
+    """
+    report = report or (lambda _text: None)
+    started = time.monotonic()
+    with _WAKE_LOCK:
+        try:
+            constants.PROJECT_DIR.mkdir(parents=True, exist_ok=True)
+            lock = open(constants.PROJECT_DIR / "daemon.start.lock", "a")
+        except OSError as e:
+            return False, f"Could not start Symbio's model: {e}"
+        with lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            state = daemon_state()
+            if state == "loading":
+                try:
+                    pid = int(constants.DAEMON_PID_FILE.read_text(encoding="utf-8").strip())
+                except (OSError, ValueError):
+                    pid = 0
+                if pid and not _is_our_daemon(pid):
+                    for stale in (constants.DAEMON_PID_FILE, constants.DAEMON_SOCKET):
+                        try:
+                            stale.unlink()
+                        except OSError:
+                            pass
+                    state = "down"
+            if state == "down":
+                report("Waking Symbio — starting the model…")
+                try:
+                    done = subprocess.run(
+                        [sys.executable, "-m", "symbio.app.cli", "daemon", "start"],
+                        cwd=str(APP_DIR.parent), stdin=subprocess.DEVNULL,
+                        capture_output=True, text=True, timeout=60, check=False)
+                    said = (done.stdout + done.stderr).strip()
+                except (OSError, subprocess.SubprocessError) as e:
+                    said = str(e)
+                if daemon_state() == "down":
+                    return False, ("Symbio could not start its model"
+                                   + (f": {said[-400:]}" if said else "."))
+    last = 0.0
+    while time.monotonic() - started < timeout:
+        state = daemon_state()
+        if state == "ready":
+            return True, ""
+        if state == "down":
+            tail = _daemon_log_tail()
+            return False, ("Symbio's model stopped while it was loading"
+                           + (f":\n{tail}" if tail else ".")
+                           + "\nThat is usually memory — another model or a training "
+                             "run may be holding it. Send again to retry.")
+        now = time.monotonic()
+        if now - last >= _WAKE_REPORT_S:
+            report(f"Waking Symbio — loading the model… {now - started:.0f}s")
+            last = now
+        time.sleep(0.5)
+    return False, (f"Symbio's model did not finish loading in {timeout:.0f}s. "
+                   f"See {constants.LOG_DIR / 'daemon.log'}.")
+
+
 # ── the bridge to the resident model ─────────────────────────────────
 
 # The one live conversation, kept across browser reloads.
@@ -511,6 +628,8 @@ def ws_read_message(sock: socket.socket) -> tuple[int, bytes]:
 # anyway, so the bridge belongs to the server, not to a socket.
 _BRIDGE: "DaemonBridge | None" = None
 _BRIDGE_LOCK = threading.Lock()
+# The first window of this server has asked for the model to be loaded.
+_PREWARMED = False
 
 
 class DaemonBridge:
@@ -558,7 +677,13 @@ class DaemonBridge:
         self.sock: socket.socket | None = None
         self.rfile = None
         self.wfile = None
-        self.turn_open = False
+        # Turns sent and not yet answered. A count, not a flag: messages held
+        # while the model loads go out together, and each needs its `done`.
+        self.open_turns = 0
+        self.waking = False
+        self._wake_lock = threading.Lock()
+        self._connect_lock = threading.Lock()
+        self.woke_at = 0.0             # when a wake by this bridge finished
         # The session prints its banner and THEN asks for input, so a message
         # sent the moment the socket opens arrives before the session is
         # listening: the banner's own input_prompt closed a turn that had not
@@ -568,6 +693,14 @@ class DaemonBridge:
         self.ready = False
         self.pending: list[str] = []
         self.spoke = False
+
+    @property
+    def turn_open(self) -> bool:
+        return self.open_turns > 0
+
+    @turn_open.setter
+    def turn_open(self, value: bool) -> None:
+        self.open_turns = max(self.open_turns, 1) if value else 0
 
     @staticmethod
     def daemon_ready() -> bool:
@@ -587,15 +720,24 @@ class DaemonBridge:
         except (OSError, ValueError):
             return False
 
-    def connect(self) -> tuple[bool, str]:
-        if self.alive():
+    def connect(self, grace: float | None = None) -> tuple[bool, str]:
+        # The socket handler and the waker can both get here for one message.
+        with self._connect_lock:
+            return self._connect(grace)
+
+    def _connect(self, grace: float | None) -> tuple[bool, str]:
+        if self.alive() or self.connecting():
             return True, ""
+        if grace is None and time.monotonic() - self.woke_at < 120:
+            # The first session after a load builds its prompt from cold:
+            # give it longer before suggesting another window holds it.
+            grace = 45.0
         if not self.daemon_ready():
             return False, (
                 "No resident model is running, so there is nothing to talk to "
-                "yet. Start one with `symb daemon start` — it loads the "
-                "headmaster once, in its own process, and this window stays a "
-                "few megabytes."
+                "yet. Sending a message starts one (`symb daemon start` does "
+                "the same) — it loads the headmaster once, in its own process, "
+                "and this window stays a few megabytes."
             )
         try:
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -613,8 +755,50 @@ class DaemonBridge:
         self.rfile = sock.makefile("rb")
         self.wfile = sock.makefile("wb")
         threading.Thread(target=self._pump, daemon=True).start()
-        threading.Thread(target=self._report_if_queued, daemon=True).start()
+        threading.Thread(target=self._report_if_queued,
+                         args=(self._QUEUE_GRACE if grace is None else grace,),
+                         daemon=True).start()
         return True, ""
+
+    def connecting(self) -> bool:
+        """Connected and waiting for the session's first prompt. Seen as not
+        alive, this used to open a SECOND socket on the next message: it went
+        into the daemon's backlog, the queued text was written to it, and the
+        conversation hung behind itself."""
+        return self.sock is not None and not self.ready
+
+    def start_waking(self, then_connect: bool = True) -> None:
+        """Load the model in the background, then (if asked) open the
+        session; messages said meanwhile wait in `pending`. One at a time."""
+        with self._wake_lock:
+            if self.waking:
+                return
+            self.waking = True
+        threading.Thread(target=self._wake, args=(then_connect,), daemon=True).start()
+
+    def _wake(self, then_connect: bool) -> None:
+        try:
+            ok, why = wake_daemon(lambda text: self.send_json({"type": "waking", "text": text}))
+        except Exception as e:           # never leave `waking` stuck on
+            ok, why = False, f"Could not start Symbio's model: {e}"
+        finally:
+            with self._wake_lock:
+                self.waking = False
+        if ok:
+            self.woke_at = time.monotonic()
+            self.send_json({"type": "awake", "text": ""})
+            # A pre-warm opens no session, but a message typed while it was
+            # loading is waiting in `pending`. Seen live: it waited forever.
+            # Checked after `waking` is cleared, so a message arriving from
+            # here on connects by itself and none falls between the two.
+            if then_connect or self.pending:
+                ok, why = self.connect()
+        if not ok:
+            self.send_json({"type": "system", "text": why})
+            if self.pending:
+                self.pending.clear()
+                self.open_turns = 0
+                self.send_json({"type": "done", "text": ""})
 
     # How long a silent connection is normal. The daemon prints its banner
     # and asks for input within a second of accepting; longer than this means
@@ -622,7 +806,23 @@ class DaemonBridge:
     # window is holding it.
     _QUEUE_GRACE = 8.0
 
-    def _report_if_queued(self) -> None:
+    def _report_if_queued(self, grace: float = _QUEUE_GRACE) -> None:
+        if time.monotonic() - self.woke_at < 120:
+            # Just woken: nothing else can be holding a model this bridge
+            # started. The first conversation reads the whole system prompt
+            # before it asks for input — about a minute on the 14B when there
+            # is no saved prompt cache — so say that, every few seconds,
+            # instead of blaming another window after 45.
+            started = time.monotonic()
+            while self.sock is not None and not self.ready:
+                self.send_json({"type": "waking", "text": (
+                    "Symbio is reading its instructions (the first conversation "
+                    f"after it wakes up)… {time.monotonic() - started:.0f}s")})
+                time.sleep(_WAKE_REPORT_S)
+            return
+        self._report_if_queued_slowly(grace)
+
+    def _report_if_queued_slowly(self, grace: float) -> None:
         """Say when the connection is sitting in the daemon's backlog.
 
         connect() succeeds either way -- the kernel completes the handshake
@@ -630,11 +830,11 @@ class DaemonBridge:
         exactly like a window whose model is thinking, forever. That silence
         is the thing to name.
         """
-        time.sleep(self._QUEUE_GRACE)
+        time.sleep(grace)
         if not self.ready and self.sock is not None:
             self.send_json({"type": "system", "text": (
                 "Connected, but the resident model has not answered in "
-                f"{self._QUEUE_GRACE:.0f}s. It serves one window at a time — "
+                f"{grace:.0f}s. It serves one window at a time — "
                 "another tab or a `symb chat` session is probably holding it. "
                 "Close that one and this window takes over.")})
 
@@ -664,11 +864,30 @@ class DaemonBridge:
     def alive(self) -> bool:
         return self.sock is not None and self.ready
 
-    def _send(self, msg: dict) -> None:
+    def _send(self, msg: dict) -> bool:
         if not self.wfile:
-            return
-        self.wfile.write((json.dumps(msg) + "\n").encode("utf-8"))
-        self.wfile.flush()
+            return False
+        try:
+            self.wfile.write((json.dumps(msg) + "\n").encode("utf-8"))
+            self.wfile.flush()
+            return True
+        except OSError:
+            # The daemon went away under us (stopped, OOM-killed). Forget the
+            # connection so the next message wakes a model, instead of raising
+            # out of the socket handler and ending the window's connection.
+            self._forget_connection()
+            return False
+
+    def _forget_connection(self) -> None:
+        try:
+            if self.sock:
+                self.sock.close()
+        except OSError:
+            pass
+        self.sock = None
+        self.rfile = None
+        self.wfile = None
+        self.ready = False
 
     def _pump(self) -> None:
         """Daemon frames in, browser frames out, until either end hangs up."""
@@ -704,13 +923,14 @@ class DaemonBridge:
                     # one it means the session has finished starting up.
                     if not self.ready:
                         self.ready = True
-                        for queued in self.pending:
-                            self._send({"type": "input", "text": queued})
-                        self.pending.clear()
-                    elif self.turn_open:
+                        self.send_json({"type": "awake", "text": ""})
+                        queued, self.pending = self.pending, []
+                        for text in queued:
+                            self._send({"type": "input", "text": text})
+                    elif self.open_turns:
                         self._end_of_turn()
-                        self.turn_open = False
-                        self.spoke = False
+                        self.open_turns -= 1
+                        self._new_turn()
                         self.send_json({"type": "done", "text": ""})
                 elif kind == "done":
                     self.send_json({"type": "quit"})
@@ -719,6 +939,14 @@ class DaemonBridge:
             pass
         finally:
             self.send_json({"type": "system", "text": "[The resident model closed the connection.]"})
+            # A turn still open will never get its prompt back: close it, or the
+            # page waits on it forever. Then drop the dead socket, so the next
+            # message wakes the model again rather than writing into it.
+            if self.open_turns:
+                self.open_turns = 0
+                self.send_json({"type": "done", "text": ""})
+            if self.rfile is not None and self.sock is not None:
+                self._forget_connection()
 
     # How much of a turn's opening is held back while looking for the speaker
     # label. The label is short ("Caine   : "); anything longer than this is
@@ -838,16 +1066,27 @@ class DaemonBridge:
             self.prefix_done = True
             self.send_json({"type": "token", "text": self.turn_text})
 
-    def say(self, text: str) -> None:
+    def _new_turn(self) -> None:
         self.turn_text = ""
         self.prefix_done = False
         self.carry = ""
         self.inside = None
-        self.turn_open = True
+        self.spoke = False
+
+    def say(self, text: str) -> bool:
+        """Send, or hold until the session is listening. False when the
+        daemon connection turned out to be dead; the text is held for the
+        next one."""
+        if not self.open_turns:
+            self._new_turn()     # not mid-stream: a queued turn resets at its start
+        self.open_turns += 1
         if not self.ready:
             self.pending.append(text)
-            return
-        self._send({"type": "input", "text": text})
+            return True
+        if self._send({"type": "input", "text": text}):
+            return True
+        self.pending.append(text)
+        return False
 
     def confirm(self, approved: bool) -> None:
         self._send({"type": "confirm", "answer": bool(approved)})
@@ -962,12 +1201,14 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
         config = _config_summary()
-        send_json({"type": "connected", **{k: config[k] for k in
-                                           ("assistant_name", "user_name", "model_name")}})
+        state = daemon_state()
+        send_json({"type": "connected", "model_state": state,
+                   **{k: config[k] for k in ("assistant_name", "user_name", "model_name")}})
 
-        global _BRIDGE
+        global _BRIDGE, _PREWARMED
         with _BRIDGE_LOCK:
-            if _BRIDGE is not None and _BRIDGE.alive():
+            if _BRIDGE is not None and (_BRIDGE.alive() or _BRIDGE.connecting()
+                                        or _BRIDGE.waking):
                 bridge = _BRIDGE
                 bridge.attach(send_json)
                 send_json({"type": "system", "text":
@@ -975,6 +1216,15 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 bridge = DaemonBridge(send_json, config.get("assistant_name", ""))
                 _BRIDGE = bridge
+            # Opening the window is the intent to chat, so the model starts
+            # loading now, not when the first message is sent: half a minute
+            # of the wait happens while the reader is still typing. Once per
+            # window: a reconnect after a sleep must not reload a model that
+            # was stopped on purpose. Loading only — no session is opened.
+            prewarm = state == "down" and not _PREWARMED
+            _PREWARMED = True
+        if prewarm:
+            bridge.start_waking(then_connect=False)
 
         def ensure_bridge() -> tuple[bool, str]:
             """Attach to the resident model on demand.
@@ -982,17 +1232,15 @@ class Handler(BaseHTTPRequestHandler):
             Not at page load: a browser that reconnects its socket -- a
             refresh, a sleep/wake, the backoff loop after a restart -- would
             take one of the daemon's queue slots each time and hold it for a
-            window nobody is typing in.
+            window nobody is typing in. With no model up yet, it is woken in
+            the background and the message waits for it.
             """
-            if bridge.alive():
+            if bridge.alive() or bridge.connecting():
                 return True, ""
-            return bridge.connect()
-
-        if not DaemonBridge.daemon_ready():
-            send_json({"type": "system", "text": (
-                "No resident model is running. Start one with `symb daemon "
-                "start` — it loads the headmaster once, in its own process, "
-                "and this window stays a few megabytes.")})
+            if DaemonBridge.daemon_ready():
+                return bridge.connect()
+            bridge.start_waking()
+            return True, ""
 
         try:
             while True:
@@ -1019,7 +1267,12 @@ class Handler(BaseHTTPRequestHandler):
                         send_json({"type": "system", "text": why})
                         send_json({"type": "done", "text": ""})
                         continue
-                    bridge.say(text)
+                    if not bridge.say(text):
+                        # The daemon died since the last turn: the text is
+                        # held, and a fresh model is woken for it.
+                        bridge.start_waking()
+                    elif bridge.pending and not (bridge.connecting() or bridge.waking):
+                        bridge.start_waking()
                 elif kind == "confirm_response":
                     bridge.confirm(msg.get("approved", False))
                 elif kind == "ping":

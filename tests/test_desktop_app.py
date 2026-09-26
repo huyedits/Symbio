@@ -255,7 +255,10 @@ def test_a_message_sent_before_the_session_is_listening_is_not_lost():
 
     assert [json.loads(line) for line in b"".join(written).splitlines()] == [
         {"type": "input", "text": "What is my name?"}]
-    assert "done" not in [m["type"] for m in sent], "the banner is not a finished turn"
+    # The pipe then runs dry, which reads as the daemon hanging up: that closes
+    # the open turn. Nothing before it may.
+    closed = sent.index({"type": "system", "text": "[The resident model closed the connection.]"})
+    assert "done" not in [m["type"] for m in sent[:closed]], "the banner is not a finished turn"
 
 
 # --- the resident model outliving its clients ------------------------------
@@ -344,6 +347,189 @@ def test_the_daemon_queues_waiting_clients():
 
     source = inspect.getsource(daemon.daemon_main)
     assert "sock.listen(16)" in source
+
+
+# --- no model up: the message wakes one and waits for it -------------------
+#
+# Live 2026-09-26: "i cant even chat to it because the model isnt ready". The
+# resident model had died, and the window answered every message with
+# "Start one with `symb daemon start`" and dropped it. Ollama and LM Studio
+# load on the first request; so does this now.
+
+
+def test_a_message_with_no_model_is_held_and_the_model_is_woken(monkeypatch):
+    sent, connected = [], []
+    monkeypatch.setattr(server, "wake_daemon",
+                        lambda report: (report("Waking Symbio — loading the model… 2s") or (True, "")))
+    bridge = server.DaemonBridge(sent.append)
+    monkeypatch.setattr(bridge, "connect", lambda grace=None: connected.append(grace) or (True, ""))
+
+    assert bridge.say("hello") is True
+    assert bridge.pending == ["hello"], "held until the session is listening"
+    bridge.start_waking()
+    for _ in range(100):
+        if not bridge.waking:
+            break
+        __import__("time").sleep(0.01)
+
+    kinds = [m["type"] for m in sent]
+    assert kinds == ["waking", "awake"]
+    assert len(connected) == 1 and bridge.woke_at > 0
+
+
+def test_a_message_typed_during_the_prewarm_is_sent_when_the_model_is_up(monkeypatch):
+    """Live 2026-09-26, headless Chrome: the window opened, the pre-warm
+    loaded the model, and the message typed meanwhile waited 480s for a
+    session that the pre-warm (loading only) never opened."""
+    connected = []
+    monkeypatch.setattr(server, "wake_daemon", lambda report: (True, ""))
+    bridge = server.DaemonBridge(lambda _m: None)
+    monkeypatch.setattr(bridge, "connect", lambda grace=None: connected.append(grace) or (True, ""))
+    bridge.waking = True               # the pre-warm is running...
+    bridge.say("hey, are you awake?")  # ...when the message arrives
+    bridge.waking = False
+    bridge._wake(then_connect=False)
+
+    assert len(connected) == 1, "the held message needs a session"
+
+
+def test_a_prewarm_with_nothing_to_say_opens_no_session(monkeypatch):
+    connected = []
+    monkeypatch.setattr(server, "wake_daemon", lambda report: (True, ""))
+    bridge = server.DaemonBridge(lambda _m: None)
+    monkeypatch.setattr(bridge, "connect", lambda grace=None: connected.append(grace) or (True, ""))
+    bridge._wake(then_connect=False)
+    assert connected == [], "loading is not a session: no daemon slot held"
+
+
+def test_a_model_that_will_not_load_says_why_and_ends_the_turn(monkeypatch):
+    sent = []
+    monkeypatch.setattr(server, "wake_daemon",
+                        lambda report: (False, "Symbio's model stopped while it was loading"))
+    bridge = server.DaemonBridge(sent.append)
+    bridge.say("hello")
+    bridge._wake(then_connect=True)
+
+    assert [m["type"] for m in sent] == ["system", "done"]
+    assert "stopped while it was loading" in sent[0]["text"]
+    assert bridge.pending == [] and not bridge.turn_open
+
+
+def test_a_second_message_during_the_handshake_opens_no_second_socket(monkeypatch):
+    """Seen as not alive while the session had not yet asked for input, the
+    second message opened another socket; it sat in the daemon's backlog with
+    the queued text written into it, and the conversation hung on itself."""
+    def _no_socket(*_a, **_k):
+        raise AssertionError("a second socket was opened")
+
+    monkeypatch.setattr(server.socket, "socket", _no_socket)
+    bridge = server.DaemonBridge(lambda _m: None)
+    bridge.sock = object()          # connected, first prompt not yet seen
+    assert bridge.connecting()
+    assert bridge.connect() == (True, "")
+    bridge.say("second")
+    assert bridge.pending == ["second"]
+
+
+def test_a_daemon_that_dies_mid_turn_ends_the_turn_and_is_forgotten():
+    sent = []
+    bridge = server.DaemonBridge(sent.append)
+
+    class _Gone:
+        def readline(self): return b""
+        def close(self): pass
+
+    bridge.sock, bridge.rfile, bridge.ready = _Gone(), _Gone(), True
+    bridge.open_turns = 1
+    bridge._pump()
+
+    assert [m["type"] for m in sent][-1] == "done", "the page must stop waiting"
+    assert bridge.sock is None and not bridge.alive(), "the next message wakes a model"
+
+
+def test_every_held_message_gets_its_own_done():
+    sent, written = [], []
+
+    class _Out:
+        def write(self, data): written.append(data)
+        def flush(self): pass
+
+    class _Pipe:
+        def __init__(self, lines): self.lines = list(lines)
+        def readline(self): return self.lines.pop(0) if self.lines else b""
+
+    bridge = server.DaemonBridge(sent.append)
+    bridge.wfile = _Out()
+    bridge.say("one")
+    bridge.say("two")
+    prompt = json.dumps({"type": "input_prompt", "prompt": "> "}).encode() + b"\n"
+    bridge.rfile = _Pipe([prompt, prompt, prompt])     # banner, end of one, end of two
+    bridge._pump()
+
+    assert len(written) == 2
+    assert [m["type"] for m in sent].count("done") == 2
+
+
+def _fake_daemon_home(tmp_path, monkeypatch):
+    for name, value in (("PROJECT_DIR", tmp_path), ("LOG_DIR", tmp_path / "logs"),
+                        ("DAEMON_PID_FILE", tmp_path / "daemon.pid"),
+                        ("DAEMON_SOCKET", tmp_path / "daemon.sock")):
+        monkeypatch.setattr(server.constants, name, value)
+    monkeypatch.setattr(server, "_WAKE_REPORT_S", 0.0)
+    monkeypatch.setattr(server, "_is_our_daemon", lambda _pid: True)
+
+
+def test_two_windows_waking_at_once_start_one_model(tmp_path, monkeypatch):
+    """Two copies of a 14B on 16 GB is the out-of-memory kill this project
+    keeps having; a window and an ACP host that both saw "down" must not both
+    start one."""
+    import os
+    import threading
+    import time
+
+    _fake_daemon_home(tmp_path, monkeypatch)
+    starts = []
+
+    def _run(argv, **_kwargs):
+        starts.append(argv)
+        time.sleep(0.2)                                  # `daemon start` is not instant
+        server.constants.DAEMON_PID_FILE.write_text(str(os.getpid()))
+        threading.Timer(0.3, server.constants.DAEMON_SOCKET.write_text, args=("",)).start()
+        return server.subprocess.CompletedProcess(argv, 0, "Daemon starting", "")
+
+    monkeypatch.setattr(server.subprocess, "run", _run)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(server.wake_daemon(timeout=5)))
+               for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+
+    assert len(starts) == 1
+    assert results == [(True, ""), (True, "")]
+
+
+def test_a_load_that_dies_is_reported_when_it_dies(tmp_path, monkeypatch):
+    import subprocess
+    import time
+
+    _fake_daemon_home(tmp_path, monkeypatch)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "daemon.log").write_text("Loading model...\nKilled: 9\n")
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+
+    def _run(argv, **_kwargs):
+        server.constants.DAEMON_PID_FILE.write_text(str(dead.pid))
+        return subprocess.CompletedProcess(argv, 0, "Daemon starting", "")
+
+    monkeypatch.setattr(server.subprocess, "run", _run)
+    started = time.monotonic()
+    ok, why = server.wake_daemon(timeout=60)
+
+    assert ok is False and time.monotonic() - started < 5
+    assert "Killed: 9" in why or "could not start" in why
 
 
 def test_the_window_attaches_only_when_there_is_something_to_say():
