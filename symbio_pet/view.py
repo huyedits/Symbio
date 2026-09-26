@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import signal
 import socket
 import subprocess
@@ -59,7 +60,7 @@ from AppKit import (
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
 )
-from Foundation import NSMakeRect, NSRunLoop, NSRunLoopCommonModes, NSTimer
+from Foundation import NSMakeRect, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
 from symbio_pet.cat import (
     CX, FAR_FRONT, FAR_HIND, GROUND, HEIGHT, PANEL, WIDTH, Cat,
@@ -714,13 +715,22 @@ class CatView(NSView):
         NSApplication.sharedApplication().terminate_(None)
 
 
+class PetDelegate(NSObject):
+    def applicationWillTerminate_(self, notification):
+        pet = getattr(self, "pet", None)
+        if pet is not None:
+            pet.guard("quit", pet.shutdown)
+
+
 class Pet:
     def __init__(self, feed, position_file: Path | None, log_dir: Path | None,
-                 port: int = 8742):
+                 port: int = 8742, pid_file: Path | None = None):
         self.feed = feed
         self.position_file = position_file
         self.log_dir = log_dir
         self.port = port
+        self.pid_file = pid_file
+        self._delegate = None
         self.cat = Cat()
         self.roamer = Roamer()
         self.painter = Painter()
@@ -848,6 +858,18 @@ class Pet:
             self.window.setFrameOrigin_((x, y))
         if self.roamer.arrived:
             self._save_position()
+
+    def shutdown(self):
+        """On the way out: remember where it sat, and give up the pid file —
+        only if it is still ours, so a stale pet never removes a live one's."""
+        self._save_position()
+        if self.pid_file is None:
+            return
+        try:
+            if self.pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                self.pid_file.unlink()
+        except OSError:
+            pass
 
     def toggle_roam(self):
         self.roamer.enabled = not self.roamer.enabled
@@ -1007,8 +1029,20 @@ class Pet:
         threading.Thread(target=self._poll_forever, name="pet-feed", daemon=True).start()
         self._pace()
 
+        # Every way out — the menu, a signal, logging out — goes through
+        # applicationWillTerminate_, which is where the place is saved and the
+        # pid file removed. AppKit ends the process with exit(), so nothing
+        # after app.run() and no Python atexit handler would ever run.
+        self._delegate = PetDelegate.alloc().init()
+        self._delegate.pet = self
+        app.setDelegate_(self._delegate)
+        if self.pid_file is not None:
+            try:
+                self.pid_file.write_text(str(os.getpid()), encoding="utf-8")
+            except OSError:
+                pass
+
         def stop(*_):
-            self._save_position()
             app.terminate_(None)
 
         # The handler runs at the next timer tick, at most 1/6 s away.

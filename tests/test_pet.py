@@ -515,6 +515,136 @@ def test_it_stays_put_when_it_should(snap, hovered, enabled):
     assert x == 700.0
 
 
+def test_waking_up_clears_the_zs():
+    """Sitting up puts the head where the z's were still drifting."""
+    cat = Cat(seed=1)
+    _step(cat, 4.0, Snapshot(presence="asleep"))
+    assert any(p.kind == "z" for p in cat.particles)
+    _step(cat, 1.0, Snapshot(presence="awake"))
+    assert not any(p.kind == "z" for p in cat.particles)
+
+
+# ---- `symb pet` ---------------------------------------------------------------
+
+from symbio.app import pet as pet_cmd  # noqa: E402
+from symbio.app.cli import _build_parser  # noqa: E402
+
+
+@pytest.mark.parametrize("argv,action,demo", [
+    (["pet"], "start", False),
+    (["pet", "--demo"], "start", True),
+    (["pet", "start", "--demo"], "start", True),
+    (["pet", "run", "--demo"], "run", True),
+    (["pet", "stop"], "stop", False),
+    (["pet", "status"], "status", False),
+])
+def test_symb_pet_parses_every_shape(argv, action, demo):
+    args = _build_parser().parse_args(argv)
+    assert (args.command, args.pet_command, args.demo) == ("pet", action, demo)
+
+
+@pytest.fixture
+def pet_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants, "PROJECT_DIR", tmp_path)
+    monkeypatch.setattr(constants, "PET_PID_FILE", tmp_path / "pet.pid")
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    return tmp_path
+
+
+def test_a_stale_or_foreign_pid_is_not_a_pet(pet_home):
+    constants.PET_PID_FILE.write_text(str(_dead_pid()), encoding="utf-8")
+    assert pet_cmd.pet_pid() is None
+    # Alive, but this is pytest, not a pet: after a reboot a stale number is
+    # soon somebody else's.
+    constants.PET_PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    assert pet_cmd.pet_pid() is None
+
+
+def test_the_pet_runs_as_its_own_light_process(pet_home):
+    """Never the CLI itself, which has the whole agent package loaded."""
+    argv = pet_cmd._argv(demo=True, port=9000)
+    assert argv[1:] == ["-m", "symbio_pet", "--demo", "--port", "9000"]
+    assert pet_cmd._env()["SYMBIO_HOME"] == str(pet_home)
+
+
+def test_start_finds_a_pet_already_out(pet_home, monkeypatch, capsys):
+    monkeypatch.setattr(pet_cmd, "pet_pid", lambda: 4242)
+    monkeypatch.setattr(pet_cmd.subprocess, "Popen", lambda *a, **k: pytest.fail("spawned"))
+    assert pet_cmd.start_pet() == 0
+    assert "already out (PID 4242)" in capsys.readouterr().out
+
+
+def test_start_reports_a_pet_that_could_not_start(pet_home, monkeypatch, capsys):
+    class Gone:
+        pid = 777
+
+        def poll(self):
+            return 1
+
+    def spawn(argv, **kwargs):
+        kwargs["stdout"].write("  The pet draws with AppKit through PyObjC ...\n")
+        kwargs["stdout"].flush()
+        return Gone()
+
+    monkeypatch.setattr(pet_cmd.subprocess, "Popen", spawn)
+    assert pet_cmd.start_pet() == 1
+    assert "PyObjC" in capsys.readouterr().out
+
+
+def test_start_waits_for_the_pet_to_claim_its_pid(pet_home, monkeypatch, capsys):
+    class Running:
+        pid = 778
+
+        def poll(self):
+            return None
+
+    answers = iter([None, None, 778])
+    monkeypatch.setattr(pet_cmd, "pet_pid", lambda: next(answers))
+    monkeypatch.setattr(pet_cmd.subprocess, "Popen", lambda *a, **k: Running())
+    assert pet_cmd.start_pet() == 0
+    assert "The pet is out (PID 778)" in capsys.readouterr().out
+
+
+def test_stop_sends_it_home(pet_home, monkeypatch, capsys):
+    answers = iter([555, None, None])
+    sent = []
+    monkeypatch.setattr(pet_cmd, "pet_pid", lambda: next(answers))
+    monkeypatch.setattr(pet_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    assert pet_cmd.stop_pet() == 0
+    assert sent == [(555, pet_cmd.signal.SIGTERM)]
+    assert "went home" in capsys.readouterr().out
+
+
+def test_stop_with_no_pet_out(pet_home, capsys):
+    assert pet_cmd.stop_pet() == 0
+    assert "No pet is out" in capsys.readouterr().out
+
+
+def test_one_cat_at_a_time(tmp_path):
+    from symbio_pet.cli import other_pet
+
+    pid_file = tmp_path / "pet.pid"
+    assert other_pet(pid_file) is None
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    assert other_pet(pid_file) is None            # that is this process
+    pid_file.write_text(str(_dead_pid()), encoding="utf-8")
+    assert other_pet(pid_file) is None            # stale
+
+
+def test_a_pet_gives_up_only_its_own_pid_file(tmp_path):
+    pytest.importorskip("AppKit")
+    from symbio_pet.view import Pet
+
+    pid_file = tmp_path / "pet.pid"
+    pet = Pet(feed=None, position_file=None, log_dir=None, pid_file=pid_file)
+    pid_file.write_text("999999", encoding="utf-8")
+    pet.shutdown()
+    assert pid_file.exists(), "a pet must never remove another pet's pid file"
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    pet.shutdown()
+    assert not pid_file.exists()
+
+
 # ---- the demo, and drawing it -----------------------------------------------
 
 def test_the_demo_passes_through_every_state():

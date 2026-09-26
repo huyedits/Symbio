@@ -181,9 +181,14 @@ default.
 ### The pet
 
 ```bash
-symbio-pet                 # a cat on your desktop, watching this install
-symbio-pet --demo          # the same cat playing a scripted run; nothing is trained
+symb pet                   # put a cat on your desktop, watching this install
+symb pet --demo            # the same cat playing a scripted run; nothing is trained
+symb pet status            # is it out
+symb pet stop              # call it in
 ```
+
+`symb pet` starts it in the background, like `symb daemon start`; `symb pet run`
+keeps it in the terminal instead, and `symbio-pet` does the same on its own.
 
 A tilcayo — *Leopardus tilcayo*, the newest cat species, described on
 17 September 2026: light-brown coat, big irregular rosettes, short round ears.

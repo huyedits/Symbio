@@ -118,6 +118,20 @@ def _build_parser() -> argparse.ArgumentParser:
     daemon_sub.add_parser("run", help=argparse.SUPPRESS)  # internal: the daemon process
     daemon_parser.set_defaults(daemon_command="status")
 
+    # One optional action rather than subparsers, so `symb pet --demo` and
+    # `symb pet start --demo` both parse: flags declared on both a parser and
+    # its subparser are overwritten by the subparser's defaults.
+    pet_parser = sub.add_parser(
+        "pet", help="The desktop cat that shows training as it happens (macOS)")
+    pet_parser.add_argument(
+        "pet_command", nargs="?", default="start",
+        choices=["start", "stop", "status", "run"],
+        help="start (default) puts it on the desktop; run keeps it in this terminal")
+    pet_parser.add_argument("--demo", action="store_true",
+                            help="Play a scripted run instead of watching this install")
+    pet_parser.add_argument("--port", type=int, default=8742,
+                            help="Port of the chat window a double-click opens")
+
     train_parser = sub.add_parser("train", help="Run LoRA training")
     train_parser.add_argument(
         "skill",
@@ -1388,6 +1402,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print("Usage: symb daemon [start | stop | status]")
         return 1
+
+    if command == "pet":
+        from symbio.app import pet
+
+        action = getattr(args, "pet_command", None) or "start"
+        if action == "stop":
+            return pet.stop_pet()
+        if action == "status":
+            return pet.pet_status()
+        if action == "run":
+            return pet.run_pet(demo=args.demo, port=args.port)
+        return pet.start_pet(demo=args.demo, port=args.port)
 
     parser.print_help()
     return 1

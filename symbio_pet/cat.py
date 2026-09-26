@@ -622,7 +622,13 @@ class Cat:
 
     def _ambient(self, dt: float) -> None:
         mood = self.mood
-        if self.sleepy > 0.6:
+        if mood != "asleep":
+            # Awake: the z's still drifting up go at once. Sitting up puts the
+            # head right where they are.
+            for p in self.particles:
+                if p.kind == "z":
+                    p.life = max(p.life, p.ttl - 0.25)
+        elif self.sleepy > 0.6:
             self.z_clock += dt
             if self.z_clock > 1.8:
                 self.z_clock = 0.0
@@ -791,7 +797,7 @@ class Cat:
         elif mood == "kept" or self.t < self.happy_until or self.groom > 0.5:
             eyes = "happy"
         elif self.yawn_t is not None:
-            eyes = "squeeze"
+            eyes = "closed"      # squeezed shut with the mouth open read as a scream
         elif mood == "held":
             eyes = "wide"
         elif mood == "waking":
