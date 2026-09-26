@@ -1186,6 +1186,23 @@ def _resolve_command(args: argparse.Namespace) -> str:
     return args.command or "chat"
 
 
+def _wake_resident_model() -> tuple[bool, str]:
+    """Start the resident model if it is down, wait while it loads, and show
+    the wait. The desktop window's waker: one starter at a time across
+    processes, and a load that dies is reported when it dies."""
+    try:
+        from symbio_desktop.server import wake_daemon
+    except ImportError as e:            # a checkout without the desktop package
+        return False, f"Could not start the resident model here ({e}); try `symb daemon start`."
+
+    def report(text: str) -> None:
+        print(f"\r  {text}   ", end="", flush=True)
+
+    ok, why = wake_daemon(report)
+    print()
+    return ok, why
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1216,18 +1233,26 @@ def main(argv: list[str] | None = None) -> int:
         if _wants_tui(args, command, config):
             from symbio.app import daemon as _daemon
 
+            if command == "tui" and not _daemon.daemon_ready():
+                # It needs a resident model, so it starts one rather than
+                # sending the reader off to type `symb daemon start` first.
+                ok, why = _wake_resident_model()
+                if not ok:
+                    print(why)
+                    return 1
             if _daemon.daemon_ready():
                 from symbio_tui.app import SymbioTUI
 
                 SymbioTUI().run(inline=True)
                 return 0
-            if command == "tui":
-                print("The panelled interface needs a resident model. "
-                      "Start one with `symb daemon start`.")
-                return 1
 
         if not getattr(args, "no_attach", False):
             from symbio.app import daemon
+            if not daemon.daemon_ready() and daemon.daemon_running()[0]:
+                # Still loading. Falling through to chat_loop here loaded a
+                # SECOND copy of the model next to the one the daemon was
+                # loading — on 16 GB, the out-of-memory kill. Wait for it.
+                _wake_resident_model()
             if daemon.daemon_ready():
                 exit_code = daemon.DaemonClient(config).run()
                 # None means the daemon could not be reached. Falling through

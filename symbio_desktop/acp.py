@@ -40,24 +40,20 @@ stdout carries the protocol and nothing else; everything else goes to stderr.
 from __future__ import annotations
 
 import json
-import os
 import queue
 import re
 import signal
-import subprocess
 import sys
 import threading
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
-from symbio_desktop.server import DaemonBridge, _config_summary, constants
+from symbio_desktop.server import DaemonBridge, _config_summary, constants, wake_daemon
 
 PROTOCOL_VERSION = 1
 # A cold daemon maps the headmaster's weights and then builds a session; on
 # the 14B that is tens of seconds before the first prompt can be read.
-DAEMON_START_S = 300.0
 SESSION_READY_S = 180.0
 
 MODES = [
@@ -106,29 +102,11 @@ def prompt_text(blocks: list[dict]) -> str:
 
 
 def ensure_daemon() -> tuple[bool, str]:
-    """The resident model up and answering, started if it has to be."""
-    if DaemonBridge.daemon_ready():
-        return True, ""
-    loading = False
-    try:
-        pid = int(constants.DAEMON_PID_FILE.read_text(encoding="utf-8").strip())
-        os.kill(pid, 0)
-        loading = True          # up, still mapping weights
-    except (OSError, ValueError):
-        pass
-    if not loading:
-        log("no resident model; starting `symb daemon`")
-        root = Path(__file__).resolve().parent.parent
-        subprocess.run([sys.executable, "-m", "symbio.app.cli", "daemon", "start"],
-                       cwd=str(root), stdin=subprocess.DEVNULL,
-                       stdout=sys.stderr, stderr=sys.stderr, check=False)
-    deadline = time.monotonic() + DAEMON_START_S
-    while time.monotonic() < deadline:
-        if DaemonBridge.daemon_ready():
-            return True, ""
-        time.sleep(0.5)
-    return False, (f"The resident model did not come up in {DAEMON_START_S:.0f}s. "
-                   f"See {constants.LOG_DIR / 'daemon.log'}.")
+    """The resident model up and answering, started if it has to be — by the
+    same single-flight waker the desktop window uses, so an ACP host and a
+    window that both find it down start one model between them, and a load
+    that dies is reported when it dies rather than after five minutes."""
+    return wake_daemon(lambda text: log(text))
 
 
 def training_state() -> dict | None:
@@ -371,6 +349,19 @@ class Agent:
         with session.lock:
             session.drain()
             session.cancelled.clear()
+            if not (session.bridge.alive() or session.bridge.connecting()):
+                # The model went away since the last turn (stopped, killed for
+                # memory). Held for a session that no longer exists, the text
+                # would wait forever: wake one and reopen instead.
+                ok, why = ensure_daemon()
+                if ok:
+                    ok, why = session.open()
+                if not ok:
+                    self.update(session, {"sessionUpdate": "agent_message_chunk",
+                                          "content": {"type": "text", "text": why}})
+                    return {"stopReason": "end_turn"}
+                self.update(session, {"sessionUpdate": "agent_thought_chunk", "content": {
+                    "type": "text", "text": "[Symbio restarted: this is a fresh conversation.]\n"}})
             session.bridge.say(text)
             if text.strip() == "/save":
                 session.saved_at = session.turns

@@ -164,9 +164,18 @@ chat reports the same thing.
 ### The window
 
 ```bash
-symb daemon start          # loads the model once, in its own process
 symbio-desktop             # opens the chat window in your browser
 ```
+
+No model has to be running first. Opening the window starts `symb daemon`
+loading in the background, and a message sent before it is ready waits for it,
+with the window counting the load out loud ("Waking Symbio — loading the
+model… 5s"), then goes. Measured on the 14B from cold: about 7 s to load and
+25 s to the first reply with a saved prompt cache. The same waker serves the
+ACP and MCP bridges, `symb tui`, and `symb chat` (which now waits for a model
+that is still loading instead of loading a second copy next to it); one lock
+means two of them waking at once still start one model. A load that dies —
+usually memory — is reported when it dies, with the end of `daemon.log`.
 
 A chat-first interface: conversation in the middle, the agent's own tool calls
 folded into one line you can open, approval prompts inline (the same gate the
@@ -274,10 +283,60 @@ MCP bridge by typing into Hermes Agent's own terminal UI.
 ### Staying online
 
 ```bash
-symb daemon start     # load the model once, in its own process
+symb daemon start     # load the model now (the window and bridges also start it)
 symb watch            # keep it loaded, and run what is due
 symb watch --status   # the last heartbeat
 ```
+
+**Flash attention with an 8-bit KV cache.** `agent.kv_bits: 8` stores the
+cache at 8 bits, but mlx_lm then leaves its fused attention kernel for one that
+builds the whole score matrix — attention without flash attention, which is
+why mlx-lm#1587 finds kv_bits using more memory than it saves. llama.cpp (and
+so Ollama and LM Studio) never has that trade: its kernels read the quantized
+cache directly. Symbio now dequantizes one layer's K/V at a time for any
+prefill and hands it to the fused kernel, keeping the quantized path for
+single-token decode. On the 14B-3bit with a 6,000-token prompt: 60.3 s →
+53.3 s to prefill and 2,595 MB → 1,132 MB of peak memory over the weights,
+same answer. `SYMBIO_NO_FLASH_ATTENTION=1` turns it off.
+
+An adapter whose training went to nan is now refused when it is loaded, and the
+base model answers instead: loaded, it made every reply a row of `!`.
+
+**Side models on the Neural Engine.** `symbio_ane/ane_helper.swift` is a small
+Swift program (built on first use with the command-line tools' `swiftc`, kept
+running, ~108 MB) that does three jobs off the GPU the 14B generates on:
+
+- **OCR**: Vision's text recognizer, pinned to the Neural Engine — ~120 ms for a
+  1080p screen once warm. `see_screen` answers questions about *words* from it
+  and no longer wakes the 4 GB vision model (or sleeps the 14B) to read text;
+  every VLM look also gets the exact text alongside. A blob with words in it is
+  named by its words, not by a VLM generation.
+- **Decision model**: think first or answer now, from a nearest-neighbour vote
+  over Apple's on-device contextual embedding (~7 ms). Held out, it made the
+  think/no-think call right 30/31 against the regex's 19/31. Every decision is
+  logged as a label. With Apple Intelligence turned on it asks Apple's
+  on-device model to fill in a routing schema instead.
+- **Vision requests**: saliency and scene labels on the Neural Engine
+  (`ane.vision`), for callers that want candidate regions without a model.
+
+`ane.enabled: false` turns it all off; every call falls back to the old path.
+
+**Replies in seconds, not half a minute.** Measured on the 14B, same prompts,
+before → after: "hey, how's it going?" 18.3 s → 8.8 s; "what's 17 times 23?"
+30.2 s → 4.5 s; follow-ups 4-5 s. Four changes:
+
+- `agent.think_when: auto` — plain conversation answers without a reasoning
+  block; a task, code, a link or a tool round keeps `thinking_level`
+  (`always` restores the old behaviour).
+- The standing context (curated memory, soul, env: ~840 tokens) moved out of
+  the per-turn block into the cached prefix, snapshotted per session, and each
+  past turn is replayed exactly as sent — a follow-up prefills ~250 tokens
+  instead of ~880.
+- `gpu.keep_model_wired` (default on): the resident weights are wired, like
+  LM Studio's "keep model in memory" or llama.cpp's `--mlock`. An idle daemon
+  had 6.6 GB of its 8.7 GB in the compressor; every turn paid to page it back.
+- The soul reflection waits for 45 quiet seconds instead of running a 14B
+  generation under your next message.
 
 Scheduled jobs used to run inside a chat session's background thread, so
 "every morning at 8" meant "every morning at 8, if a window happens to be

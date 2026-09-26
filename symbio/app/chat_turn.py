@@ -34,6 +34,9 @@ from symbio.app.chat_text import (
 )
 
 
+# User turns between re-reads of the standing context (memory, soul, env).
+STANDING_REFRESH_TURNS = 10
+
 class AgentTurnMixin:
     # How much of a tool's result is shown as it happens. The model gets the
     # whole thing; this is the line a person reads to know what the turn is
@@ -446,6 +449,8 @@ class AgentTurnMixin:
         continuation_challenged = False
         incapacity_challenged = False
         thinking_cut_retried = False
+        turn_think = False           # what this round was actually served with
+        turn_decision = None         # (think, budget), decided on the first round
         # The round index used to select thinking (think=round_num > 0);
         # agent.thinking_level owns that now, so nothing reads the counter.
         for _round_num in range(max_rounds):
@@ -477,10 +482,28 @@ class AgentTurnMixin:
             # changes nothing (344 tokens reused either way), but when the RAG
             # hit also changes — the common case, since retrieval runs per
             # query — reuse goes from 141 tokens to 243.
+            # Split by how often it changes. Curated memory and the machine's
+            # env note are the same turn after turn — 842 of the ~880 tokens
+            # every turn re-prefilled on the 14B (measured 2026-09-26: 8.7 s to
+            # the first token for "what's 3+3?"). They now sit in a fixed pair
+            # after the few-shots, inside the prefix the cache keeps, and only
+            # what really changes rides on the newest message.
+            #
+            # Read once per session and every STANDING_REFRESH_TURNS after:
+            # the soul store is rewritten in the background mid-session
+            # (measured: soul.md changed between turns two and three), and
+            # re-reading it each turn broke the cached prefix just the same.
+            # What the model itself saves this session is in the history
+            # already, so a snapshot loses nothing it could not see.
+            user_turns = sum(1 for m in self.history if m.get("role") == "user")
+            snapshot = getattr(self, "_standing_context", None)
+            if snapshot is None or user_turns - snapshot[0] >= STANDING_REFRESH_TURNS:
+                snapshot = (user_turns, (memory.curated_memory_block(self.config)
+                                         + prompts.env_note()).strip())
+                self._standing_context = snapshot
+            stable_block = snapshot[1]
             context_block = (
-                memory.curated_memory_block(self.config) + prompts.env_note()
-                + rag_block + prompts.time_note() + nudge_block
-                + browser_note
+                rag_block + prompts.time_note() + nudge_block + browser_note
             ).lstrip()
             # Greeting guard: the small model sometimes invents random tool
             # calls for "hi" instead of just greeting back. Prepend a one-
@@ -502,7 +525,15 @@ class AgentTurnMixin:
             history_limit = self.config["agent"]["history_limit"]
             start = min(max(0, len(self.history) - history_limit),
                         user_turn_floor(self.history))
-            working_history = list(self.history[start:])
+            # Earlier user turns are rendered with the context they were SENT
+            # with (kept on the history entry as `_context`). Rendered bare,
+            # the first earlier turn differed from what the cache holds, and
+            # everything after it was prefilled again every turn.
+            working_history = [
+                {"role": m["role"], "content": m["_context"] + "\n\n" + m["content"]}
+                if m.get("_context") else m
+                for m in self.history[start:]
+            ]
             if context_block:
                 attached = False
                 for i in range(len(working_history) - 1, -1, -1):
@@ -510,10 +541,14 @@ class AgentTurnMixin:
                         working_history[i]["role"] == "user"
                         and not str(working_history[i]["content"]).startswith("[System observation:")
                     ):
+                        original = self.history[start + i]
                         working_history[i] = {
                             "role": "user",
-                            "content": context_block + "\n\n" + working_history[i]["content"],
+                            "content": context_block + "\n\n" + original["content"],
                         }
+                        # The last round's block is the one in the cache when
+                        # the turn ends, so it is the one the next turn replays.
+                        original["_context"] = context_block
                         attached = True
                         break
                 # First turn: no user message in history yet. Prepend the
@@ -534,7 +569,19 @@ class AgentTurnMixin:
             # resolved once at the top of the turn and held for the whole turn:
             # they sit in front of the history in the prompt, so changing them
             # mid-turn would re-prefill the block on every round for nothing.
+            # After the few-shots, not before: the session's warmed prefix is
+            # the system prompt plus the full few-shot set, and a first turn
+            # with the standing block ahead of the few-shots re-prefilled both
+            # (measured: 1,198 fresh tokens, 11.6 s, against 542 and 6.3 s).
+            # The cost is the turn after the model first uses a tool, when the
+            # few-shots rotate to that tool's family and everything after them
+            # is prefilled once more.
             messages.extend(tool_few_shots(self.config, family=turn_family))
+            if stable_block:
+                messages.extend([
+                    {"role": "user", "content": f"[Standing context: {stable_block}]"},
+                    {"role": "assistant", "content": "Noted."},
+                ])
             messages.extend(working_history)
 
             # The assistant's own line. Styled only when a person is watching
@@ -552,7 +599,14 @@ class AgentTurnMixin:
                 # or the handler below can never tell.
                 _had_prompt_cache = self._prompt_cache is not None
                 try:
-                    _think, _budget = self.thinking_setting()
+                    # Decided once per turn, not per round: a quick question the
+                    # model answered with one tool call used to flip to full
+                    # thinking on the follow-up round (measured: "what's 17
+                    # times 23?" ran a code tool, then reasoned 85 words, 19 s).
+                    if turn_decision is None:
+                        turn_decision = self.turn_thinking(user_input)
+                    _think, _budget = turn_decision
+                    turn_think = _think
                     raw_reply, streamed_live = self._generate_reply(
                         messages, chunk_prefix=chunk_prefix, timings=timings,
                         think=_think, reasoning_budget=_budget,
@@ -648,7 +702,7 @@ class AgentTurnMixin:
             # earlier version asked only whether a block was closed and fired
             # on every tagless answer, costing a second generation each time.
             cut_off = bool(timings.get("hit_token_cap"))
-            if self.thinking_setting()[0]:
+            if turn_think:
                 unclosed = tooling.count_think_closes(raw_reply) < 1
             else:
                 unclosed = not tooling.think_block_closed(raw_reply)

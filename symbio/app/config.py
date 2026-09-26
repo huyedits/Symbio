@@ -299,6 +299,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # (chat.py used think=round_num > 0), and it is the setting the 21-case
         # battery scored 19/21 on.
         "thinking_level": "low",
+        # "auto": think only when the turn is work (a task, code, a link, a
+        # tool round); plain conversation answers without a reasoning block.
+        # "always": every turn at thinking_level.
+        "think_when": "auto",
         # Speculative decoding: a small model drafts, the real one verifies.
         # Empty disables it. Keep num_draft_tokens low on hybrid
         # linear-attention models (Qwen3.5) — deeper drafts lose there.
@@ -357,6 +361,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # is what makes a 14B fit on a 16 GB card. 8 is also quantized; any
         # other value loads unquantized.
         "load_in_bits": 4,
+    },
+    # The side models on the Apple Neural Engine (symbio/app/ane.py): the
+    # decision model that picks think/no-think, and OCR for see_screen. Off
+    # the GPU the headmaster generates on. macOS only.
+    "ane": {
+        "enabled": True,
+        "decide": True,
     },
     "vision": {
         # A vision-language model that looks at screenshots and reports what is
@@ -465,6 +476,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Wired (non-swappable) memory ceiling, in MB. -1 leaves the default.
         # Only raise this if you know the machine's headroom.
         "wired_limit_mb": -1,
+        # With no explicit ceiling above: wire the loaded weights plus room
+        # for the KV cache, so macOS cannot compress or swap the model out
+        # between turns (LM Studio's "keep model in memory", llama.cpp's
+        # --mlock). Measured 2026-09-26: an idle resident 14B had 6.6 GB of
+        # its 8.7 GB in the compressor, and every turn paid to bring it back.
+        "keep_model_wired": True,
+        "keep_model_wired_margin_mb": 1536,
         # Drop the in-process model before spawning the LoRA trainer, so only
         # one copy of the weights is resident at a time.
         "unload_model_during_training": True,
@@ -832,6 +850,38 @@ def apply_gpu_limits(config: dict[str, Any]) -> None:
         except Exception:
             # A ceiling we could not set is not worth failing a startup over.
             pass
+
+
+def keep_model_resident(model: Any, config: dict[str, Any]) -> int | None:
+    """Wire the loaded weights so they stay in RAM between turns.
+
+    mlx_lm wires memory only for the length of one generation (its
+    wired_limit context manager) and then puts the old limit back — 0 — so an
+    idle resident model is ordinary memory, and macOS compresses and swaps it
+    like any other. The next turn then waits on decompression and swap-in
+    before the first token. Setting the limit here makes it the "old" limit
+    that each generation restores. Returns the bytes wired, or None when it
+    is left alone (opted out, an explicit wired_limit_mb, or no Metal).
+    """
+    gpu = config.get("gpu", {})
+    if not gpu.get("keep_model_wired", True) or int(gpu.get("wired_limit_mb", -1)) >= 0:
+        return None
+    try:
+        from symbio.mlx_gate import attr as _mlx
+        mx = _mlx("mlx.core")
+        from mlx.utils import tree_flatten
+
+        if not mx.metal.is_available():
+            return None
+        weights = sum(v.nbytes for _, v in tree_flatten(model.parameters()))
+        margin = int(gpu.get("keep_model_wired_margin_mb", 1536)) * 1024 * 1024
+        ceiling = mx.device_info()["max_recommended_working_set_size"]
+        limit = min(weights + margin, int(ceiling))
+        mx.set_wired_limit(limit)
+        return limit
+    except Exception:
+        # Residency is a speed-up, never a reason a model fails to serve.
+        return None
 
 
 # Speed preset: applied after user config/env overrides so the user can still

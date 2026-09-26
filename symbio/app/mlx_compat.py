@@ -281,6 +281,21 @@ def _apply() -> None:
 
         _gen.speculative_generate_step = _speculative_generate_step
 
+        # --- flash attention over the 8-bit KV cache (mlx-lm 0.31.3) --------
+        #
+        # agent.kv_bits sent every prefill through mlx_lm's unfused quantized
+        # attention, which builds the full score matrix. Measured on the
+        # 14B-3bit headmaster, 6,000-token prompt, kv_bits=8 (2026-09-26):
+        #     as shipped   prefill 60.3s, peak +2,595 MB over the weights
+        #     fused        prefill 53.3s, peak +1,132 MB — same 24 tokens out
+        # See symbio/app/flash_attention.py. SYMBIO_NO_FLASH_ATTENTION=1 opts out.
+        import os as _os
+
+        if _os.environ.get("SYMBIO_NO_FLASH_ATTENTION") != "1":
+            from symbio.app import flash_attention as _flash
+
+            _flash.install()
+
         _done = True
 
 

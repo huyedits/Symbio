@@ -38,6 +38,38 @@ def trust_tokenizer_eos(tokenizer: Any) -> int | None:
         return None
 
 
+def nonfinite_adapter_tensors(adapter_path: Any) -> list[str]:
+    """Names of adapter tensors holding NaN or inf. Empty when the adapter is
+    sound, absent, or unreadable here (loading then says why on its own)."""
+    from pathlib import Path
+
+    weights = Path(str(adapter_path)) / "adapters.safetensors"
+    if not adapter_path or not weights.is_file():
+        return []
+    try:
+        import mlx.core as mx
+
+        tensors = mx.load(str(weights))
+        return [name for name, value in tensors.items()
+                if not mx.all(mx.isfinite(value)).item()]
+    except Exception:
+        return []
+
+
+def _refuse_diverged_adapter(adapter_path: Any) -> None:
+    """A run whose loss went to nan still saves its adapter, and the plain
+    trainer has no guard that stops it being kept. Loaded, every logit is nan
+    and every reply is "!!!!!!!!" (token 0): seen on 2026-09-26, a 14B that
+    answered "hey, are you awake?" with a row of exclamation marks. Refused
+    here, where every adapter load passes; the callers already fall back to
+    the base model when an adapter will not load, and say so."""
+    bad = nonfinite_adapter_tensors(adapter_path)
+    if bad:
+        raise ValueError(
+            f"the adapter at {adapter_path} has NaN/inf weights in {len(bad)} "
+            f"tensor(s) (e.g. {bad[0]}): a training run diverged. Not loading it.")
+
+
 def load(*args: Any, **kwargs: Any):
     """mlx_lm.load, with the stop-token set repaired.
 
@@ -95,6 +127,8 @@ def _load_with_backend(args: tuple, kwargs: dict, config: dict | None):
                             config=config)
 
     from symbio.mlx_gate import attr as _g
+
+    _refuse_diverged_adapter(kwargs.get("adapter_path"))
 
     # Resolving through the gate applies mlx_compat's patches (gemma4_unified
     # remap, speculative-decode fix) before the first engine import, which

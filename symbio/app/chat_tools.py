@@ -642,12 +642,20 @@ class ToolsMixin:
             if grant_note and not vision.available():
                 return grant_note
 
+        from symbio.app import ane
+
+        # Without the VLM a look can still READ: the Neural Engine's text
+        # recognizer needs neither mlx-vlm nor the GPU.
+        vision_off = None
         if not vision.is_enabled(self.config):
-            return ("Vision is disabled. Enable it with "
-                    "<config set=\"vision.enabled\">true</config>.")
-        if not vision.available():
-            return ("Vision is unavailable: mlx-vlm is not installed. "
-                    "Install it with `pip install mlx-vlm`, then look again.")
+            vision_off = ("Vision is disabled. Enable it with "
+                          "<config set=\"vision.enabled\">true</config>.")
+        elif not vision.available():
+            vision_off = ("Vision is unavailable: mlx-vlm is not installed. "
+                          "Install it with `pip install mlx-vlm`, then look again.")
+        ane_on = ane.enabled(self.config)
+        if vision_off and not ane_on:
+            return vision_off
 
         if target.startswith("desk") or target.startswith("screen"):
             if not self._desktop_enabled():
@@ -738,6 +746,29 @@ class ToolsMixin:
                 shot = self.browser.screenshot_path(full_page=False)
             except Exception as e:
                 return f"Could not capture the page: {e}"
+        # Read the words first, on the Neural Engine: ~0.1 s, and nothing
+        # leaves the GPU. The VLM look below unloads the ~10 GB headmaster and
+        # reloads it — a price worth paying for how a screen LOOKS, and pure
+        # waste for what it SAYS. So a question about text (or no question)
+        # is answered from the text, and the VLM is woken only for the rest.
+        text_elements = self._ane_read(shot) if ane_on else []
+        click_tool = "desktop_click" if where == "the desktop" else "browser_click_at"
+        if text_elements and (vision_off or ane.is_reading_question(question)):
+            lines = [f"Text on {where} ({shot.name}), read on the Neural Engine — "
+                     f"exact words, centre coordinates first:",
+                     ane.text_block(text_elements),
+                     f"\nTo press a control labelled with one of these, pass its "
+                     f"coordinates to {click_tool}. For how the screen LOOKS — an "
+                     f"icon, an image, colours, a layout — ask see_screen about "
+                     f"that and the vision model will look."]
+            if controls:
+                lines.append("\nControls on this page (use 'selector' with "
+                             "browser_type to fill a field exactly):")
+                lines.extend(self._control_line(c, click_tool) for c in controls)
+            return self._wrap_look("\n".join(lines))
+        if vision_off:
+            return vision_off
+
         self._status(f"  [Vision] Looking at {where}...")
         try:
             description, elements = self._run_vision(shot, question)
@@ -745,6 +776,10 @@ class ToolsMixin:
             return (f"Could not look at {where}: {e}")
 
         lines = [f"Looking at {where} ({shot.name}):", description.strip()]
+        if text_elements:
+            # The exact words beside the VLM's reading of small type.
+            lines.append("\nText read on the Neural Engine (exact, centre first):")
+            lines.append(ane.text_block(text_elements, limit=40))
         if elements:
             click_tool = ("desktop_click" if where == "the desktop"
                           else "browser_click_at")
@@ -826,6 +861,19 @@ class ToolsMixin:
                     "look, NOT evidence the thing is missing. Scroll or "
                     "reload and look again before concluding anything.")
         return self._wrap_look("\n".join(lines))
+
+    def _ane_read(self, shot) -> list[dict[str, Any]]:
+        """The screenshot's text from the Neural Engine, or [] if it cannot."""
+        from symbio.app import ane
+
+        result = ane.ocr(shot)
+        if not result.get("ok"):
+            return []
+        on = ", ".join(sorted(set((result.get("devices") or {}).values()))) or "?"
+        elements = ane.ocr_elements(result)
+        self._status(f"  [ANE] Read {len(elements)} line(s) of text in "
+                     f"{result.get('ms', '?')} ms ({on}).")
+        return elements
 
     def _wrap_look(self, body: str) -> str:
         """Everything a look returns, wrapped as the untrusted content it is.

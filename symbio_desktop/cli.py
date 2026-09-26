@@ -44,7 +44,7 @@ def main() -> int:
     from symbio_desktop.server import DaemonBridge
 
     print("  Resident model: ready" if DaemonBridge.daemon_ready()
-          else "  Resident model: not running — start it with `symb daemon start`")
+          else "  Resident model: asleep — the window wakes it when it opens")
     print("  Ctrl+C to stop\n")
 
     if args.window:

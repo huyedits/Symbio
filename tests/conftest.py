@@ -175,36 +175,20 @@ def fixture_worker_catalog():
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-# ---- hosts without the MLX engine ----
-#
-# MLX publishes macOS-arm64 wheels only, so on Linux (CI, a contributor's box)
-# every test that drives a ChatSession or a model dies with the install hint
-# from symbio.mlx_gate. That is ~200 red lines that say nothing about the code
-# under test and bury the handful that do. Report them as skips instead — but
-# ONLY when the engine is genuinely absent: on a Mac with mlx installed the
-# same exception is a real failure and must stay one.
-_ENGINE_ABSENT = importlib.util.find_spec("mlx_lm") is None
+def pytest_configure(config):
+    config.addinivalue_line("markers", "uses_ane: runs the real Neural Engine helper (macOS)")
 
 
-def _needs_engine(exc: BaseException | None) -> bool:
-    from symbio import mlx_gate
+@pytest.fixture(autouse=True)
+def no_neural_engine_helper(request, monkeypatch):
+    """Keep the Swift helper out of the suite unless a test asks for it.
 
-    seen = set()
-    while exc is not None and id(exc) not in seen:
-        seen.add(id(exc))
-        if isinstance(exc, ModuleNotFoundError) and (
-                mlx_gate._is_engine_missing(exc) or mlx_gate.HINT in str(exc)):
-            return True
-        exc = exc.__cause__ or exc.__context__
-    return False
+    symbio/app/ane.py compiles and starts symbio_ane on first use; a test that
+    merely runs a turn would otherwise build a binary and spawn a process as a
+    side effect. Tests of the helper itself mark themselves `uses_ane`.
+    """
+    if request.node.get_closest_marker("uses_ane"):
+        return
+    from symbio.app import ane
 
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item, call):
-    outcome = yield
-    report = outcome.get_result()
-    if (_ENGINE_ABSENT and report.failed and call.excinfo is not None
-            and _needs_engine(call.excinfo.value)):
-        report.outcome = "skipped"
-        report.longrepr = (str(item.path), item.location[1] or 0,
-                           "Skipped: needs the MLX engine (Apple Silicon only)")
+    monkeypatch.setattr(ane, "enabled", lambda config=None: False)

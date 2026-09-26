@@ -85,6 +85,24 @@ def _decode_msg(line: bytes) -> dict:
 
 
 def start_daemon(config: dict[str, Any]) -> int:
+    """Start the resident model unless one is running or loading.
+
+    Check-then-start runs under an flock on PROJECT_DIR/daemon.start.lock,
+    held until the new pid file is written. Every starter comes through here —
+    the desktop window's waker, the ACP and MCP bridges, `symb watch`
+    restarting a crashed model, a terminal — and two that both saw "not
+    running" would otherwise each load a copy: two 14Bs on 16 GB, the
+    out-of-memory kill this project keeps having.
+    """
+    import fcntl
+
+    constants.PROJECT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(constants.PROJECT_DIR / "daemon.start.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _start_daemon_locked(config)
+
+
+def _start_daemon_locked(config: dict[str, Any]) -> int:
     running, pid = daemon_running()
     if running and pid is not None:
         print(f"Daemon already running (PID {pid}).")
@@ -285,6 +303,22 @@ def daemon_main(config: dict[str, Any]) -> int:
 
     print("Loading model...", flush=True)
     (model, tokenizer), adapter_loaded = _load_model(config)
+    from symbio.app.config import apply_gpu_limits, keep_model_resident
+
+    apply_gpu_limits(config)
+    wired = keep_model_resident(model, config)
+    # The Neural Engine side (decision model, OCR) starts now, off the GPU and
+    # in the background, so the first turn does not pay for it.
+    try:
+        from symbio.app import ane, decider
+
+        if ane.enabled(config):
+            threading.Thread(target=decider.warm, daemon=True).start()
+    except Exception:
+        pass
+    if wired:
+        print(f"Keeping {wired / 2**30:.1f} GB wired: the model stays in RAM "
+              f"between turns.", flush=True)
     print("Model loaded. Listening for clients.", flush=True)
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
