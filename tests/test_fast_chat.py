@@ -59,6 +59,32 @@ def test_always_is_the_old_behaviour_and_none_stays_none():
     assert _session("none").turn_thinking("debug this traceback") == (False, 0)
 
 
+@pytest.mark.parametrize("text,only", [
+    ("open x.com", True), ("please open youtube", True), ("can you open github.com for me", True),
+    ("open x.com in a new tab please", True),
+    # Live 2026-09-26: this one opened x.com and ended the turn.
+    ('Go to x.com and tweet "hello."', False), ("go to x.com and post hi", False),
+    ("go to cloudflare pricing", False), ("open safari and search for cats", False),
+    ("visit example.com then click login", False), ("what is x.com", False),
+])
+def test_only_a_bare_destination_ends_the_turn_when_the_page_opens(text, only):
+    from symbio.app.chat_text import _is_navigation_only
+
+    assert _is_navigation_only(text) is only
+
+
+def test_continue_carries_on_the_task_it_continues():
+    """"continue" alone read as small talk (thinking off) and the resumed x.com
+    post degraded into bare <click>Post</click> tags."""
+    session = _session("max")
+    session._last_decision = {"label": "action", "think": True, "source": "minilm-ane"}
+    session._log_info = lambda message: None
+    assert session.turn_thinking("continue")[0] is True
+    assert session._last_decision["source"] == "continues minilm-ane"
+    session.turn_thinking("continue with the essay about cats")                  # a new ask
+    assert not session._last_decision["source"].startswith("continues")
+
+
 def test_the_resident_weights_are_wired(monkeypatch):
     """The limit set here is what mlx_lm's per-generation wired_limit restores
     afterwards, so the model stays resident between turns too."""

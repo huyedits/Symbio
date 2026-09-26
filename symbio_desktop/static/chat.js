@@ -470,10 +470,18 @@ function nearBottom() {
   return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80;
 }
 
+/* Following the conversation is the READER's choice, recorded when they
+ * scroll, not re-guessed from the geometry after each change. It used to ask
+ * nearBottom() at every append: one update that added more than 80px — a
+ * finished reply replacing its streaming bubble, a thought block folding up,
+ * a long tool observation — made the check fail, the window stopped
+ * following, and from about the fifth message on each new answer landed
+ * below the fold behind the down-arrow (measured: 150-196px out of view). */
+let autoFollow = true;
+
 function scrollToEnd(force = false) {
-  if (force || nearBottom() || !document.body.classList.contains('busy')) {
-    thread.scrollTop = thread.scrollHeight;
-  }
+  if (force) autoFollow = true;
+  if (autoFollow) thread.scrollTop = thread.scrollHeight;
   updateToBottom();
 }
 
@@ -636,6 +644,7 @@ function submit() {
     return;
   }
   addBubble('user', text);
+  scrollToEnd(true);             // sending is looking at the conversation again
   input.value = '';
   input.style.height = 'auto';
   setBusy(true);
@@ -664,7 +673,17 @@ input.addEventListener('input', () => {
 });
 
 document.getElementById('btn-new-chat').addEventListener('click', newChat);
-thread.addEventListener('scroll', updateToBottom);
+thread.addEventListener('scroll', () => {
+  // Only a scroll the reader made can stop the following; ours land at the
+  // bottom, so they keep it on.
+  autoFollow = nearBottom();
+  updateToBottom();
+});
+// Anything that changes the thread's height — a token, a card, a bubble, a
+// fold opening — keeps the bottom in view while following.
+new MutationObserver(() => {
+  if (autoFollow) requestAnimationFrame(() => { thread.scrollTop = thread.scrollHeight; });
+}).observe(thread, { childList: true, subtree: true, characterData: true });
 document.getElementById('btn-notice-close').addEventListener('click', hideNotice);
 document.getElementById('btn-to-bottom').addEventListener('click', () => scrollToEnd(true));
 thread.addEventListener('click', (e) => {

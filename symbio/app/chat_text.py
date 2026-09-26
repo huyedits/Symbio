@@ -513,19 +513,36 @@ def _is_substantive(text: str) -> bool:
 
 
 # navigation
+_NAV_VERBS = re.compile(
+    r"^(?:(?:can|could|would|will) you |please |pls |just |now )*"
+    r"(?:open(?: up)?|go to|goto|visit|browse to|browse|navigate to|navigate|"
+    r"take me to|bring up|pull up|load|head to)\s+", re.IGNORECASE)
+# Words that can sit around a destination without asking for anything more.
+_NAV_FILLER = {
+    "please", "pls", "for", "me", "now", "the", "a", "an", "website", "site",
+    "page", "homepage", "home", "tab", "new", "in", "on", "browser", "chrome",
+    "safari", "firefox", "up", "just", "quickly", "thanks", "thank", "you", "ty",
+    "real", "quick", "again", "window",
+}
+
+
 def _is_navigation_only(text: str) -> bool:
+    """Is this ONLY "open X" — nothing to do once the page is up?
+
+    Only then does the loop stop right after browser_open. It used to answer
+    yes unless the message contained one of a dozen follow-on verbs, and
+    "tweet" was not one of them: live 2026-09-26, "Go to x.com and tweet
+    'hello.'" opened x.com and ended the turn, and the user had to type
+    "continue" twice. Now anything beyond the destination itself — a second
+    content word, whatever it is — means there is more to do.
+    """
     t = text.strip().lower()
-    if not t:
+    match = _NAV_VERBS.match(t)
+    if not match:
         return False
-    if not any(m in t for m in ("open ", "go to ", "visit ", "browse ", "navigate ")):
-        return False
-    if any(m in t for m in (
-        "click", "press", "type ", "scroll", "read", "tell", "what", "find",
-        "show", "price", "pricing", "cost", "how much", "list", "summary",
-        "summari", "extract", "who", "when", "where", "why", "and then", "then ",
-    )):
-        return False
-    return True
+    words = re.findall(r"[\w.:/'-]+", t[match.end():])
+    content = [w for w in words if w.strip(".'") not in _NAV_FILLER]
+    return len(content) <= 1
 
 
 def _last_exchange(history: list[dict[str, str]]) -> tuple[str | None, str | None]:
