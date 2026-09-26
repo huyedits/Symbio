@@ -441,6 +441,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             before_worker_fn=self._sleep_headmaster,
             after_worker_fn=self._wake_headmaster,
         )
+        # Before the model setup below: _finish_model_setup runs from here when
+        # a model is handed in (the daemon's case), and its cache decisions —
+        # handed-over warm, persisted-file hit, prefill failures — log through
+        # this logger. Assigned after it, every one of those lines was dropped
+        # and a working warm was indistinguishable from a silently refused one.
         self.logger = _make_chat_logger()
         # Tidy the retrieval stores once the pieces it reports through exist
         # (session_id to skip the live log, retriever to drop its note cache,
