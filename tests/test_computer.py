@@ -4,6 +4,8 @@ browser has ever been opened must return a graceful error string, not raise
 etc. because they were called outside their own try/except) took down a
 live session; see the git history for the exact traceback."""
 
+import pytest
+
 from symbio.computer import BrowserSession
 
 
@@ -846,6 +848,16 @@ def test_browser_type_without_a_selector_still_types_into_the_focused_field():
 
 
 # ---- a look must not assert absence while holding proof of presence ----
+
+@pytest.fixture(autouse=True)
+def _vision_stack_present(monkeypatch):
+    """These tests fake the vision model itself (_run_vision), so whether
+    mlx-vlm is importable is beside the point. It is not in the [mlx] extra,
+    so without this they failed on any host that had not installed it
+    separately — every Linux box, and a Mac with only `symbio-cli[mlx]`."""
+    from symbio import vision
+    monkeypatch.setattr(vision, "available", lambda: True)
+
 
 def _look_session(controls, elements, description="a page"):
     from symbio.app import chat_tools

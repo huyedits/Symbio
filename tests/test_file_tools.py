@@ -233,10 +233,9 @@ def test_an_unrelated_failure_is_left_alone():
 # is now also the easy one.
 
 def _run(code):
-    import json
     from symbio.app import sandbox
-    return sandbox.run_python_code(code, json.loads(
-        (constants.PROJECT_DIR / "config.json").read_text(encoding="utf-8")))
+    from symbio.app.config import load_config
+    return sandbox.run_python_code(code, load_config())
 
 
 def test_pure_computation_still_needs_no_import():

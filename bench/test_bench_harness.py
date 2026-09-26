@@ -26,6 +26,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 import bfcl  # noqa: E402
 import harness  # noqa: E402
 
+# Every test here scores the real datasets, which are gitignored and
+# re-downloadable (see .gitignore: bench/data/). Without them the whole module
+# would read as 38 failures on a fresh clone; it is a skip, not a pass.
+pytestmark = pytest.mark.skipif(
+    not harness.DATA.is_dir(),
+    reason="bench/data/ not downloaded (BFCL, GSM8K, HumanEval, IFEval)")
+
 N = 150
 
 # HumanEval/32's own test is broken upstream — `_poly(*candidate(*inp), inp)`

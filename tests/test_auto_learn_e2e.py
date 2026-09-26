@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end test for automatic correction learning."""
+import pytest
+pytest.importorskip("mlx_lm")  # MLX is Apple Silicon only; skip elsewhere
 from mlx_lm import load
 
 from symbio import AIAgent, ADAPTER_DIR, _looks_like_correction, learn_from_last_correction, load_config, run_training

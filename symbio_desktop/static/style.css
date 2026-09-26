@@ -16,10 +16,10 @@
 
 :root {
   color-scheme: light;
-  --bg-deep: #f7f6f3;
+  --bg-deep: #faf9f5;
   --bg-surface: #ffffff;
-  --bg-elevated: #f2f1ed;
-  --bg-overlay: #eae8e2;
+  --bg-elevated: #f3f1ea;
+  --bg-overlay: #e9e6dc;
   --border-subtle: rgba(20, 18, 14, 0.09);
   --border-medium: rgba(20, 18, 14, 0.16);
   --text-primary: #1f1d1a;
@@ -34,7 +34,7 @@
   --danger: #c0392b;
   --danger-glow: rgba(192, 57, 43, 0.14);
   --success: #2f8f62;
-  --user-bubble: #eceae4;
+  --user-bubble: #f0eee6;
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 16px;
@@ -43,18 +43,19 @@
   --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --transition: 160ms ease;
   --sidebar-w: 260px;
+  --font-serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg-deep: #17161a;
-    --bg-surface: #1e1d22;
-    --bg-elevated: #26252b;
-    --bg-overlay: #302f37;
+    --bg-deep: #262624;
+    --bg-surface: #30302e;
+    --bg-elevated: #1f1e1d;
+    --bg-overlay: #3a3a37;
     --border-subtle: rgba(255, 255, 255, 0.08);
     --border-medium: rgba(255, 255, 255, 0.15);
-    --text-primary: #ece9e4;
+    --text-primary: #f0eee6;
     --text-secondary: #a8a29a;
     --text-muted: #736e67;
     --accent: #d97757;
@@ -65,19 +66,19 @@
     --accent-5: #d07ab4;
     --danger: #ef6b5e;
     --success: #4cc38a;
-    --user-bubble: #2b2a31;
+    --user-bubble: #141413;
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg-deep: #17161a;
-  --bg-surface: #1e1d22;
-  --bg-elevated: #26252b;
-  --bg-overlay: #302f37;
+  --bg-deep: #262624;
+  --bg-surface: #30302e;
+  --bg-elevated: #1f1e1d;
+  --bg-overlay: #3a3a37;
   --border-subtle: rgba(255, 255, 255, 0.08);
   --border-medium: rgba(255, 255, 255, 0.15);
-  --text-primary: #ece9e4;
+  --text-primary: #f0eee6;
   --text-secondary: #a8a29a;
   --text-muted: #736e67;
   --accent: #d97757;
@@ -88,7 +89,7 @@
   --accent-5: #d07ab4;
   --danger: #ef6b5e;
   --success: #4cc38a;
-  --user-bubble: #2b2a31;
+  --user-bubble: #141413;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1281,3 +1282,149 @@ body.swapped.workspace-open.sidebar-hidden[data-layout="right"] #main { inset: 0
 body.swapped.workspace-open.sidebar-hidden[data-layout="right"] #workspace { left: 0; }
 body.swapped.workspace-open[data-layout="below"] #workspace { top: 0; bottom: auto; border-top: none; border-bottom: 1px solid var(--border-subtle); transform: none; }
 body.swapped.workspace-open[data-layout="below"] #main { inset: min(52vh, 620px) 0 0 var(--sidebar-w); }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Desktop-chat layout (2026-09-25)
+
+   The shape the desktop chat apps share: an empty window is a greeting
+   with the composer under it in the middle of the page; the first message
+   moves the composer to the bottom. Replies read as prose in a serif, the
+   user's turns sit in a quiet bubble, and the composer is a card with its
+   controls on a bar inside it. Everything above this block still applies;
+   these rules only override.
+   ═══════════════════════════════════════════════════════════════════ */
+
+#topbar { border-bottom: none; background: transparent; padding: 10px 16px 4px; }
+.topbar-title { font-weight: 500; }
+
+/* Empty state: greeting + composer centred as one group. */
+#main.empty { justify-content: center; }
+#main.empty .thread { flex: 0 0 auto; overflow: visible; padding-top: 0; padding-bottom: 0; }
+#main.empty #topbar { position: absolute; top: 0; left: 0; right: 0; }
+#main.empty .composer-wrap { padding-bottom: 12vh; }
+.welcome { margin-top: 0; }
+.welcome h1.greeting {
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  font-family: var(--font-serif);
+  font-size: 38px; font-weight: 400; letter-spacing: -0.01em;
+  color: var(--text-primary);
+  margin-bottom: 26px;
+}
+/* The mark: two overlapping circles, the project's own sign of two things
+   living together; drawn in CSS so it follows the accent in both themes. */
+.mark { position: relative; width: 34px; height: 24px; flex-shrink: 0; }
+.mark::before, .mark::after {
+  content: ''; position: absolute; top: 0; width: 24px; height: 24px;
+  border-radius: 50%; border: 2.5px solid var(--accent);
+}
+.mark::before { left: 0; }
+.mark::after { left: 10px; background: var(--accent-glow); }
+
+.suggestions { display: none; margin-top: 14px; }
+#main.empty .suggestions { display: flex; }
+.suggestion { border-radius: var(--radius-md); background: transparent; }
+
+/* Messages. */
+.thread { gap: 26px; padding-top: 12px; }
+.msg.assistant .msg-body {
+  font-family: var(--font-serif);
+  font-size: 16.5px;
+  line-height: 1.68;
+  color: var(--text-primary);
+}
+.msg.assistant .msg-body code, .msg.assistant .msg-body pre { font-family: var(--font-mono); }
+.msg.user .msg-body { padding: 10px 16px; border-radius: 18px; font-size: 15px; line-height: 1.55; }
+
+/* Action row under a reply: quiet until hovered; Retry only on the newest. */
+.msg-actions { display: flex; gap: 2px; margin-top: 8px; margin-left: -6px; opacity: 0;
+  transition: opacity var(--transition); }
+.msg:hover .msg-actions, .msg.last .msg-actions { opacity: 1; }
+.msg-actions .copy-btn, .msg-actions .retry-btn {
+  position: static; opacity: 1; padding: 4px 8px; border-radius: var(--radius-sm);
+  font-size: 12px; color: var(--text-muted);
+}
+.msg-actions button:hover { background: var(--bg-overlay); color: var(--text-primary); }
+.retry-btn { display: none; }
+.msg.last .retry-btn { display: inline-block; }
+body.busy .msg-actions { visibility: hidden; }
+
+/* Thinking, folded: a chevron that turns, not a text arrow. */
+.thought { border-left: none; padding-left: 0; }
+.thought summary {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle); background: var(--bg-surface);
+  font-family: var(--font-sans); font-size: 12.5px; color: var(--text-secondary);
+}
+.thought summary::before {
+  content: ''; width: 6px; height: 6px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform var(--transition);
+}
+.thought[open] summary::before { content: ''; transform: rotate(45deg); }
+.thought-body {
+  margin-top: 8px; padding: 10px 14px; border-left: 2px solid var(--border-medium);
+  font-family: var(--font-sans); font-size: 13px; color: var(--text-secondary);
+}
+
+/* Code blocks: a header with the language and a copy button. */
+.code-block { margin: 0.9em 0; border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md); overflow: hidden; background: var(--bg-elevated); }
+.code-head { display: flex; justify-content: space-between; align-items: center;
+  padding: 6px 12px; border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-sans); font-size: 12px; color: var(--text-muted); }
+.code-copy { font-size: 12px; color: var(--text-muted); padding: 2px 6px; border-radius: var(--radius-sm); }
+.code-copy:hover { background: var(--bg-overlay); color: var(--text-primary); }
+.code-block pre.code { margin: 0; border: none; border-radius: 0; background: transparent; }
+
+/* Composer: a card, text on top, controls on a bar inside it. */
+.composer-wrap { padding: 6px 24px 18px; background: transparent; }
+.composer {
+  flex-direction: column; align-items: stretch; gap: 4px;
+  padding: 14px 12px 10px 16px; border-radius: 20px; border: 1px solid var(--border-medium);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 22px rgba(0, 0, 0, 0.05);
+}
+.composer:focus-within { border-color: var(--border-medium);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 28px rgba(0, 0, 0, 0.08); }
+#input { min-height: 28px; font-size: 15.5px; padding: 2px 0 6px; }
+.composer-bar { display: flex; align-items: center; gap: 8px; }
+.composer-note { flex: 1; font-size: 12px; color: var(--text-muted); }
+.model-chip { font-family: var(--font-sans); font-size: 12.5px; border: none; background: transparent;
+  color: var(--text-secondary); }
+#btn-send { border-radius: 10px; width: 34px; height: 34px; }
+.composer-hint { display: none; }
+
+/* Back-to-latest, over the bottom of the thread. */
+.to-bottom {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 150px; z-index: 5;
+  width: 34px; height: 34px; display: grid; place-items: center;
+  border-radius: 50%; border: 1px solid var(--border-medium);
+  background: var(--bg-surface); color: var(--text-secondary);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+}
+.to-bottom:hover { color: var(--text-primary); }
+
+/* Sidebar: quieter, closer to the page. */
+#sidebar { gap: 14px; }
+.new-chat { background: transparent; border-color: transparent; font-weight: 500; }
+.new-chat svg { color: var(--accent); }
+.chat-row.active { background: var(--bg-overlay); font-weight: 500; }
+
+/* The recents list takes the spare height, so the footer sits at the bottom.
+   The old rule used :nth-of-type(1), which matched .sidebar-top (also a
+   div), so the footer floated in the middle of the sidebar. */
+.sidebar-section:nth-of-type(1) { flex: none; }
+.sidebar-section.recents { flex: 1; min-height: 0; }
+.sidebar-foot { margin-top: auto; }
+
+/* A notice about the window itself (no daemon, not connected), above the
+   composer instead of in the conversation. */
+.notice {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 10px 12px; margin-bottom: 10px;
+  border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
+  background: var(--bg-elevated); font-size: 13px; color: var(--text-secondary);
+}
+.notice-text { flex: 1; line-height: 1.5; }
+.notice-text p { margin: 0; }
+.notice .icon-btn { width: 22px; height: 22px; font-size: 11px; }

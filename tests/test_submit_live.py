@@ -82,6 +82,24 @@ class _Rig:
         self._srv.shutdown()
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _stop_the_shared_driver():
+    """BrowserSession keeps ONE sync Playwright driver per process, alive until
+    exit, on purpose. Under pytest that process is the whole suite, and the
+    sync driver leaves its event loop marked as running on the main thread —
+    so every async test collected after this file (test_telegram's, via
+    pytest-asyncio) died with "Runner.run() cannot be called from a running
+    event loop". Stop it when this module is done with it."""
+    yield
+    driver = BrowserSession._driver
+    BrowserSession._driver = None
+    if driver is not None:
+        try:
+            driver.stop()
+        except Exception:
+            pass
+
+
 @pytest.fixture
 def rig():
     r = _Rig()
