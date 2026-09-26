@@ -376,9 +376,13 @@ class Agent:
                 session.saved_at = session.turns
             elif not text.startswith("/"):
                 session.turns += 1
-            return self._turn(session)
+            return self._turn(session, command=text.lstrip().startswith("/"))
 
-    def _turn(self, session: Session) -> dict:
+    def _turn(self, session: Session, command: bool = False) -> dict:
+        """One turn's events as updates. A command answers in output lines,
+        not tokens, so for a command those lines are the reply; otherwise they
+        are Symbio's activity, shown as its thinking."""
+        line_kind = "agent_message_chunk" if command else "agent_thought_chunk"
         while True:
             if session.cancelled.is_set():
                 session.draining = True
@@ -394,7 +398,7 @@ class Agent:
             elif kind == "system":
                 line = (event.get("text") or "").rstrip()
                 if line and not (session.training and _TRAINER_LINE.match(line)):
-                    self.update(session, {"sessionUpdate": "agent_thought_chunk",
+                    self.update(session, {"sessionUpdate": line_kind,
                                           "content": {"type": "text", "text": line + "\n"}})
             elif kind == "confirm":
                 session.bridge.confirm(self._permission(session, event.get("prompt", "")))

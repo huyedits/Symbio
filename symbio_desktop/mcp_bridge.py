@@ -23,12 +23,14 @@ import threading
 import time
 from typing import Any
 
-from symbio_desktop.acp import Session, ensure_daemon, log
+from symbio_desktop.acp import _TRAINER_LINE, Session, ensure_daemon, log
 from symbio_desktop.server import DaemonBridge, _config_summary, constants
 
 SERVER_INFO = {"name": "symbio", "version": "0.2.0"}
 IDLE_S = 300.0
 TURN_S = 900.0
+# Output lines a command's reply keeps (its trainer steps are already left out).
+MAX_LINES = 80
 
 TOOLS = [
     {
@@ -139,7 +141,7 @@ class Bridge:
                 self.session = session
             session = self.session
             session.bridge.say(message)
-            reply, notes = [], []
+            reply, lines, notes = [], [], []
             deadline = time.monotonic() + TURN_S
             while time.monotonic() < deadline:
                 try:
@@ -149,6 +151,10 @@ class Bridge:
                 kind = event.get("type")
                 if kind == "token":
                     reply.append(event["text"])
+                elif kind == "system":
+                    line = (event.get("text") or "").rstrip()
+                    if line and not _TRAINER_LINE.match(line):
+                        lines.append(line)
                 elif kind == "confirm":
                     # Nobody can answer this from inside a tool call.
                     session.bridge.confirm(False)
@@ -162,7 +168,16 @@ class Bridge:
             else:
                 notes.append(f"Symbio was still answering after {TURN_S:.0f}s.")
             self.used = time.monotonic()
-            text = "".join(reply).strip() or "(Symbio returned no text.)"
+            text = "".join(reply).strip()
+            if lines and (message.startswith("/") or not text):
+                # A command (/status, /save, /train…) answers in output lines,
+                # not tokens: seen from Hermes, every one came back empty.
+                # The end is kept, where a retrain's verdict is.
+                kept = lines[-MAX_LINES:]
+                if len(lines) > len(kept):
+                    kept.insert(0, f"(… {len(lines) - len(kept)} earlier lines)")
+                text = "\n".join(kept) + (f"\n\n{text}" if text else "")
+            text = text or "(Symbio returned no text.)"
             if notes:
                 text += "\n\n" + "\n".join(notes)
             return self._text(text)

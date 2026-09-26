@@ -224,6 +224,7 @@ sitting and 3% asleep, more while it walks or eats. It needs PyObjC
 symb acp                        # an ACP agent on stdio, for Zed, the VS Code and
                                 # JetBrains ACP plugins, Toad, and other ACP hosts
 symb connect claude-desktop     # Claude Desktop gets Symbio as tools (MCP)
+symb connect hermes             # so does Hermes Agent (CLI and desktop app)
 ```
 
 `symb acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com):
@@ -252,7 +253,16 @@ claude-desktop` registers `symb mcp bridge` in its config instead: Claude gets
 prompts cannot be answered from inside a tool call there, so they are declined
 and the reply says what was asked. `--remove` takes it out again.
 
-Both bridges were checked with the official ACP and MCP SDK clients.
+Hermes Agent can run as an ACP agent but cannot host one, so it gets the same
+MCP bridge. `symb connect hermes` registers it through Hermes's own `hermes mcp
+add`, which keeps the comments in its config.yaml, and raises the tool timeout
+to 900 seconds so a `/train` sent through `ask_symbio` is not cut off at
+Hermes's default of 300. The loop's commands work through `ask_symbio` too:
+send it `/status`, `/save`, `/golden` or `/train` and their output comes back
+as the reply, without the trainer's per-step lines.
+
+Both bridges were checked with the official ACP and MCP SDK clients, and the
+MCP bridge by typing into Hermes Agent's own terminal UI.
 
 ### Staying online
 

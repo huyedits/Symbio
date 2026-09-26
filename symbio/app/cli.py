@@ -265,7 +265,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "acp", help="Speak the Agent Client Protocol on stdio, for Zed, VS Code, "
                     "JetBrains, Toad and other ACP hosts")
     connect_parser = sub.add_parser("connect", help="Hook Symbio into another app")
-    connect_parser.add_argument("target", choices=["claude-desktop"],
+    connect_parser.add_argument("target", choices=["claude-desktop", "hermes"],
                                 help="The app to connect Symbio to")
     connect_parser.add_argument("--remove", action="store_true",
                                 help="Disconnect instead")
@@ -1318,6 +1318,8 @@ def main(argv: list[str] | None = None) -> int:
     if command == "connect":
         from symbio.app import connect
 
+        if args.target == "hermes":
+            return connect.hermes(remove=args.remove)
         return connect.claude_desktop(remove=args.remove)
 
     if command == "mcp":

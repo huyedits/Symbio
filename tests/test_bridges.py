@@ -8,6 +8,8 @@ real daemon behind them was exercised end to end with the official ACP and MCP
 SDK clients; these keep the contract from drifting.
 """
 import json
+import subprocess
+import sys
 import threading
 import time
 
@@ -308,16 +310,31 @@ def test_an_old_run_on_disk_is_not_news(agent, tmp_path, monkeypatch):
     assert not [u for u in _updates(out) if u["sessionUpdate"].startswith("tool_call")]
 
 
-def test_trainer_lines_leave_the_thinking_while_a_run_is_shown(agent):
+def test_trainer_lines_leave_the_reply_while_a_run_is_shown(agent):
+    """The training tool call carries the steps; the reply keeps the rest."""
     agent_, out = agent
     FakeBridge.script = [("system", "Iter 10: Train loss 1.234, Learning Rate 1e-05"),
                          ("system", "  [Train] Backing up current adapter...")]
     session_id = agent_.new_session({"cwd": "/tmp", "mcpServers": []})["sessionId"]
     agent_.sessions[session_id].training = True
     agent_.prompt({"sessionId": session_id, "prompt": [{"type": "text", "text": "/train"}]})
-    thoughts = "".join(u["content"]["text"] for u in _updates(out)
-                       if u["sessionUpdate"] == "agent_thought_chunk")
-    assert "Iter 10" not in thoughts and "Backing up current adapter" in thoughts
+    reply = "".join(u["content"]["text"] for u in _updates(out)
+                    if u["sessionUpdate"] == "agent_message_chunk")
+    assert "Iter 10" not in reply and "Backing up current adapter" in reply
+
+
+def test_a_commands_output_is_the_reply_not_thinking(agent):
+    agent_, out = agent
+    session_id = agent_.new_session({"cwd": "/tmp", "mcpServers": []})["sessionId"]
+    FakeBridge.script = [("system", "Model: Qwen3-14B · adapter 400 steps")]
+    agent_.prompt({"sessionId": session_id, "prompt": [{"type": "text", "text": "/status"}]})
+    FakeBridge.script = [("system", "[Search] otters"), ("token", "Otters hold hands.")]
+    agent_.prompt({"sessionId": session_id, "prompt": [{"type": "text", "text": "otters?"}]})
+    kinds = [(u["sessionUpdate"], u["content"]["text"].strip()) for u in _updates(out)
+             if u["sessionUpdate"] in ("agent_message_chunk", "agent_thought_chunk")]
+    assert kinds == [("agent_message_chunk", "Model: Qwen3-14B · adapter 400 steps"),
+                     ("agent_thought_chunk", "[Search] otters"),
+                     ("agent_message_chunk", "Otters hold hands.")]
 
 
 def test_an_unknown_method_is_a_json_rpc_error(agent):
@@ -374,6 +391,37 @@ def test_ask_symbio_returns_the_reply_and_declines_approvals(bridge):
     assert FakeBridge.instances[-1].confirmed == [False]
 
 
+def test_a_command_answers_with_its_output_lines(bridge):
+    """Seen from Hermes: /status, /save and /train all came back as
+    "(Symbio returned no text.)" — a command speaks in output lines, not tokens."""
+    bridge_, out = bridge
+    FakeBridge.script = [("system", "  [Train] Starting LoRA (100 iters)..."),
+                         ("system", "Iter 10: Train loss 2.100, Learning Rate 1e-05"),
+                         ("system", "  [Golden] 12/15 checks passing (baseline 11/15) — no regression.")]
+    result = _rpc(bridge_, out, "tools/call",
+                  {"name": "ask_symbio", "arguments": {"message": "/train"}})["result"]
+    text = result["content"][0]["text"]
+    assert "[Train] Starting LoRA" in text and "no regression" in text
+    assert "Iter 10" not in text                # step lines are symbio_status's job
+
+
+def test_a_long_command_keeps_its_end(bridge, monkeypatch):
+    bridge_, out = bridge
+    monkeypatch.setattr(mcp_bridge, "MAX_LINES", 3)
+    FakeBridge.script = [("system", f"line {i}") for i in range(10)]
+    text = _rpc(bridge_, out, "tools/call", {"name": "ask_symbio",
+                                             "arguments": {"message": "/golden"}})["result"]["content"][0]["text"]
+    assert text.splitlines() == ["(… 7 earlier lines)", "line 7", "line 8", "line 9"]
+
+
+def test_a_chat_reply_leaves_the_activity_lines_out(bridge):
+    bridge_, out = bridge
+    FakeBridge.script = [("system", "[Search] otters"), ("token", "Otters hold hands.")]
+    text = _rpc(bridge_, out, "tools/call", {"name": "ask_symbio",
+                                             "arguments": {"message": "otters?"}})["result"]["content"][0]["text"]
+    assert text == "Otters hold hands."
+
+
 def test_an_empty_message_is_an_error_not_a_turn(bridge):
     bridge_, out = bridge
     result = _rpc(bridge_, out, "tools/call",
@@ -412,8 +460,72 @@ def test_connect_leaves_an_unreadable_config_alone(tmp_path):
     assert config.read_text() == "{not json"
 
 
+def _fake_hermes(monkeypatch, outputs):
+    """subprocess.run as Hermes's CLI: each call gets the next (code, stdout)."""
+    from symbio.app import connect
+
+    calls = []
+
+    def run(argv, input="", **_):
+        calls.append((argv, input))
+        code, stdout = outputs.pop(0)
+        return subprocess.CompletedProcess(argv, code, stdout, "")
+
+    monkeypatch.setattr(connect.subprocess, "run", run)
+    return connect, calls
+
+
+def test_connect_hermes_registers_through_hermes_own_cli(monkeypatch):
+    """Hermes's writer keeps config.yaml's comments; a YAML dump from here would not."""
+    connect, calls = _fake_hermes(monkeypatch, [
+        (0, "\x1b[32m  ✓ Saved 'symbio' to ~/.hermes/config.yaml (2/2 tools enabled)\x1b[0m"),
+        (0, "✓ Set mcp_servers.symbio.timeout = 900"),
+    ])
+    assert connect.hermes(binary="/bin/hermes") == 0
+    (add, answers), (timeout, _) = calls
+    assert add[:6] == ["/bin/hermes", "mcp", "add", "symbio", "--command", sys.executable]
+    env = add[add.index("--env") + 1:add.index("--args")]
+    assert [e.split("=")[0] for e in env] == ["SYMBIO_HOME", "PYTHONPATH"]
+    assert add[add.index("--args") + 1:] == ["-m", "symbio_desktop.mcp_bridge"]
+    assert answers == "y\ny\n"          # overwrite it, enable both tools
+    # Long enough for a /train through ask_symbio, which Hermes's 300s cuts off.
+    assert timeout[1:] == ["config", "set", "mcp_servers.symbio.timeout", "900"]
+
+
+def test_connect_hermes_says_so_when_hermes_refuses(monkeypatch, capsys):
+    connect, _ = _fake_hermes(monkeypatch, [(1, "✗ Connection failed")])
+    assert connect.hermes(binary="/bin/hermes") == 1
+    assert "Connection failed" in capsys.readouterr().out
+
+
+def test_connect_hermes_remove(monkeypatch, capsys):
+    connect, calls = _fake_hermes(monkeypatch, [(0, "✓ Removed 'symbio' from config"),
+                                                (0, "✗ Server 'symbio' not found in config.")])
+    assert connect.hermes(remove=True, binary="/bin/hermes") == 0
+    assert connect.hermes(remove=True, binary="/bin/hermes") == 0
+    assert calls[0][0][1:] == ["mcp", "remove", "symbio"]
+    out = capsys.readouterr().out
+    assert "Removed Symbio from Hermes" in out and "not connected" in out
+
+
+def test_the_hermes_binary_is_found_where_the_desktop_installer_puts_it(tmp_path, monkeypatch):
+    from symbio.app import connect
+
+    monkeypatch.setattr(connect.shutil, "which", lambda _: None)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))     # not this Mac's ~/.hermes
+    assert connect.hermes_binary() is None
+    assert connect.hermes() == 1                 # nothing to run, nothing run
+    binary = tmp_path / "installs/72de/environments/532c/venv/bin/hermes"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    assert connect.hermes_binary() == str(binary)
+
+
 @pytest.mark.parametrize("argv,command", [
     (["acp"], "acp"), (["mcp", "bridge"], "mcp"), (["connect", "claude-desktop"], "connect"),
+    (["connect", "hermes"], "connect"),
 ])
 def test_the_bridges_are_subcommands(argv, command):
     from symbio.app.cli import _build_parser
