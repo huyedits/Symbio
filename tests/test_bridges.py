@@ -405,6 +405,29 @@ def test_a_command_answers_with_its_output_lines(bridge):
     assert "Iter 10" not in text                # step lines are symbio_status's job
 
 
+def test_a_slow_turn_answers_in_time_and_the_next_call_collects_the_rest(
+        bridge, monkeypatch):
+    """Seen live: Hermes cut a /train off at 420s and the reply was lost."""
+    bridge_, out = bridge
+    waits = iter([0.3, 5.0])                # the first call is cut short
+    monkeypatch.setattr(mcp_bridge, "_reply_wait", lambda: next(waits))
+    FakeBridge.script = [("system", "  [Train] Starting LoRA (100 iters)..."), ("sleep", 0.8),
+                         ("system", "  [Golden] Rolled back to the previous adapter.")]
+    first = _rpc(bridge_, out, "tools/call", {"name": "ask_symbio",
+                                              "arguments": {"message": "/train"}})["result"]
+    text = first["content"][0]["text"]
+    assert first["isError"] is False
+    assert "[Train] Starting LoRA" in text and "still working" in text
+    assert "Rolled back" not in text
+    second = _rpc(bridge_, out, "tools/call", {"name": "ask_symbio",
+                                               "arguments": {"message": "/status"}},
+                  id_=2)["result"]["content"][0]["text"]
+    assert "still on your earlier message ('/train')" in second
+    assert "Rolled back to the previous adapter" in second
+    assert "[Train] Starting LoRA" not in second, "what was reported is not told twice"
+    assert FakeBridge.instances[-1].said == ["/train"], "the second message was not sent"
+
+
 def test_a_long_command_keeps_its_end(bridge, monkeypatch):
     bridge_, out = bridge
     monkeypatch.setattr(mcp_bridge, "MAX_LINES", 3)
@@ -479,17 +502,17 @@ def test_connect_hermes_registers_through_hermes_own_cli(monkeypatch):
     """Hermes's writer keeps config.yaml's comments; a YAML dump from here would not."""
     connect, calls = _fake_hermes(monkeypatch, [
         (0, "\x1b[32m  ✓ Saved 'symbio' to ~/.hermes/config.yaml (2/2 tools enabled)\x1b[0m"),
-        (0, "✓ Set mcp_servers.symbio.timeout = 900"),
     ])
     assert connect.hermes(binary="/bin/hermes") == 0
-    (add, answers), (timeout, _) = calls
+    [(add, answers)] = calls
     assert add[:6] == ["/bin/hermes", "mcp", "add", "symbio", "--command", sys.executable]
-    env = add[add.index("--env") + 1:add.index("--args")]
-    assert [e.split("=")[0] for e in env] == ["SYMBIO_HOME", "PYTHONPATH"]
+    env = dict(e.split("=", 1) for e in add[add.index("--env") + 1:add.index("--args")])
+    assert set(env) == {"SYMBIO_HOME", "PYTHONPATH", "SYMBIO_MCP_REPLY_WAIT_S"}
+    # Under Hermes's 300s per call and 420s per batch: seen live, a /train
+    # held the call until Hermes cut it off at 420s despite `timeout: 900`.
+    assert int(env["SYMBIO_MCP_REPLY_WAIT_S"]) < 300
     assert add[add.index("--args") + 1:] == ["-m", "symbio_desktop.mcp_bridge"]
     assert answers == "y\ny\n"          # overwrite it, enable both tools
-    # Long enough for a /train through ask_symbio, which Hermes's 300s cuts off.
-    assert timeout[1:] == ["config", "set", "mcp_servers.symbio.timeout", "900"]
 
 
 def test_connect_hermes_says_so_when_hermes_refuses(monkeypatch, capsys):

@@ -27,9 +27,10 @@ from symbio import constants
 CLAUDE_DESKTOP_CONFIG = (Path.home() / "Library" / "Application Support" / "Claude"
                          / "claude_desktop_config.json")
 SERVER_NAME = "symbio"
-# Hermes gives an MCP tool call 300s by default. ask_symbio can hold a /train
-# for up to the bridge's own turn limit (symbio_desktop.mcp_bridge.TURN_S).
-HERMES_TOOL_TIMEOUT_S = 900
+# Hermes gives an MCP tool call 300s (and a tool batch 420s, whatever the
+# server's own timeout says), so ask_symbio answers within 240s there and
+# leaves anything longer, like a /train, running in the background.
+HERMES_REPLY_WAIT_S = 240
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
@@ -135,6 +136,7 @@ def hermes(remove: bool = False, binary: str | None = None) -> int:
         return 0
 
     entry = mcp_entry()
+    entry["env"]["SYMBIO_MCP_REPLY_WAIT_S"] = str(HERMES_REPLY_WAIT_S)
     code, said = run("mcp", "add", SERVER_NAME, "--command", entry["command"],
                      "--env", *(f"{k}={v}" for k, v in entry["env"].items()),
                      "--args", *entry["args"], answers="y\ny\n")
@@ -142,11 +144,6 @@ def hermes(remove: bool = False, binary: str | None = None) -> int:
         print("Hermes did not register Symbio:")
         print(said.strip())
         return 1
-    code, said = run("config", "set", f"mcp_servers.{SERVER_NAME}.timeout",
-                     str(HERMES_TOOL_TIMEOUT_S))
-    if code != 0:
-        print(f"Registered, but the tool timeout stayed at Hermes's default "
-              f"(a /train through ask_symbio may be cut off): {said.strip()}")
     print(f"Connected: Hermes will start Symbio's MCP bridge ({SERVER_NAME}: "
           f"ask_symbio, symbio_status), watching {constants.PROJECT_DIR}.")
     print("Start a new Hermes session (or /reload-mcp) and ask Hermes to use Symbio.")
