@@ -2,8 +2,9 @@
 
 import json
 
-import mlx.core as mx
 import pytest
+pytest.importorskip("mlx")  # MLX is Apple Silicon only; skip elsewhere
+import mlx.core as mx
 
 import weight_delta
 

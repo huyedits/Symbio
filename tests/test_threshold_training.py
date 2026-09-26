@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end test that fine-tunes only after the mistake threshold is reached."""
+import pytest
+pytest.importorskip("mlx_lm")  # MLX is Apple Silicon only; skip elsewhere
 from mlx_lm import load
 
 from symbio import ADAPTER_DIR, AIAgent, learn_from_last_correction, load_config, maybe_train_on_mistakes, _mistake_note_count

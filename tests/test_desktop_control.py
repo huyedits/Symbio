@@ -411,6 +411,18 @@ def test_an_edited_tool_file_is_kept(tmp_path, monkeypatch):
 # --- the grant that was there, reported as missing -------------------------
 
 
+def _stub_ax_framework(monkeypatch, **calls):
+    """Patch ApplicationServices calls, or stand in for the whole framework
+    where it does not exist (ax._ax is None off macOS, and setattr on None
+    fails before the test gets to say anything)."""
+    if ax._ax is None:
+        import types
+        monkeypatch.setattr(ax, "_ax", types.SimpleNamespace(**calls))
+        return
+    for name, fn in calls.items():
+        monkeypatch.setattr(ax._ax, name, fn)
+
+
 def test_the_frontmost_app_falls_back_to_the_window_server(monkeypatch):
     """AXFocusedApplication on the system-wide element returns
     kAXErrorCannotComplete (-25204) on Huy's Mac — granted, trusted, every
@@ -423,9 +435,9 @@ def test_the_frontmost_app_falls_back_to_the_window_server(monkeypatch):
     monkeypatch.setattr(ax, "_attr",
                         lambda element, name: calls.append(name) or None)
     monkeypatch.setattr(ax, "frontmost_window", lambda: (658, "Code", "main.py"))
-    monkeypatch.setattr(ax._ax, "AXUIElementCreateSystemWide", lambda: 1)
-    monkeypatch.setattr(ax._ax, "AXUIElementCreateApplication",
-                        lambda pid: f"app-{pid}")
+    _stub_ax_framework(monkeypatch,
+                       AXUIElementCreateSystemWide=lambda: 1,
+                       AXUIElementCreateApplication=lambda pid: f"app-{pid}")
 
     assert ax._focused_app() == "app-658"
     assert "AXFocusedApplication" in calls, "the documented route is tried first"
@@ -436,7 +448,7 @@ def test_no_window_at_all_is_still_reported_as_the_permission(monkeypatch):
     an empty screen from a missing grant, and the grant is the likelier one."""
     monkeypatch.setattr(ax, "_attr", lambda element, name: None)
     monkeypatch.setattr(ax, "frontmost_window", lambda: (0, "", ""))
-    monkeypatch.setattr(ax._ax, "AXUIElementCreateSystemWide", lambda: 1)
+    _stub_ax_framework(monkeypatch, AXUIElementCreateSystemWide=lambda: 1)
     monkeypatch.setattr(ax, "trusted", lambda: True)
 
     snap = ax.snapshot()
