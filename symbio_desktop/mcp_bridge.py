@@ -12,11 +12,18 @@ between calls, so Symbio remembers the thread, and lets it go after five idle
 minutes so `symb chat` and the pet's window are not locked out. Symbio's
 approval prompts cannot be answered from inside a tool call, so they are
 declined, and the reply says what was asked.
+
+Hosts cut tool calls off: Claude Desktop after 60 seconds, Hermes after 300
+(and its whole tool batch after 420, whatever the server's own timeout says).
+A /train runs longer than any of them, so a call waits at most REPLY_WAIT_S.
+The turn carries on in the background; the answer says so, and the next
+ask_symbio collects the rest instead of sending a new message.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import queue
 import sys
 import threading
@@ -28,7 +35,19 @@ from symbio_desktop.server import DaemonBridge, _config_summary, constants
 
 SERVER_INFO = {"name": "symbio", "version": "0.2.0"}
 IDLE_S = 300.0
-TURN_S = 900.0
+# A turn left running this long is given up on.
+TURN_S = 3600.0
+
+
+def _reply_wait() -> float:
+    """How long one call waits before answering "still working". Under Claude
+    Desktop's 60s by default; `symb connect hermes` sets more for Hermes."""
+    try:
+        return max(1.0, float(os.environ.get("SYMBIO_MCP_REPLY_WAIT_S", "50")))
+    except ValueError:
+        return 50.0
+
+
 # Output lines a command's reply keeps (its trainer steps are already left out).
 MAX_LINES = 80
 
@@ -64,6 +83,7 @@ class Bridge:
         self.write_lock = threading.Lock()
         self.session: Session | None = None
         self.used = 0.0
+        self.turn: Turn | None = None
         self.turn_lock = threading.Lock()
         threading.Thread(target=self._release_when_idle, daemon=True).start()
 
@@ -129,66 +149,119 @@ class Bridge:
 
     def ask(self, message: str) -> dict:
         with self.turn_lock:
-            if self.session is None or not self.session.bridge.alive():
-                ok, why = ensure_daemon()
-                if not ok:
-                    return self._text(why, error=True)
-                session = Session("mcp")
-                ok, why = session.open()
-                if not ok:
-                    session.bridge.close()
-                    return self._text(why, error=True)
-                self.session = session
-            session = self.session
-            session.bridge.say(message)
-            reply, lines, notes = [], [], []
-            deadline = time.monotonic() + TURN_S
+            turn = self.turn
+            if turn is not None and not turn.done.is_set():
+                # Still on an earlier message: collect that, send nothing new.
+                earlier = turn.message
+            else:
+                earlier = None
+                if self.session is None or not self.session.bridge.alive():
+                    ok, why = ensure_daemon()
+                    if not ok:
+                        return self._text(why, error=True)
+                    session = Session("mcp")
+                    ok, why = session.open()
+                    if not ok:
+                        session.bridge.close()
+                        return self._text(why, error=True)
+                    self.session = session
+                turn = self.turn = Turn(message)
+                threading.Thread(target=self._collect, args=(self.session, turn),
+                                 daemon=True).start()
+        wait = _reply_wait()
+        turn.done.wait(wait)
+        with self.turn_lock:            # done is set under this lock: no race
+            finished = turn.done.is_set()
+            text = turn.report()
+        if earlier is not None:
+            text = (f"Symbio is still on your earlier message ({earlier!r}); "
+                    f"this one was not sent.\n\n" + text)
+        if not finished:
+            text += (f"\n\nSymbio is still working on this after {wait:.0f}s "
+                     "(a /train takes minutes) and carries on in the background. "
+                     "symbio_status follows a fine-tune; ask_symbio again collects "
+                     "the rest of this reply.")
+        return self._text(text)
+
+    def _collect(self, session: Session, turn: "Turn") -> None:
+        """One turn's events, gathered in the background for ask() to report."""
+        deadline = time.monotonic() + TURN_S
+        try:
+            session.bridge.say(turn.message)
             while time.monotonic() < deadline:
                 try:
                     event = session.events.get(timeout=1.0)
                 except queue.Empty:
                     continue
                 kind = event.get("type")
-                if kind == "token":
-                    reply.append(event["text"])
-                elif kind == "system":
-                    line = (event.get("text") or "").rstrip()
-                    if line and not _TRAINER_LINE.match(line):
-                        lines.append(line)
-                elif kind == "confirm":
-                    # Nobody can answer this from inside a tool call.
-                    session.bridge.confirm(False)
-                    notes.append("Symbio asked for approval and was declined here: "
-                                 + (event.get("prompt") or "").strip().splitlines()[0][:200]
-                                 + " (approve it in `symb chat` if you want it done).")
-                elif kind in ("done", "quit"):
-                    if kind == "quit":
-                        self.session = None
-                    break
-            else:
-                notes.append(f"Symbio was still answering after {TURN_S:.0f}s.")
-            self.used = time.monotonic()
-            text = "".join(reply).strip()
-            if lines and (message.startswith("/") or not text):
-                # A command (/status, /save, /train…) answers in output lines,
-                # not tokens: seen from Hermes, every one came back empty.
-                # The end is kept, where a retrain's verdict is.
-                kept = lines[-MAX_LINES:]
-                if len(lines) > len(kept):
-                    kept.insert(0, f"(… {len(lines) - len(kept)} earlier lines)")
-                text = "\n".join(kept) + (f"\n\n{text}" if text else "")
-            text = text or "(Symbio returned no text.)"
-            if notes:
-                text += "\n\n" + "\n".join(notes)
-            return self._text(text)
+                with self.turn_lock:
+                    if kind == "token":
+                        turn.reply.append(event["text"])
+                    elif kind == "system":
+                        line = (event.get("text") or "").rstrip()
+                        if line and not _TRAINER_LINE.match(line):
+                            turn.lines.append(line)
+                    elif kind == "confirm":
+                        # Nobody can answer this from inside a tool call.
+                        session.bridge.confirm(False)
+                        turn.notes.append(
+                            "Symbio asked for approval and was declined here: "
+                            + ((event.get("prompt") or "").strip().splitlines() or [""])[0][:200]
+                            + " (approve it in `symb chat` if you want it done).")
+                    elif kind in ("done", "quit"):
+                        if kind == "quit" and self.session is session:
+                            self.session = None
+                        return
+            with self.turn_lock:
+                turn.notes.append(f"Symbio was still answering after {TURN_S:.0f}s; "
+                                  "the bridge stopped waiting.")
+        finally:
+            with self.turn_lock:
+                self.used = time.monotonic()
+                turn.done.set()
 
     def _release_when_idle(self) -> None:
         while True:
             time.sleep(15)
             with self.turn_lock:
-                if self.session is not None and time.monotonic() - self.used > IDLE_S:
+                busy = self.turn is not None and not self.turn.done.is_set()
+                if (self.session is not None and not busy
+                        and time.monotonic() - self.used > IDLE_S):
                     self.session.bridge.close()
                     self.session = None
+
+
+class Turn:
+    """One message's answer as it arrives. report() hands out what has not been
+    reported yet, so a reply collected over two calls is not told twice."""
+
+    def __init__(self, message: str):
+        self.message = message
+        self.reply: list[str] = []
+        self.lines: list[str] = []
+        self.notes: list[str] = []
+        self.done = threading.Event()
+        self._told_lines = 0
+        self._told_notes = 0
+
+    def report(self) -> str:
+        lines = self.lines[self._told_lines:]
+        notes = self.notes[self._told_notes:]
+        self._told_lines, self._told_notes = len(self.lines), len(self.notes)
+        text = "".join(self.reply).strip() if self.done.is_set() else ""
+        if lines and (self.message.startswith("/") or not text):
+            # A command (/status, /save, /train…) answers in output lines,
+            # not tokens: seen from Hermes, every one came back empty.
+            # The end is kept, where a retrain's verdict is.
+            kept = lines[-MAX_LINES:]
+            if len(lines) > len(kept):
+                kept.insert(0, f"(… {len(lines) - len(kept)} earlier lines)")
+            text = "\n".join(kept) + (f"\n\n{text}" if text else "")
+        if not text and self.done.is_set():
+            text = "(Symbio returned no text.)"
+        if notes:
+            text += ("\n\n" if text else "") + "\n".join(notes)
+        return text
 
 
 def status() -> dict[str, Any]:

@@ -255,11 +255,15 @@ and the reply says what was asked. `--remove` takes it out again.
 
 Hermes Agent can run as an ACP agent but cannot host one, so it gets the same
 MCP bridge. `symb connect hermes` registers it through Hermes's own `hermes mcp
-add`, which keeps the comments in its config.yaml, and raises the tool timeout
-to 900 seconds so a `/train` sent through `ask_symbio` is not cut off at
-Hermes's default of 300. The loop's commands work through `ask_symbio` too:
-send it `/status`, `/save`, `/golden` or `/train` and their output comes back
-as the reply, without the trainer's per-step lines.
+add`, which keeps the comments in its config.yaml. The loop's commands work
+through `ask_symbio` too: send it `/status`, `/save`, `/golden` or `/train` and
+their output comes back as the reply, without the trainer's per-step lines.
+
+Hosts cut tool calls off (Claude Desktop after 60 seconds, Hermes after 300),
+and a `/train` takes longer. So `ask_symbio` answers within 50 seconds (240 in
+Hermes) with what it has so far, and says the turn is still running; the next
+`ask_symbio` collects the rest instead of sending a new message, and
+`symbio_status` follows the fine-tune.
 
 Both bridges were checked with the official ACP and MCP SDK clients, and the
 MCP bridge by typing into Hermes Agent's own terminal UI.
