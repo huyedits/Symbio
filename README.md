@@ -1,4 +1,3 @@
-### CUDA SUPPORT NEEDED
 # Symbio - that fine tuning agent.
 
 > **Learns from your corrections, on your machine — and rolls back a fine-tune that made it worse.**
@@ -8,8 +7,9 @@
 [![Live Demo](https://img.shields.io/badge/%F0%9F%A4%97-Live%20Demo-yellow)](https://huggingface.co/spaces/HuyEdits/symbio-demo)
 [![GitHub](https://img.shields.io/badge/GitHub-Symbio-black?logo=github)](https://github.com/huyedits/Symbio)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](#license)
+[![Tests](https://github.com/huyedits/Symbio/actions/workflows/tests.yml/badge.svg)](https://github.com/huyedits/Symbio/actions/workflows/tests.yml)
 
-**[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)** 
+**[Website](https://huyedits.github.io/Symbio/)** · **[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)** 
 
 ---
 
@@ -86,6 +86,9 @@ Everything can stay on your machine, nothing phones "home"
 *  **Self-corrects tool mistakes** — successful recovery from a failed command can become a training example.
 *  **Learnable skills** — create a skill as a Markdown procedure and train a dedicated worker adapter for it.
 *  **LoRA fine-tuning** — only small adapter weights are trained; the base model stays frozen.
+*  **Fine-tunes itself when it decides to** — besides training automatically once enough examples pile up, the model can call its own `train_adapter` tool mid-conversation. With default settings that runs without asking you; it is logged, and the golden set still rolls back a run that made things worse.
+*  **Watches its own weights change** — `scripts/weight_delta.py` shows, module by module, how far each fine-tune moved the weights, and how much the latest run moved them compared with the one before.
+*  **Looks inside the model (experimental)** — record which neurons fire on your own traffic, and grow new neurons that start at exactly zero change. See [Looking inside the weights](#looking-inside-the-weights).
 *  **Mixture of Agents** — a headmaster can delegate bounded tasks to smaller worker models.
 *  **Local memory** — notes, sessions, training data, adapters and caches live locally.
 *  **RAG retrieval** — relevant notes can be retrieved and supplied as context.
@@ -788,52 +791,6 @@ The goal is to make the evaluation auditable rather than flattering.
 
 > A high adapter score demonstrates recall of the trained procedure. It does not prove general intelligence or deep conceptual understanding.
 
----
-
-# Six-skill evaluation
-
-A larger evaluation using six generated skills produced:
-
-| Skill                      | Base | Prompted | Adapter |
-| -------------------------- | ---: | -------: | ------: |
-| Quick Task Helper          |  0/5 |      1/5 | **5/5** |
-| Coffee Making              |  1/5 |      5/5 | **5/5** |
-| Bicycle Tuning             |  1/5 |      5/5 | **5/5** |
-| Repotting a Houseplant     |  2/5 |      5/5 | **5/5** |
-| Shipping a Parcel Overseas |  0/5 |      5/5 | **5/5** |
-| Sharpening a Kitchen Knife |  1/5 |      4/5 | **5/5** |
-
-WOWIE, that is a BIG BIG jump!!!!
-Overall:
-
-```text
-Adapter: 30/30
-Base:     5/30
-```
-
-These numbers should be treated as an experiment, not a benchmark claim. The evaluation metric measures reproduction of the skill's procedure, which is specifically what the experiment is designed to test.
-
-Custom evaluation tasks can be added under:
-
-```text
-training_data/workers/<role>/eval_tasks.json
-```
-
-Example:
-
-```json
-[
-  {
-    "id": "no_wifi",
-    "prompt": "wifi's dead again",
-    "must_include": ["toggle"]
-  },
-  "the network dropped, sort it out"
-]
-```
-
----
-
 # How much does it take to learn something new?
 
 Measured on 2026-09-15, Qwen3-14B on an M-series Mac, against a
@@ -1408,6 +1365,71 @@ Training is **not automatically restarted after a crash**. This prevents a machi
 
 ---
 
+## Looking inside the weights
+
+### It decides when to train
+
+Training starts two ways. The automatic way: corrections and recovered
+mistakes collect as examples, and once enough accumulate a LoRA run starts on
+its own. The other way: the model itself can call `train_adapter` (keep
+training on what it has) or `retrain_adapter` (rebuild from scratch) whenever
+it judges a fine-tune is due. At the default `safety.require_confirm_score`
+of 3 these score 2/3, so they run without a prompt and land in the security
+log. Raise the bar to 2 if you want to approve every self-started run.
+Either way the golden set still grades the result and rolls it back if it
+got worse.
+
+### Seeing what a fine-tune changed
+
+LoRA never rewrites the base model. Each module it touches becomes
+`W + scale · (lora_a @ lora_b)`, so the change is readable straight from the
+adapter file:
+
+```bash
+venv/bin/python scripts/weight_delta.py adapters/ --base mlx-community/Qwen3-14B-3bit
+```
+
+```text
+module                              |dW|      rel
+model.layers.38.self_attn.q_proj     11.616  10.181%  ########################
+model.layers.38.self_attn.v_proj      6.225   9.342%  ############
+model.layers.39.self_attn.q_proj     10.995   9.757%  ######################
+model.layers.39.self_attn.v_proj      5.969   9.635%  ############
+```
+
+That is the live 14B adapter on one machine: four attention modules in the
+last two layers, each moved by about a tenth of its own size. `--since OLD`
+compares two adapters (two checkpoints of one run, or before and after a
+retrain) and prints how much the latest training moved each module.
+
+### Which neurons fire, and growing new ones (experimental)
+
+`bench/activation_recorder.py` hooks every layer and MLP of the headmaster,
+records which neurons fire on one set of prompts, then tests on a second set
+whether that recording means anything, by pruning with it and with a random
+choice. On Qwen3-14B-3bit, measured as how often the pruned model still picks
+the full model's next token:
+
+| cut | chosen by the recording | chosen at random |
+|---|---|---|
+| switch off 10% of neurons | 0.875 | 0.776 |
+| switch off 50% of neurons | 0.584 | 0.200 |
+| drop 8 of 40 layers | 0.478 | 0.484 |
+
+Neuron firing is a real signal. Layer "influence" is not; it did no better
+than random.
+
+`bench/neuron_adapter.py` adds weights instead: new MLP neurons beside the
+frozen base, whose output starts at exactly zero, so at step 0 the model is
+bit-for-bit unchanged. On Qwen3-0.6B, four examples taught it a fact it could
+not have known, and it answered a phrasing it never saw. Left switched on for
+everything, the new neurons also bent unrelated answers (the capital of
+Australia turned into Vancouver). Switched on only for their own skill, the
+same way skill adapters are triggered, unrelated replies were identical to
+the base model's. Neither of these is wired into the agent yet.
+
+---
+
 # 💻 Tools
 
 Symbio can interact with the local machine through several tool groups.
@@ -1481,6 +1503,32 @@ Save information for future retrieval:
 ### Web research
 
 Search the web and save useful discoveries as local `Learned:` notes.
+
+### Screen recording (OBS)
+
+`obs_record` starts, stops or checks an OBS Studio recording, so a task you
+are filming can end itself: Symbio finishes the job, then stops the
+recording, and the clip ends on the result instead of on you reaching for
+the mouse.
+
+It talks to OBS's built-in WebSocket server (OBS 28 and later), not a hotkey
+or a click on the OBS window, so nothing is pulled in front of what is being
+recorded, and every answer is OBS's own report: `stop` names the file OBS
+saved, and only says STOPPED once OBS confirms no recording is running.
+
+One-time setup: in OBS, **Tools → WebSocket Server Settings → Enable
+WebSocket server**. The port and password are read from OBS's own settings on
+the same Mac; set `obs.host`, `obs.port` or `obs.password` in `config.json`
+(or `SYMBIO_OBS_PASSWORD`) to point it elsewhere. Starting a recording is
+scored as a screen capture, so on a turn where you did not ask for it, it
+asks first.
+
+```text
+You: Submit the Show HN post, then stop the recording.
+     ... browser steps, the Allow card for the post ...
+     [Submit CONFIRMED ... /item?id=...]
+     [Recording STOPPED] Saved to ~/Movies/2026-09-25 14-02-11.mov
+```
 
 ### Telegram
 

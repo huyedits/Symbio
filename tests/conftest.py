@@ -27,6 +27,7 @@ That also stops the developer's personal notes from steering retrieval
 assertions. symbio/rag.py keeps its own module-level NOTES_DIR, so both must move.
 test_prune.py covers the pruner directly against its own isolated store.
 """
+import importlib.util
 import json
 import shutil
 

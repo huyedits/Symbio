@@ -13,6 +13,16 @@ from symbio.app import chat, dispatch, golden, pending, tooling, training
 from symbio.app import config as app_config
 
 
+@pytest.fixture(autouse=True)
+def _engine_free_sampling(monkeypatch):
+    """Every test here fakes load() and generate(), but dispatch builds its
+    sampler and logits processors from mlx_lm before calling generate, so the
+    fakes were unreachable without the engine installed. The fakes ignore
+    both, so a stub changes nothing where the engine exists."""
+    monkeypatch.setattr(dispatch, "make_sampler", lambda *a, **k: None)
+    monkeypatch.setattr(dispatch, "make_logits_processors", lambda *a, **k: None)
+
+
 class FakeTokenizer:
     def apply_chat_template(self, messages, tokenize=False,
                             add_generation_prompt=False, enable_thinking=False):
@@ -1712,7 +1722,13 @@ def test_the_browser_action_grammar_is_left_byte_identical():
 # 'set_up_tent_in_wind', each with its own backup.
 
 def test_a_second_run_for_the_same_role_is_refused(monkeypatch, tmp_path):
+    import importlib.util
     import threading as _threading
+
+    # The first run happens on a thread, where a missing engine kills it
+    # silently and reads as "never started" rather than as a skip.
+    if importlib.util.find_spec("mlx_lm") is None:
+        pytest.skip("needs the MLX engine (Apple Silicon only)")
 
     _isolate_dirs(monkeypatch, tmp_path)
     monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")

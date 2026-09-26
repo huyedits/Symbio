@@ -265,21 +265,28 @@ EXTENDED_CASES: tuple[ToolCase, ...] = DEFAULT_CASES + (
         expect_tool="verify_features", observation="12 features checked, all healthy.",
         also_accept=("system_check",), check_final=_any_of("12", "health", "feature"),
     ),
+    # Both delegation cases name BUILT-IN roles (worker_defaults.BUILTIN_WORKERS).
+    # They used to name mock_aws_client and research_brief, which existed only
+    # in one developer's saved skills: on a fresh install neither is in the
+    # delegate_task role enum, so the model was right to refuse and the cases
+    # read as dispatch failures forever.
     ToolCase(
-        id="delegate_mock_aws",
-        description="An AWS question reaches the mock_aws_client worker",
-        prompt="Use the mock_aws_client worker to list my S3 buckets.",
+        id="delegate_summarize",
+        description="A condense request reaches the summarize worker",
+        prompt=("Use the summarize worker to condense this: solid-state "
+                "batteries promise higher energy density and better safety, "
+                "but manufacturing them at scale is still unsolved."),
         expect_tool="delegate_task",
-        observation="Worker mock_aws_client replied: buckets are backups, logs, assets.",
-        check_final=_any_of("backups", "logs", "assets", "bucket"),
+        observation="Worker summarize_worker replied: denser and safer, but not yet manufacturable at scale.",
+        check_final=_any_of("solid-state", "density", "denser", "scale"),
     ),
     ToolCase(
-        id="delegate_research",
-        description="A research request reaches the research_brief worker",
-        prompt="Delegate to the research_brief worker: summarise the state of solid-state batteries.",
+        id="delegate_second_opinion",
+        description="A verification request reaches the second_opinion worker",
+        prompt="Get a second_opinion from that worker: is 17 * 23 equal to 391?",
         expect_tool="delegate_task",
-        observation="Worker research_brief replied: solid-state cells promise higher density but scaling is unsolved.",
-        check_final=_any_of("solid-state", "density", "scaling"),
+        observation="Worker second_opinion_worker replied: VERDICT: correct\nANSWER: 391",
+        check_final=_any_of("391", "correct", "yes"),
     ),
     ToolCase(
         id="compact_memory", description="A full memory store reaches compact_memory",
