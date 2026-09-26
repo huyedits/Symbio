@@ -103,6 +103,9 @@ GATEWAY_PID_FILE = PROJECT_DIR / "gateway.pid"
 # file is for stop/status.
 DAEMON_SOCKET = PROJECT_DIR / "daemon.sock"
 DAEMON_PID_FILE = PROJECT_DIR / "daemon.pid"
+# The desktop pet (`symb pet`). Written by the pet process itself, so one
+# started directly as `symbio-pet` is found by `symb pet status` too.
+PET_PID_FILE = PROJECT_DIR / "pet.pid"
 # The fine-tune in progress, as one JSON file under LOG_DIR for anything
 # outside the training process that wants to watch it (symbio_pet draws it).
 # Written by symbio/app/training_live.py. A name rather than a path: the suite

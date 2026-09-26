@@ -118,6 +118,18 @@ def _build_parser() -> argparse.ArgumentParser:
     daemon_sub.add_parser("run", help=argparse.SUPPRESS)  # internal: the daemon process
     daemon_parser.set_defaults(daemon_command="status")
 
+    # One optional action rather than subparsers, so `symb pet --demo` and
+    # `symb pet start --demo` both parse: flags declared on both a parser and
+    # its subparser are overwritten by the subparser's defaults.
+    pet_parser = sub.add_parser(
+        "pet", help="The desktop cat that shows training as it happens (macOS)")
+    pet_parser.add_argument(
+        "pet_command", nargs="?", default="start",
+        choices=["start", "stop", "status", "run"],
+        help="start (default) puts it on the desktop; run keeps it in this terminal")
+    pet_parser.add_argument("--demo", action="store_true",
+                            help="Play a scripted run instead of watching this install")
+
     train_parser = sub.add_parser("train", help="Run LoRA training")
     train_parser.add_argument(
         "skill",
@@ -245,7 +257,18 @@ def _build_parser() -> argparse.ArgumentParser:
     mcp_build.add_argument("name", help="Tool name")
     mcp_build.add_argument("--desc", default="", help="Short description of what the tool does")
     mcp_sub.add_parser("list", help="List generated MCP tools")
+    mcp_sub.add_parser(
+        "bridge", help="Serve Symbio's resident model to MCP hosts such as Claude Desktop")
     mcp_parser.set_defaults(mcp_command="run")
+
+    sub.add_parser(
+        "acp", help="Speak the Agent Client Protocol on stdio, for Zed, VS Code, "
+                    "JetBrains, Toad and other ACP hosts")
+    connect_parser = sub.add_parser("connect", help="Hook Symbio into another app")
+    connect_parser.add_argument("target", choices=["claude-desktop", "hermes"],
+                                help="The app to connect Symbio to")
+    connect_parser.add_argument("--remove", action="store_true",
+                                help="Disconnect instead")
 
     benchmark_parser = sub.add_parser("benchmark", help="Benchmark Ollama models as local brains")
     benchmark_parser.add_argument(
@@ -1279,6 +1302,26 @@ def main(argv: list[str] | None = None) -> int:
 
         ok = retrain_model(config, digest=not args.no_digest, seed=not args.no_seed)
         return 0 if ok else 1
+    if command in ("acp", "mcp") and (command == "acp" or args.mcp_command == "bridge"):
+        # The host talks to the bridge on stdio. It becomes this process
+        # rather than a child of it, so none of the agent stack this CLI has
+        # loaded stays resident behind a bridge that needs none of it.
+        from symbio.app.connect import package_root
+
+        module = "symbio_desktop.acp" if command == "acp" else "symbio_desktop.mcp_bridge"
+        env = dict(os.environ, SYMBIO_HOME=str(constants.PROJECT_DIR))
+        env["PYTHONPATH"] = os.pathsep.join(
+            p for p in (package_root(), env.get("PYTHONPATH", "")) if p)
+        sys.stdout.flush()
+        os.execve(sys.executable, [sys.executable, "-m", module], env)
+
+    if command == "connect":
+        from symbio.app import connect
+
+        if args.target == "hermes":
+            return connect.hermes(remove=args.remove)
+        return connect.claude_desktop(remove=args.remove)
+
     if command == "mcp":
         sub = getattr(args, "mcp_command", None) or "run"
         if sub == "run":
@@ -1388,6 +1431,18 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print("Usage: symb daemon [start | stop | status]")
         return 1
+
+    if command == "pet":
+        from symbio.app import pet
+
+        action = getattr(args, "pet_command", None) or "start"
+        if action == "stop":
+            return pet.stop_pet()
+        if action == "status":
+            return pet.pet_status()
+        if action == "run":
+            return pet.run_pet(demo=args.demo)
+        return pet.start_pet(demo=args.demo)
 
     parser.print_help()
     return 1

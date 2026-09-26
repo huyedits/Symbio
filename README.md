@@ -184,9 +184,14 @@ default.
 ### The pet
 
 ```bash
-symbio-pet                 # a cat on your desktop, watching this install
-symbio-pet --demo          # the same cat playing a scripted run; nothing is trained
+symb pet                   # put a cat on your desktop, watching this install
+symb pet --demo            # the same cat playing a scripted run; nothing is trained
+symb pet status            # is it out
+symb pet stop              # call it in
 ```
+
+`symb pet` starts it in the background, like `symb daemon start`; `symb pet run`
+keeps it in the terminal instead, and `symbio-pet` does the same on its own.
 
 A tilcayo — *Leopardus tilcayo*, the newest cat species, described on
 17 September 2026: light-brown coat, big irregular rosettes, short round ears.
@@ -205,14 +210,62 @@ It is the fine-tune, drawn:
   is kept, and the cat swats it off its collar when it is rolled back.
 
 Between runs it sleeps while no model is loaded, thinks while the model works,
-and strolls along the top of the Dock now and then. Drag it anywhere,
-double-click it for the chat window, right-click to stop it wandering.
+and strolls along the top of the Dock now and then. Drag it anywhere, and
+right-click to stop it wandering. Double-click it and the chat opens as its
+own app — a native Symbio window with the cat in the Dock and the usual
+menus, not a browser tab.
 
 It never imports `symbio`. Training writes `logs/training_live.json` from the
 trainer's own lines and the gate's verdict; the pet reads that, the daemon's
 pid and socket, and `ps`. Measured: about 80 MB resident, 4.5% of one core
 sitting and 3% asleep, more while it walks or eats. It needs PyObjC
 (`pip install "symbio-cli[pet]"`) and runs on macOS only.
+
+### Symbio in other apps
+
+```bash
+symb acp                        # an ACP agent on stdio, for Zed, the VS Code and
+                                # JetBrains ACP plugins, Toad, and other ACP hosts
+symb connect claude-desktop     # Claude Desktop gets Symbio as tools (MCP)
+symb connect hermes             # so does Hermes Agent (CLI and desktop app)
+```
+
+`symb acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com):
+the host starts it, and Symbio's resident model becomes the host's agent. The
+reply streams in as the agent's message, Symbio's activity lines arrive as its
+thinking, and its approval prompts are asked through the host's own permission
+dialog. It starts `symb daemon` itself if no model is loaded. In Zed:
+
+```json
+"agent_servers": { "Symbio": { "command": "symb", "args": ["acp"] } }
+```
+
+The fine-tune loop comes along. A session has two modes: **Private** (the
+default; nothing is added to the corpus) and **Learn** (the conversation is
+saved for training when the session closes). The loop's commands — `/save`,
+`/learn`, `/train`, `/golden`, `/forget_last`, `/status` — show up in the
+host's command menu. A retrain started from the session appears as a tool call
+that counts the steps and the loss, then reports the golden gate's verdict:
+kept, or rolled back to the previous adapter. The four stages (collect, train,
+golden gate, keep or roll back) are shown as the session's plan.
+
+Claude Desktop hosts MCP servers rather than ACP agents, so `symb connect
+claude-desktop` registers `symb mcp bridge` in its config instead: Claude gets
+`ask_symbio` (a turn with Symbio, which keeps the thread between calls) and
+`symbio_status` (model, adapter, and any fine-tune in progress). Approval
+prompts cannot be answered from inside a tool call there, so they are declined
+and the reply says what was asked. `--remove` takes it out again.
+
+Hermes Agent can run as an ACP agent but cannot host one, so it gets the same
+MCP bridge. `symb connect hermes` registers it through Hermes's own `hermes mcp
+add`, which keeps the comments in its config.yaml, and raises the tool timeout
+to 900 seconds so a `/train` sent through `ask_symbio` is not cut off at
+Hermes's default of 300. The loop's commands work through `ask_symbio` too:
+send it `/status`, `/save`, `/golden` or `/train` and their output comes back
+as the reply, without the trainer's per-step lines.
+
+Both bridges were checked with the official ACP and MCP SDK clients, and the
+MCP bridge by typing into Hermes Agent's own terminal UI.
 
 ### Staying online
 

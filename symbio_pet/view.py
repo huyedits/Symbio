@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import signal
 import socket
 import subprocess
@@ -28,6 +29,7 @@ import objc
 from AppKit import (
     NSAffineTransform,
     NSApplication,
+    NSApplicationActivateIgnoringOtherApps,
     NSApplicationActivationPolicyAccessory,
     NSAttributedString,
     NSBackingStoreBuffered,
@@ -49,6 +51,7 @@ from AppKit import (
     NSMenu,
     NSMenuItem,
     NSPanel,
+    NSRunningApplication,
     NSScreen,
     NSShadow,
     NSView,
@@ -59,7 +62,7 @@ from AppKit import (
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
 )
-from Foundation import NSMakeRect, NSRunLoop, NSRunLoopCommonModes, NSTimer
+from Foundation import NSMakeRect, NSObject, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
 from symbio_pet.cat import (
     CX, FAR_FRONT, FAR_HIND, GROUND, HEIGHT, PANEL, WIDTH, Cat,
@@ -632,6 +635,46 @@ class Painter:
 
 # ── rendering without a window ───────────────────────────────────────
 
+def render_icon(path: Path, size: int = 512) -> None:
+    """The app icon: the cat's face on a rounded tile, the way macOS draws
+    them. Used for the chat app's Dock icon (symbio_desktop/static/icon.png)."""
+    NSApplication.sharedApplication()
+    cat = Cat(seed=5)
+    awake = __import__("symbio_pet.feed", fromlist=["Snapshot"]).Snapshot(
+        presence="awake", has_adapter=True, adapter_iters=600)
+    for _ in range(60):
+        cat.update(1 / 30, awake)
+    cat.look = (0.0, 0.0)
+    rig = cat.rig()
+    painter = Painter()
+    rep = NSBitmapImageRep.alloc().initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel_(
+        None, size, size, 8, 4, True, False, NSDeviceRGBColorSpace, 0, 0)
+    context = NSGraphicsContext.graphicsContextWithBitmapImageRep_(rep)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.setCurrentContext_(context)
+    try:
+        inset = size * 0.1          # Apple's grid leaves a margin round the tile
+        tile = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            ((inset, inset), (size - 2 * inset, size - 2 * inset)), size * 0.18, size * 0.18)
+        NSGradient.alloc().initWithStartingColor_endingColor_(
+            painter.color((0.11, 0.38, 0.36)), painter.color((0.20, 0.62, 0.56))
+        ).drawInBezierPath_angle_(tile, 90.0)
+        tile.addClip()
+        hx, hy, _, _, _ = rig["head"]
+        place = NSAffineTransform.transform()
+        place.translateXBy_yBy_(size / 2, size * 0.53)
+        place.scaleXBy_yBy_(size / 100.0, size / 100.0)
+        place.translateXBy_yBy_(-hx - 3.0, -hy)
+        place.concat()
+        painter._collar(rig, cat)
+        painter._head(rig)
+        context.flushGraphics()
+    finally:
+        NSGraphicsContext.restoreGraphicsState()
+    data = rep.representationUsingType_properties_(NSBitmapImageFileTypePNG, {})
+    data.writeToFile_atomically_(str(path), True)
+
+
 def render_png(painter: Painter, cat: Cat, path: Path, scale: float = 2.0,
                background=None) -> None:
     """Draw one frame into a PNG. For checks and screenshots; needs no window."""
@@ -657,12 +700,11 @@ def render_png(painter: Painter, cat: Cat, path: Path, scale: float = 2.0,
 
 # ── the live pet ─────────────────────────────────────────────────────
 
-def _listening(port: int) -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
-            return True
-    except OSError:
-        return False
+def _free_port() -> int:
+    """A port nothing is listening on, for the chat app's own server."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 class CatView(NSView):
@@ -714,13 +756,22 @@ class CatView(NSView):
         NSApplication.sharedApplication().terminate_(None)
 
 
+class PetDelegate(NSObject):
+    def applicationWillTerminate_(self, notification):
+        pet = getattr(self, "pet", None)
+        if pet is not None:
+            pet.guard("quit", pet.shutdown)
+
+
 class Pet:
     def __init__(self, feed, position_file: Path | None, log_dir: Path | None,
-                 port: int = 8742):
+                 pid_file: Path | None = None):
         self.feed = feed
         self.position_file = position_file
         self.log_dir = log_dir
-        self.port = port
+        self.pid_file = pid_file
+        self._delegate = None
+        self._chat: subprocess.Popen | None = None
         self.cat = Cat()
         self.roamer = Roamer()
         self.painter = Painter()
@@ -849,6 +900,18 @@ class Pet:
         if self.roamer.arrived:
             self._save_position()
 
+    def shutdown(self):
+        """On the way out: remember where it sat, and give up the pid file —
+        only if it is still ours, so a stale pet never removes a live one's."""
+        self._save_position()
+        if self.pid_file is None:
+            return
+        try:
+            if self.pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                self.pid_file.unlink()
+        except OSError:
+            pass
+
     def toggle_roam(self):
         self.roamer.enabled = not self.roamer.enabled
         if not self.roamer.enabled:
@@ -905,20 +968,20 @@ class Pet:
         NSMenu.popUpContextMenu_withEvent_forView_(menu, event, self.view)
 
     def open_chat(self):
-        """The desktop chat window: reused when it is already serving,
-        started (detached, so it outlives the pet) when it is not. It opens
-        the browser itself once it is listening.
+        """The chat as its own app: a native Symbio window with its own Dock
+        icon and menus (symbio_desktop --window), never a browser tab.
 
-        `open`, not webbrowser.open: on macOS that drives the browser over
-        AppleScript, and a browser that is not answering blocked this thread
-        (the one that draws) for the two minutes an AppleEvent takes to
-        time out.
+        One at a time: while it is open, a double-click brings it forward.
+        It serves itself on a free port, so a browser-mode desktop someone
+        started on 8742 is neither needed nor in the way, and it is detached,
+        so it stays open when the pet goes home.
         """
-        url = f"http://127.0.0.1:{self.port}"
-        if _listening(self.port):
-            subprocess.Popen(["open", url], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return
+        if self._chat is not None and self._chat.poll() is None:
+            running = NSRunningApplication.runningApplicationWithProcessIdentifier_(
+                self._chat.pid)
+            if running is not None:
+                running.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+                return
         log = subprocess.DEVNULL
         if self.log_dir is not None:
             try:
@@ -927,8 +990,9 @@ class Pet:
             except OSError:
                 log = subprocess.DEVNULL
         try:
-            subprocess.Popen(
-                [sys.executable, "-m", "symbio_desktop.cli", "--port", str(self.port)],
+            self._chat = subprocess.Popen(
+                [sys.executable, "-m", "symbio_desktop.cli", "--window",
+                 "--port", str(_free_port())],
                 cwd=str(Path(__file__).resolve().parent.parent),
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True)
@@ -1007,8 +1071,20 @@ class Pet:
         threading.Thread(target=self._poll_forever, name="pet-feed", daemon=True).start()
         self._pace()
 
+        # Every way out — the menu, a signal, logging out — goes through
+        # applicationWillTerminate_, which is where the place is saved and the
+        # pid file removed. AppKit ends the process with exit(), so nothing
+        # after app.run() and no Python atexit handler would ever run.
+        self._delegate = PetDelegate.alloc().init()
+        self._delegate.pet = self
+        app.setDelegate_(self._delegate)
+        if self.pid_file is not None:
+            try:
+                self.pid_file.write_text(str(os.getpid()), encoding="utf-8")
+            except OSError:
+                pass
+
         def stop(*_):
-            self._save_position()
             app.terminate_(None)
 
         # The handler runs at the next timer tick, at most 1/6 s away.

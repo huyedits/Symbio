@@ -106,6 +106,32 @@ def test_a_gated_run_waits_for_the_gate(live):
     assert training_live.read()["verdict"] == "kept"
 
 
+def test_the_golden_remedy_run_is_judged_by_the_same_gate(live):
+    """The gate's own follow-up run must not end "kept" on its own: seen live,
+    the remedy was shown kept, then the gate rolled both runs back."""
+    training_live.arm_gate(None)
+    training_live.begin(None, 100)
+    training_live.end("trained", iter=100, total_iters=100)
+    first = training_live.read()["run"]
+    training_live.begin(None, 50)              # the remedy, arm already spent
+    training_live.end("trained", iter=50, total_iters=150)
+    state = training_live.read()
+    assert (state["gated"], state["follows"], state["verdict"]) == (True, first, None)
+    training_live.mark_rolled_back(None)
+    assert training_live.read()["verdict"] == "rolled_back"
+
+
+def test_a_run_after_a_verdict_starts_a_new_flow(live):
+    training_live.arm_gate(None)
+    training_live.begin(None, 20)
+    training_live.end("trained", iter=20, total_iters=20)
+    training_live.mark_kept()
+    training_live.begin(None, 20)              # e.g. a later `symb train`
+    training_live.end("trained", iter=20, total_iters=40)
+    state = training_live.read()
+    assert (state["gated"], state["follows"], state["verdict"]) == (False, None, "kept")
+
+
 def test_the_cleanup_never_overturns_a_rollback(live):
     """discard_adapter_backup runs in the `finally` of every gated flow."""
     training_live.arm_gate(None)
@@ -513,6 +539,164 @@ def test_it_stays_put_when_it_should(snap, hovered, enabled):
         cat.hovered = hovered
         x, y = roam.step(cat, 1 / 30, x, y, floor=80.0, left=0.0, right=1600.0)
     assert x == 700.0
+
+
+def test_waking_up_clears_the_zs():
+    """Sitting up puts the head where the z's were still drifting."""
+    cat = Cat(seed=1)
+    _step(cat, 4.0, Snapshot(presence="asleep"))
+    assert any(p.kind == "z" for p in cat.particles)
+    _step(cat, 1.0, Snapshot(presence="awake"))
+    assert not any(p.kind == "z" for p in cat.particles)
+
+
+# ---- `symb pet` ---------------------------------------------------------------
+
+from symbio.app import pet as pet_cmd  # noqa: E402
+from symbio.app.cli import _build_parser  # noqa: E402
+
+
+@pytest.mark.parametrize("argv,action,demo", [
+    (["pet"], "start", False),
+    (["pet", "--demo"], "start", True),
+    (["pet", "start", "--demo"], "start", True),
+    (["pet", "run", "--demo"], "run", True),
+    (["pet", "stop"], "stop", False),
+    (["pet", "status"], "status", False),
+])
+def test_symb_pet_parses_every_shape(argv, action, demo):
+    args = _build_parser().parse_args(argv)
+    assert (args.command, args.pet_command, args.demo) == ("pet", action, demo)
+
+
+@pytest.fixture
+def pet_home(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants, "PROJECT_DIR", tmp_path)
+    monkeypatch.setattr(constants, "PET_PID_FILE", tmp_path / "pet.pid")
+    monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
+    return tmp_path
+
+
+def test_a_stale_or_foreign_pid_is_not_a_pet(pet_home):
+    constants.PET_PID_FILE.write_text(str(_dead_pid()), encoding="utf-8")
+    assert pet_cmd.pet_pid() is None
+    # Alive, but this is pytest, not a pet: after a reboot a stale number is
+    # soon somebody else's.
+    constants.PET_PID_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    assert pet_cmd.pet_pid() is None
+
+
+def test_the_pet_runs_as_its_own_light_process(pet_home):
+    """Never the CLI itself, which has the whole agent package loaded."""
+    argv = pet_cmd._argv(demo=True)
+    assert argv[1:] == ["-m", "symbio_pet", "--demo"]
+    assert pet_cmd._env()["SYMBIO_HOME"] == str(pet_home)
+
+
+def test_start_finds_a_pet_already_out(pet_home, monkeypatch, capsys):
+    monkeypatch.setattr(pet_cmd, "pet_pid", lambda: 4242)
+    monkeypatch.setattr(pet_cmd.subprocess, "Popen", lambda *a, **k: pytest.fail("spawned"))
+    assert pet_cmd.start_pet() == 0
+    assert "already out (PID 4242)" in capsys.readouterr().out
+
+
+def test_start_reports_a_pet_that_could_not_start(pet_home, monkeypatch, capsys):
+    class Gone:
+        pid = 777
+
+        def poll(self):
+            return 1
+
+    def spawn(argv, **kwargs):
+        kwargs["stdout"].write("  The pet draws with AppKit through PyObjC ...\n")
+        kwargs["stdout"].flush()
+        return Gone()
+
+    monkeypatch.setattr(pet_cmd.subprocess, "Popen", spawn)
+    assert pet_cmd.start_pet() == 1
+    assert "PyObjC" in capsys.readouterr().out
+
+
+def test_start_waits_for_the_pet_to_claim_its_pid(pet_home, monkeypatch, capsys):
+    class Running:
+        pid = 778
+
+        def poll(self):
+            return None
+
+    answers = iter([None, None, 778])
+    monkeypatch.setattr(pet_cmd, "pet_pid", lambda: next(answers))
+    monkeypatch.setattr(pet_cmd.subprocess, "Popen", lambda *a, **k: Running())
+    assert pet_cmd.start_pet() == 0
+    assert "The pet is out (PID 778)" in capsys.readouterr().out
+
+
+def test_stop_sends_it_home(pet_home, monkeypatch, capsys):
+    answers = iter([555, None, None])
+    sent = []
+    monkeypatch.setattr(pet_cmd, "pet_pid", lambda: next(answers))
+    monkeypatch.setattr(pet_cmd.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    assert pet_cmd.stop_pet() == 0
+    assert sent == [(555, pet_cmd.signal.SIGTERM)]
+    assert "went home" in capsys.readouterr().out
+
+
+def test_stop_with_no_pet_out(pet_home, capsys):
+    assert pet_cmd.stop_pet() == 0
+    assert "No pet is out" in capsys.readouterr().out
+
+
+def test_one_cat_at_a_time(tmp_path):
+    from symbio_pet.cli import other_pet
+
+    pid_file = tmp_path / "pet.pid"
+    assert other_pet(pid_file) is None
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    assert other_pet(pid_file) is None            # that is this process
+    pid_file.write_text(str(_dead_pid()), encoding="utf-8")
+    assert other_pet(pid_file) is None            # stale
+
+
+def test_double_click_opens_the_chat_as_its_own_app(tmp_path, monkeypatch):
+    """A native Symbio window, never a browser tab, and never two of them."""
+    pytest.importorskip("AppKit")
+    from symbio_pet import view
+
+    launched, raised = [], []
+
+    class Chat:
+        pid = 4321
+
+        def poll(self):
+            return None
+
+    class Running:
+        def activateWithOptions_(self, options):
+            raised.append(options)
+
+    monkeypatch.setattr(view.subprocess, "Popen", lambda argv, **k: launched.append(argv) or Chat())
+    monkeypatch.setattr(view, "NSRunningApplication", types.SimpleNamespace(
+        runningApplicationWithProcessIdentifier_=lambda pid: Running()))
+    pet = view.Pet(feed=None, position_file=None, log_dir=tmp_path)
+    pet.open_chat()
+    pet.open_chat()
+    assert len(launched) == 1, "the second double-click must bring the first forward"
+    assert launched[0][1:4] == ["-m", "symbio_desktop.cli", "--window"]
+    assert raised
+
+
+def test_a_pet_gives_up_only_its_own_pid_file(tmp_path):
+    pytest.importorskip("AppKit")
+    from symbio_pet.view import Pet
+
+    pid_file = tmp_path / "pet.pid"
+    pet = Pet(feed=None, position_file=None, log_dir=None, pid_file=pid_file)
+    pid_file.write_text("999999", encoding="utf-8")
+    pet.shutdown()
+    assert pid_file.exists(), "a pet must never remove another pet's pid file"
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    pet.shutdown()
+    assert not pid_file.exists()
 
 
 # ---- the demo, and drawing it -----------------------------------------------
