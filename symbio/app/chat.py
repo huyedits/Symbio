@@ -71,7 +71,8 @@ from symbio.computer import BrowserSession
 from symbio import safety
 from symbio.tools import tool_few_shots
 from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, pending, prompts, prune, sandbox, security, sessions, setup, skills, tooling, training, web
-from symbio.app.config import apply_gpu_limits, config_show, set_config_value
+from symbio.app.config import (apply_gpu_limits, config_show, keep_model_resident,
+                               set_config_value)
 try:
     # tag_rag lives at the repo root rather than inside the package, so it is
     # only importable when the root is on sys.path — true for `./symb` (which
@@ -102,6 +103,7 @@ from symbio.app.chat_constants import (  # noqa: F401  (re-exported; see above)
     _COMPLETION_CLAIM, _CLAIM_HEDGE,
     _claims_completion
 )
+from symbio.app.chat_text import needs_thinking
 from symbio.app.chat_text import (  # noqa: F401  (re-exported; see above)
     _GUI_APP_ALIASES, _GUI_APP_STEMS, _gui_app_from_stem, _gui_app_for,
     _looks_like_shell_command, _VERIFICATION_FOLLOWUPS, _VERIFICATION_TRAILING,
@@ -792,6 +794,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         Called either immediately (when a model is supplied by the caller) or
         from _ensure_model_loaded() the first time the model is needed.
         """
+        # The daemon hands its sessions a model it loaded itself, so the
+        # _ensure_model_loaded path that applies these never ran there: the
+        # buffer-cache cap was ignored and the weights were never kept wired.
+        apply_gpu_limits(self.config)
+        keep_model_resident(self.model, self.config)
         self._check_idle_adapter()
 
         # Seed identity notes + clean training corpus on first run.
@@ -1679,6 +1686,22 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         level = str(self.config.get("agent", {}).get("thinking_level", "none")).lower()
         return THINKING_LEVELS.get(level, THINKING_LEVELS["none"])
 
+    def turn_thinking(self, user_input: str, working: bool = False) -> tuple[bool, int]:
+        """The thinking setting for THIS turn.
+
+        agent.think_when "auto" (the default) keeps thinking_level for work —
+        a task, code, a link, a tool round already under way — and answers
+        plain conversation without a reasoning block. "always" is the old
+        behaviour: every turn at thinking_level.
+        """
+        think, budget = self.thinking_setting()
+        if not think:
+            return think, budget
+        mode = str(self.config.get("agent", {}).get("think_when", "auto")).lower()
+        if mode == "always" or working or needs_thinking(user_input):
+            return think, budget
+        return False, 0
+
     def _skill_example_generator(self):
         """A teacher callable for skills._seed_worked_examples, or None.
 
@@ -2015,6 +2038,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             raise
         finally:
             self._indexing_now = False
+            # When the user last got a reply: the soul pass waits for a quiet
+            # spell after this rather than starting under their next message.
+            self._last_reply_at = time.monotonic()
             spinner.stop()
 
         if stripper is not None:
@@ -2250,7 +2276,15 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 return
             if not self._soul_pending:
                 continue
-            while self._indexing_now and not self._index_stop.is_set():
+            # Wait for a quiet spell, not just for the current reply to end.
+            # A reflection is a full 14B generation (~10 s): started the moment
+            # a reply finished, it ran under the user's NEXT message — measured
+            # 2026-09-26, a follow-up with 264 new tokens took 5.5 s to its
+            # first token instead of ~2.5. Nobody is waiting for this note.
+            quiet = float(self.config.get("memory", {}).get("soul_quiet_seconds", 45))
+            while not self._index_stop.is_set() and (
+                    self._indexing_now
+                    or time.monotonic() - getattr(self, "_last_reply_at", 0.0) < quiet):
                 time.sleep(0.5)
             if self._index_stop.is_set():
                 return

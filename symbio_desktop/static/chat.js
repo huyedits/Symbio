@@ -490,6 +490,11 @@ function connect() {
         wakingText = data.text || 'Waking Symbio…';
         if (waitTimer) tickWaiting(); else setStatus('busy', wakingText);
         break;
+      case 'asleep':
+        // The model could not be woken (the reason follows as a system line).
+        wakingText = '';
+        setStatus('off', `${window.__assistantName || 'Symbio'} · asleep — send a message to try again`);
+        break;
       case 'awake':
         wakingText = '';
         if (!waitTimer) setStatus('ok', `${window.__assistantName || 'Symbio'} · ready`);

@@ -147,7 +147,9 @@ def test_a_closed_reasoning_block_with_a_real_answer_is_left_alone(
         return _reply(timings, "<think>Short thought.</think>Here is your answer.")
 
     monkeypatch.setattr(session, "_generate_reply", fake_generate)
-    session._agent_turn("hello")
+    # A task, so the turn is served WITH thinking (think_when "auto" answers
+    # plain chat like "hello" without a reasoning block at all).
+    session._agent_turn("debug why my script crashes")
 
     assert calls == [True], f"one sample only, got {calls}"
     assert "Ran out of tokens mid-thought" not in "\n".join(output)

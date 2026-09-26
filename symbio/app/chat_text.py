@@ -247,6 +247,36 @@ _GREETING_FILLERS = {
 }
 
 
+# What makes a turn worth thinking about before answering. Chat — a greeting,
+# a quick question, thanks — answers directly. Measured 2026-09-26 on the 14B:
+# "hey, how's it going?" spent 105 words (about 11 s at 13 tok/s) reasoning
+# before "Hi! How can I help you today?", and "what's 17 times 23?" 152 words;
+# at thinking_level "max" the allowance is 4,096 tokens, five minutes.
+_WORK_WORDS = re.compile(
+    r"\b(write|code|coding|script|program|function|class|debug|fix|bug|error|"
+    r"traceback|exception|build|implement|refactor|design|architect|plan|"
+    r"step[- ]by[- ]step|prove|derive|solve|analy[sz]e|compare|evaluate|review|"
+    r"research|investigate|crack|decrypt|exploit|optimi[sz]e|think|reason|"
+    r"search|browse|open|click|post|tweet|download|install|configure|schedule|"
+    r"train|fine[- ]?tune)\b", re.IGNORECASE)
+_WORK_SHAPES = re.compile(r"```|https?://|\b[\w./-]+\.(py|js|ts|tsx|json|md|sh|txt|html|css|yaml|toml)\b")
+
+
+def needs_thinking(text: str) -> bool:
+    """Is this message work (think first) or chat (answer now)?
+
+    Errs toward thinking: a long message, code, a link or a file, or any
+    task verb gets the configured level. Only short, plain conversation —
+    the turns where a reasoning block is pure latency — skips it.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if len(t.split()) > 30:
+        return True
+    return bool(_WORK_SHAPES.search(t) or _WORK_WORDS.search(t))
+
+
 def _is_greeting(text: str) -> bool:
     t = text.strip().lower()
     if not t:

@@ -35,7 +35,6 @@ import base64
 import hashlib
 import json
 import mimetypes
-import fcntl
 import os
 import re
 import socket
@@ -552,11 +551,11 @@ def _daemon_log_tail(lines: int = 4) -> str:
 def wake_daemon(report=None, timeout: float = DAEMON_START_S) -> tuple[bool, str]:
     """The resident model up and answering, started if it has to be.
 
-    One starter at a time, across processes as well as threads: the check and
-    `symb daemon start` run under an flock on PROJECT_DIR/daemon.start.lock,
-    and `start` returns only once the new pid file is written. Two windows, or
-    a window and an ACP host, that both saw "down" would otherwise both start
-    one — two copies of a 14B, the out-of-memory kill this Mac keeps having.
+    One starter at a time: a lock here for this process, and an flock inside
+    `symb daemon start` for every process (see symbio/app/daemon.py). Two
+    windows, or a window and an ACP host, that both saw "down" would otherwise
+    both start one — two copies of a 14B, the out-of-memory kill this Mac
+    keeps having.
 
     `report(text)` gets a progress line every couple of seconds while it loads.
     A load that dies (usually memory) is reported when it dies, with the end
@@ -564,40 +563,36 @@ def wake_daemon(report=None, timeout: float = DAEMON_START_S) -> tuple[bool, str
     """
     report = report or (lambda _text: None)
     started = time.monotonic()
+    # One starter per process here; across processes `symb daemon start`
+    # itself holds an flock around check-and-start (symbio/app/daemon.py), so
+    # a window, an ACP host and `symb watch` that all find it down start one.
     with _WAKE_LOCK:
-        try:
-            constants.PROJECT_DIR.mkdir(parents=True, exist_ok=True)
-            lock = open(constants.PROJECT_DIR / "daemon.start.lock", "a")
-        except OSError as e:
-            return False, f"Could not start Symbio's model: {e}"
-        with lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            state = daemon_state()
-            if state == "loading":
-                try:
-                    pid = int(constants.DAEMON_PID_FILE.read_text(encoding="utf-8").strip())
-                except (OSError, ValueError):
-                    pid = 0
-                if pid and not _is_our_daemon(pid):
-                    for stale in (constants.DAEMON_PID_FILE, constants.DAEMON_SOCKET):
-                        try:
-                            stale.unlink()
-                        except OSError:
-                            pass
-                    state = "down"
-            if state == "down":
-                report("Waking Symbio — starting the model…")
-                try:
-                    done = subprocess.run(
-                        [sys.executable, "-m", "symbio.app.cli", "daemon", "start"],
-                        cwd=str(APP_DIR.parent), stdin=subprocess.DEVNULL,
-                        capture_output=True, text=True, timeout=60, check=False)
-                    said = (done.stdout + done.stderr).strip()
-                except (OSError, subprocess.SubprocessError) as e:
-                    said = str(e)
-                if daemon_state() == "down":
-                    return False, ("Symbio could not start its model"
-                                   + (f": {said[-400:]}" if said else "."))
+        state = daemon_state()
+        if state == "loading":
+            try:
+                pid = int(constants.DAEMON_PID_FILE.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                pid = 0
+            if pid and not _is_our_daemon(pid):
+                for stale in (constants.DAEMON_PID_FILE, constants.DAEMON_SOCKET):
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
+                state = "down"
+        if state == "down":
+            report("Waking Symbio — starting the model…")
+            try:
+                done = subprocess.run(
+                    [sys.executable, "-m", "symbio.app.cli", "daemon", "start"],
+                    cwd=str(APP_DIR.parent), stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True, timeout=60, check=False)
+                said = (done.stdout + done.stderr).strip()
+            except (OSError, subprocess.SubprocessError) as e:
+                said = str(e)
+            if daemon_state() == "down":
+                return False, ("Symbio could not start its model"
+                               + (f": {said[-400:]}" if said else "."))
     last = 0.0
     while time.monotonic() - started < timeout:
         state = daemon_state()
@@ -683,7 +678,11 @@ class DaemonBridge:
         self.waking = False
         self._wake_lock = threading.Lock()
         self._connect_lock = threading.Lock()
-        self.woke_at = 0.0             # when a wake by this bridge finished
+        # say() and the first-prompt hand-off of `pending` both read `ready`
+        # and touch `pending`; unlocked, a message sent in between could jump
+        # ahead of the held ones or be stranded in the list.
+        self._pending_lock = threading.Lock()
+        self.woke_at = 0.0             # when a wake by this bridge loaded a model
         # The session prints its banner and THEN asks for input, so a message
         # sent the moment the socket opens arrives before the session is
         # listening: the banner's own input_prompt closed a turn that had not
@@ -777,6 +776,7 @@ class DaemonBridge:
         threading.Thread(target=self._wake, args=(then_connect,), daemon=True).start()
 
     def _wake(self, then_connect: bool) -> None:
+        loaded_here = daemon_state() != "ready"
         try:
             ok, why = wake_daemon(lambda text: self.send_json({"type": "waking", "text": text}))
         except Exception as e:           # never leave `waking` stuck on
@@ -785,7 +785,11 @@ class DaemonBridge:
             with self._wake_lock:
                 self.waking = False
         if ok:
-            self.woke_at = time.monotonic()
+            if loaded_here:
+                # Only a model this bridge watched load has a cold first
+                # session; one already up that is slow to answer is being
+                # held by another client, and the old warning is right.
+                self.woke_at = time.monotonic()
             self.send_json({"type": "awake", "text": ""})
             # A pre-warm opens no session, but a message typed while it was
             # loading is waiting in `pending`. Seen live: it waited forever.
@@ -794,6 +798,7 @@ class DaemonBridge:
             if then_connect or self.pending:
                 ok, why = self.connect()
         if not ok:
+            self.send_json({"type": "asleep", "text": why})
             self.send_json({"type": "system", "text": why})
             if self.pending:
                 self.pending.clear()
@@ -922,11 +927,12 @@ class DaemonBridge:
                     # out as tokens, so this carries no body. Before the first
                     # one it means the session has finished starting up.
                     if not self.ready:
-                        self.ready = True
+                        with self._pending_lock:
+                            self.ready = True
+                            queued, self.pending = self.pending, []
+                            for text in queued:
+                                self._send({"type": "input", "text": text})
                         self.send_json({"type": "awake", "text": ""})
-                        queued, self.pending = self.pending, []
-                        for text in queued:
-                            self._send({"type": "input", "text": text})
                     elif self.open_turns:
                         self._end_of_turn()
                         self.open_turns -= 1
@@ -944,6 +950,8 @@ class DaemonBridge:
             # message wakes the model again rather than writing into it.
             if self.open_turns:
                 self.open_turns = 0
+                with self._pending_lock:
+                    self.pending.clear()
                 self.send_json({"type": "done", "text": ""})
             if self.rfile is not None and self.sock is not None:
                 self._forget_connection()
@@ -1080,13 +1088,14 @@ class DaemonBridge:
         if not self.open_turns:
             self._new_turn()     # not mid-stream: a queued turn resets at its start
         self.open_turns += 1
-        if not self.ready:
+        with self._pending_lock:
+            if not self.ready:
+                self.pending.append(text)
+                return True
+            if self._send({"type": "input", "text": text}):
+                return True
             self.pending.append(text)
-            return True
-        if self._send({"type": "input", "text": text}):
-            return True
-        self.pending.append(text)
-        return False
+            return False
 
     def confirm(self, approved: bool) -> None:
         self._send({"type": "confirm", "answer": bool(approved)})

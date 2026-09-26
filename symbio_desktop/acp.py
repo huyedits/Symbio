@@ -349,6 +349,19 @@ class Agent:
         with session.lock:
             session.drain()
             session.cancelled.clear()
+            if not (session.bridge.alive() or session.bridge.connecting()):
+                # The model went away since the last turn (stopped, killed for
+                # memory). Held for a session that no longer exists, the text
+                # would wait forever: wake one and reopen instead.
+                ok, why = ensure_daemon()
+                if ok:
+                    ok, why = session.open()
+                if not ok:
+                    self.update(session, {"sessionUpdate": "agent_message_chunk",
+                                          "content": {"type": "text", "text": why}})
+                    return {"stopReason": "end_turn"}
+                self.update(session, {"sessionUpdate": "agent_thought_chunk", "content": {
+                    "type": "text", "text": "[Symbio restarted: this is a fresh conversation.]\n"}})
             session.bridge.say(text)
             if text.strip() == "/save":
                 session.saved_at = session.turns

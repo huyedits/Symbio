@@ -299,6 +299,23 @@ same answer. `SYMBIO_NO_FLASH_ATTENTION=1` turns it off.
 An adapter whose training went to nan is now refused when it is loaded, and the
 base model answers instead: loaded, it made every reply a row of `!`.
 
+**Replies in seconds, not half a minute.** Measured on the 14B, same prompts,
+before → after: "hey, how's it going?" 18.3 s → 8.8 s; "what's 17 times 23?"
+30.2 s → 4.5 s; follow-ups 4-5 s. Four changes:
+
+- `agent.think_when: auto` — plain conversation answers without a reasoning
+  block; a task, code, a link or a tool round keeps `thinking_level`
+  (`always` restores the old behaviour).
+- The standing context (curated memory, soul, env: ~840 tokens) moved out of
+  the per-turn block into the cached prefix, snapshotted per session, and each
+  past turn is replayed exactly as sent — a follow-up prefills ~250 tokens
+  instead of ~880.
+- `gpu.keep_model_wired` (default on): the resident weights are wired, like
+  LM Studio's "keep model in memory" or llama.cpp's `--mlock`. An idle daemon
+  had 6.6 GB of its 8.7 GB in the compressor; every turn paid to page it back.
+- The soul reflection waits for 45 quiet seconds instead of running a 14B
+  generation under your next message.
+
 Scheduled jobs used to run inside a chat session's background thread, so
 "every morning at 8" meant "every morning at 8, if a window happens to be
 open". `symb watch` is the process that watches instead: it restarts the
