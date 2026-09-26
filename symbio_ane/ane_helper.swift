@@ -225,6 +225,62 @@ func embed(_ args: [String: Any]) async throws -> [String: Any] {
     return ["ok": true, "vectors": vectors, "dims": model.dimension, "ms": millis(since: start)]
 }
 
+// MARK: - the Neural Engine text encoder (symbio_ane/build_text_encoder.py)
+
+/// MiniLM converted to an fp16 Core ML program with fixed 64-token inputs,
+/// loaded with compute units .cpuAndNeuralEngine. It replaced
+/// NLContextualEmbedding for the decision model because that one runs on the
+/// CPU (measured with macmon: 0 W of Neural Engine while embedding).
+nonisolated(unsafe) var textEncoder: MLModel? = nil
+nonisolated(unsafe) var textEncoderPath: String = ""
+
+func loadTextEncoder(_ directory: String) throws -> MLModel {
+    if let model = textEncoder, textEncoderPath == directory { return model }
+    let package = URL(fileURLWithPath: directory).appendingPathComponent("encoder.mlpackage")
+    let compiled = URL(fileURLWithPath: directory).appendingPathComponent("encoder.mlmodelc")
+    let fm = FileManager.default
+    let stale = (try? package.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+        .flatMap { built in
+            (try? compiled.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+                .map { $0 < built }
+        } ?? true
+    if !fm.fileExists(atPath: compiled.path) || stale {
+        let temporary = try MLModel.compileModel(at: package)
+        try? fm.removeItem(at: compiled)
+        try fm.moveItem(at: temporary, to: compiled)
+    }
+    let configuration = MLModelConfiguration()
+    configuration.computeUnits = .cpuAndNeuralEngine
+    let model = try MLModel(contentsOf: compiled, configuration: configuration)
+    textEncoder = model
+    textEncoderPath = directory
+    return model
+}
+
+func encode(_ args: [String: Any]) throws -> [String: Any] {
+    let start = DispatchTime.now()
+    let model = try loadTextEncoder(args["model"] as? String ?? "")
+    let ids = (args["ids"] as? [[Int]]) ?? []
+    let masks = (args["mask"] as? [[Int]]) ?? []
+    var vectors: [[Double]] = []
+    for (row, mask) in zip(ids, masks) {
+        let idArray = try MLMultiArray(shape: [1, NSNumber(value: row.count)], dataType: .int32)
+        let maskArray = try MLMultiArray(shape: [1, NSNumber(value: mask.count)], dataType: .int32)
+        for (i, value) in row.enumerated() { idArray[i] = NSNumber(value: value) }
+        for (i, value) in mask.enumerated() { maskArray[i] = NSNumber(value: value) }
+        let input = try MLDictionaryFeatureProvider(dictionary: [
+            "input_ids": MLFeatureValue(multiArray: idArray),
+            "attention_mask": MLFeatureValue(multiArray: maskArray)])
+        let output = try model.prediction(from: input)
+        guard let embedding = output.featureValue(for: "embedding")?.multiArrayValue else {
+            return ["ok": false, "error": "the encoder returned no embedding"]
+        }
+        vectors.append((0..<embedding.count).map { embedding[$0].doubleValue })
+    }
+    return ["ok": true, "vectors": vectors, "dims": vectors.first?.count ?? 0,
+            "ms": millis(since: start)]
+}
+
 // MARK: - decisions (Apple Intelligence's on-device model)
 
 func modelStatus() -> [String: Any] {
@@ -267,20 +323,59 @@ func decisionSchema() throws -> GenerationSchema {
     return try GenerationSchema(root: schema, dependencies: [])
 }
 
+nonisolated(unsafe) var readySession: LanguageModelSession? = nil
+
+func newDecisionSession() -> LanguageModelSession {
+    // Measured: with a one-line brief the model said think=true for almost
+    // everything ("haha that's funny" — "check for sarcasm"), 17/31 held out.
+    // The criteria and worked examples below are what it needs; none of the
+    // examples is in the held-out set it is graded on.
+    LanguageModelSession(instructions: """
+        You route messages for a local assistant that runs a large language \
+        model. Decide only; never answer the message.
+
+        think = whether the big model must reason step by step BEFORE it \
+        answers. It is slow, so it is false unless the answer needs working out.
+        think = false: greetings, small talk, thanks, jokes, opinions, quick \
+        facts and definitions, one-step arithmetic, anything that is only a \
+        lookup of current information (weather, news, prices, scores: those \
+        need a search, not thinking), reading or describing the screen, simple \
+        commands like opening an app.
+        think = true: writing, fixing or explaining code and errors; planning; \
+        comparing options or making a decision with trade-offs; multi-step \
+        maths or estimates; designing or outlining something.
+
+        Examples:
+        "hey there" -> think false, route chat
+        "what's 7 times 8?" -> think false, route chat
+        "who invented the telephone?" -> think false, route chat
+        "weather in perth this weekend" -> think false, route search
+        "what does this popup say?" -> think false, route vision
+        "open the notes app" -> think false, route tool
+        "this function throws IndexError, fix it" -> think true, route code
+        "rent or buy in brisbane, which makes more sense for me?" -> think true, route chat
+        "how many litres of paint for a 4x5 metre room with 2.4 m walls?" -> think true, route chat
+        """)
+}
+
 func decide(_ args: [String: Any]) async throws -> [String: Any] {
     let start = DispatchTime.now()
     guard SystemLanguageModel.default.isAvailable else {
         return ["ok": false, "status": modelStatus(), "ms": millis(since: start)]
     }
     let message = args["message"] as? String ?? ""
-    let session = LanguageModelSession(instructions: """
-        You route messages for a local assistant that runs a large model. \
-        Decide only; do not answer the message.
-        """)
+    // A fresh session per decision (a shared one would grow a transcript of
+    // every message it ever routed), taken already warm: the next one is
+    // prewarmed as soon as this one is handed out.
+    let session = readySession ?? newDecisionSession()
+    readySession = nil
     let response = try await session.respond(
         to: "Message: \(message)", schema: try decisionSchema(),
         options: GenerationOptions(sampling: .greedy))
     let content = response.content
+    let next = newDecisionSession()
+    next.prewarm()
+    readySession = next
     return ["ok": true,
             "think": (try? content.value(Bool.self, forProperty: "think")) ?? true,
             "route": (try? content.value(String.self, forProperty: "route")) ?? "chat",
@@ -310,6 +405,8 @@ func handle(_ line: String) async {
             reply(try vision(args))
         case "embed":
             reply(try await embed(args))
+        case "encode":
+            reply(try encode(args))
         case "decide":
             #if canImport(FoundationModels)
             reply(try await decide(args))

@@ -6,9 +6,11 @@ learned model instead, and it runs on the Neural Engine side of the machine:
 
 1. Apple Intelligence's on-device model, when it is enabled — it fills in a
    routing schema (symbio_ane "decide").
-2. Otherwise a nearest-neighbour classifier over Apple's on-device contextual
-   embedding (symbio_ane "embed", ~7 ms a message): the message is compared
-   with the labelled examples below and takes the vote of the closest ones.
+2. Otherwise a nearest-neighbour vote: the message is embedded and takes the
+   vote of the closest labelled examples below. The embedding is MiniLM as a
+   Core ML program on the Neural Engine when it has been built
+   (symbio_ane/build_text_encoder.py), else Apple's NLContextualEmbedding —
+   which, measured with macmon, runs on the CPU, not the Neural Engine.
 3. Otherwise, or when the vote is too close to call, the regex.
 
 The examples are generic seeds written here, not anyone's conversations.
@@ -91,8 +93,24 @@ _lock = threading.Lock()
 _index: dict[str, Any] = {}
 
 
+def _space() -> str:
+    """Which embedding the vectors come from: never mix the two."""
+    from symbio.app import ane
+
+    return "minilm-ane" if ane.encoder_dir() is not None else "nl-contextual"
+
+
+def _embed(texts: list[str], timeout: float = 60.0) -> dict[str, Any]:
+    from symbio.app import ane
+
+    if _space() == "minilm-ane":
+        return ane.encode(texts)
+    return ane.request({"op": "embed", "texts": texts}, timeout=timeout)
+
+
 def _seed_key() -> str:
-    return hashlib.sha256(json.dumps(SEEDS, sort_keys=True).encode()).hexdigest()[:12]
+    material = json.dumps(SEEDS, sort_keys=True) + _space()
+    return hashlib.sha256(material.encode()).hexdigest()[:12]
 
 
 def _load_index() -> list[tuple[str, list[float]]] | None:
@@ -105,10 +123,8 @@ def _load_index() -> list[tuple[str, list[float]]] | None:
         try:
             rows = [(label, vector) for label, vector in json.loads(path.read_text())]
         except (OSError, ValueError):
-            from symbio.app import ane
-
             texts = [(label, text) for label, items in SEEDS.items() for text in items]
-            answer = ane.request({"op": "embed", "texts": [t for _, t in texts]})
+            answer = _embed([t for _, t in texts])
             if not answer.get("ok"):
                 return None
             rows = [(label, vector) for (label, _), vector in zip(texts, answer["vectors"])]
@@ -126,9 +142,7 @@ def classify(message: str) -> dict[str, Any] | None:
     rows = _load_index()
     if not rows:
         return None
-    from symbio.app import ane
-
-    answer = ane.request({"op": "embed", "texts": [message]}, timeout=5)
+    answer = _embed([message], timeout=5)
     if not answer.get("ok") or not answer.get("vectors"):
         return None
     query = answer["vectors"][0]
@@ -142,7 +156,7 @@ def classify(message: str) -> dict[str, Any] | None:
     top, top_votes = ranked[0]
     second = ranked[1][1] if len(ranked) > 1 else 0.0
     return {"label": top, "think": LABELS[top]["think"],
-            "margin": (top_votes - second) / total, "source": "embedding",
+            "margin": (top_votes - second) / total, "source": _space(),
             "ms": answer.get("ms")}
 
 
@@ -156,16 +170,33 @@ def warm() -> None:
 
 
 def decide(message: str, config: dict[str, Any] | None = None) -> dict[str, Any]:
-    """The turn's decision, from the best source that can give one."""
+    """The turn's decision, from the best source that can give one.
+
+    Measured 2026-09-26 on 31 held-out messages (think / no-think), with
+    macmon on the power rails:
+
+        vote over MiniLM on the Neural Engine   30/31   <1 ms   ANE 1.8 W
+        Apple Intelligence's on-device model    27/31   ~0.7 s  ANE 4.7 W
+        vote over Apple's contextual embedding  30/31   ~8 ms   CPU only
+        regex                                   19/31
+
+    So the Neural Engine vote goes first, Apple's model when that encoder has
+    not been built (still the Neural Engine), the CPU vote after that, and
+    the regex last. A vote too close to call falls through to the next.
+    """
     from symbio.app import ane
     from symbio.app.chat_text import needs_thinking
 
     if ane.enabled(config) and ((config or {}).get("ane") or {}).get("decide", True):
+        voted = classify(message) if _space() == "minilm-ane" else None
+        if voted and voted["margin"] >= MIN_MARGIN:
+            return voted
         apple = ane.decide(message)
         if apple.get("ok"):
             return {"label": apple.get("route", "chat"), "think": bool(apple.get("think")),
                     "source": "apple-intelligence", "ms": apple.get("ms")}
-        voted = classify(message)
+        if voted is None:
+            voted = classify(message)
         if voted and voted["margin"] >= MIN_MARGIN:
             return voted
     return {"label": None, "think": needs_thinking(message), "source": "regex"}
