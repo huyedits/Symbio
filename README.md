@@ -7,8 +7,9 @@
 [![Live Demo](https://img.shields.io/badge/%F0%9F%A4%97-Live%20Demo-yellow)](https://huggingface.co/spaces/HuyEdits/symbio-demo)
 [![GitHub](https://img.shields.io/badge/GitHub-Symbio-black?logo=github)](https://github.com/huyedits/Symbio)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](#license)
+[![Tests](https://github.com/huyedits/Symbio/actions/workflows/tests.yml/badge.svg)](https://github.com/huyedits/Symbio/actions/workflows/tests.yml)
 
-**[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)** 
+**[Website](https://huyedits.github.io/Symbio/)** · **[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)** 
 
 ---
 

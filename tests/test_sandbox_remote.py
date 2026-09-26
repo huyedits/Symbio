@@ -67,7 +67,9 @@ def test_run_remote_builds_ssh_args(config):
     target = f"{host_cfg['user']}@{host_cfg['hostname']}"
     ssh_args.extend([target, "uptime"])
     assert "-i" in ssh_args
-    assert "/Users/" in ssh_args[-5] and ".ssh/id_ed25519" in ssh_args[-5]
+    # The key path is expanded against this machine's home, which is not
+    # /Users/... off a Mac.
+    assert ssh_args[-5] == str(Path("~/.ssh/id_ed25519").expanduser())
     assert "-p" in ssh_args
     assert "2222" in ssh_args
     assert "root@example.com" in ssh_args

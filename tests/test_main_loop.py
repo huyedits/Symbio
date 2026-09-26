@@ -224,7 +224,8 @@ def test_system_prompt_preserves_customized_prompt_md():
         prompt_path.unlink(missing_ok=True)
         default_path.unlink(missing_ok=True)
     # prompt.md is no longer the head of the system prompt: build_system_prompt
-    # prepends the <trust> block (symbio/app/security.py). Its position is the
+    # prepends the <security> block (symbio/app/security.py; it was <trust>
+    # before the policy moved out of prompt.md into security.md). Its position is the
     # point, not an artefact -- the untrusted-content rules have to precede
     # every editable region, or a prompt.md edit could front-run the rules that
     # govern it. So this checks the order rather than just co-presence.
@@ -232,9 +233,9 @@ def test_system_prompt_preserves_customized_prompt_md():
     # Assertion messages stay short deliberately. Passing `sp` dumps the whole
     # system prompt -- trust block and tool schemas -- into the failure output.
     custom_at = sp.find("My custom prompt for Caine and Huy")
-    assert sp.startswith("<trust>"), f"prompt does not open with <trust>: {sp[:80]!r}"
+    assert sp.startswith("<security>"), f"prompt does not open with <security>: {sp[:80]!r}"
     assert custom_at != -1, "customized prompt.md text missing from system prompt"
-    assert sp.index("</trust>") < custom_at, "prompt.md precedes the trust block"
+    assert sp.index("</security>") < custom_at, "prompt.md precedes the security block"
     assert "<tools>" in sp, "tool schemas missing from system prompt"
     print("test_system_prompt_preserves_customized_prompt_md passed")
 

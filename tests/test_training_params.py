@@ -6,22 +6,30 @@ evidence of a measurement too small to tell: val_batches was 8, so a two-hour
 run was ended on a 0.005 difference across eight samples, with 24 validation
 rows on disk unused.
 """
-import json
 import math
 import pathlib
+
+import pytest
 
 from symbio.app import training
 
 
 def _lora():
-    return json.loads(pathlib.Path("config.json").read_text())["lora"]
+    # The config the app actually runs with: config.json merged over the
+    # defaults, or the defaults alone on a fresh clone (config.json is
+    # per-install and gitignored).
+    from symbio.app.config import load_config
+    return load_config()["lora"]
 
 
 def test_validation_uses_the_whole_validation_set():
     """8 of 24 rows cannot resolve 0.776 against 0.781, and that comparison is
     what stops the run."""
     lora = _lora()
-    rows = sum(1 for _ in open("training_data/valid.jsonl"))
+    valid = pathlib.Path("training_data/valid.jsonl")
+    if not valid.exists():
+        pytest.skip("no validation set yet (training_data/ is per-install)")
+    rows = sum(1 for _ in valid.open())
 
     assert lora["val_batches"] * lora["batch_size"] >= rows
 
