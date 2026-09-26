@@ -45,7 +45,20 @@ def test_the_vote_decides_think_from_the_nearest_examples(monkeypatch, tmp_path)
     _fake_embed(monkeypatch, _one_hot_by_label)
     assert decider.decide("yo what's up")["think"] is False
     decision = decider.decide("here is my traceback, help")
-    assert decision == {**decision, "label": "code", "think": True, "source": "embedding"}
+    assert decision == {**decision, "label": "code", "think": True, "source": "nl-contextual"}
+
+
+def test_the_neural_engine_encoder_goes_first_and_apple_is_not_asked(monkeypatch, tmp_path):
+    """Measured: the MiniLM vote on the ANE got 30/31 in under a millisecond;
+    Apple's on-device model 27/31 in ~0.7 s. The fast one decides first."""
+    monkeypatch.setattr(decider.constants, "PROJECT_DIR", tmp_path)
+    calls = _fake_embed(monkeypatch, _one_hot_by_label)
+    monkeypatch.setattr(ane, "encoder_dir", lambda: tmp_path)
+    monkeypatch.setattr(ane, "encode", lambda texts: {
+        "ok": True, "vectors": [_one_hot_by_label(t) for t in texts], "ms": 1})
+    decision = decider.decide("here is my traceback, help")
+    assert decision["source"] == "minilm-ane" and decision["think"] is True
+    assert not [c for c in calls if c["op"] == "decide"], "a confident vote needs no second opinion"
 
 
 def test_the_seed_vectors_are_embedded_once_and_cached(monkeypatch, tmp_path):

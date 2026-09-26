@@ -216,6 +216,13 @@ def _reset_headroom() -> None:
     _headroom_mb, _headroom_at = None, 0.0
 
 
+# A message that only says "keep going" with the task already in hand.
+_CONTINUE_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:continue|go on|keep going|carry on|go ahead|proceed|"
+    r"finish(?: it| up)?|do it|and\??|next|resume|ok(?:ay)?(?:,? (?:do it|go|continue))?|"
+    r"yes(?: please)?|yep|sure)\s*[.!]*\s*$", re.IGNORECASE)
+
+
 class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     """One interactive chat session: model, stores, browser, cron thread.
 
@@ -1704,12 +1711,21 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # it is on, else a vote over Apple's on-device embedding, else the
         # regex. Held out, the vote got think/no-think right 28/31 against
         # the regex's 19/31, at ~7 ms a message off the GPU.
-        try:
-            from symbio.app import decider
+        previous = getattr(self, "_last_decision", None)
+        if previous and _CONTINUE_RE.match(user_input or ""):
+            # "continue" carries on the task before it, so it is decided the
+            # way that task was. Classified on its own it read as small talk:
+            # live 2026-09-26 an x.com post resumed with thinking off and the
+            # model fell back to bare <click>Post</click> tags, clicking Post
+            # until the round budget ran out.
+            decision = {**previous, "source": f"continues {previous.get('source')}"}
+        else:
+            try:
+                from symbio.app import decider
 
-            decision = decider.decide(user_input, self.config)
-        except Exception:
-            decision = {"think": needs_thinking(user_input), "source": "regex"}
+                decision = decider.decide(user_input, self.config)
+            except Exception:
+                decision = {"think": needs_thinking(user_input), "source": "regex"}
         self._last_decision = decision
         # Logged as a label: the decision model can only be graded, or later
         # trained on this user's own turns, if its calls are on record.
