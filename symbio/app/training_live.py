@@ -108,12 +108,21 @@ def begin(role: str | None, iters: int | None, prior_iters: int = 0) -> None:
     now = time.time()
     with _lock:
         armed_at = _gate_armed.pop(role, None)
+        # A run that starts while this process's last run still waits on its
+        # gate is that gate's follow-up (the golden remedy), judged with it.
+        # Seen live: the arm was spent on the first run, so the remedy ended
+        # "kept" by itself and the gate then rolled both back.
+        previous = _state
+        follows = (previous["run"] if previous is not None and previous.get("gated")
+                   and previous.get("phase") == "trained" and not previous.get("verdict")
+                   and previous.get("role") == role else None)
         _state = {
             "version": 1,
             "run": f"{os.getpid()}-{now:.3f}",
             "role": role,
             "phase": "training",
-            "gated": armed_at is not None and now - armed_at < GATE_WINDOW_S,
+            "gated": bool(follows) or (armed_at is not None and now - armed_at < GATE_WINDOW_S),
+            "follows": follows,
             "pid": os.getpid(),
             "iters": int(iters) if iters else None,
             "prior_iters": max(0, int(prior_iters or 0)),

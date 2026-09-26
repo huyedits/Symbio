@@ -236,6 +236,15 @@ dialog. It starts `symb daemon` itself if no model is loaded. In Zed:
 "agent_servers": { "Symbio": { "command": "symb", "args": ["acp"] } }
 ```
 
+The fine-tune loop comes along. A session has two modes: **Private** (the
+default; nothing is added to the corpus) and **Learn** (the conversation is
+saved for training when the session closes). The loop's commands — `/save`,
+`/learn`, `/train`, `/golden`, `/forget_last`, `/status` — show up in the
+host's command menu. A retrain started from the session appears as a tool call
+that counts the steps and the loss, then reports the golden gate's verdict:
+kept, or rolled back to the previous adapter. The four stages (collect, train,
+golden gate, keep or roll back) are shown as the session's plan.
+
 Claude Desktop hosts MCP servers rather than ACP agents, so `symb connect
 claude-desktop` registers `symb mcp bridge` in its config instead: Claude gets
 `ask_symbio` (a turn with Symbio, which keeps the thread between calls) and

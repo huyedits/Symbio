@@ -106,6 +106,32 @@ def test_a_gated_run_waits_for_the_gate(live):
     assert training_live.read()["verdict"] == "kept"
 
 
+def test_the_golden_remedy_run_is_judged_by_the_same_gate(live):
+    """The gate's own follow-up run must not end "kept" on its own: seen live,
+    the remedy was shown kept, then the gate rolled both runs back."""
+    training_live.arm_gate(None)
+    training_live.begin(None, 100)
+    training_live.end("trained", iter=100, total_iters=100)
+    first = training_live.read()["run"]
+    training_live.begin(None, 50)              # the remedy, arm already spent
+    training_live.end("trained", iter=50, total_iters=150)
+    state = training_live.read()
+    assert (state["gated"], state["follows"], state["verdict"]) == (True, first, None)
+    training_live.mark_rolled_back(None)
+    assert training_live.read()["verdict"] == "rolled_back"
+
+
+def test_a_run_after_a_verdict_starts_a_new_flow(live):
+    training_live.arm_gate(None)
+    training_live.begin(None, 20)
+    training_live.end("trained", iter=20, total_iters=20)
+    training_live.mark_kept()
+    training_live.begin(None, 20)              # e.g. a later `symb train`
+    training_live.end("trained", iter=20, total_iters=40)
+    state = training_live.read()
+    assert (state["gated"], state["follows"], state["verdict"]) == (False, None, "kept")
+
+
 def test_the_cleanup_never_overturns_a_rollback(live):
     """discard_adapter_backup runs in the `finally` of every gated flow."""
     training_live.arm_gate(None)

@@ -178,6 +178,148 @@ def test_cancel_ends_the_turn_and_the_next_prompt_still_works(agent):
     assert after == "still here", "the cancelled turn's tail must not leak into the next"
 
 
+def test_a_session_offers_learn_and_private_and_the_loops_commands(agent):
+    agent_, out = agent
+    FakeBridge.script = []
+    agent_.handle({"jsonrpc": "2.0", "id": 1, "method": "session/new",
+                   "params": {"cwd": "/tmp", "mcpServers": []}})
+    result = next(m for m in out.messages if m.get("id") == 1)["result"]
+    modes = result["modes"]
+    assert modes["currentModeId"] == "private", "nothing is trained on unless asked"
+    assert {m["id"] for m in modes["availableModes"]} == {"private", "learn"}
+    commands = next(u for u in _updates(out)
+                    if u["sessionUpdate"] == "available_commands_update")["availableCommands"]
+    assert {"save", "learn", "train", "golden", "forget_last"} <= {c["name"] for c in commands}
+    for session in agent_.sessions.values():
+        session.closed.set()
+
+
+def test_set_mode_is_confirmed_to_the_host(agent):
+    agent_, out = agent
+    session_id = agent_.new_session({"cwd": "/tmp", "mcpServers": []})["sessionId"]
+    assert agent_.set_mode({"sessionId": session_id, "modeId": "learn"}) == {}
+    assert agent_.sessions[session_id].mode == "learn"
+    assert _updates(out)[-1] == {"sessionUpdate": "current_mode_update", "currentModeId": "learn"}
+    with pytest.raises(RuntimeError):
+        agent_.set_mode({"sessionId": session_id, "modeId": "yolo"})
+
+
+@pytest.mark.parametrize("mode,saved", [("learn", True), ("private", False)])
+def test_a_learn_session_is_kept_for_training_when_it_closes(agent, mode, saved):
+    """A host closing the pipe used to read as "no" to Save conversation."""
+    agent_, _ = agent
+    FakeBridge.script = [("token", "ok")]
+    session_id = agent_.new_session({"cwd": "/tmp", "mcpServers": []})["sessionId"]
+    session = agent_.sessions[session_id]
+    session.mode = mode
+    agent_.prompt({"sessionId": session_id, "prompt": [{"type": "text", "text": "hello"}]})
+    FakeBridge.script = [("system", " Saved 1 exchange(s) to training data.")]
+    session.finish()
+    assert ("/save" in FakeBridge.instances[-1].said) is saved
+
+
+def test_training_shows_as_a_tool_call_and_the_loops_plan(agent, tmp_path, monkeypatch):
+    agent_, out = agent
+    monkeypatch.setattr(acp.constants, "LOG_DIR", tmp_path)
+    live = tmp_path / "training_live.json"
+    session_id = agent_.new_session({"cwd": "/tmp", "mcpServers": []})["sessionId"]
+    session = agent_.sessions[session_id]
+    watcher = threading.Thread(target=agent_.watch_training, args=(session, 0.02), daemon=True)
+    watcher.start()
+
+    def write(**fields):
+        state = {"run": "r1", "role": None, "phase": "training", "iters": 40, "iter": 0,
+                 "prior_iters": 0, "train": [], "started_at": time.time(),
+                 "verdict": None, "gated": True, "total_iters": None}
+        state.update(fields)
+        live.write_text(json.dumps(state))
+        time.sleep(0.15)
+
+    write()
+    write(iter=10, train=[[10, 1.5]])
+    write(phase="trained", iter=40, train=[[10, 1.5], [40, 0.4]], total_iters=40)
+    write(phase="trained", iter=40, total_iters=40, verdict="kept")
+    session.closed.set()
+    watcher.join(1)
+
+    updates = _updates(out)
+    call = next(u for u in updates if u["sessionUpdate"] == "tool_call")
+    assert call["title"] == "Fine-tuning the headmaster adapter"
+    said = [u["content"][0]["content"]["text"] for u in updates
+            if u["sessionUpdate"] == "tool_call_update"]
+    assert said[:2] == ["Step 0/40", "Step 10/40 · loss 1.500 (started at 1.500)"]
+    assert said[2].startswith("Golden gate")
+    assert said[3].startswith("Kept: the adapter now carries 40 steps")
+    last = [u for u in updates if u["sessionUpdate"] == "tool_call_update"][-1]
+    assert last["status"] == "completed"
+    final_plan = [u for u in updates if u["sessionUpdate"] == "plan"][-1]["entries"]
+    assert [e["status"] for e in final_plan] == ["completed"] * 4
+
+
+def test_the_gates_follow_up_run_closes_the_first_and_carries_the_verdict(
+        agent, tmp_path, monkeypatch):
+    """Seen live: the first run's call was left spinning at "Golden gate…",
+    and the final plan still had its last stage in progress after a rollback."""
+    agent_, out = agent
+    monkeypatch.setattr(acp.constants, "LOG_DIR", tmp_path)
+    live = tmp_path / "training_live.json"
+    session_id = agent_.new_session({"cwd": "/tmp", "mcpServers": []})["sessionId"]
+    session = agent_.sessions[session_id]
+    watcher = threading.Thread(target=agent_.watch_training, args=(session, 0.02), daemon=True)
+    watcher.start()
+
+    def write(**fields):
+        state = {"run": "r1", "role": None, "phase": "trained", "iters": 100, "iter": 100,
+                 "prior_iters": 0, "train": [], "started_at": time.time(), "verdict": None,
+                 "gated": True, "follows": None, "total_iters": 100}
+        state.update(fields)
+        live.write_text(json.dumps(state))
+        time.sleep(0.15)
+
+    write()
+    write(run="r2", phase="training", iters=50, iter=0, total_iters=None, follows="r1")
+    write(run="r2", iters=50, iter=50, total_iters=150, follows="r1", verdict="rolled_back")
+    session.closed.set()
+    watcher.join(1)
+
+    updates = [u for u in _updates(out) if u["sessionUpdate"] == "tool_call_update"]
+    first = [u for u in updates if u["toolCallId"] == "train_r1"]
+    assert first[-1]["status"] == "completed"
+    assert "follow-up run" in first[-1]["content"][0]["content"]["text"]
+    second = [u for u in updates if u["toolCallId"] == "train_r2"]
+    assert second[-1]["status"] == "failed"
+    assert second[-1]["content"][0]["content"]["text"].startswith("Rolled back")
+    final_plan = [u for u in _updates(out) if u["sessionUpdate"] == "plan"][-1]["entries"]
+    assert [e["status"] for e in final_plan] == ["completed"] * 4
+
+
+def test_an_old_run_on_disk_is_not_news(agent, tmp_path, monkeypatch):
+    agent_, out = agent
+    monkeypatch.setattr(acp.constants, "LOG_DIR", tmp_path)
+    (tmp_path / "training_live.json").write_text(json.dumps(
+        {"run": "old", "phase": "trained", "started_at": time.time() - 3600, "verdict": "kept"}))
+    session_id = agent_.new_session({"cwd": "/tmp", "mcpServers": []})["sessionId"]
+    session = agent_.sessions[session_id]
+    watcher = threading.Thread(target=agent_.watch_training, args=(session, 0.02), daemon=True)
+    watcher.start()
+    time.sleep(0.15)
+    session.closed.set()
+    watcher.join(1)
+    assert not [u for u in _updates(out) if u["sessionUpdate"].startswith("tool_call")]
+
+
+def test_trainer_lines_leave_the_thinking_while_a_run_is_shown(agent):
+    agent_, out = agent
+    FakeBridge.script = [("system", "Iter 10: Train loss 1.234, Learning Rate 1e-05"),
+                         ("system", "  [Train] Backing up current adapter...")]
+    session_id = agent_.new_session({"cwd": "/tmp", "mcpServers": []})["sessionId"]
+    agent_.sessions[session_id].training = True
+    agent_.prompt({"sessionId": session_id, "prompt": [{"type": "text", "text": "/train"}]})
+    thoughts = "".join(u["content"]["text"] for u in _updates(out)
+                       if u["sessionUpdate"] == "agent_thought_chunk")
+    assert "Iter 10" not in thoughts and "Backing up current adapter" in thoughts
+
+
 def test_an_unknown_method_is_a_json_rpc_error(agent):
     agent_, out = agent
     agent_.handle({"jsonrpc": "2.0", "id": 7, "method": "session/teleport", "params": {}})
