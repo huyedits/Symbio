@@ -368,6 +368,26 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         except Exception:
             pass
         conn.close()
+        # Re-warm for the next session. The hand-over is one-shot by design —
+        # a second session inheriting the first's prefix diff would corrupt it
+        # — which left every session after the first paying the 387MB
+        # persisted-file read at boot, or worse, a full in-session prefill when
+        # the file was stale. The model is idle exactly between sessions; the
+        # re-warm (~30s at this machine's measured prefill rate) hides in that
+        # idle window, and the next connect takes a fresh hand-over.
+        # warm["prefix"] is the same slot _serve_connection pops; refill it.
+        # One at a time: a short session chain could otherwise stack re-warm
+        # threads, and two concurrent prefills is the double-residency this
+        # project keeps paying for.
+        if warm is not None:
+            def _rewarm():
+                warmed = _warm_prefix(config, model, tokenizer, adapter_loaded)
+                if warmed is not None:
+                    warm["prefix"] = warmed
+            if not any(t.name == "daemon-rewarm" and t.is_alive()
+                       for t in threading.enumerate()):
+                threading.Thread(target=_rewarm, daemon=True,
+                                 name="daemon-rewarm").start()
 
 
 def daemon_main(config: dict[str, Any]) -> int:

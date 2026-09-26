@@ -386,10 +386,12 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         self.history: list[dict[str, str]] = []
         self.session_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S-%f}"
 
-        # If a caller already handed us a loaded model, the self-check ran
-        # before session_id existed; re-persist now that we have one.
-        if self._model_loaded and self._health_report.get("_persisted") is None:
-            self._run_post_load_self_check()
+        # The self-check used to ALSO fire here, on the placeholder report
+        # whose _persisted is always unset, so every session printed
+        # "[Self-check] Feature verification complete." twice — once here
+        # before the logger existed and once at the end of __init__. Live
+        # 2026-09-26, the doubled banner read as the CLI glitching. It runs
+        # once, at the end of __init__, for both the lazy and hand-in paths.
 
         # Skill notes touched this session; used to append health errors and
         # user corrections to the matching sidecar files.
