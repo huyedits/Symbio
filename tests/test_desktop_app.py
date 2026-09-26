@@ -626,3 +626,19 @@ def test_a_turn_that_ends_inside_a_thinking_block_says_so():
 
     assert not [m for m in sent if m["type"] == "token"]
     assert any("ended inside a thinking block" in m.get("text", "") for m in sent)
+
+
+def test_the_window_is_an_app_with_the_menus_a_mac_app_has():
+    """Opened as its own app, not a browser tab: without an Edit menu, ⌘C,
+    ⌘V and ⌘A do nothing in the page's text box."""
+    AppKit = pytest.importorskip("AppKit")
+    from symbio_desktop import window
+
+    bar = window._main_menu(AppKit.NSMenu, AppKit.NSMenuItem)
+    menus = {bar.itemAtIndex_(i).submenu().title(): bar.itemAtIndex_(i).submenu()
+             for i in range(bar.numberOfItems())}
+    assert list(menus) == ["Symbio", "Edit", "Window"]
+    actions = {menus["Edit"].itemAtIndex_(i).action()
+               for i in range(menus["Edit"].numberOfItems())}
+    assert {"copy:", "paste:", "cut:", "selectAll:", "undo:"} <= actions
+    assert window.ICON.is_file() and window.ICON.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"

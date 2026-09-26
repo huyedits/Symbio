@@ -102,8 +102,6 @@ def main(argv: list[str] | None = None) -> int:
         description="A desktop cat that shows Symbio fine-tuning itself.")
     parser.add_argument("--demo", action="store_true",
                         help="Play a scripted run instead of watching Symbio")
-    parser.add_argument("--port", type=int, default=8742,
-                        help="Port of the chat window a double-click opens (default 8742)")
     parser.add_argument("--snapshot", metavar="DIR",
                         help="Render the demo's key frames to PNGs in DIR and exit")
     args = parser.parse_args(argv)
@@ -141,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     # buffers, so a piped banner would otherwise never appear.
     print("  Ctrl+C to stop\n", flush=True)
     pet = Pet(feed, position_file=constants.LOG_DIR / "pet_position.json",
-              log_dir=constants.LOG_DIR, port=args.port, pid_file=pid_file)
+              log_dir=constants.LOG_DIR, pid_file=pid_file)
     return pet.run()
 
 

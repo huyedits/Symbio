@@ -49,12 +49,10 @@ def pet_pid() -> int | None:
     return pid if "symbio_pet" in command else None
 
 
-def _argv(demo: bool, port: int) -> list[str]:
+def _argv(demo: bool) -> list[str]:
     argv = [sys.executable, "-m", "symbio_pet"]
     if demo:
         argv.append("--demo")
-    if port != 8742:
-        argv += ["--port", str(port)]
     return argv
 
 
@@ -72,7 +70,7 @@ def _env() -> dict[str, str]:
     return env
 
 
-def start_pet(demo: bool = False, port: int = 8742) -> int:
+def start_pet(demo: bool = False) -> int:
     pid = pet_pid()
     if pid is not None:
         print(f"The pet is already out (PID {pid}). `symb pet stop` calls it in.")
@@ -82,7 +80,7 @@ def start_pet(demo: bool = False, port: int = 8742) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as log:
         process = subprocess.Popen(
-            _argv(demo, port), cwd=_package_root(), env=_env(), start_new_session=True,
+            _argv(demo), cwd=_package_root(), env=_env(), start_new_session=True,
             stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
     deadline = time.monotonic() + _START_WAIT_S
     while time.monotonic() < deadline:
@@ -138,10 +136,10 @@ def pet_status() -> int:
     return 0
 
 
-def run_pet(demo: bool = False, port: int = 8742) -> int:
+def run_pet(demo: bool = False) -> int:
     """This terminal becomes the pet: exec, so none of this process stays."""
     sys.stdout.flush()
     os.chdir(_package_root())
-    argv = _argv(demo, port)
+    argv = _argv(demo)
     os.execve(argv[0], argv, _env())
     return 1   # not reached

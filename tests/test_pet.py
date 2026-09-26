@@ -562,8 +562,8 @@ def test_a_stale_or_foreign_pid_is_not_a_pet(pet_home):
 
 def test_the_pet_runs_as_its_own_light_process(pet_home):
     """Never the CLI itself, which has the whole agent package loaded."""
-    argv = pet_cmd._argv(demo=True, port=9000)
-    assert argv[1:] == ["-m", "symbio_pet", "--demo", "--port", "9000"]
+    argv = pet_cmd._argv(demo=True)
+    assert argv[1:] == ["-m", "symbio_pet", "--demo"]
     assert pet_cmd._env()["SYMBIO_HOME"] == str(pet_home)
 
 
@@ -629,6 +629,34 @@ def test_one_cat_at_a_time(tmp_path):
     assert other_pet(pid_file) is None            # that is this process
     pid_file.write_text(str(_dead_pid()), encoding="utf-8")
     assert other_pet(pid_file) is None            # stale
+
+
+def test_double_click_opens_the_chat_as_its_own_app(tmp_path, monkeypatch):
+    """A native Symbio window, never a browser tab, and never two of them."""
+    pytest.importorskip("AppKit")
+    from symbio_pet import view
+
+    launched, raised = [], []
+
+    class Chat:
+        pid = 4321
+
+        def poll(self):
+            return None
+
+    class Running:
+        def activateWithOptions_(self, options):
+            raised.append(options)
+
+    monkeypatch.setattr(view.subprocess, "Popen", lambda argv, **k: launched.append(argv) or Chat())
+    monkeypatch.setattr(view, "NSRunningApplication", types.SimpleNamespace(
+        runningApplicationWithProcessIdentifier_=lambda pid: Running()))
+    pet = view.Pet(feed=None, position_file=None, log_dir=tmp_path)
+    pet.open_chat()
+    pet.open_chat()
+    assert len(launched) == 1, "the second double-click must bring the first forward"
+    assert launched[0][1:4] == ["-m", "symbio_desktop.cli", "--window"]
+    assert raised
 
 
 def test_a_pet_gives_up_only_its_own_pid_file(tmp_path):

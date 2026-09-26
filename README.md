@@ -207,8 +207,10 @@ It is the fine-tune, drawn:
   is kept, and the cat swats it off its collar when it is rolled back.
 
 Between runs it sleeps while no model is loaded, thinks while the model works,
-and strolls along the top of the Dock now and then. Drag it anywhere,
-double-click it for the chat window, right-click to stop it wandering.
+and strolls along the top of the Dock now and then. Drag it anywhere, and
+right-click to stop it wandering. Double-click it and the chat opens as its
+own app — a native Symbio window with the cat in the Dock and the usual
+menus, not a browser tab.
 
 It never imports `symbio`. Training writes `logs/training_live.json` from the
 trainer's own lines and the gate's verdict; the pet reads that, the daemon's

@@ -129,8 +129,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="start (default) puts it on the desktop; run keeps it in this terminal")
     pet_parser.add_argument("--demo", action="store_true",
                             help="Play a scripted run instead of watching this install")
-    pet_parser.add_argument("--port", type=int, default=8742,
-                            help="Port of the chat window a double-click opens")
 
     train_parser = sub.add_parser("train", help="Run LoRA training")
     train_parser.add_argument(
@@ -1412,8 +1410,8 @@ def main(argv: list[str] | None = None) -> int:
         if action == "status":
             return pet.pet_status()
         if action == "run":
-            return pet.run_pet(demo=args.demo, port=args.port)
-        return pet.start_pet(demo=args.demo, port=args.port)
+            return pet.run_pet(demo=args.demo)
+        return pet.start_pet(demo=args.demo)
 
     parser.print_help()
     return 1
