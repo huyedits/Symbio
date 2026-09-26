@@ -500,6 +500,18 @@ def test_block_count_is_none_for_an_uncached_model(monkeypatch):
     assert training.model_block_count("nope/not-here") is None
 
 
+class _SilentTrainer:
+    """A trainer child that printed nothing and exited cleanly."""
+
+    returncode = 0
+
+    def __init__(self):
+        self.stdout = iter(())
+
+    def wait(self, timeout=None):
+        return 0
+
+
 def _run_and_capture_trainer_args(corpus, monkeypatch, lora_overrides,
                                   resume=False):
     """Run run_training against a stub trainer; return (argv, parsed yaml)."""
@@ -514,18 +526,15 @@ def _run_and_capture_trainer_args(corpus, monkeypatch, lora_overrides,
 
     captured = {}
 
-    def fake_run(cmd, check=False):
+    def fake_popen(cmd, **_kwargs):
         import yaml
         captured["cmd"] = list(cmd)
         config_path = cmd[cmd.index("--config") + 1]
         with open(config_path, encoding="utf-8") as fh:
             captured["yaml"] = yaml.safe_load(fh)
+        return _SilentTrainer()
 
-        class Done:
-            returncode = 0
-        return Done()
-
-    monkeypatch.setattr(training.subprocess, "run", fake_run)
+    monkeypatch.setattr(training.subprocess, "Popen", fake_popen)
     lora = {"rank": 8, "dropout": 0.0, "scale": 20.0, "num_layers": 8,
             "batch_size": 1, "learning_rate": 1e-4, "iters": 2, "epochs": 1,
             "max_iters": 10, "max_seq_length": 512, "steps_per_eval": 10,
@@ -577,17 +586,18 @@ def test_only_one_trainer_runs_at_a_time(corpus, monkeypatch):
     overlap = []
     running = threading.Event()
 
-    def fake_run(cmd, check=False):
+    class SlowTrainer(_SilentTrainer):
+        def wait(self, timeout=None):
+            threading.Event().wait(0.05)
+            running.clear()
+            return 0
+
+    def fake_popen(cmd, **_kwargs):
         overlap.append(running.is_set())
         running.set()
-        threading.Event().wait(0.05)
-        running.clear()
+        return SlowTrainer()
 
-        class Done:
-            returncode = 0
-        return Done()
-
-    monkeypatch.setattr(training.subprocess, "run", fake_run)
+    monkeypatch.setattr(training.subprocess, "Popen", fake_popen)
     config = {"model_name": "m", "gpu": {},
               "lora": {"rank": 8, "dropout": 0.0, "scale": 20.0, "num_layers": 8,
                        "batch_size": 1, "learning_rate": 1e-4, "iters": 2,

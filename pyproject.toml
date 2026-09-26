@@ -72,6 +72,7 @@ Demo = "https://huggingface.co/spaces/HuyEdits/symbio-demo"
 symbio = "symbio.app.cli:main"
 symb = "symbio.app.cli:main"
 symbio-desktop = "symbio_desktop.cli:main"
+symbio-pet = "symbio_pet.cli:main"
 
 [project.optional-dependencies]
 # The default install on an Apple Silicon Mac: `pip install "symbio-cli[mlx]"`.
@@ -80,6 +81,9 @@ mlx = [
     "mlx>=0.30.0; sys_platform == 'darwin'",
     "torch; sys_platform == 'darwin'",
 ]
+# The desktop cat (symbio-pet) draws with AppKit through PyObjC. Nothing else
+# needs it, and it only exists on macOS.
+pet = ["pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'"]
 # The panelled terminal interface. Optional because `symb chat` falls back to
 # the plain scrollback path without it, and an install that only ever runs
 # piped or scripted has no use for a renderer.
@@ -101,7 +105,7 @@ dev = [
 # of `symbio/computer.py` (half the size, months behind) that nothing imported.
 
 [tool.setuptools.packages.find]
-include = ["symbio*", "symbio_desktop*", "symbio_tui*"]
+include = ["symbio*", "symbio_desktop*", "symbio_tui*", "symbio_pet*"]
 
 # The shipped defaults. A wheel contains python packages and nothing else, so
 # models.json, the prompt default and the security default — all three of which

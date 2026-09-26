@@ -23,6 +23,7 @@ import yaml
 
 from symbio import constants
 from symbio.app import config as app_config
+from symbio.app import training_live
 # chat_constants is documented as the bottom of the chat import graph,
 # so taking the thinking table from it here cannot form a cycle.
 from symbio.app.chat_constants import THINKING_LEVELS
@@ -72,6 +73,22 @@ def _say(message: str = "") -> None:
             # A front-end that breaks must not take the training run with it.
             pass
     print(message)
+
+
+def _echo_trainer_line(line: str) -> None:
+    """One line of the trainer's own output, passed on and kept.
+
+    The per-iteration lines ("Iter 40: Train loss 0.612, ...") are the part of
+    a retrain worth watching. They go through the sink to whoever asked for
+    the run, and into training_live for anything outside this process
+    (symbio_pet) that draws it.
+    """
+    if _log_sink is not None:
+        _say(line.rstrip("\n"))
+    else:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+    training_live.line(line)
 
 
 CORPUS_LOCK = threading.RLock()
@@ -2289,25 +2306,24 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
                 pass
             return False
 
-        if early_stop:
-            trained = _run_training_with_early_stop(
-                cmd, lora, adapter_dir, config_path,
-            )
-        else:
-            try:
-                subprocess.run(cmd, check=True)
-                trained = True
-            except subprocess.CalledProcessError:
-                _say("  [System] Training failed.")
-                trained = False
-            except KeyboardInterrupt:
-                _say("  [System] Training stopped.")
-                trained = False
-            finally:
-                try:
-                    os.unlink(config_path)
-                except OSError:
-                    pass
+        # What the adapter already holds when this run continues it rather
+        # than starting over. Read from the argv, not from `resume`: a resume
+        # that resume_source refused trains from scratch.
+        prior_iters = (adapter_total_iters(role)
+                       if "--resume-adapter-file" in cmd else 0)
+        training_live.begin(role, iters, prior_iters)
+        try:
+            if early_stop:
+                trained = _run_training_with_early_stop(
+                    cmd, lora, adapter_dir, config_path,
+                )
+            else:
+                trained = _run_trainer(cmd, config_path)
+        except BaseException as e:
+            # Left at "training" with this process still alive, the run would
+            # read as in progress for as long as the process lives.
+            training_live.end("failed", reason=f"{type(e).__name__}: {e}")
+            raise
 
         # Both branches above ran the trainer as a child process, and it has
         # exited by the time either returns — including the failure paths,
@@ -2326,6 +2342,7 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
                     + list(adapter_dir.glob("adapter_model.*")))
     if not config_file.exists() or not weight_files:
         _say("  [System] Adapter files missing after training.")
+        training_live.end("failed", reason="adapter files missing after training")
         return False
 
     # A fresh run replaced the weights, so its steps are the adapter's whole
@@ -2355,6 +2372,12 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     adapter_kb = sum(f.stat().st_size for f in adapter_dir.iterdir() if f.is_file()) // 1024
     _say(f"  [System] Adapter baked. Size: ~{adapter_kb:,} KB "
           f"({adapter_label(role)}, {total} total iters)")
+    # A no-op when a loop already recorded how it ended (Ctrl-C, a garbage
+    # loss); otherwise the outcome is only certain here.
+    if trained:
+        training_live.end("trained", iter=ran, total_iters=total)
+    else:
+        training_live.end("failed")
     return trained
 
 def _model_repo_dir(model_name: str | None) -> Path | None:
@@ -2680,6 +2703,49 @@ def _stop_trainer(process: subprocess.Popen, signalled: bool = False) -> None:
     except (ProcessLookupError, OSError):
         pass
 
+def _run_trainer(cmd: list[str], config_path: str) -> bool:
+    """Run the trainer for its whole budget, reading its lines as they come.
+
+    This was subprocess.run(cmd, check=True), with the child writing straight
+    to this process's stdout: the losses reached a terminal, or the daemon's
+    log file, and nothing else. It reads them the way the early-stop path
+    always has, so they reach the sink and training_live too.
+
+    Ctrl-C also ends better. subprocess.run met a KeyboardInterrupt by waiting
+    a quarter of a second and then SIGKILLing a trainer that was still tearing
+    down its Metal buffers — the abrupt exit _stop_trainer exists to avoid.
+    """
+    process: subprocess.Popen | None = None
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            _echo_trainer_line(line)
+        process.wait()
+        if process.returncode != 0:
+            _say("  [System] Training failed.")
+            return False
+        return True
+    except KeyboardInterrupt:
+        _say("  [System] Training stopped.")
+        training_live.end("stopped")
+        if process is not None:
+            # Same process group: the child took the same SIGINT and is
+            # already unwinding. Wait it out rather than signal it again.
+            _stop_trainer(process, signalled=True)
+        return False
+    finally:
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
+
 def _run_training_with_early_stop(
     cmd: list[str],
     lora: dict[str, Any],
@@ -2765,16 +2831,10 @@ def _run_training_with_early_stop(
         )
         assert process.stdout is not None
         for line in process.stdout:
-            # The trainer's own per-iteration lines — "Iter 40: Train loss
-            # 0.612, Val loss 0.588, ..." — are the part of a retrain worth
-            # watching, and they went to this process's stdout, which in the
-            # daemon is a file. Through the sink they reach whoever asked for
-            # the training run.
-            if _log_sink is not None:
-                _say(line.rstrip("\n"))
-            else:
-                sys.stdout.write(line)
-                sys.stdout.flush()
+            # The trainer's own per-iteration lines went to this process's
+            # stdout, which in the daemon is a file. Through the sink they
+            # reach whoever asked for the training run.
+            _echo_trainer_line(line)
 
             match = val_re.search(line)
             if match:
@@ -2795,6 +2855,9 @@ def _run_training_with_early_stop(
                     _say(f"  [Train] Implausible validation loss {loss!r} at "
                           f"iter {iteration}. Aborting; the adapter from this "
                           f"run is not trustworthy.")
+                    training_live.end(
+                        "failed", reason=f"implausible validation loss {loss!r} "
+                                         f"at iter {iteration}")
                     _stop_trainer(process)
                     return False
                 improved = best_loss is None or loss < (best_loss - min_delta)
@@ -2843,6 +2906,7 @@ def _run_training_with_early_stop(
             kept_iters = None          # ran the whole budget
     except KeyboardInterrupt:
         _say("  [System] Training stopped.")
+        training_live.end("stopped")
         if process is not None:
             # The child shares our process group, so it already took the same
             # SIGINT from the terminal and is unwinding. Sending another signal
@@ -2939,6 +3003,9 @@ def backup_adapter(role: str | None = None, label: str | None = None) -> Path | 
     things you need to pick one to go back to. A timestamp is appended only
     to break a collision, so the common case stays readable.
     """
+    # Armed even with nothing to back up: the golden checks still run and
+    # still end in discard_adapter_backup, which is what records the verdict.
+    training_live.arm_gate(role)
     adapter_dir = constants.adapter_dir_for(role)
     if not adapter_dir.exists() or not any(adapter_dir.iterdir()):
         return None
@@ -2992,11 +3059,15 @@ def restore_adapter(backup_dir: Path, role: str | None = None):
             shutil.copytree(item, target)
         else:
             shutil.copy2(item, target)
+    training_live.mark_rolled_back(role)
 
 def discard_adapter_backup(backup_dir: Path | None):
     """Remove a backup once it is no longer needed (training kept)."""
     if backup_dir and backup_dir.exists():
         shutil.rmtree(backup_dir, ignore_errors=True)
+    # Every gated flow ends here, kept or not; mark_kept only acts on a
+    # trained run that no rollback has already ruled on.
+    training_live.mark_kept()
 
 _ADAPTER_LAST_USED_FILE_NAME = "last_used.json"
 
