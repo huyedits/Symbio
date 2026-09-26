@@ -341,7 +341,10 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         send_msg({"type": "stream", "text": text})
 
     chat_ui.set_status_sink(status_fn)
+    chat_ui.set_status_sink(status_fn)
     # One shot: the hand-over travels with the first session that arrives.
+    # The warm holds (cache, ids, signature) exactly as the session's
+    # _accept_warmed_prefix consumes it.
     hand = warm.pop("prefix", None) if warm else None
     session = ChatSession(
         config,

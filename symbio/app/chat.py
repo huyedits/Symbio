@@ -1316,14 +1316,15 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         hand = getattr(self, "_warmed_prefix", None)
         if not hand or not self._mlx_generation():
             return False
-        cache, ids = hand
+        cache, ids, have = hand
         if self._prompt_cache is not None or self._cached_prompt_ids:
             return False
         # The hand-over assumed these weights. Adapter fingerprints move
         # between the warm and the session; a stale hand-over is a silently
-        # wrong model, which is worse than a slow first turn.
+        # wrong model, which is worse than a slow first turn. The signature
+        # the daemon computed travels WITH the cache — the session re-derives
+        # only what it can check from disk right now.
         want = self._prompt_cache_signature(ids)
-        have = getattr(self, "_warmed_prefix_signature", None)
         if have is None or have.get("adapter_sig") != want["adapter_sig"] \
                 or have.get("kv_sig") != want["kv_sig"] \
                 or have.get("model_name") != want["model_name"]:

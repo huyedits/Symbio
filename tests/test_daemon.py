@@ -306,3 +306,49 @@ def test_a_session_refuses_a_warmed_cache_whose_adapter_moved():
                                "model_name": "m"})
     assert chat_mod.ChatSession._accept_warmed_prefix(session) is False
     assert session._prompt_cache is None, "a refused cache must not be kept"
+
+
+def test_the_handover_signature_travels_with_the_cache(monkeypatch, tmp_path):
+    """A warm whose weights match the session's is ACCEPTED: the cache lands,
+    the ids are recorded, and the stale-adapter refusal above is the only
+    thing that stops it."""
+    import mlx.core as mx
+    from mlx_lm.models.cache import KVCache
+
+    from symbio import constants
+    from symbio.app import chat as chat_mod
+
+    monkeypatch.setattr(constants, "PROMPT_CACHE_FILE", tmp_path / "c.safetensors")
+    monkeypatch.setattr(constants, "ADAPTER_DIR", tmp_path / "adapters")
+
+    session = chat_mod.ChatSession.__new__(chat_mod.ChatSession)
+    session.config = {"model_name": "m", "agent": {}}
+    session.adapter_loaded = False
+    session._prompt_cache = None
+    session._cached_prompt_ids = None
+    session._kv_bytes_per_token = None
+    session._prefetch_thread = None
+    session._warmed_prefix = None
+    logged = []
+    session.logger = type("L", (), {"info": lambda s, m: logged.append(m)})()
+    session.stream_fn = chat_mod.backend.stream_generate  # the real MLX path
+
+    cache = [KVCache()]
+    cache[0].update_and_fetch(mx.random.normal((1, 1, 3, 4)),
+                              mx.random.normal((1, 1, 3, 4)))
+    ids = [1, 2, 3]
+    # The signature must be what the session derives for these ids and
+    # weights — the daemon computes it the same way.
+    sig = chat_mod.ChatSession._prompt_cache_signature(session, ids)
+    session._warmed_prefix = (cache, ids, sig)
+    assert chat_mod.ChatSession._accept_warmed_prefix(session) is True
+    assert session._prompt_cache is cache
+    assert session._cached_prompt_ids == ids
+    assert session._warmed_prefix is None, "one shot: not kept for a later session"
+    assert any("handed over" in m for m in logged)
+
+    # A second acceptance must not happen: the cache is already installed.
+    cache2 = [KVCache()]
+    session._warmed_prefix = (cache2, ids, sig)
+    assert chat_mod.ChatSession._accept_warmed_prefix(session) is False
+    assert session._prompt_cache is cache, "the live conversation keeps its own"
