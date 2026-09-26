@@ -41,7 +41,7 @@ def _imports(path: pathlib.Path) -> set[str]:
     return found
 
 
-@pytest.mark.parametrize("name", ["server.py", "cli.py", "window.py"])
+@pytest.mark.parametrize("name", ["server.py", "cli.py", "window.py", "acp.py", "mcp_bridge.py"])
 def test_the_desktop_never_imports_the_agent_package(name):
     """`symbio` costs 105 MB of stack the window has no use for. constants.py
     is loaded by path precisely so this stays true."""

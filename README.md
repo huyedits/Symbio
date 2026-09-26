@@ -218,6 +218,33 @@ pid and socket, and `ps`. Measured: about 80 MB resident, 4.5% of one core
 sitting and 3% asleep, more while it walks or eats. It needs PyObjC
 (`pip install "symbio-cli[pet]"`) and runs on macOS only.
 
+### Symbio in other apps
+
+```bash
+symb acp                        # an ACP agent on stdio, for Zed, the VS Code and
+                                # JetBrains ACP plugins, Toad, and other ACP hosts
+symb connect claude-desktop     # Claude Desktop gets Symbio as tools (MCP)
+```
+
+`symb acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com):
+the host starts it, and Symbio's resident model becomes the host's agent. The
+reply streams in as the agent's message, Symbio's activity lines arrive as its
+thinking, and its approval prompts are asked through the host's own permission
+dialog. It starts `symb daemon` itself if no model is loaded. In Zed:
+
+```json
+"agent_servers": { "Symbio": { "command": "symb", "args": ["acp"] } }
+```
+
+Claude Desktop hosts MCP servers rather than ACP agents, so `symb connect
+claude-desktop` registers `symb mcp bridge` in its config instead: Claude gets
+`ask_symbio` (a turn with Symbio, which keeps the thread between calls) and
+`symbio_status` (model, adapter, and any fine-tune in progress). Approval
+prompts cannot be answered from inside a tool call there, so they are declined
+and the reply says what was asked. `--remove` takes it out again.
+
+Both bridges were checked with the official ACP and MCP SDK clients.
+
 ### Staying online
 
 ```bash
