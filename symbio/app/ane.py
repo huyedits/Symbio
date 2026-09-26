@@ -166,6 +166,42 @@ def vision(path: str | Path, tasks: list[str] | None = None) -> dict[str, Any]:
     return request(payload)
 
 
+def encoder_dir() -> Path | None:
+    """The Core ML text encoder (symbio_ane/build_text_encoder.py), if built."""
+    directory = constants.PROJECT_DIR / "cache" / "text-encoder"
+    if (directory / "encoder.mlpackage").exists() and (directory / "tokenizer.json").exists():
+        return directory
+    return None
+
+
+_tokenizer_cache: dict[str, Any] = {}
+
+
+def encode(texts: list[str]) -> dict[str, Any]:
+    """Sentence vectors from the Neural Engine text encoder, or ok=False.
+
+    Tokenised here (the tokenizer is a few ms of CPU), run there.
+    """
+    directory = encoder_dir()
+    if directory is None:
+        return {"ok": False, "error": "no text encoder built"}
+    try:
+        tokenizer = _tokenizer_cache.get(str(directory))
+        if tokenizer is None:
+            from tokenizers import Tokenizer
+
+            meta = json.loads((directory / "meta.json").read_text())
+            tokenizer = Tokenizer.from_file(str(directory / "tokenizer.json"))
+            tokenizer.enable_truncation(meta["seq_len"])
+            tokenizer.enable_padding(length=meta["seq_len"], pad_id=meta.get("pad_id", 0))
+            _tokenizer_cache[str(directory)] = tokenizer
+        batch = tokenizer.encode_batch([t or " " for t in texts])
+    except Exception as e:
+        return {"ok": False, "error": f"tokenizer: {e}"}
+    return request({"op": "encode", "model": str(directory),
+                    "ids": [b.ids for b in batch], "mask": [b.attention_mask for b in batch]})
+
+
 _decide_state = {"unavailable_until": 0.0}
 
 
