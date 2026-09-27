@@ -75,6 +75,21 @@ def _load_constants():
 
 constants = _load_constants()
 
+
+def _load_guardrails():
+    """symbio/guardrails.py, by path, for the same reason as constants: it
+    is standard library only, and the package behind it is 105 MB."""
+    import importlib.util
+
+    path = APP_DIR.parent / "symbio" / "guardrails.py"
+    spec = importlib.util.spec_from_file_location("_symbio_guardrails", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+guardrails = _load_guardrails()
+
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -359,6 +374,25 @@ def set_settings(patch: dict[str, Any]) -> dict[str, Any]:
     except OSError as e:
         return {"ok": False, "error": f"Could not write config.json: {e}"}
     return {"ok": True, "changed": changed}
+
+
+def get_guardrails() -> dict[str, Any]:
+    """The Guardrails panel: every kind of action with its mode, the floors
+    nothing can switch off, and what was asked lately and how it went."""
+    try:
+        config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        config = {}
+    out = guardrails.describe_all(config)
+    out["recent"] = guardrails.recent(constants.LOG_DIR, limit=20)
+    return out
+
+
+def set_guardrail(patch: dict[str, Any]) -> dict[str, Any]:
+    """One kind's mode, from the panel. guardrails.set_mode accepts only a
+    known kind and a known mode, and writes nothing else."""
+    return guardrails.set_mode(constants.CONFIG_FILE, str(patch.get("kind", "")),
+                               str(patch.get("mode", "")))
 
 
 def get_sessions(limit: int = 60, session_id: str = "") -> dict[str, Any]:
@@ -692,6 +726,12 @@ class DaemonBridge:
         self.ready = False
         self.pending: list[str] = []
         self.spoke = False
+        # The approval card the daemon is blocked on, if any. Kept so a window
+        # that reloads mid-question gets the card again: the daemon's
+        # confirm_fn is a real thread waiting for this answer, and a card that
+        # vanished with the old page left the turn hanging with no way to
+        # answer it.
+        self.pending_confirm: dict | None = None
 
     @property
     def turn_open(self) -> bool:
@@ -862,6 +902,8 @@ class DaemonBridge:
 
     def attach(self, send_json) -> None:
         self.sink = send_json
+        if self.pending_confirm is not None:
+            self.send_json(self.pending_confirm)
 
     def detach(self) -> None:
         self.sink = None
@@ -893,6 +935,7 @@ class DaemonBridge:
         self.rfile = None
         self.wfile = None
         self.ready = False
+        self.pending_confirm = None
 
     def _pump(self) -> None:
         """Daemon frames in, browser frames out, until either end hangs up."""
@@ -920,7 +963,13 @@ class DaemonBridge:
                     self.send_json({"type": "system", "text": msg.get("text", "")})
                 elif kind == "confirm":
                     self._flush_prefix()
-                    self.send_json({"type": "confirm", "prompt": msg.get("prompt", "")})
+                    frame = {"type": "confirm", "prompt": msg.get("prompt", "")}
+                    # The guardrails card's parts, when the daemon sent them:
+                    # what will happen, exactly what, and why it is asking.
+                    if isinstance(msg.get("card"), dict):
+                        frame["card"] = msg["card"]
+                    self.pending_confirm = frame
+                    self.send_json(frame)
                 elif kind == "input_prompt":
                     # The session is asking for the next message. After a turn
                     # that means the turn is over -- the text has already gone
@@ -1097,8 +1146,15 @@ class DaemonBridge:
             self.pending.append(text)
             return False
 
-    def confirm(self, approved: bool) -> None:
-        self._send({"type": "confirm", "answer": bool(approved)})
+    def confirm(self, approved: bool, always: bool = False) -> None:
+        """The answer the daemon's confirm_fn is waiting for. `always` is
+        "Always allow" on the card: the daemon switches that kind of action
+        to allow, where Settings → Guardrails reads it."""
+        self.pending_confirm = None
+        answer = {"type": "confirm", "answer": bool(approved)}
+        if approved and always:
+            answer["always"] = True
+        self._send(answer)
 
     def close(self) -> None:
         try:
@@ -1106,6 +1162,54 @@ class DaemonBridge:
                 self.sock.close()
         except OSError:
             pass
+
+
+# ── who may talk to this server ──────────────────────────────────────
+#
+# It listens on localhost, and that is not the same as "only this window":
+# every web page open in any browser on this Mac can reach 127.0.0.1:8742
+# too. The same-origin policy stops a page from READING a cross-site
+# response, but a WebSocket is exempt from it — so until this check any site
+# could open /ws/chat, type to an agent that runs shell commands, and answer
+# its approval cards. A form posted as text/plain reached /api/settings the
+# same way. Browsers always send Origin on a WebSocket handshake and on a
+# cross-site POST, and a page cannot forge it; a client that sends none is
+# not a browser, and so is not a web page acting behind the user's back.
+#
+# Host is checked on every request for DNS rebinding: a name that resolves
+# to 127.0.0.1 turns an attacker's page into a same-origin one, but its
+# requests still say `Host: attacker.example:8742`.
+_LOCAL_NAMES = ("127.0.0.1", "localhost", "[::1]")
+
+
+def _is_local_hostport(value: str, port: int, bound: str = "") -> bool:
+    value = (value or "").strip().lower()
+    # The address it was started on counts too: `--host` is what the
+    # launcher puts in the window's URL.
+    names = _LOCAL_NAMES + ((bound.lower(),) if bound else ())
+    return value in {f"{name}:{port}" for name in names}
+
+
+def request_refusal(headers: Any, port: int, websocket: bool = False,
+                    writes: bool = False, bound: str = "") -> str:
+    """Why this request is refused, or "" when it may proceed."""
+    if not _is_local_hostport(headers.get("Host", ""), port, bound):
+        return "Host is not this machine's window server."
+    if not (websocket or writes):
+        return ""
+    origin = headers.get("Origin")
+    if origin is not None:
+        parts = urllib.parse.urlsplit(origin)
+        if parts.scheme != "http" or not _is_local_hostport(parts.netloc, port, bound):
+            return f"Origin {origin!r} is not this window."
+    if writes and not websocket:
+        # A cross-site form can only send text/plain, form-urlencoded or
+        # multipart; JSON from a page needs a preflight this server never
+        # answers.
+        kind = (headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if kind != "application/json":
+            return "Settings are written as application/json only."
+    return ""
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────
@@ -1120,8 +1224,18 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- routing --
 
+    def _refuse(self, websocket: bool = False, writes: bool = False) -> bool:
+        bound, port = self.server.server_address[:2]
+        why = request_refusal(self.headers, port, websocket=websocket,
+                              writes=writes, bound=str(bound))
+        if why:
+            self.send_error(403, why)
+        return bool(why)
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's name
         path = self.path.split("?", 1)[0]
+        if self._refuse(websocket=path == "/ws/chat"):
+            return
         if path == "/ws/chat":
             return self._websocket()
         if path == "/api/ecosystem":
@@ -1130,6 +1244,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(get_health())
         if path == "/api/settings":
             return self._json(get_settings())
+        if path == "/api/guardrails":
+            return self._json(get_guardrails())
         if path == "/api/sessions":
             query = self.path.partition("?")[2]
             wanted = ""
@@ -1148,7 +1264,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404, "Not found")
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's name
-        if self.path.split("?", 1)[0] != "/api/settings":
+        if self._refuse(writes=True):
+            return
+        path = self.path.split("?", 1)[0]
+        writers = {"/api/settings": set_settings, "/api/guardrails": set_guardrail}
+        if path not in writers:
             return self.send_error(404, "Not found")
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -1157,7 +1277,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": "Malformed request."})
         if not isinstance(body, dict):
             return self._json({"ok": False, "error": "Malformed request."})
-        return self._json(set_settings(body))
+        return self._json(writers[path](body))
 
     def _json(self, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -1283,7 +1403,8 @@ class Handler(BaseHTTPRequestHandler):
                     elif bridge.pending and not (bridge.connecting() or bridge.waking):
                         bridge.start_waking()
                 elif kind == "confirm_response":
-                    bridge.confirm(msg.get("approved", False))
+                    bridge.confirm(bool(msg.get("approved", False)),
+                                   always=bool(msg.get("always", False)))
                 elif kind == "ping":
                     send_json({"type": "pong"})
         except (WSError, OSError):

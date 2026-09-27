@@ -1392,7 +1392,9 @@ def test_an_unseeded_domain_consults_the_confirm_fn():
     session = BrowserSession(confirm_fn=lambda p: confirmed.append(p) or True)
     ok, _ = session._check_url("https://example.org/x")
     assert ok is True
-    assert confirmed == ["Allow browser to access 'example.org'?"]
+    # One question, naming the site, in a sentence (a guardrails card).
+    assert len(confirmed) == 1 and "example.org" in confirmed[0]
+    assert "hasn't visited before" in confirmed[0]
     # A deny is final: the domain never enters _confirmed.
     said_no = BrowserSession(confirm_fn=lambda p: False)
     ok, msg = said_no._check_url("https://denied.example/x")

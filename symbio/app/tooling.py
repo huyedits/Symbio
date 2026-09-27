@@ -479,7 +479,7 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "post_to_x",
-        "description": "Write a post on x.com and verify it went out. The browser must already be open at x.com and signed in — this does not navigate there, because posting is not something to do on a page nobody asked for. Returns a verdict you cannot shape: '[Post CONFIRMED' only when the exact text was found rendered on the timeline afterwards. Never report a post as made without that verdict; if it says NOT confirmed, check x.com before trying again or it goes out twice.",
+        "description": "Post on x.com, as the user, with exactly this text — the ONLY way to post there. The user sees the text and approves it first; then this opens x.com/home, empties the composer, types the text, sends, and checks the timeline. Never type into X's composer and press Post yourself: pass the user's exact words here. Returns a verdict you cannot shape: '[Post CONFIRMED' only when a new post with exactly this text is on the timeline. Never report a post as made without that verdict; if it says NOT confirmed, check x.com before trying again or it goes out twice.",
         "parameters": {
             "type": "object",
             "properties": {"text": {"type": "string", "description": "The post, 280 characters or fewer."}},

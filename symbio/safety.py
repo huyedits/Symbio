@@ -72,6 +72,8 @@ SENSITIVE_CONFIG_KEYS: set[str] = {
 # Prefixes that make any dotted key sensitive.
 SENSITIVE_PREFIXES: tuple[str, ...] = (
     "safety.",
+    # The model loosening its own guardrails is a change the user must see.
+    "guardrails",
     "telegram.",
     "remote.hosts",
     "sandbox.blocked",

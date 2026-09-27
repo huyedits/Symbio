@@ -625,6 +625,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # key-based auth or ssh-agent.
         "hosts": {},
     },
+    # What Symbio may do without asking, by KIND of action — "Post publicly",
+    # "Run commands and code" — each one allow / risky / ask / block. Empty
+    # means the defaults in symbio/guardrails.py, which are the old
+    # behaviour. The window's Settings → Guardrails writes here, and so does
+    # "Always allow" on an approval card.
+    "guardrails": {
+        "modes": {},
+        # Ask the model to say, in one plain English sentence, what a gated
+        # action will do. The card shows the exact post or command under it
+        # either way; off, the harness's own wording is the headline.
+        "translate": True,
+    },
     "safety": {
         # Prompt-injection defenses and risk-based escalation.
         "enabled": True,

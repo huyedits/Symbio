@@ -357,9 +357,8 @@ paragraph.
 post_to_x  {"text": "shipping the desktop window today"}
 ```
 
-The browser must already be open at x.com and signed in — it does not navigate
-there on its own, because posting is not something to do on a page nobody
-asked for. It fills the composer **by selector** (the composer is 28px tall,
+The browser profile must be signed in to x.com. It fills the composer **by
+selector** (the composer is 28px tall,
 under the vision model's one-patch floor, and a coordinate for it missed by
 ~36px every time), sends with x's own Post button, then reads the timeline back
 and returns a verdict the model cannot shape:
@@ -372,7 +371,44 @@ and returns a verdict the model cannot shape:
 
 A cleared composer is not confirmation — a discarded draft clears too. This
 project has already posted something and reported that it had not, which is
-why the proof is read from the DOM rather than from a toast.
+why the proof is read from the DOM rather than from a toast. The proof is a NEW
+article with exactly those words: "testing" posted yesterday is still on the
+timeline, and finding it again once meant confirming a post that never went.
+
+Once the post is approved, the tool opens x.com/home itself. It empties the box
+before typing — a draft left in it is posted along with the words otherwise —
+and sends only when the box holds exactly the post. When a message spells the
+words out (`make a tweet “testing"`), the harness makes the post_to_x call
+itself with those words; the model takes over from the verdict. On 2026-09-27
+the model, asked for “testing”, typed "Hi" into the composer and pressed Post.
+
+### Guardrails
+
+What Symbio may do without asking is set per **kind of action**, in words you
+would use — *Post publicly*, *Run commands and code*, *Change files*, *Use your
+desktop*, *Browse the web*, *Forget things*, *Train itself*, *Change its
+settings*, *Schedule work* — each **Allow**, **If risky**, **Ask** or **Never**
+(Settings → the first section in the window, or `guardrails.modes` in
+config.json). The defaults are the old behaviour.
+
+- **One question per action, in plain English.** The card's headline is the
+  model's own sentence for the concrete call ("I'll post “Hi” publicly on your X
+  account"); under it, the exact post or command, from the harness. If the
+  words about to go out are not the ones you quoted, the card says so in red.
+  It used to ask twice for one post, once with no text at all.
+- **A click is judged by what it lands on.** Pressing X's Post button, its
+  cmd+enter shortcut, a DM's send, a repost — by text, selector, coordinates
+  or key — is *Post publicly*, whichever tool did it. Before this, only
+  post_to_x was gated, and browser_type plus browser_click posted "Hi" with
+  nobody asked.
+- **Always allow** on a card switches that kind to Allow; anything the risk
+  scorer rates destructive still asks. **Never** is refused, and the model is
+  told the refusal is yours.
+- **Floors** no switch reaches: the security policy, self-destruction, and the
+  model loosening its own guardrails.
+- The window's server only talks to the window: requests must come from its
+  own origin, so a web page open in your browser can no longer open the chat
+  socket or write settings.
 
 ---
 

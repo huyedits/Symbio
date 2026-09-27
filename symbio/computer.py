@@ -108,6 +108,11 @@ def _normalize_key(key: str) -> str:
     return key[:1].upper() + key[1:]
 
 
+def _is_x_host(host: str) -> bool:
+    host = (host or "").lower()
+    return host in ("x.com", "twitter.com") or host.endswith((".x.com", ".twitter.com"))
+
+
 def _first_visible(locator: Any) -> tuple[Any | None, int]:
     """Return (first visible element, total match count) for a locator."""
     count = locator.count()
@@ -121,6 +126,16 @@ def _confirm_domain(domain: str, ask_fn=None) -> bool:
     """Prompt the user before opening a new domain.
     `ask_fn(prompt) -> bool` may be supplied by non-terminal front-ends."""
     prompt = f"Allow browser to access '{domain}'?"
+    try:
+        from symbio import guardrails
+
+        # No kind: "always allow" on a card switches a whole kind of action,
+        # and a new site is asked about once, by name, not by kind.
+        prompt = guardrails.Card(
+            f"Open {domain} in Symbio's browser — a site it hasn't visited before.",
+            reason="New sites are asked about once.")
+    except Exception:
+        pass
     if ask_fn is not None:
         try:
             return ask_fn(prompt)
@@ -167,6 +182,12 @@ class BrowserSession:
         # dedicated one, which is what keeps the agent to the accounts it was
         # deliberately signed into.
         self._chrome_profile = chrome_profile
+        # Asked before a click, a key or a coordinate lands on something that
+        # publishes: (facts) -> (approved, observation if not). Set by the
+        # app, which owns the guardrails and the person to ask; None here
+        # means nothing is gated, which is what a bare BrowserSession in a
+        # script has always been.
+        self.publish_gate: Any | None = None
 
     @property
     def is_open(self) -> bool:
@@ -184,14 +205,30 @@ class BrowserSession:
         # Spell the tags out rather than naming the tools. Naming them is what
         # taught the model to invent <browser_open>; and this note exists
         # precisely for the moment it has forgotten how to act on the page.
+        # On X the tags below are the wrong tools for the job the user
+        # usually has there. Live 2026-09-27: told only this, the model typed
+        # "Hi" into the composer and clicked Post — the user had asked for
+        # "testing".
+        on_x = (' To post here, call post_to_x with {"text": "<the exact '
+                'words>"} — it clears the box, types, sends and checks the '
+                "timeline. Pressing Post yourself asks the user first."
+                if _is_x_host(self._page_host()) else "")
         return (
             f"Browser is open at {self._last_url} "
             f"(page title: \"{title}\"). "
             f"Act on THIS page directly — do not reopen it and do not use a "
             f"shell command. Emit exactly one of: "
             f"<click>visible text</click>, <type>words</type>, "
-            f"<press>Enter</press>, <scroll />, <browser_close />."
+            f"<press>Enter</press>, <scroll />, <browser_close />." + on_x
         )
+
+    def _page_host(self) -> str:
+        """The open page's host, lower-case, without www. "" when unknown."""
+        try:
+            url = self._page.url if self._page is not None else ""
+        except Exception:
+            url = ""
+        return re.sub(r"^https?://(www\.)?", "", url or "").split("/")[0].split(":")[0].lower()
 
     def _init(self, channel: str = "") -> tuple[Any, Any]:
         if self._page is not None:
@@ -452,6 +489,118 @@ class BrowserSession:
 
     _TIMEOUT_MS = 4000
 
+    # What a click, a key or a point would PUBLISH on X, read off the element
+    # it lands on: the composer's own send button (inline, or in the compose
+    # dialog), a DM's send button, the repost confirmation — and for a key,
+    # the box that has focus. null when it publishes nothing.
+    #
+    # Judged by what is hit, not by how it was aimed. Live 2026-09-27 the
+    # model typed "Hi" with browser_type and pressed Post with browser_click:
+    # two tools on no approval list, and between them a public post under the
+    # user's name that nobody was asked about.
+    _PUBLISH_JS = r"""(el, how) => {
+        const host = (location.hostname || '').replace(/^www\./, '').toLowerCase();
+        if (!/(^|\.)(x|twitter)\.com$/.test(host)) return null;
+        const SEND = '[data-testid="tweetButton"],[data-testid="tweetButtonInline"],'
+                   + '[data-testid="dmComposerSendButton"],[data-testid="retweetConfirm"]';
+        const BOXES = '[data-testid^="tweetTextarea_"],[data-testid="dmComposerTextInput"]';
+        const isBox = (n) => {
+            const id = (n && n.getAttribute && n.getAttribute('data-testid')) || '';
+            return /^tweetTextarea_\d+$/.test(id) || id === 'dmComposerTextInput';
+        };
+        const boxText = (n) => ((n.tagName === 'TEXTAREA' || n.tagName === 'INPUT')
+            ? n.value : (n.innerText || '')).trim();
+        const scopeOf = (n) => {
+            for (let p = n; p; p = p.parentElement) {
+                if (p.querySelector && p.querySelector(BOXES)) return p;
+            }
+            return document;
+        };
+        const textIn = (scope) => [...scope.querySelectorAll(BOXES)]
+            .filter(isBox).map(boxText).filter(Boolean).join('\n\n');
+        const nameOf = (b, fallback) => (((b && (b.innerText || b.getAttribute('aria-label'))) || '')
+            .trim() || fallback).slice(0, 40);
+        if (!el || !el.closest) return null;
+        if (how === 'click') {
+            const button = el.closest(SEND);
+            if (!button) return null;
+            const id = button.getAttribute('data-testid');
+            return {site: host, control: id, label: nameOf(button, 'Post'),
+                    text: id === 'retweetConfirm' ? '' : textIn(scopeOf(button)),
+                    disabled: !!(button.disabled || button.getAttribute('aria-disabled') === 'true'),
+                    action: id === 'dmComposerSendButton' ? 'send a direct message'
+                          : id === 'retweetConfirm' ? 'repost' : 'post'};
+        }
+        const box = el.closest(BOXES);
+        if (!box) return null;
+        const dm = !!el.closest('[data-testid="dmComposerTextInput"]');
+        if (how === 'enter' && !dm) return null;   // Enter in a post is a new line
+        const scope = scopeOf(box);
+        const button = scope.querySelector(dm ? '[data-testid="dmComposerSendButton"]'
+            : '[data-testid="tweetButton"],[data-testid="tweetButtonInline"]');
+        return {site: host, control: button ? button.getAttribute('data-testid')
+                    : (dm ? 'dmComposerSendButton' : 'tweetButton'),
+                label: nameOf(button, dm ? 'Send' : 'Post'), text: textIn(scope),
+                disabled: false, action: dm ? 'send a direct message' : 'post'};
+    }"""
+
+    def _publish_facts(self, page: Any, target: Any = None, point: Any = None,
+                       key: str = "") -> dict[str, Any] | None:
+        """What this action would publish, or None when it publishes nothing.
+
+        Fails CLOSED on X alone: a page that cannot be read there is treated
+        as a possible post, because the cost of asking once needlessly is a
+        click and the cost of the other mistake is a public post. Anywhere
+        else an unreadable page is not a reason to ask.
+        """
+        try:
+            if target is not None:
+                return target.evaluate(self._PUBLISH_JS, "click")
+            if point is not None:
+                return page.evaluate(
+                    f"([x, y]) => ({self._PUBLISH_JS})(document.elementFromPoint(x, y), 'click')",
+                    [int(point[0]), int(point[1])])
+            return page.evaluate(
+                f"(how) => ({self._PUBLISH_JS})(document.activeElement, how)", key)
+        except Exception:
+            host = self._page_host()
+            if not _is_x_host(host):
+                return None
+            return {"site": host, "control": "unknown", "label": "this control",
+                    "text": "", "disabled": False, "action": "post", "unread": True}
+
+    def _gate_publish(self, page: Any, target: Any = None, point: Any = None,
+                      key: str = "") -> str:
+        """"" to go ahead, or the observation that takes the action's place."""
+        gate = self.publish_gate
+        if gate is None:
+            return ""
+        facts = self._publish_facts(page, target=target, point=point, key=key)
+        # A disabled send button does nothing when clicked; asking about it
+        # would be a question about nothing.
+        if not facts or facts.get("disabled"):
+            return ""
+        try:
+            approved, why = gate(facts)
+        except Exception as e:
+            approved, why = False, f"Not sent: the approval could not be asked ({_short_error(e)})."
+        return "" if approved else (why or "Not sent: the user did not approve posting.")
+
+    def publish_preview(self) -> dict[str, Any] | None:
+        """What X's open composer would post right now — for the card that
+        asks about a submit_form on x.com, which otherwise shows only a
+        button's name."""
+        try:
+            page = self._ensure_open()
+            return page.evaluate(
+                f"() => {{ const b = document.querySelector("
+                f"'[role=\"dialog\"] [data-testid=\"tweetButton\"]') || "
+                f"document.querySelector('[data-testid=\"tweetButtonInline\"],"
+                f"[data-testid=\"tweetButton\"]'); "
+                f"return b ? ({self._PUBLISH_JS})(b, 'click') : null; }}")
+        except Exception:
+            return None
+
     def click(self, selector: str = "", text: str = "") -> str:
         try:
             page = self._ensure_open()
@@ -497,16 +646,24 @@ class BrowserSession:
                 f"element containing text '{text}'",
             )
 
-    def _try_click(self, page, selector: str = "", text: str = "", attempt: int = 1) -> str:
+    def _try_click(self, page, selector: str = "", text: str = "", attempt: int = 1,
+                   gate: bool = True) -> str:
         """Single click attempt. On the first failure due to a timeout or
         missing visible element, wait a moment and try once more — small
-        models often issue a click before the page has fully settled."""
+        models often issue a click before the page has fully settled.
+
+        `gate=False` only for a caller whose own tool was already approved as
+        a publish (submit_form); anything else that lands on a control that
+        publishes is asked about first, whatever it was aimed with."""
         if selector:
             # Generic selectors often match dozens of elements, many
             # hidden; click the first *visible* match instead of the
             # first match (which times out on hidden elements).
             target, count = _first_visible(page.locator(selector))
             if target is not None:
+                refused = self._gate_publish(page, target=target) if gate else ""
+                if refused:
+                    return refused
                 target.click(timeout=self._TIMEOUT_MS)
                 which = f" (first visible of {count} matches)" if count > 1 else ""
                 return f"Clicked element matching '{selector}'{which}."
@@ -523,6 +680,14 @@ class BrowserSession:
                     target, count = _first_visible(locator)
                     if target is None:
                         continue
+                    # Before the click, on the exact element it would hit. A
+                    # "no" ends here: the next candidate for "Post" is the
+                    # sidebar link, and falling through to it after the user
+                    # declined would open a fresh composer as if nothing had
+                    # been said.
+                    refused = self._gate_publish(page, target=target) if gate else ""
+                    if refused:
+                        return refused
                     try:
                         target.click(timeout=self._TIMEOUT_MS)
                     except Exception:
@@ -535,7 +700,7 @@ class BrowserSession:
             if attempt == 1:
                 # Page may still be settling; one automatic retry.
                 time.sleep(0.5)
-                return self._try_click(page, selector, text, attempt=2)
+                return self._try_click(page, selector, text, attempt=2, gate=gate)
             return (
                 f"Click failed: no visible element with text '{text}'. "
                 "Look at the screen to find where the element actually is and "
@@ -616,6 +781,9 @@ class BrowserSession:
                         "top of what is there."
                     )
             if press_enter:
+                refused = self._gate_publish(page, key="enter")
+                if refused:
+                    return f"Typed '{text}'. " + refused
                 page.keyboard.press("Enter")
                 # Same false success press() now catches, reachable through
                 # the other tool: browser_type with enter:true is how the
@@ -921,6 +1089,12 @@ class BrowserSession:
             # leaves a composer holding its text, and the note would then fire
             # on every arrow key with a message half-written.
             submits = normalized.split("+")[-1] == "Enter"
+            if submits:
+                # cmd/ctrl+enter sends a post on X; plain Enter sends a DM.
+                refused = self._gate_publish(
+                    page, key="enter" if normalized == "Enter" else "send")
+                if refused:
+                    return refused
             pending = self._pending_state(page) if submits else ("", "")
             page.keyboard.press(normalized)
             if normalized == "Enter" and not self._enter_submitted(page):
@@ -1003,6 +1177,9 @@ class BrowserSession:
                     f"come from a screenshot of the CURRENT viewport — scroll "
                     f"to bring the target into view and look again."
                 )
+            refused = self._gate_publish(page, point=(x, y))
+            if refused:
+                return refused
             pending = self._pending_state(page)
             page.mouse.click(x, y)
             return f"Clicked at ({x}, {y})." + self._submit_note(page, pending)
@@ -1152,7 +1329,7 @@ class BrowserSession:
         try:
             text, url_before = self._pending_state(page)
             needle = " ".join((expect_text or "").split())[:80]
-            out = self._try_click(page, selector, target)
+            out = self._try_click(page, selector, target, gate=False)
             if out.startswith("Click failed"):
                 return out + (
                     " Do NOT report this form as submitted — the click did not "
@@ -1373,6 +1550,8 @@ class BrowserSession:
         except Exception:
             url = ""
         if "x.com" not in url and "twitter.com" not in url:
+            # The app opens x.com/home first once the user has approved the
+            # post; this layer still refuses to post from a page nobody chose.
             return (f"{X_UNVERIFIABLE}] The open page is {url or 'unknown'}, not "
                     "x.com. Open https://x.com/home first — this does not "
                     "navigate on its own, because a post is not something to "
@@ -1387,32 +1566,55 @@ class BrowserSession:
             except Exception:
                 pass
 
+        # The compose WINDOW when one is open, else the box on the timeline.
+        # A dialog makes everything behind it inert, and the first composer
+        # in the document is the one behind it: typing there does nothing and
+        # its Post button cannot be pressed.
         try:
-            composer = page.query_selector(X_COMPOSER)
+            composer = page.query_selector(f'[role="dialog"] {X_COMPOSER}')
+            buttons = tuple(f'[role="dialog"] {b}' for b in X_POST_BUTTONS)
+            if composer is None:
+                composer, buttons = page.query_selector(X_COMPOSER), X_POST_BUTTONS
         except Exception as e:
             return f"{X_UNVERIFIABLE}] Could not read the page: {_short_error(e)}"
         if composer is None:
             return (f"{X_NOT_CONFIRMED}] No composer on this page. Open "
                     "https://x.com/home, or click the Post button to open one.")
 
+        # Empty the box first. It can already hold a draft — live 2026-09-27
+        # the model had typed "Hi" into it before this was called — and typing
+        # on top of a draft posts both.
         try:
             composer.click()
+            if _x_box_text(composer):
+                _x_clear_box(page, composer)
+            left = _x_box_text(composer)
+            if left:
+                return (f"{X_NOT_CONFIRMED}] The box already held {left[:80]!r} "
+                        "and could not be emptied. Nothing was sent.")
             page.keyboard.type(body)
         except Exception as e:
             return f"{X_NOT_CONFIRMED}] Could not write the post: {_short_error(e)}"
 
-        # What the composer holds now, BEFORE sending. A draft that never
-        # landed would otherwise be "sent" into an empty box.
-        try:
-            in_box = " ".join((composer.inner_text() or "").split())
-        except Exception:
-            in_box = ""
-        if in_box and " ".join(body.split())[:40] not in in_box:
-            return (f"{X_NOT_CONFIRMED}] The text did not reach the composer — "
-                    f"it holds {in_box[:80]!r}. Nothing was sent.")
+        # What the box holds now, BEFORE sending, and it has to be exactly
+        # the post. A prefix check passed a box holding more than the text,
+        # which is the draft-plus-post case above.
+        in_box = _x_box_text(composer)
+        if in_box != " ".join(body.split()):
+            try:
+                _x_clear_box(page, composer)
+            except Exception:
+                pass
+            held = f"it held {in_box[:80]!r}" if in_box else "it stayed empty"
+            return (f"{X_NOT_CONFIRMED}] The text did not land exactly in the "
+                    f"composer — {held}. It was cleared and nothing was sent.")
 
+        # How many posts with these exact words are on the timeline already.
+        # "testing" posted yesterday is still there, and finding it again is
+        # not proof that today's went out.
+        before = _x_text_on_timeline(page, body)
         clicked = False
-        for selector in X_POST_BUTTONS:
+        for selector in buttons:
             try:
                 button = page.query_selector(selector)
                 if button is None:
@@ -1439,7 +1641,7 @@ class BrowserSession:
         # be found on the timeline.
         deadline = time.time() + max(1.0, timeout_ms / 1000.0)
         while time.time() < deadline:
-            if _x_text_on_timeline(page, body):
+            if _x_text_on_timeline(page, body) > before:
                 return (f"{X_CONFIRMED}] The post is rendered on the timeline: "
                         f"{body[:80]!r}")
             try:
@@ -1855,30 +2057,52 @@ X_LOGGED_OUT = ('a[data-testid="loginButton"]', 'a[href="/login"]')
 
 # Verdict heads, matching submit_form's contract so the app layer can read
 # either with the same rule.
+def _x_box_text(box: Any) -> str:
+    """What X's compose box holds, whitespace collapsed; "" when unreadable."""
+    try:
+        text = box.inner_text() or ""
+    except Exception:
+        return ""
+    return " ".join(text.replace("\u200b", "").split())
+
+
+def _x_clear_box(page: Any, box: Any) -> None:
+    """Select everything in the box and delete it. Select-all inside a
+    contenteditable selects only its own content."""
+    box.click()
+    page.keyboard.press("Meta+A" if sys.platform == "darwin" else "Control+A")
+    page.keyboard.press("Backspace")
+
+
 X_CONFIRMED = "[Post CONFIRMED"
 X_NOT_CONFIRMED = "[Post NOT confirmed"
 X_UNVERIFIABLE = "[Post verification could not run"
 
 
-def _x_text_on_timeline(page: Any, text: str) -> bool:
-    """Is this exact text now rendered in a timeline article?
+def _x_text_on_timeline(page: Any, text: str) -> int:
+    """How many timeline articles show exactly this post. 0 when none.
 
-    The proof that a post went out. Read from the DOM rather than from a
-    toast: a toast is a transient element that may already be gone, and its
-    text says "Your post was sent" whether or not the network call returned.
+    The proof that a post went out is this number going UP across the send.
+    Read from the DOM rather than from a toast: a toast is a transient element
+    that may already be gone, and its text says "Your post was sent" whether
+    or not the network call returned. An article's own post text
+    (`tweetText`) must equal the post; an article without one is matched on
+    containing it, as before.
     """
-    probe = " ".join(text.split())[:80]
+    probe = " ".join(text.split())[:280]
     if not probe:
-        return False
+        return 0
     try:
-        return bool(page.evaluate(
+        return int(page.evaluate(
             """(needle) => {
-                const articles = document.querySelectorAll('article');
-                for (const article of articles) {
-                    const rendered = (article.innerText || '').replace(/\\s+/g, ' ');
-                    if (rendered.includes(needle)) return true;
+                const norm = (t) => (t || '').replace(/\\s+/g, ' ').trim();
+                let n = 0;
+                for (const article of document.querySelectorAll('article')) {
+                    const own = article.querySelector('[data-testid="tweetText"]');
+                    if (own ? norm(own.innerText) === needle
+                            : norm(article.innerText).includes(needle)) n += 1;
                 }
-                return false;
-            }""", probe))
+                return n;
+            }""", probe) or 0)
     except Exception:
-        return False
+        return 0

@@ -30,7 +30,7 @@ from symbio.app.chat_text import (
     _EXPLICIT_SEARCH_RE, _MOOD_TAG_RE, _VALID_MOODS, _asks_for_action,
     _is_action_request, _is_greeting, _is_navigation_only, _is_substantive,
     _last_exchange, _looks_like_verification_followup,
-    _subjectless_search_command, infer_user_affect,
+    _subjectless_search_command, infer_user_affect, x_post_request,
 )
 
 
@@ -451,6 +451,11 @@ class AgentTurnMixin:
         # this turn; a submission claim is then backed by code, not the model.
         submit_confirmed = False
         last_observation = ""
+        # True while the last thing on screen was said BEFORE the last tool
+        # ran. Live 2026-09-27 the turn's visible answer was "I've opened X.
+        # Let's create your tweet." — written two rounds before the clicks
+        # that posted "Hi" — and nothing after it said what had happened.
+        answer_is_stale = False
         unparsed_tag_nudged = False
         echo_retry_nudged = False
         continuation_challenged = False
@@ -458,6 +463,22 @@ class AgentTurnMixin:
         thinking_cut_retried = False
         turn_think = False           # what this round was actually served with
         turn_decision = None         # (think, budget), decided on the first round
+        # A post the user spelled out word for word is made by the harness:
+        # the first round's reply is the post_to_x call with THEIR words, and
+        # the model takes over from the verdict. Live 2026-09-27 the model,
+        # asked for `a tweet “testing"`, typed "Hi" and pressed Post. The call
+        # still goes through _execute_tool, so the approval card comes first.
+        forced_reply = None
+        planned_post = x_post_request(user_input)
+        if (planned_post
+                and self.config.get("browser", {}).get("enabled", False)
+                and tooling.tool_group_enabled("post_to_x",
+                                               getattr(self, "enabled_groups", None))):
+            forced_reply = ("<tool_call>" + json.dumps(
+                {"name": "post_to_x", "arguments": {"text": planned_post}},
+                ensure_ascii=False) + "</tool_call>")
+            self.output_fn(f"  [Plan] Posting exactly “{planned_post}” on x.com — "
+                           "the harness makes this call itself, so the words are yours.")
         # The round index used to select thinking (think=round_num > 0);
         # agent.thinking_level owns that now, so nothing reads the counter.
         for _round_num in range(max_rounds):
@@ -614,10 +635,14 @@ class AgentTurnMixin:
                         turn_decision = self.turn_thinking(user_input)
                     _think, _budget = turn_decision
                     turn_think = _think
-                    raw_reply, streamed_live = self._generate_reply(
-                        messages, chunk_prefix=chunk_prefix, timings=timings,
-                        think=_think, reasoning_budget=_budget,
-                        )
+                    if forced_reply is not None:
+                        raw_reply, streamed_live, forced_reply = forced_reply, False, None
+                        turn_think = False
+                    else:
+                        raw_reply, streamed_live = self._generate_reply(
+                            messages, chunk_prefix=chunk_prefix, timings=timings,
+                            think=_think, reasoning_budget=_budget,
+                            )
                     # The thinking block is surfaced to the user (streamed by
                     # StreamingStripper, or printed below when not streaming);
                     # the reply itself stays reasoning-free so tools and
@@ -886,6 +911,7 @@ class AgentTurnMixin:
 
             if display.strip():
                 final_display = display
+                answer_is_stale = False
                 if not streamed_live:
                     # Streaming showed nothing (streaming off, or the whole
                     # reply was a tool tag) — surface the reasoning here so it
@@ -1550,6 +1576,7 @@ class AgentTurnMixin:
                 distinct_attempts.append((name, params))
                 attempted_names.add(name)
             any_tool_ran = True
+            answer_is_stale = True
             extra = fresh_tools[1:]
 
             # There are tools to execute
@@ -1775,6 +1802,8 @@ class AgentTurnMixin:
             if (name == "browser_open"
                     and _is_navigation_only(user_input)
                     and not learn.sounds_like_tool_error(observation)):
+                # "Opening x.com." IS the answer to "open x.com".
+                answer_is_stale = False
                 break
 
         # A turn must never end with nothing on screen. The blank-reply nudge
@@ -1794,6 +1823,18 @@ class AgentTurnMixin:
                    "is the result.)" if any_tool_ran else
                    "(No reply — the model returned only internal reasoning.)"))
             self.logger.info("Turn ended with no visible reply.")
+        elif answer_is_stale and last_observation.strip():
+            # The answer on screen predates the last action. Say what that
+            # action did, in the harness's words — the model had its chance.
+            step = " ".join(last_observation.strip().split())
+            step = step.split(" Page text now:")[0][:220]
+            failed = learn.sounds_like_tool_error(last_observation)
+            self.output_fn(
+                f"{self.config['assistant_name']:8}: "
+                + (f"(I didn't finish — my last step failed: {step})" if failed else
+                   f"(I stopped after my last step without saying how it went: "
+                   f"{step} Check it before asking me to do it again.)"))
+            self.logger.info(f"Turn ended on a stale answer; last step: {step}")
 
         # What the model actually worked on this turn decides which worked
         # examples it is shown next turn (see tool_few_shots). The LAST tool it

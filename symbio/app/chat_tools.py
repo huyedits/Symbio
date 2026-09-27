@@ -18,14 +18,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from symbio import computer, constants, safety
+from symbio import computer, constants, guardrails, safety
 from symbio.app import (
     cron, health, learn, local_telemetry, mcp_bridge, memory, sandbox,
     security, tooling, training, web,
 )
 from symbio.app.config import config_show, set_config_value
-from symbio.app.chat_constants import (
-    _ALWAYS_CONFIRM_TOOLS, _LOCAL_TRUSTED_TOOLS, _TELEGRAM_CONFIRM_TOOLS)
 from symbio.app.chat_text import (
     _annotate_sandbox_cwd, _gui_app_for, _looks_like_shell_command,
     _queries_overlap, _repair_project_path_command,
@@ -90,6 +88,19 @@ def _browser_peek(browser, config=None) -> str:
     from symbio.app import chat
 
     return chat._browser_peek(browser, config)
+
+
+
+def _nested_confirm(session):
+    """What a gate INSIDE a tool (the sandbox's blocked-command check) asks
+    with: nobody, when the user just approved this very call on its card —
+    the card showed the exact command — else the usual person.
+
+    A function of the session rather than a method, because several tests
+    drive _dispatch_tool with a duck-typed stand-in for the session."""
+    if getattr(session, "_card_approved_call", False):
+        return lambda _prompt: True
+    return getattr(session, "confirm_fn", None)
 
 
 class ToolsMixin:
@@ -225,13 +236,22 @@ class ToolsMixin:
         if not tooling.tool_group_enabled(name, enabled_groups):
             return f"Tool '{name}' is disabled."
 
-        # Ask by name — before the risk scorer gets a say — for the actions
-        # whose cost does not depend on their arguments, and, when the person
-        # is somewhere else, for the ones they cannot judge from there.
-        if self.confirm_fn is not None and self._asks_by_name(name):
-            prompt = self._tool_confirm_prompt(name, params)
-            if not self.confirm_fn(prompt):
-                return f"Tool '{name}' was not approved."
+        # What KIND of action this is, and what the user has said about that
+        # kind — Settings → Guardrails in the window, `guardrails.modes` in
+        # config.json. It replaces two gates that asked about the same call
+        # separately: a post to x.com used to stop once as "Allow tool
+        # 'post_to_x'?", with no text, and again with it. See
+        # symbio/guardrails.py.
+        kind = guardrails.kind_of(name)
+        mode = guardrails.mode_for(kind, self._guardrail_config(),
+                                   remote=self.confirm_policy() == "name")
+        if mode == "block":
+            self._record_guardrail(name, kind, mode, "blocked")
+            return (f"Not allowed: the user declined this in advance — their "
+                    f"guardrails set “{guardrails.label(kind)}” to Never, so "
+                    f"'{name}' did not run. Tell them so, and that Settings → "
+                    "Guardrails is where it changes. Do not try to reach the same "
+                    "result another way.")
 
         # Risk-based escalation: the more dangerous an action is, the louder
         # the alert. High-risk actions require explicit approval; medium-risk
@@ -257,7 +277,11 @@ class ToolsMixin:
         # prompts on the TTY instead — while leaving them on for the front-ends
         # that do supply one. The guard was off wherever a human was actually
         # sitting there.
-        if safety.can_prompt(self.confirm_fn):
+        someone = safety.can_prompt(self.confirm_fn)
+        # "Always allow" is the user's own word for this kind, so the two
+        # escalations that guess at where a call came from stand down. What
+        # the call itself scores does not: a destructive command still asks.
+        if someone and mode != "allow":
             risk = safety.assess_provenance(
                 name, risk, self.config,
                 untrusted_in_context=getattr(self, "_untrusted_this_turn", False))
@@ -268,20 +292,39 @@ class ToolsMixin:
                 name, params, risk, self.config,
                 user_asked_for_action=getattr(
                     self, "_action_asked_this_turn", True))
-        allowed, reason = safety.maybe_confirm(name, params, risk, self.config, self.confirm_fn)
-        # `reason` is non-None only when the gate actually asked; combined with
-        # `allowed` that means the user was shown this call and said yes. The
-        # annotation below needs to carry that, or the model re-litigates an
-        # action its own user already authorised.
-        user_approved = allowed and reason is not None
-        if not allowed:
-            safety.log_security_event("tool_blocked", {
-                "tool": name, "params": params, "risk": risk, "reason": reason,
-            })
-            return (
-                f"Tool '{name}' was not approved (risk score {risk['risk_score']}/3: "
-                f"{', '.join(risk['flags'])})."
-            )
+
+        # One question, however many reasons there are to ask it. "Always
+        # ask" needs somebody to ask: with nobody there (a scheduled job, a
+        # script) the call keeps the risk score it earned, as it always did,
+        # and a high one is refused.
+        safety_cfg = (getattr(self, "config", None) or {}).get("safety", {})
+        by_mode = mode == "ask" and someone
+        threshold = int(safety_cfg.get("require_confirm_score", 3))
+        if mode == "allow":
+            threshold = max(threshold, 3)
+        by_risk = (not by_mode and safety_cfg.get("enabled", True)
+                   and risk.get("risk_score", 0) >= threshold)
+        # The annotation below needs to carry a yes, or the model
+        # re-litigates an action its own user already authorised.
+        user_approved = False
+        if by_mode or by_risk:
+            card = self._action_card(name, params, kind,
+                                     "ask" if by_mode else mode, risk)
+            approved = safety._prompt_confirm(card, self.confirm_fn)
+            self._record_guardrail(name, kind, mode,
+                                   "allowed" if approved else "denied", card)
+            if not approved:
+                if by_mode:
+                    return f"Tool '{name}' was not approved."
+                safety.log_security_event("tool_blocked", {
+                    "tool": name, "params": params, "risk": risk,
+                    "reason": str(card),
+                })
+                return (
+                    f"Tool '{name}' was not approved (risk score {risk['risk_score']}/3: "
+                    f"{', '.join(risk['flags'])})."
+                )
+            user_approved = True
 
         # A tool failing outright (e.g. clicking before the browser was ever
         # opened) must never crash the whole session — every branch below
@@ -289,10 +332,16 @@ class ToolsMixin:
         # backstop for anything that slips through. It becomes an
         # observation the model — and the tool-mistake-learning pipeline in
         # _agent_turn — can react to, same as any other tool failure.
+        # A yes on the card covers this call. The sandbox used to ask again
+        # for the same command ("'rm' is normally blocked. Allow once?"),
+        # which is two questions for one action.
+        self._card_approved_call = user_approved
         try:
             observation = self._dispatch_tool(name, params)
         except Exception as e:
             return f"Tool '{name}' failed unexpectedly: {e}"
+        finally:
+            self._card_approved_call = False
 
         # Only now does this tool stop being novel. Recording it before the
         # confirmation would let a refused call teach the baseline that it was
@@ -1272,10 +1321,317 @@ class ToolsMixin:
         return policy if policy in ("risk", "name") else "risk"
 
     def _asks_by_name(self, name: str) -> bool:
-        """Whether this tool stops for approval before it is even scored."""
-        if name in _ALWAYS_CONFIRM_TOOLS:
-            return True
-        return self.confirm_policy() == "name" and name in _LOCAL_TRUSTED_TOOLS
+        """Whether this tool stops for approval before it is even scored:
+        its kind is set to "always ask" — by default, or by the user."""
+        mode = guardrails.mode_for(guardrails.kind_of(name), self._guardrail_config(),
+                                   remote=self.confirm_policy() == "name")
+        return mode == "ask"
+
+    # ── guardrails ────────────────────────────────────────────────────
+
+    def _guardrail_config(self) -> dict[str, Any]:
+        """The config, with the guardrails section as the user last left it.
+
+        The window writes config.json directly — a switch in Settings, or
+        "Always allow" on a card — while the daemon holds its config in
+        memory, so the section is re-read whenever the file has changed. Only
+        where a front-end set `_guardrails_file` (the daemon does): a session
+        built in a test reads nothing off the disk it happens to run on.
+        """
+        config = getattr(self, "config", None)
+        if not isinstance(config, dict):
+            config = {}
+        path = getattr(self, "_guardrails_file", None)
+        if path is None:
+            return config
+        try:
+            stamp = Path(path).stat().st_mtime_ns
+        except OSError:
+            return config
+        if stamp != getattr(self, "_guardrails_stamp", None):
+            self._guardrails_stamp = stamp
+            section = guardrails.read_section(Path(path))
+            if section:
+                config["guardrails"] = {**(config.get("guardrails") or {}), **section}
+        return config
+
+    def _record_guardrail(self, name: str, kind: str | None, mode: str,
+                          answer: str, card: Any = None) -> None:
+        """What was asked and what came back, for the window's Guardrails
+        panel. Secrets are redacted: a card quotes the command it asks about."""
+        entry = {"tool": name, "kind": kind, "kind_label": guardrails.label(kind),
+                 "mode": mode, "answer": answer}
+        if isinstance(card, guardrails.Card):
+            entry.update(headline=tooling.redact_secrets(card.headline)[:300],
+                         details=tooling.redact_secrets(card.details)[:600],
+                         said_by=card.said_by)
+        guardrails.record(constants.LOG_DIR, entry)
+
+    def _action_card(self, name: str, params: dict[str, Any], kind: str | None,
+                     mode: str, risk: dict[str, Any] | None = None,
+                     facts: dict[str, Any] | None = None) -> "guardrails.Card":
+        """The question for this call: what it will do, in plain English, with
+        exactly what it will do underneath.
+
+        The headline is the model's own account when it can give one — asked
+        to translate the concrete call, not to recall what it meant to do —
+        and the harness's otherwise. The details are always the harness's:
+        the literal post, command or path, so a model that described its
+        action wrongly is contradicted on the same card.
+        """
+        if facts is None and name == "submit_form":
+            # On x.com a form submit IS a post, and a card that only names the
+            # button would be approved without the words being seen.
+            try:
+                facts = self.browser.publish_preview() or {}
+                facts.setdefault("url", self.browser._page.url)
+            except Exception:
+                facts = {}
+        headline, details, outgoing = self._plain_action(name, params, facts or {})
+        user_text = str(getattr(self, "_user_text_this_turn", "") or "")
+        warning = (guardrails.mismatch_warning(user_text, outgoing)
+                   if kind == "publish" and outgoing else "")
+        said_by = "harness"
+        spoken = self._translate_action(name, params, headline, details, warning)
+        if spoken:
+            headline, said_by = spoken, "model"
+        reason = guardrails.reason_for((risk or {}).get("flags", []), mode, kind,
+                                       remote=self.confirm_policy() == "name")
+        return guardrails.Card(headline, details, kind=kind, reason=reason,
+                               said_by=said_by, warning=warning)
+
+    def _plain_action(self, name: str, params: dict[str, Any],
+                      facts: dict[str, Any]) -> tuple[str, str, str]:
+        """(headline, details, outgoing text) for a call, read off the call.
+
+        `outgoing` is what would leave the machine under the user's name — a
+        post's text — so the card can hold it against what they asked for.
+        """
+        v = safety._visible
+
+        def arg(*keys: str) -> str:
+            for key in keys:
+                if params.get(key) not in (None, ""):
+                    return str(params.get(key))
+            return ""
+
+        def host(url: str) -> str:
+            return re.sub(r"^https?://(www\.)?", "", url or "").split("/")[0] or url
+
+        if name == "post_to_x":
+            text = arg("text")
+            return ("Post this on x.com, publicly, as you.", v(text), text)
+        if name == "browser_publish":
+            text = str(facts.get("text") or "")
+            what = facts.get("action") or "post"
+            button = facts.get("label") or "Post"
+            site = facts.get("site") or "x.com"
+            verb = {"post": "posts", "send a direct message": "sends",
+                    "repost": "reposts"}.get(what, "sends")
+            headline = (f"Press “{v(button)}” on {site} — that {verb} "
+                        + ("what's in the box" if text else "it") + ", as you.")
+            return headline, v(text) if text else "(the box looks empty)", text
+        if name == "submit_form":
+            where = host(str(facts.get("url") or ""))
+            text = str(facts.get("text") or "")
+            headline = (f"Submit the form" + (f" on {where}" if where else "")
+                        + f" by pressing “{v(arg('target', 'selector'))}”.")
+            lines = [v(text)] if text else []
+            if arg("expected_url"):
+                lines.append(f"Expected to land on {v(arg('expected_url'))}")
+            return headline, "\n".join(lines), text
+        if name in ("run_command", "terminal"):
+            return ("Run a shell command on this Mac.",
+                    f"$ {v(arg('cmd', 'command'))}", "")
+        if name == "run_remote":
+            return (f"Run a command on {v(arg('host'))}.",
+                    f"$ {v(arg('command', 'cmd'))}", "")
+        if name == "execute_code":
+            return ("Run this Python code.", safety._render_code(arg("code")), "")
+        if name == "write_file":
+            content = arg("content")
+            return (f"Write the file {v(arg('path'))} ({len(content)} characters).",
+                    safety._render_code(content, max_lines=8), "")
+        if name in ("edit_file", "patch"):
+            return (f"Edit the file {v(arg('path'))}.",
+                    f"replace: {v(arg('old', 'old_text', 'search'))[:160]}\n"
+                    f"with:    {v(arg('new', 'new_text', 'replace'))[:160]}", "")
+        if name == "save_command":
+            return (f"Save a command to run later as “{v(arg('name'))}”.",
+                    f"$ {v(arg('cmd', 'command'))}", "")
+        if name == "desktop_type":
+            return (f"Type “{v(arg('text'))}” into the frontmost window.", "", "")
+        if name == "desktop_press":
+            return (f"Press {v(arg('key', 'keys'))} in the frontmost window.", "", "")
+        if name in ("desktop_click", "desktop_drag", "desktop_move", "desktop_scroll",
+                    "desktop_hotkey"):
+            target = (f"element {params.get('element')}"
+                      if params.get("element") is not None
+                      else f"({params.get('x')}, {params.get('y')})")
+            return (f"{name.split('_', 1)[1].capitalize()} on your desktop at {target}.",
+                    "It acts on the frontmost window, which may not be the one you expect.",
+                    "")
+        if name == "open_app":
+            return (f"Open the app {v(arg('app', 'name'))}.", "", "")
+        if name == "obs_record":
+            return (f"{v(arg('action') or 'Start').capitalize()} recording the screen.",
+                    "", "")
+        if name == "browser_open":
+            return (f"Open {v(arg('url'))} in Symbio's browser.", "", "")
+        if name == "browser_click":
+            return (f"Click “{v(arg('target'))}” on the open page.", "", "")
+        if name == "browser_type":
+            return (f"Type “{v(arg('text'))}” on the open page.", "", "")
+        if name == "delete_note":
+            return (f"Delete the note “{v(arg('name', 'title', 'id', 'path'))}”.", "", "")
+        if name == "train_adapter":
+            return ("Start fine-tuning myself on your data.",
+                    "It uses the GPU for a while — about 12 s a step.", "")
+        if name == "retrain_adapter":
+            return ("Rebuild my adapter from scratch.",
+                    "This DELETES the current adapter first and cannot be undone.", "")
+        if name == "digest_notes":
+            return ("Fold your notes into training data.",
+                    "The next fine-tune learns from them.", "")
+        if name == "realign":
+            return ("Realign my adapter.", "", "")
+        if name == "config_set":
+            return (f"Change the setting {v(arg('key'))} to {v(arg('value'))}.", "", "")
+        if name == "schedule_job":
+            return (f"Schedule “{v(arg('text'))}” to run {v(arg('schedule'))}.", "", "")
+        if name == "update_cron_job":
+            return (f"Change scheduled job {v(arg('job_id'))} to “{v(arg('text'))}” "
+                    f"at {v(arg('schedule'))}.", "", "")
+        if name == "delete_cron_job":
+            return (f"Delete scheduled job {v(arg('job_id'))}.", "", "")
+        shown = json.dumps(params, ensure_ascii=False, default=str)
+        return (f"Use the tool {v(name)}.", v(shown[:400]), "")
+
+    # How long the model gets to say what it is about to do. A sentence, not a
+    # reply: past this it is repeating itself or has wandered into a tool call.
+    _TRANSLATE_TOKENS = 64
+
+    def _translate_action(self, name: str, params: dict[str, Any],
+                          headline: str, details: str, warning: str) -> str:
+        """One plain-English sentence, in the model's own words, of what this
+        call will do — or "" to use the harness's.
+
+        A fresh, short prompt rather than a continuation of the conversation:
+        it costs a few hundred tokens of prefill instead of the whole context,
+        and it leaves the conversation's prompt cache exactly as it was. The
+        facts it is given are the harness's reading of the call, so what comes
+        back is a translation of the action, not a recollection of the intent —
+        the intent is the part that was wrong when the model posted "Hi".
+        """
+        cfg = (getattr(self, "config", None) or {}).get("guardrails", {}) or {}
+        if not cfg.get("translate", True):
+            return ""
+        model = getattr(self, "model", None)
+        tokenizer = getattr(self, "tokenizer", None)
+        generate_fn = getattr(self, "generate_fn", None)
+        if model is None or tokenizer is None or generate_fn is None:
+            return ""
+        user_text = str(getattr(self, "_user_text_this_turn", "") or "")[:400]
+        call = json.dumps({"name": name, "arguments": params},
+                          ensure_ascii=False, default=str)[:700]
+        ask = (
+            f"The user asked: {user_text or '(nothing this turn)'}\n\n"
+            f"The action about to run: {call}\n"
+            f"What it does, read off the call: {headline}\n"
+            + (f"Exactly: {details[:500]}\n" if details else "")
+            + (f"Note: {warning}\n" if warning else "")
+            + "\nSay in ONE plain English sentence, starting with \"I'll\", what "
+            "this action will do. Quote any text that will be posted, sent or "
+            "typed, exactly as it appears above. If it is not what the user "
+            "asked for, say so in the same sentence. No preamble, no tool calls."
+        )
+        messages = [
+            {"role": "system", "content": (
+                "You translate a computer action into one plain English sentence "
+                "for the person who must approve it. Speak to them as \"you\": "
+                "it is their account and their Mac. Only state what the facts "
+                "say. Never soften or leave out what will be posted, sent, run "
+                "or deleted.")},
+            {"role": "user", "content": ask},
+        ]
+        started = time.perf_counter()
+        try:
+            try:
+                prompt = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                    enable_thinking=False)
+            except TypeError:
+                prompt = tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True)
+            from symbio.app.chat import make_sampler
+            text = str(generate_fn(model, tokenizer, prompt=prompt,
+                                   sampler=make_sampler(temp=0.0),
+                                   max_tokens=self._TRANSLATE_TOKENS, verbose=False))
+        except Exception as e:
+            self._log_guardrail(f"translation failed: {e}")
+            return ""
+        text = tooling.strip_reasoning_block(text)
+        text = re.sub(r"<[^>]{0,40}>", "", text).strip().strip("\"'`*").strip()
+        text = text.splitlines()[0].strip() if text else ""
+        self._log_guardrail(f"translated {name} in "
+                            f"{(time.perf_counter() - started) * 1000:.0f} ms: {text!r}")
+        # A sentence about the action, or nothing. A reply that wandered off
+        # into a tool call, a question or a refusal is not a translation.
+        if (len(text) < 8 or len(text) > 400 or "tool_call" in text
+                or not re.match(r"(?i)^(i'll|i will|i'm going to|i am going to)\b", text)):
+            return ""
+        return text
+
+    def _log_guardrail(self, message: str) -> None:
+        logger = getattr(self, "logger", None)
+        if logger is not None:
+            try:
+                logger.info(f"Guardrails: {message}")
+            except Exception:
+                pass
+
+    def _publish_gate(self, facts: dict[str, Any]) -> tuple[bool, str]:
+        """Called by the browser when a click, a key or a coordinate is about
+        to land on something that publishes — X's Post button, its send
+        shortcut, a DM's send. (approved, observation if not).
+
+        Posting publicly is always "risky", so "ask if risky" asks here. This
+        is the gate that did not exist when "Hi" went out: two tools, neither
+        on any list, that together posted as the user.
+        """
+        mode = guardrails.mode_for("publish", self._guardrail_config(),
+                                   remote=self.confirm_policy() == "name")
+        text = str(facts.get("text") or "")
+        site = facts.get("site") or "x.com"
+        button = facts.get("label") or "Post"
+        if mode == "block":
+            self._record_guardrail("browser_publish", "publish", mode, "blocked")
+            return False, (
+                f"Not sent: the user declined this in advance — their guardrails "
+                f"set “Post publicly” to Never, so “{button}” on {site} was not "
+                "pressed. Nothing was posted.")
+        if mode == "allow":
+            self._record_guardrail("browser_publish", "publish", mode, "auto")
+            return True, ""
+        card = self._action_card("browser_publish", {"text": text, "site": site},
+                                 "publish", mode,
+                                 {"flags": ["publishes_publicly", "irreversible"]},
+                                 facts=facts)
+        approved = safety._prompt_confirm(card, self.confirm_fn)
+        self._record_guardrail("browser_publish", "publish", mode,
+                               "allowed" if approved else "denied", card)
+        if approved:
+            return True, ""
+        wanted = guardrails.quoted_texts(str(getattr(self, "_user_text_this_turn", "") or ""))
+        hint = (f' To post the user\'s exact words, call post_to_x with '
+                f'{{"text": "{wanted[0]}"}} — it clears the box, types, sends and '
+                f"checks the timeline." if wanted else
+                " To post, call post_to_x with the exact text — it clears the "
+                "box, types, sends and checks the timeline.")
+        return False, (
+            f"Not sent: the user declined — they were asked whether to press "
+            f"“{button}” on {site}, posting {text[:200]!r}, and said no. Nothing "
+            "was posted." + hint)
 
     def _dispatch_tool(self, name: str, params: dict[str, Any]) -> str:
         # The contract first. Everything below reads its arguments with
@@ -1409,7 +1765,7 @@ class ToolsMixin:
             # routed through the local shell instead of shlex+no-shell, so the
             # user gets the behavior they expect from a normal terminal.
             if _looks_like_shell_command(cmd):
-                ok, out = sandbox.run_shell(cmd, self.config, confirm_fn=self.confirm_fn)
+                ok, out = sandbox.run_shell(cmd, self.config, confirm_fn=_nested_confirm(self))
                 if "no such file" in out.lower():
                     repaired = _repair_project_path_command(cmd)
                     if repaired:
@@ -1417,13 +1773,13 @@ class ToolsMixin:
                                      f"{constants.SANDBOX_DIR.name}/; retrying "
                                      f"with the project path.")
                         ok2, out2 = sandbox.run_shell(
-                            repaired, self.config, confirm_fn=self.confirm_fn)
+                            repaired, self.config, confirm_fn=_nested_confirm(self))
                         if "no such file" not in out2.lower():
                             return (f"Shell command '{repaired}' exited "
                                     f"{'ok' if ok2 else 'error'}.\nOutput:\n{out2}")
                 out = _annotate_sandbox_cwd(cmd, out)
                 return f"Shell command exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
-            ok, out = sandbox.run_sandboxed(params["cmd"], self.config, confirm_fn=self.confirm_fn)
+            ok, out = sandbox.run_sandboxed(params["cmd"], self.config, confirm_fn=_nested_confirm(self))
 
             # Launch a GUI app the way macOS actually launches one.
             #
@@ -1446,7 +1802,7 @@ class ToolsMixin:
                                  f"launching it with open -a '{app}'.")
                     retry = f"open -a {shlex.quote(app)}"
                     ok, out = sandbox.run_sandboxed(
-                        retry, self.config, confirm_fn=self.confirm_fn)
+                        retry, self.config, confirm_fn=_nested_confirm(self))
                     local_telemetry.log_event(
                         "gui_launch_recover", asked=params["cmd"].strip(),
                         app=app, ok=ok)
@@ -1500,7 +1856,7 @@ class ToolsMixin:
                                  f"{constants.SANDBOX_DIR.name}/; retrying with "
                                  f"the project path.")
                     ok, out = sandbox.run_sandboxed(
-                        repaired, self.config, confirm_fn=self.confirm_fn)
+                        repaired, self.config, confirm_fn=_nested_confirm(self))
                     if ok:
                         return (f"Command '{repaired}' exited ok.\n"
                                 f"Output:\n{out}")
@@ -1517,7 +1873,7 @@ class ToolsMixin:
 
         if name == "run_remote":
             ok, out = sandbox.run_remote(
-                params["host"], params["command"], self.config, confirm_fn=self.confirm_fn
+                params["host"], params["command"], self.config, confirm_fn=_nested_confirm(self)
             )
             return f"Remote '{params['host']}' command exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
@@ -1776,6 +2132,12 @@ class ToolsMixin:
                 except Exception:
                     before = ""
 
+            # Whatever this action lands on is judged before it happens: a
+            # click on X's Post button is a public post however it was aimed.
+            try:
+                self.browser.publish_gate = self._publish_gate
+            except Exception:
+                pass
             out = _act()
 
             # Reopen and retry once when the page is gone.
@@ -1963,9 +2325,29 @@ class ToolsMixin:
         if name == "post_to_x":
             if not self.config.get("browser", {}).get("enabled", False):
                 return "Browser automation is disabled, so there is nothing to post with."
-            if not self.browser.is_open:
-                return ("The browser is not open. Open https://x.com/home with "
-                        "browser_open first, check you are signed in, then post.")
+            # The user has approved "Post this on x.com" by now (or chose
+            # "always allow"), so going to x.com is part of what they said
+            # yes to. The model used to have to open it first, and on
+            # 2026-09-27 it opened it and then typed into the page by hand.
+            host = ""
+            if self.browser.is_open:
+                try:
+                    host = self.browser._page_host()
+                except Exception:
+                    host = ""
+            if not computer._is_x_host(host):
+                # The yes on the card was to posting on x.com; asking next
+                # whether the browser may visit x.com is the same question
+                # twice (seen live: "Open x.com in Symbio's browser" right
+                # after "I'll post “testing” on x.com").
+                if getattr(self, "_card_approved_call", False):
+                    try:
+                        self.browser._confirmed.update({"x.com", "twitter.com"})
+                    except Exception:
+                        pass
+                opened = self.browser.open("https://x.com/home")
+                if not opened.startswith("Opened"):
+                    return f"Could not open x.com to post: {opened}"
             out = self.browser.post_to_x(str(params.get("text") or ""))
             self._untrusted_this_turn = True   # the timeline was read back
             return out
@@ -2062,39 +2444,6 @@ class ToolsMixin:
             f"Added golden case '{case_id}' to {constants.GOLDEN_CASES_FILE.name}. "
             "It will be included in the next pre/post-train golden check."
         )
-
-    @staticmethod
-    def _tool_confirm_prompt(name: str, params: dict[str, Any]) -> str:
-        """User-friendly prompt shown by non-terminal front-ends before
-        state-mutating tools."""
-        if name == "execute_code":
-            code = params.get("code", "").replace("\n", " ")[:200]
-            return f"Run the following Python code?\n{code}"
-        if name == "run_command":
-            cmd = params.get("cmd", "").replace("\n", " ")[:200]
-            return f"Run this shell command?\n{cmd}"
-        if name == "config_set":
-            return f"Change config '{params.get('key')}' to '{params.get('value')}'?"
-        if name == "schedule_job":
-            return f"Schedule job '{params.get('schedule')}' with text '{params.get('text')}'?"
-        if name == "delete_cron_job":
-            return f"Delete scheduled job {params.get('job_id')}?"
-        if name == "update_cron_job":
-            return (f"Update scheduled job {params.get('job_id')} to "
-                    f"'{params.get('schedule')}' with text '{params.get('text')}'?")
-        if name == "digest_notes":
-            return "Digest all notes into training data?"
-        if name == "train_adapter":
-            return "Start LoRA training? This may take a while."
-        if name == "retrain_adapter":
-            return (
-                "⚠️  Start a FULL adapter rebuild? This will DELETE the current LoRA "
-                "adapter and retrain from scratch. This cannot be undone."
-            )
-        if name == "submit_form":
-            return (f"Submit the form on the live page? target='{params.get('target')}' "
-                    f"expected to land on '{params.get('expected_url')}'.")
-        return f"Allow tool '{name}'?"
 
 
 def _argument_check_mode(config: Any) -> str:
