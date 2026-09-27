@@ -2150,6 +2150,39 @@ def _string_leaves(value: Any) -> list[str]:
     return []
 
 
+# The call format Qwen3.5-family and Qwen3-Coder models are trained on:
+#   <tool_call><function=browser_type><parameter=text>testing</parameter>
+#   </function></tool_call>
+# Nothing here read it, so a model emitting its own native format had every
+# call dropped and was scored as if it never acted.
+_XML_CALL_RE = re.compile(
+    r"(?:<tool_call>\s*)?<function=([\w.\-]+)>(.*?)</function>(?:\s*</tool_call>)?",
+    re.DOTALL)
+_XML_PARAM_RE = re.compile(r"<parameter=([\w.\-]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
+
+
+def _xml_calls_to_json(reply: str) -> str:
+    """Rewrite `<function=name><parameter=k>v</parameter></function>` calls as
+    the JSON `<tool_call>` form. Values that parse as JSON (numbers, booleans,
+    objects) keep their type; anything else is the string as written."""
+    if "<function=" not in reply:
+        return reply
+
+    def one(match: re.Match) -> str:
+        arguments: dict[str, Any] = {}
+        for param in _XML_PARAM_RE.finditer(match.group(2)):
+            raw = param.group(2)
+            try:
+                value = json.loads(raw)
+            except (ValueError, TypeError):
+                value = raw
+            arguments[param.group(1)] = value
+        call = {"name": match.group(1), "arguments": arguments}
+        return "<tool_call>" + json.dumps(call, ensure_ascii=False) + "</tool_call>"
+
+    return _XML_CALL_RE.sub(one, reply)
+
+
 def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
     """Extract tool calls from the model reply.
 
@@ -2161,6 +2194,8 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     # and both scanner families were fooled by it -- the legacy ones through
     # `scan`, the JSON ones through `reply`. Rebinding here covers both.
     reply = _blank_tool_responses(reply)
+    # A model's own call format, read as the JSON one everything below knows.
+    reply = _xml_calls_to_json(reply)
 
     # The legacy tag scanners below read `scan`, not `reply`: a tag
     # quoted inside a well-formed <tool_call>'s arguments is that call's
