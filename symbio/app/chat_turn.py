@@ -478,6 +478,11 @@ class AgentTurnMixin:
         thinking_cut_retried = False
         turn_think = False           # what this round was actually served with
         turn_decision = None         # (think, budget), decided on the first round
+        # Turns this session has run, counted here rather than read off the
+        # history: _trim_history pops from the front once the history is at
+        # its cap, so a count of user messages in it stops rising and the
+        # standing context below was never re-read again for the session.
+        self._turns_run = getattr(self, "_turns_run", 0) + 1
         # The round index used to select thinking (think=round_num > 0);
         # agent.thinking_level owns that now, so nothing reads the counter.
         for _round_num in range(max_rounds):
@@ -522,10 +527,9 @@ class AgentTurnMixin:
             # re-reading it each turn broke the cached prefix just the same.
             # What the model itself saves this session is in the history
             # already, so a snapshot loses nothing it could not see.
-            user_turns = sum(1 for m in self.history if m.get("role") == "user")
             snapshot = getattr(self, "_standing_context", None)
-            if snapshot is None or user_turns - snapshot[0] >= STANDING_REFRESH_TURNS:
-                snapshot = (user_turns, (memory.curated_memory_block(self.config)
+            if snapshot is None or self._turns_run - snapshot[0] >= STANDING_REFRESH_TURNS:
+                snapshot = (self._turns_run, (memory.curated_memory_block(self.config)
                                          + prompts.env_note()).strip())
                 self._standing_context = snapshot
             stable_block = snapshot[1]

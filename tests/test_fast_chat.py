@@ -182,3 +182,41 @@ def test_two_starters_at_once_start_one_daemon(tmp_path, monkeypatch):
     for t in threads:
         t.join(5)
     assert len(spawned) == 1
+
+
+def test_the_standing_context_is_reread_after_the_history_is_capped(monkeypatch, tmp_path):
+    """The standing context (curated memory, env note) is snapshotted and
+    re-read every STANDING_REFRESH_TURNS turns. The turn count used to be the
+    number of user messages in the history — which stops rising once
+    _trim_history starts popping from the front, so a long session never saw
+    a memory or soul change again."""
+    from symbio.app import chat, chat_turn, memory
+    from tests.test_thinking_truncation import _reply, _session
+
+    # Engine-free: the fake generate below never samples, so the sampler the
+    # session builds is never used. Lets this run where MLX cannot install.
+    monkeypatch.setattr(chat, "make_sampler", lambda *a, **k: None)
+    monkeypatch.setattr(chat, "make_logits_processors", lambda *a, **k: None)
+    monkeypatch.setattr(chat, "_nn", lambda: type("nn", (), {"Module": type("Module", (), {})}))
+
+    reads = []
+
+    def curated(config):
+        reads.append(len(reads) + 1)
+        return f"memory read #{len(reads)}"
+
+    monkeypatch.setattr(memory, "curated_memory_block", curated)
+    prompts = []
+
+    def fake_generate(messages, chunk_prefix="", timings=None, think=True, reasoning_budget=0):
+        prompts.append(messages)
+        return _reply(timings, "Sure.")
+
+    session = _session(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(session, "_generate_reply", fake_generate)
+    for n in range(chat_turn.STANDING_REFRESH_TURNS + 1):
+        session._agent_turn(f"message {n}")
+        del session.history[:-2]      # what _trim_history does once at its cap
+
+    standing = [m["content"] for m in prompts[-1] if "[Standing context:" in m["content"]]
+    assert standing and "memory read #2" in standing[0], standing

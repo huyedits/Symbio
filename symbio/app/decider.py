@@ -202,14 +202,17 @@ def decide(message: str, config: dict[str, Any] | None = None) -> dict[str, Any]
     from symbio.app.chat_text import needs_thinking
 
     if ane.enabled(config) and ((config or {}).get("ane") or {}).get("decide", True):
-        voted = classify(message) if _space() == "minilm-ane" else None
+        tried = _space() == "minilm-ane"
+        voted = classify(message) if tried else None
         if voted and voted["margin"] >= MIN_MARGIN:
             return voted
         apple = ane.decide(message)
         if apple.get("ok"):
             return {"label": apple.get("route", "chat"), "think": bool(apple.get("think")),
                     "source": "apple-intelligence", "ms": apple.get("ms")}
-        if voted is None:
+        # Only if the vote has not run yet: when it already failed (the helper
+        # is down or wedged), a second try in the same turn doubles the wait.
+        if not tried:
             voted = classify(message)
         if voted and voted["margin"] >= MIN_MARGIN:
             return voted

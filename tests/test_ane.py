@@ -77,6 +77,47 @@ def test_no_helper_falls_back_to_the_regex(monkeypatch):
         "label": None, "think": True, "source": "regex"}
 
 
+def test_a_helper_that_will_not_start_is_unavailable_not_a_crash(monkeypatch, tmp_path):
+    """request() promises never to raise. A built binary that fails to exec
+    (truncated build, lost its x bit) raised OSError out of it, into
+    see_screen and the turn's routing decision."""
+    broken = tmp_path / "symbio-ane-broken"
+    broken.write_text("not a program")
+    monkeypatch.setattr(ane, "helper_binary", lambda: broken)
+    monkeypatch.setattr(ane, "_proc", None)
+    answer = ane.request({"op": "status"}, timeout=1)
+    assert answer["ok"] is False and "starting the helper failed" in answer["error"]
+
+
+def test_a_decision_that_times_out_is_not_asked_again_every_turn(monkeypatch):
+    """A timeout kills the helper. Without a back-off every turn paid the 3 s
+    wait, a restart, and the next OCR's 7 s cold load."""
+    calls = []
+
+    def request(payload, timeout=None):
+        calls.append(payload)
+        return {"ok": False, "error": f"no answer in {timeout:.0f}s"}
+
+    monkeypatch.setattr(ane, "request", request)
+    monkeypatch.setattr(ane, "_decide_state", {"unavailable_until": 0.0})
+    ane.decide("first")
+    ane.decide("second")
+    assert len(calls) == 1
+
+
+def test_a_failed_vote_is_not_retried_in_the_same_turn(monkeypatch, tmp_path):
+    """With the Neural Engine encoder built, a vote that failed (helper down)
+    was run a second time after Apple's model also failed: twice the wait."""
+    monkeypatch.setattr(decider.constants, "PROJECT_DIR", tmp_path)
+    _fake_embed(monkeypatch, _one_hot_by_label)
+    monkeypatch.setattr(ane, "encoder_dir", lambda: tmp_path)
+    encodes = []
+    monkeypatch.setattr(ane, "encode", lambda texts: encodes.append(texts) or {
+        "ok": False, "error": "helper down"})
+    assert decider.decide("fix this bug in main.py")["source"] == "regex"
+    assert len(encodes) == 1
+
+
 def test_ocr_lines_become_click_elements():
     result = {"ok": True, "lines": [{"text": "Post", "conf": 0.9, "box": [100, 40, 60, 20]},
                                     {"text": " ", "box": [0, 0, 1, 1]}]}
