@@ -90,14 +90,21 @@ def helper_binary() -> Path | None:
 
 
 def _start() -> subprocess.Popen | None:
-    global _proc
+    global _proc, _build_error
     if _proc is not None and _proc.poll() is None:
         return _proc
     binary = helper_binary()
     if binary is None:
         return None
-    _proc = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    try:
+        _proc = subprocess.Popen([str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    except OSError as e:
+        # A binary that will not exec (truncated build, lost its x bit) must
+        # read as "unavailable", not raise out of request(), which promises
+        # never to.
+        _build_error = f"starting the helper failed: {e}"
+        _proc = None
     return _proc
 
 
@@ -214,7 +221,11 @@ def decide(message: str) -> dict[str, Any]:
     if time.monotonic() < _decide_state["unavailable_until"]:
         return {"ok": False, "error": "on-device model unavailable"}
     answer = request({"op": "decide", "message": message}, timeout=DECIDE_TIMEOUT_S)
-    if not answer.get("ok") and "status" in answer:
+    if not answer.get("ok") and ("status" in answer
+                                 or str(answer.get("error", "")).startswith("no answer")):
+        # Too slow counts as unavailable too. A timeout kills the helper, so
+        # without this every turn paid the 3 s wait, a helper restart, and
+        # the next OCR's 7 s cold load.
         _decide_state["unavailable_until"] = time.monotonic() + 600
     return answer
 
