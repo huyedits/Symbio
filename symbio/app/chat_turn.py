@@ -439,6 +439,13 @@ class AgentTurnMixin:
         user_refused_this_turn = False
         browser_retry_nudged = False
         blank_retry_nudged = False
+        # Its own flag: sharing blank_retry_nudged meant an empty first reply
+        # used up the one nudge that turns "I'll open the website and post
+        # your tweet." into the tool call it describes.
+        action_nudged = False
+        # An empty reply with thinking on is the thinking mode misfiring
+        # (seen: "<think>\n\n<end>"), not the model having nothing to say.
+        think_off_retried = False
         claim_nudged = False
         # True once submit_form returns its machine-verified CONFIRMED verdict
         # this turn; a submission claim is then backed by code, not the model.
@@ -1082,6 +1089,15 @@ class AgentTurnMixin:
                 # below — a real question that blanks should search, not nudge.
 
                 action_req = _is_action_request(user_input)
+                if (not _is_substantive(display) and turn_think
+                        and not think_off_retried):
+                    # Before any nudge: the nudge is spent on a reply the
+                    # thinking mode ate, and the next one comes back the same.
+                    think_off_retried = True
+                    turn_decision = (False, 0)
+                    self.output_fn("  [Reasoning] Empty reply with thinking on; "
+                                   "answering again without it.")
+                    continue
                 # any_tool_ran, not executed_calls: the retry path discards a
                 # failed call from executed_calls so it can be attempted again,
                 # which empties the set precisely when a tool has just FAILED —
@@ -1410,8 +1426,8 @@ class AgentTurnMixin:
                 # "emit <browse>" — live 2026-08-25 the model dutifully switched
                 # to browser_press and hit "Browser is not open". A nudge that
                 # names one toolset drags every unfinished turn towards it.
-                if action_req and not any_tool_ran and not blank_retry_nudged:
-                    blank_retry_nudged = True
+                if action_req and not any_tool_ran and not action_nudged:
+                    action_nudged = True
                     self.output_fn(
                         "  [Action] Model described the action but didn't "
                         "call a tool — prompting to retry...")
@@ -1424,6 +1440,9 @@ class AgentTurnMixin:
                         "<press>Enter</press>. To read one: "
                         "<read>https://...</read> for its text, "
                         "<fetch_html>https://...</fetch_html> for its markup. "
+                        "To post on x.com: open https://x.com/home, then call "
+                        "post_to_x with the text — it types, sends and checks "
+                        "the timeline itself. "
                         "To compute, fetch or write files: <py>...</py>. "
                         "To run a command: <cmd>...</cmd>. Pick the one that "
                         "fits what you were already doing — do not switch "
