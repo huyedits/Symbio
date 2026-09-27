@@ -1,6 +1,7 @@
 """The interactive chat REPL: slash commands, the autonomous agent loop,
 and the growth loop (memory nudges, exit flush, cron surfacing)."""
 
+import copy
 import gc
 import hashlib
 import json
@@ -277,6 +278,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # under it (adapter reload, a generation that errored mid-stream).
         self._prompt_cache: list | None = None
         self._cached_prompt_ids: list[int] | None = None
+        # Copies of a cache that cannot be trimmed, as slot -> (ids, cache).
+        # See _keep_checkpoint for the slots.
+        self._cache_checkpoints: dict[str, tuple[list[int], list]] = {}
         # What one cached token actually costs on this box, measured off the
         # live cache rather than derived from layer counts and head dimensions
         # — the arithmetic changes with every headmaster swap and with
@@ -554,6 +558,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         had_cache = self._prompt_cache is not None
         self._prompt_cache = None
         self._cached_prompt_ids = None
+        # Copies of a cache that is unusable are unusable too.
+        self._cache_checkpoints = {}
         if not had_cache:
             return
         # The cache is already gone by here. Nothing below may raise, or a
@@ -1092,6 +1098,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         nbytes = _cache_nbytes(self._prompt_cache)
         if nbytes <= 0:
             return
+        # The copies a cache that cannot be rewound keeps are memory the
+        # prompt costs as well, so they are weighed with it.
+        for _, copied in getattr(self, "_cache_checkpoints", {}).values():
+            nbytes += _cache_nbytes(copied)
         per_token = nbytes / tokens
         if per_token < 1024:  # smaller than any real model's per-token KV
             return
@@ -1300,6 +1310,100 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             pass
         return model_cache + draft_cache
 
+    # A hybrid model (Qwen3.5's linear-attention layers, LFM2's convolutions)
+    # carries recurrent state that cannot be rewound, so can_trim_prompt_cache
+    # is False for it, and every prefix change used to rebuild the cache from
+    # token 0. Measured 2026-09-27 on Qwen3.5-9B: ~32s to first token on every
+    # generation of a 6.5k-token prompt that was 94% unchanged, because the
+    # previous reply's tokens never render back identically. So a cache like
+    # that is copied where a later prompt is likely to pick up from, and a
+    # stale cache restarts from the longest copy instead of from zero — what
+    # llama.cpp does for recurrent models. A trimmable cache never takes this
+    # path.
+
+    def _prefill_into(self, cache: list, ids: list[int]) -> None:
+        """Walk `ids` into an existing cache — both models' halves of it."""
+        if not ids:
+            return
+        kv_kw = self._kv_quant_kwargs()
+        n_main = len(make_prompt_cache(self.model))
+        # generate_step may swap list entries for quantized ones, so each half
+        # is walked as its own list and written back.
+        main = cache[:n_main]
+        for _ in generate_step(_mx().array(ids), self.model, max_tokens=0,
+                               sampler=self.sampler, prompt_cache=main, **kv_kw):
+            pass
+        cache[:n_main] = main
+        draft = self._ensure_draft_model()
+        if draft is not None and len(cache) > n_main:
+            rest = cache[n_main:]
+            for _ in generate_step(_mx().array(ids), draft, max_tokens=0,
+                                   sampler=self.sampler, prompt_cache=rest, **kv_kw):
+                pass
+            cache[n_main:] = rest
+
+    def _message_boundary(self, messages: list[dict[str, str]], ids: list[int],
+                          think: bool) -> int:
+        """How far `ids` agrees with `messages` rendered on their own.
+
+        The agreement, not the render's length: a template may draw the last
+        message differently when nothing follows it (Qwen3.5 gives a final
+        assistant message an empty think block that the same message loses
+        once a user message follows), and any prefix of `ids` is a place the
+        cache can be copied from.
+        """
+        try:
+            head = self.tokenizer.encode(self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False,
+                enable_thinking=think,
+            ))
+        except Exception:
+            return 0
+        return _common_prefix_len(head, ids)
+
+    @staticmethod
+    def _newest_user_index(messages: list[dict[str, str]]) -> int:
+        """The newest message the user wrote, or 0.
+
+        chat_turn prepends the per-turn context (time, retrieval, the page the
+        browser is on) to it, so it is where a tool loop's prompt first
+        changes from one round to the next.
+        """
+        for i in range(len(messages) - 1, 0, -1):
+            m = messages[i]
+            if (m.get("role") == "user" and not str(m.get("content", ""))
+                    .startswith("[System observation:")):
+                return i
+        return 0
+
+    def _keep_checkpoint(self, ids: list[int], slot: str) -> None:
+        """Copy the live cache as it stands after exactly `ids`.
+
+        Slots: "boot", the system prefix; "user", everything before the
+        newest user message, which a tool loop's next round starts from once
+        that message's context has moved on; "turn", everything up to the
+        last message, which the next turn starts from. The copy shares its
+        buffers with the live cache until the live one is next written, so
+        each costs at most one cache's worth of memory.
+        """
+        self._cache_checkpoints[slot] = (list(ids), copy.deepcopy(self._prompt_cache))
+
+    def _restore_checkpoint(self, ids: list[int]) -> tuple[list, int]:
+        """A fresh copy of the longest checkpoint `ids` extends, and its length.
+
+        Strictly shorter than `ids`, so there is always a token left to feed.
+        With no match it is an empty cache and 0 — what the old path did.
+        """
+        best = None
+        for checkpoint in getattr(self, "_cache_checkpoints", {}).values():
+            n = len(checkpoint[0])
+            if (0 < n < len(ids) and (best is None or n > len(best[0]))
+                    and ids[:n] == checkpoint[0]):
+                best = checkpoint
+        if best is None:
+            return self._new_prompt_cache(), 0
+        return copy.deepcopy(best[1]), len(best[0])
+
     def _prefill_system_prompt_cache(self, show_spinner: bool = True):
         """Process the system prompt through the model once at boot so the
         first user turn skips re-processing it. This is a pure latency win;
@@ -1359,6 +1463,21 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 system_ids = self.tokenizer.encode(templated)
                 if not system_ids:
                     return
+                # A cache that cannot be trimmed cannot shed the empty user
+                # turn's closing tokens either, so it stops where a real user
+                # message would start and keeps a copy there.
+                rewindable = can_trim_prompt_cache(make_prompt_cache(self.model))
+                if not rewindable:
+                    probe = self.tokenizer.encode(self.tokenizer.apply_chat_template(
+                        [{"role": "system", "content": self.system_prompt},
+                         *tool_few_shots(self.config),
+                         {"role": "user", "content": "x"}],
+                        tokenize=False, add_generation_prompt=False,
+                        enable_thinking=False,
+                    ))
+                    system_ids = system_ids[:_common_prefix_len(system_ids, probe)]
+                    if not system_ids:
+                        return
                 # A cache saved by an earlier run covers this exact prefix and
                 # these exact weights — load it and skip the prefill entirely.
                 # This used to be switched off whenever a draft model was
@@ -1373,11 +1492,15 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # re-prefilled the whole system prompt through the 14B.
                 if (self.config.get("agent", {}).get("persist_prompt_cache", True)
                         and self._load_persisted_prompt_cache(system_ids)):
+                    if not rewindable:
+                        self._keep_checkpoint(system_ids, "boot")
                     return
                 # max_tokens=0 processes the prompt into the KV cache and
                 # stops before generating any output tokens.
                 self._prompt_cache = self._prefill_new_cache(system_ids)
                 self._cached_prompt_ids = list(system_ids)
+                if not rewindable:
+                    self._keep_checkpoint(system_ids, "boot")
                 # Weigh it here too, so the very first user turn sizes its cap
                 # against this model rather than the fallback constant.
                 self._measure_kv_cost(len(system_ids))
@@ -1922,20 +2045,17 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # _prefill_system_prompt_cache) so the first turn feeds only the
             # user message, not the whole system+tools prefix.
             reused = _common_prefix_len(self._cached_prompt_ids, ids)
-            if timings is not None:
-                timings["cached_tokens"] = reused
-                timings["new_tokens"] = len(ids) - reused
             if self._prompt_cache is None or reused == 0:
-                self._prompt_cache = self._new_prompt_cache()
-                feed = ids
+                self._prompt_cache, reused = self._restore_checkpoint(ids)
             else:
                 stale = len(self._cached_prompt_ids) - reused
                 if stale and can_trim_prompt_cache(self._prompt_cache):
                     trim_prompt_cache(self._prompt_cache, stale)
                 elif stale:
-                    self._prompt_cache = self._new_prompt_cache()
-                    reused = 0
-                feed = ids[reused:] if reused else ids
+                    # Cannot be rewound: restart from the longest copy this
+                    # prompt extends (see _prefill_into), not from token 0.
+                    self._prompt_cache, reused = self._restore_checkpoint(ids)
+            feed = ids[reused:]
             if not feed:
                 # The new prompt is exactly what the cache already holds —
                 # a resample of an unchanged prompt. Generation still needs
@@ -1946,10 +2066,16 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # length that is off by one.
                 if can_trim_prompt_cache(self._prompt_cache):
                     trim_prompt_cache(self._prompt_cache, 1)
-                    feed = ids[-1:]
+                    reused -= 1
                 else:
-                    self._prompt_cache = self._new_prompt_cache()
-                    feed = ids
+                    self._prompt_cache, reused = self._restore_checkpoint(ids)
+                feed = ids[reused:]
+            # After the cache is settled, so a rebuild reports what it really
+            # reused — this used to be recorded before it, and a hybrid model
+            # showed "cached 6379" on turns that re-read all 6,807 tokens.
+            if timings is not None:
+                timings["cached_tokens"] = reused
+                timings["new_tokens"] = len(ids) - reused
         finally:
             tokenizing_spinner.stop()
 
@@ -2023,6 +2149,25 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # speculative_generate_step takes these as well, so the draft path
             # is covered.
             _spec_kw.update(self._kv_quant_kwargs())
+            # A cache that cannot be rewound is walked up to the places a
+            # later prompt picks up from and copied at each (_keep_checkpoint):
+            # the reply generated after the last message never renders back
+            # token for token, so nothing could extend the cache past it.
+            if (self._mlx_generation() and len(feed) > 1
+                    and not can_trim_prompt_cache(self._prompt_cache)):
+                done = len(ids) - len(feed)
+                newest = self._newest_user_index(messages)
+                # An empty user message in its place renders everything before
+                # it the way the real prompt does, up to where its text starts.
+                before = (messages[:newest] + [{"role": "user", "content": ""}]
+                          if newest else None)
+                for slot, upto in (("user", before), ("turn", messages)):
+                    boundary = self._message_boundary(upto, ids, think) if upto else 0
+                    if done < boundary < len(ids):
+                        self._prefill_into(self._prompt_cache, ids[done:boundary])
+                        self._keep_checkpoint(ids[:boundary], slot)
+                        done = boundary
+                feed = ids[done:]
             for response in self.stream_fn(
                 self.model, self.tokenizer, feed, max_tokens=max_tokens,
                 sampler=self.sampler, prompt_cache=self._prompt_cache,
