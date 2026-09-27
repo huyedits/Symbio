@@ -37,7 +37,6 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_close": "browser",
     "submit_form": "browser",
     "fill_form": "browser",
-    "post_to_x": "browser",
     "browser_get_text": "browser",
     # Looking is grouped with the browser, not with desktop control: seeing the
     # page the assistant already drives is the same capability as reading it,
@@ -137,7 +136,6 @@ _TOOL_FAMILIES: dict[str, str] = {
     "desktop_wait": "desktop",
     "open_app": "desktop",
     "obs_record": "desktop",
-    "post_to_x": "browser",
     "write_note": "memory",
     "recall": "memory",
     "delete_note": "memory",
@@ -314,7 +312,7 @@ _TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "text": {"type": "string", "description": "The text to type."},
-                "selector": {"type": "string", "description": "Optional CSS selector for the field to fill, e.g. '[data-testid=\"tweetTextarea_0\"]' or '#search'. Fills it directly; no clicking or focus needed."},
+                "selector": {"type": "string", "description": "Optional CSS selector for the field to fill, e.g. 'textarea[name=\"comment\"]' or '#search' — the controls list the page shows gives the exact one. Fills it directly; no clicking or focus needed."},
                 "enter": {"type": "boolean", "description": "Press Enter after typing. Default false."},
             },
             "required": ["text"],
@@ -475,15 +473,6 @@ _TOOLS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {"seconds": {"type": "number", "description": "How long to wait. Default 2, maximum 10."}},
-        },
-    },
-    {
-        "name": "post_to_x",
-        "description": "Write a post on x.com and verify it went out. The browser must already be open at x.com and signed in — this does not navigate there, because posting is not something to do on a page nobody asked for. Returns a verdict you cannot shape: '[Post CONFIRMED' only when the exact text was found rendered on the timeline afterwards. Never report a post as made without that verdict; if it says NOT confirmed, check x.com before trying again or it goes out twice.",
-        "parameters": {
-            "type": "object",
-            "properties": {"text": {"type": "string", "description": "The post, 280 characters or fewer."}},
-            "required": ["text"],
         },
     },
     {
@@ -1018,10 +1007,6 @@ _HERMES_NAME_MAP: dict[str, str] = {
     "fill_form": "fill_form",
     "fill_fields": "fill_form",
     "fill_in_form": "fill_form",
-    "post_to_x": "post_to_x",
-    "tweet": "post_to_x",
-    "post_tweet": "post_to_x",
-    "send_tweet": "post_to_x",
     "launch_app": "open_app",
     "open_application": "open_app",
     "switch_app": "open_app",
@@ -1062,8 +1047,6 @@ _ARG_ALIASES: dict[str, dict[str, str]] = {
                      "x": "x", "y": "y"},
     "desktop_wait": {"seconds": "seconds", "duration": "seconds", "time": "seconds",
                      "amount": "seconds"},
-    "post_to_x": {"text": "text", "message": "text", "content": "text",
-                  "body": "text", "tweet": "text", "status": "text"},
     "open_app": {"name": "name", "app": "name", "application": "name",
                  "app_name": "name", "target": "name"},
     "browser_open": {"url": "url", "link": "url", "page": "url", "site": "url", "address": "url", "to": "url"},
@@ -2167,6 +2150,39 @@ def _string_leaves(value: Any) -> list[str]:
     return []
 
 
+# The call format Qwen3.5-family and Qwen3-Coder models are trained on:
+#   <tool_call><function=browser_type><parameter=text>testing</parameter>
+#   </function></tool_call>
+# Nothing here read it, so a model emitting its own native format had every
+# call dropped and was scored as if it never acted.
+_XML_CALL_RE = re.compile(
+    r"(?:<tool_call>\s*)?<function=([\w.\-]+)>(.*?)</function>(?:\s*</tool_call>)?",
+    re.DOTALL)
+_XML_PARAM_RE = re.compile(r"<parameter=([\w.\-]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
+
+
+def _xml_calls_to_json(reply: str) -> str:
+    """Rewrite `<function=name><parameter=k>v</parameter></function>` calls as
+    the JSON `<tool_call>` form. Values that parse as JSON (numbers, booleans,
+    objects) keep their type; anything else is the string as written."""
+    if "<function=" not in reply:
+        return reply
+
+    def one(match: re.Match) -> str:
+        arguments: dict[str, Any] = {}
+        for param in _XML_PARAM_RE.finditer(match.group(2)):
+            raw = param.group(2)
+            try:
+                value = json.loads(raw)
+            except (ValueError, TypeError):
+                value = raw
+            arguments[param.group(1)] = value
+        call = {"name": match.group(1), "arguments": arguments}
+        return "<tool_call>" + json.dumps(call, ensure_ascii=False) + "</tool_call>"
+
+    return _XML_CALL_RE.sub(one, reply)
+
+
 def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
     """Extract tool calls from the model reply.
 
@@ -2178,6 +2194,8 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     # and both scanner families were fooled by it -- the legacy ones through
     # `scan`, the JSON ones through `reply`. Rebinding here covers both.
     reply = _blank_tool_responses(reply)
+    # A model's own call format, read as the JSON one everything below knows.
+    reply = _xml_calls_to_json(reply)
 
     # The legacy tag scanners below read `scan`, not `reply`: a tag
     # quoted inside a well-formed <tool_call>'s arguments is that call's

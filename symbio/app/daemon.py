@@ -22,7 +22,7 @@ import sys
 import threading
 from typing import Any
 
-from symbio import constants
+from symbio import constants, guardrails
 from symbio.app import chat_style, chat_ui
 
 
@@ -243,11 +243,23 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         # holds the only model on the machine until the process is killed.
         if client_gone.is_set():
             return False
-        send_msg({"type": "confirm", "prompt": prompt})
+        frame = {"type": "confirm", "prompt": str(prompt)}
+        # A guardrails card carries its parts for a client that lays them out
+        # (the window); every other client reads `prompt`, which is the same
+        # card as plain text.
+        if isinstance(prompt, guardrails.Card):
+            frame["card"] = prompt.as_dict()
+        send_msg(frame)
         while True:
             msg = recv_msg()
             if msg.get("type") == "confirm":
-                return bool(msg.get("answer", False))
+                answer = bool(msg.get("answer", False))
+                # "Always allow" on the card: this kind stops asking, written
+                # where the Settings panel reads it.
+                if (answer and msg.get("always") and isinstance(prompt, guardrails.Card)
+                        and prompt.kind):
+                    guardrails.set_mode(constants.CONFIG_FILE, prompt.kind, "allow")
+                return answer
 
     def status_fn(text) -> None:
         # Its own frame type, not an output line: a spinner is drawn over
@@ -275,6 +287,9 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         owner="daemon",
         banner_fn=banner_fn,
     )
+    # The window writes guardrail switches straight to config.json while this
+    # session holds its config in memory; this is where it re-reads them.
+    session._guardrails_file = constants.CONFIG_FILE
     try:
         session.run()
     except (_ClientGone, EOFError):

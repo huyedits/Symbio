@@ -149,15 +149,12 @@ function setTitle(text) {
  * conversation needs it. One function owns each direction, so no path can
  * leave the greeting on screen above a reply. */
 function greetingText() {
-  const h = new Date().getHours();
-  const part = h < 5 ? 'Up late' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
-  const name = window.__userName && window.__userName !== 'user' ? `, ${window.__userName}` : '';
-  return `${part}${name}`;
+  return window.__assistantName || 'Symbio';
 }
 
 function showWelcome() {
   thread.innerHTML = `<div class="welcome">
-    <h1 class="greeting"><span class="mark" aria-hidden="true"></span><span>${escHtml(greetingText())}</span></h1>
+    <h1 class="greeting"><span class="mark" aria-hidden="true"></span><span class="greeting-name">${escHtml(greetingText())}</span></h1>
   </div>`;
   document.getElementById('main').classList.add('empty');
 }
@@ -190,7 +187,7 @@ function addBubble(role, text, store = true, thought = '') {
   const lines = thought ? thought.trim().split(/\s+/).length : 0;
   el.innerHTML =
     (thought
-      ? `<details class="thought"><summary>Thought process · ${lines} words</summary>`
+      ? `<details class="thought"><summary>Reasoning (${lines} words)</summary>`
         + `<div class="thought-body">${escHtml(thought.trim())}</div></details>`
       : '')
     + `<div class="msg-body">${renderMarkdown(text)}</div>`;
@@ -426,7 +423,11 @@ function addActivity(text) {
   }
   const log = activityCard.querySelector('.activity-log');
   log.textContent += (log.textContent ? '\n' : '') + clean;
-  const label = clean.trim().replace(/^\[|\]$/g, '');
+  const trimmed = clean.trim();
+  const tagged = trimmed.match(/^\[([^\]]{1,40})\]\s*(.*)$/s);
+  const label = (tagged ? (tagged[2] ? `${tagged[1]}: ${tagged[2]}` : tagged[1])
+                        : trimmed.replace(/^\[|\]$/g, ''))
+    .replace(/\s+/g, ' ');
   activityCard.querySelector('.activity-label').textContent =
     label.length > 80 ? label.slice(0, 80) + '…' : label;
   scrollToEnd();
@@ -442,28 +443,62 @@ function hideNotice() {
   document.getElementById('notice').hidden = true;
 }
 
-function showConfirm(prompt) {
+/* An approval, in plain English. The daemon sends the card's parts when it
+ * has them: what will happen (the model's own sentence, or the harness's),
+ * exactly what — the post, the command — and why it is asking. A warning
+ * sits between them when the words about to go out are not the words the
+ * user asked for: "You asked for “testing”, not this." */
+function showConfirm(prompt, card) {
+  // The same question again (a reloaded window is sent the pending card on
+  // reconnect) replaces the unanswered one instead of stacking a second.
+  const stale = thread.querySelector('.confirm-card:not(.answered)');
+  if (stale) stale.remove();
   pendingConfirm = true;
-  const card = document.createElement('div');
-  card.className = 'confirm-card';
-  card.innerHTML = `
-    <div class="confirm-text">${escHtml(prompt)}</div>
-    <div class="confirm-actions">
-      <button class="btn deny">Deny</button>
-      <button class="btn allow">Allow</button>
-    </div>`;
-  thread.appendChild(card);
-  scrollToEnd();
-  const answer = (approved) => {
+  const el = document.createElement('div');
+  el.className = 'confirm-card';
+  const who = window.__assistantName || 'Symbio';
+  if (card && card.headline) {
+    const always = card.kind && !card.warning;
+    el.innerHTML = `
+      <div class="confirm-kind"><span class="charm" aria-hidden="true"></span>
+        <span class="confirm-reason">${escHtml(card.reason || `${who} wants to go ahead with this.`)}</span></div>
+      <div class="confirm-headline">
+        ${card.said_by === 'model' ? `<span class="confirm-who">${escHtml(who)}:</span> ` : ''}${escHtml(card.headline)}
+      </div>
+      ${card.warning ? `<div class="confirm-warning">${escHtml(card.warning)}</div>` : ''}
+      ${card.details ? `<pre class="confirm-details" aria-label="Exactly what it will do">${escHtml(card.details)}</pre>` : ''}
+      <div class="confirm-actions">
+        <button class="btn deny" type="button">Deny</button>
+        ${always ? `<button class="btn always" type="button"
+            title="Stop asking about “${escHtml(card.kind_label)}”. Change it back in Settings → Guardrails.">Always allow</button>` : ''}
+        <button class="btn allow" type="button">Allow</button>
+      </div>`;
+  } else {
+    el.innerHTML = `
+      <div class="confirm-text">${escHtml(prompt)}</div>
+      <div class="confirm-actions">
+        <button class="btn deny" type="button">Deny</button>
+        <button class="btn allow" type="button">Allow</button>
+      </div>`;
+  }
+  if (card && card.warning) el.classList.add('warned');
+  thread.appendChild(el);
+  scrollToEnd(true);
+  const answer = (approved, always = false) => {
     if (!pendingConfirm) return;
     pendingConfirm = false;
-    send({ type: 'confirm_response', approved });
-    card.classList.add('answered');
-    card.querySelector('.confirm-actions').innerHTML =
-      `<span class="confirm-verdict">${approved ? 'Allowed' : 'Denied'}</span>`;
+    send({ type: 'confirm_response', approved, always });
+    el.classList.add('answered');
+    const verdict = !approved ? 'Denied'
+      : always ? `Allowed — won't ask about “${card.kind_label}” again (Settings → Guardrails)`
+      : 'Allowed';
+    el.querySelector('.confirm-actions').innerHTML =
+      `<span class="confirm-verdict">${escHtml(verdict)}</span>`;
   };
-  card.querySelector('.allow').addEventListener('click', () => answer(true));
-  card.querySelector('.deny').addEventListener('click', () => answer(false));
+  el.querySelector('.allow').addEventListener('click', () => answer(true));
+  el.querySelector('.deny').addEventListener('click', () => answer(false));
+  const alwaysBtn = el.querySelector('.always');
+  if (alwaysBtn) alwaysBtn.addEventListener('click', () => answer(true, true));
 }
 
 function nearBottom() {
@@ -560,14 +595,14 @@ function connect() {
           (data.model_name || '').split('/').pop() || '—';
         // Asleep is not an error: the first message wakes it.
         if (data.model_state === 'down') {
-          setStatus('off', `${data.assistant_name} · asleep — waking up`);
+          setStatus('off', `${data.assistant_name} is asleep. Waking it up…`);
         } else if (data.model_state === 'loading') {
-          setStatus('busy', `${data.assistant_name} · waking up`);
+          setStatus('busy', `${data.assistant_name} is waking up…`);
         } else {
-          setStatus('ok', `${data.assistant_name} · ready`);
+          setStatus('ok', `${data.assistant_name} is ready`);
         }
         if (!live.messages.length) {
-          const title = document.querySelector('.welcome h1');
+          const title = document.querySelector('.welcome .greeting-name');
           if (title) title.textContent = window.__assistantName;
         }
         break;
@@ -579,20 +614,20 @@ function connect() {
       case 'asleep':
         // The model could not be woken (the reason follows as a system line).
         wakingText = '';
-        setStatus('off', `${window.__assistantName || 'Symbio'} · asleep — send a message to try again`);
+        setStatus('off', `${window.__assistantName || 'Symbio'} is asleep. Send a message to wake it.`);
         break;
       case 'awake':
         wakingText = '';
-        if (!waitTimer) setStatus('ok', `${window.__assistantName || 'Symbio'} · ready`);
+        if (!waitTimer) setStatus('ok', `${window.__assistantName || 'Symbio'} is ready`);
         break;
       case 'system':
       case 'progress': addActivity(data.text); break;
-      case 'confirm': showConfirm(data.prompt); break;
+      case 'confirm': showConfirm(data.prompt, data.card); break;
       case 'done':
         wakingText = '';
         stopWaiting();
         finishStream(data.text);
-        setStatus('ok', `Ready · last reply took ${Math.round((Date.now() - waitStarted) / 1000)}s`);
+        setStatus('ok', `Ready. Last reply took ${Math.round((Date.now() - waitStarted) / 1000)} s`);
         setBusy(false);
         break;
       case 'error':

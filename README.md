@@ -350,28 +350,59 @@ answer is no, and the refusal is recorded in the heartbeat.
 `cron.unattended_approve` turns that off for someone who has read this
 paragraph.
 
-### Posting to X
+### Posting and sending, on any site
 
-```
-post_to_x  {"text": "shipping the desktop window today"}
-```
+There is no posting command. Symbio posts the way a person does: it opens the
+page, types into the box, clicks the button beside the box that sends it, and
+reads the page back. Nothing in the code names a site.
 
-The browser must already be open at x.com and signed in — it does not navigate
-there on its own, because posting is not something to do on a page nobody
-asked for. It fills the composer **by selector** (the composer is 28px tall,
-under the vision model's one-patch floor, and a coordinate for it missed by
-~36px every time), sends with x's own Post button, then reads the timeline back
-and returns a verdict the model cannot shape:
+What makes that work on a 14B is what the page hands back:
 
-```
-[Post CONFIRMED] The post is rendered on the timeline: 'shipping the desktop window today'
-[Post NOT confirmed] The composer still holds the text, so it was not sent.
-[Post NOT confirmed] The composer cleared but the post is not on the timeline yet …
-```
+- **The page's boxes and buttons come with the page.** After an open, or a
+  click that changes what is on screen, the observation lists the fields to
+  type into (with the selector that reaches them) and the buttons that send
+  them — send-like labels (Post, Reply, Send, Submit…) ahead of the
+  navigation, `[disabled]` until the box has text. Before this the list only
+  appeared after a step had failed, and the model typed at nothing and clicked
+  the sidebar link that shares the send button's label.
+- **Words the user didn't give are pointed out.** If the user quoted
+  “testing” and the model types "Hi", the result says so, beside the box.
+- **Sending is asked about where it happens.** A click, a coordinate or
+  cmd+enter that would send the text in a box — a post, a reply, a comment, a
+  chat message, a form — is *Post or send*, on any site. The card shows the
+  words in the box and warns when they aren't the ones you asked for. A
+  search box's Go and a login form are not sends.
 
-A cleared composer is not confirmation — a discarded draft clears too. This
-project has already posted something and reported that it had not, which is
-why the proof is read from the DOM rather than from a toast.
+On 2026-09-27 the model, asked for “testing” on x.com, typed "Hi" into the
+composer and pressed Post; that route now stops at a card that says “You asked
+for “testing”, not this.”
+
+### Guardrails
+
+What Symbio may do without asking is set per **kind of action**, in words you
+would use — *Post or send*, *Run commands and code*, *Change files*, *Use your
+desktop*, *Browse the web*, *Forget things*, *Train itself*, *Change its
+settings*, *Schedule work* — each **Allow**, **If risky**, **Ask** or **Never**
+(Settings → the first section in the window, or `guardrails.modes` in
+config.json). The defaults are the old behaviour.
+
+- **One question per action, in plain English.** The card's headline is the
+  model's own sentence for the concrete call ("I'll post “Hi” publicly on your X
+  account"); under it, the exact post or command, from the harness. If the
+  words about to go out are not the ones you quoted, the card says so in red.
+  It used to ask twice for one post, once with no text at all.
+- **A click is judged by what it lands on.** A button that sends the text in
+  a box — by text, selector, coordinates or cmd+enter — is *Post or send* on
+  any site, whichever tool did it. Before this, browser_type plus
+  browser_click posted "Hi" with nobody asked.
+- **Always allow** on a card switches that kind to Allow; anything the risk
+  scorer rates destructive still asks. **Never** is refused, and the model is
+  told the refusal is yours.
+- **Floors** no switch reaches: the security policy, self-destruction, and the
+  model loosening its own guardrails.
+- The window's server only talks to the window: requests must come from its
+  own origin, so a web page open in your browser can no longer open the chat
+  socket or write settings.
 
 ---
 

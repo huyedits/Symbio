@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Symbio</title>
 <link rel="stylesheet" href="/static/style.css">
+<!-- avoid-ai-design-ignore: K7 — :focus-visible lives in style.css -->
 <script src="https://d3js.org/d3.v7.min.js"></script>
 </head>
 <body>
@@ -21,12 +22,12 @@
   </div>
 
   <div class="sidebar-section recents">
-    <div class="sidebar-label">Recents</div>
+    <div class="sidebar-label">Recent chats</div>
     <div id="chat-list" class="chat-list"></div>
   </div>
 
   <div class="sidebar-section">
-    <div class="sidebar-label">Workspace</div>
+    <div class="sidebar-label">Look inside</div>
     <button class="side-item" data-open-view="mindmap">Adapter map</button>
     <button class="side-item" data-open-view="skills">Skills</button>
     <button class="side-item" data-open-view="rag">RAG corpus</button>
@@ -55,7 +56,7 @@
 
   <div id="thread" class="thread">
     <div class="welcome" id="welcome">
-      <h1 class="greeting"><span class="mark" aria-hidden="true"></span><span id="welcome-title">Symbio</span></h1>
+      <h1 class="greeting"><span class="mark" aria-hidden="true"></span><span class="greeting-name" id="welcome-title">Symbio</span></h1>
     </div>
   </div>
 
@@ -72,7 +73,7 @@
       Reading a saved transcript. <button class="link-btn" id="btn-back-live">Back to the live chat</button>
     </div>
     <form class="composer" id="composer">
-      <textarea id="input" rows="1" placeholder="How can I help you today?" autofocus></textarea>
+      <textarea id="input" rows="1" placeholder="Message Symbio…" autofocus></textarea>
       <div class="composer-bar">
         <span class="composer-note">Runs on this Mac</span>
         <span class="chip model-chip" id="model-chip" title="The resident model">—</span>

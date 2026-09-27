@@ -2257,6 +2257,39 @@ def test_agent_loop_auto_searches_on_fabricated_number():
     print("test_agent_loop_auto_searches_on_fabricated_number passed")
 
 
+def test_figures_grounded():
+    df = ["/dev/disk3s5  228Gi  192Gi  4.96Gi  98%  /System/Volumes/Data"]
+    assert learn.figures_grounded("You have about 5.0 GB free.", df)
+    assert learn.figures_grounded("Roughly 5 GB is left, give or take.", df)
+    # A figure no printed number rounds to came from somewhere else.
+    assert not learn.figures_grounded("You have about 12 GB free.", df)
+    # Near is not enough: 4.9 is not 4.96 at one decimal place.
+    assert not learn.figures_grounded("About 4.9 GB.", df)
+    assert not learn.figures_grounded("About 5 GB.", [])
+
+
+def test_agent_loop_does_not_search_a_figure_a_tool_printed():
+    # Live 2026-09-27: `df -h`, then "You have about 5.0 GB", then a web
+    # search for the user's own disk, then "couldn't find it in the results".
+    real_search = web.web_search
+    searched = []
+    web.web_search = lambda q, c, max_results=5: (searched.append(q) or (True, "nothing"))
+    try:
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["How much free disk space do I have?", "/quit", "n"],
+                model_replies=[
+                    "<cmd>echo /dev/disk3s5 228Gi 192Gi 5.0Gi 98%</cmd>",
+                    "You have about 5.0 GB free.",
+                ],
+            )
+            session.run()
+        assert searched == [], searched
+        assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+    finally:
+        web.web_search = real_search
+
+
 def test_agent_loop_auto_searches_on_blank_reply():
     real_search = web.web_search
     web.web_search = lambda q, c, max_results=5: (

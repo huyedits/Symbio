@@ -225,6 +225,46 @@ def sounds_fabricated(question: str, reply: str) -> bool:
     return bool(_HEDGE_BEFORE_NUMBER_RE.search(r) or _HEDGE_AFTER_NUMBER_RE.search(r))
 
 
+_FIGURE_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def figures_grounded(reply: str, observations: list[str]) -> bool:
+    """Is every hedged figure in `reply` a rounding of one a tool printed?
+
+    "You have about 5.0 GB free" right after `df -h` printed 5.0Gi is the
+    model reading a result, not guessing one, but sounds_fabricated only sees
+    "about" before a number. Live 2026-09-27 that sent a web search for the
+    user's own free disk space, and the reply to the results ("I couldn't find
+    a specific figure in the search results") replaced the correct answer.
+
+    Rounding, not closeness: a figure counts only if some printed number
+    rounds to it at the precision the reply used, so a page of numbers does
+    not vouch for any figure that happens to be near one of them.
+    """
+    printed = []
+    for match in _FIGURE_RE.finditer("\n".join(observations or [])):
+        try:
+            printed.append(float(match.group(0).replace(",", "")))
+        except ValueError:
+            continue
+    if not printed:
+        return False
+    r = (reply or "").lower()
+    hedges = [m.span() for rx in (_HEDGE_BEFORE_NUMBER_RE, _HEDGE_AFTER_NUMBER_RE)
+              for m in rx.finditer(r)]
+    hedged = [m for m in _FIGURE_RE.finditer(r)
+              if any(m.start() < end and start < m.end() for start, end in hedges)]
+    if not hedged:
+        return False
+    for match in hedged:
+        text = match.group(0).replace(",", "")
+        places = len(text.split(".")[1]) if "." in text else 0
+        value = float(text)
+        if not any(round(p, places) == value for p in printed):
+            return False
+    return True
+
+
 # The third knowledge-gap disguise: a confident-sounding non-answer that
 # deflects to "it depends" / "check the official website" with NO figure at
 # all. sounds_unsure misses it (no "I don't know") and sounds_fabricated

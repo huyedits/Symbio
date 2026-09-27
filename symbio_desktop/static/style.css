@@ -12,84 +12,131 @@
    toggle would win in one direction and not the other. The token NAMES are
    the ones the older views already use, which is why those styles were
    carried over untouched.
+
+   The palette is Symbio's own, read off its icon (static/icon.png): the pond
+   teal it sits on, the tabby coat's browns for ink, and the amber charm on
+   its collar — the bead that glows as it learns — as the one signal colour.
+   It was Claude's (cream, #d97757, a serif), which made this window a copy
+   of another product's. See symbio_desktop/DESIGN.md before adding a colour.
 */
 
 :root {
   color-scheme: light;
-  --bg-deep: #faf9f5;
+  /* pond, in daylight */
+  --bg-deep: #f2f5f3;
   --bg-surface: #ffffff;
-  --bg-elevated: #f3f1ea;
-  --bg-overlay: #e9e6dc;
-  --border-subtle: rgba(20, 18, 14, 0.09);
-  --border-medium: rgba(20, 18, 14, 0.16);
-  --text-primary: #1f1d1a;
-  --text-secondary: #575249;
-  --text-muted: #8a8479;
-  --accent: #c15f3c;
-  --accent-glow: rgba(193, 95, 60, 0.16);
-  --accent-2: #2f6fb5;
-  --accent-3: #2f8f62;
-  --accent-4: #b8860b;
-  --accent-5: #a5568c;
-  --danger: #c0392b;
-  --danger-glow: rgba(192, 57, 43, 0.14);
-  --success: #2f8f62;
-  --user-bubble: #f0eee6;
+  --bg-elevated: #e6ecea;
+  --bg-overlay: #d9e3e0;
+  --border-subtle: rgba(24, 58, 54, 0.12);
+  --border-medium: rgba(24, 58, 54, 0.22);
+  /* tabby ink: stripe brown, coat brown, whisker */
+  --text-primary: #2a211b;
+  --text-secondary: #51453b;
+  --text-muted: #675b50;
+  /* the charm: the one signal — the primary action, and "working" */
+  --accent: #bf7c16;
+  --accent-ink: #2a211b;
+  --accent-glow: rgba(191, 124, 22, 0.16);
+  /* pond teal: links, focus, "resting" */
+  --pond: #1f7a6f;
+  --link: #1d6b62;
+  /* adapter map: charm, pond, coat, nose, stripe */
+  --accent-2: #1f7a6f;
+  --accent-3: #9a6a3a;
+  --accent-4: #c26f6a;
+  --accent-5: #4d3b2e;
+  --warn: #9a5f0c;
+  --danger: #b3361f;
+  --danger-glow: rgba(179, 54, 31, 0.12);
+  --success: #1f7a6f;
+  --user-bubble: #e2ebe8;
+  --scrim: rgba(18, 36, 34, 0.42);
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 16px;
   --radius-xl: 22px;
-  --font-mono: ui-monospace, 'SF Mono', 'Fira Code', Menlo, monospace;
-  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  /* Symbio's own voice: its name, its questions, its section titles. The
+     rounded face of the Mac's own family, as soft as the icon it comes from. */
+  --font-display: ui-rounded, 'SF Pro Rounded', -apple-system, system-ui, sans-serif;
   --transition: 160ms ease;
   --sidebar-w: 260px;
-  --font-serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', serif;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg-deep: #262624;
-    --bg-surface: #30302e;
-    --bg-elevated: #1f1e1d;
-    --bg-overlay: #3a3a37;
-    --border-subtle: rgba(255, 255, 255, 0.08);
-    --border-medium: rgba(255, 255, 255, 0.15);
-    --text-primary: #f0eee6;
-    --text-secondary: #a8a29a;
-    --text-muted: #736e67;
-    --accent: #d97757;
-    --accent-glow: rgba(217, 119, 87, 0.22);
-    --accent-2: #63a6e8;
-    --accent-3: #4cc38a;
-    --accent-4: #e0a92b;
-    --accent-5: #d07ab4;
-    --danger: #ef6b5e;
-    --success: #4cc38a;
-    --user-bubble: #141413;
+    /* pond, at night */
+    --bg-deep: #0f1e20;
+    --bg-surface: #162a2d;
+    --bg-elevated: #0b1618;
+    --bg-overlay: #20383b;
+    --border-subtle: rgba(190, 228, 220, 0.10);
+    --border-medium: rgba(190, 228, 220, 0.19);
+    /* muzzle cream, coat, whisker */
+    --text-primary: #efe7da;
+    --text-secondary: #cbbfae;
+    --text-muted: #a39684;
+    --accent: #f0b44c;
+    --accent-ink: #241b14;
+    --accent-glow: rgba(240, 180, 76, 0.20);
+    --pond: #58b8aa;
+    --link: #78cfc2;
+    --accent-2: #58b8aa;
+    --accent-3: #c99a66;
+    --accent-4: #e59a93;
+    --accent-5: #b89a80;
+    --warn: #e8a63a;
+    --danger: #f28a72;
+    --danger-glow: rgba(242, 138, 114, 0.14);
+    --success: #58b8aa;
+    --user-bubble: #1c3336;
+    --scrim: rgba(3, 10, 11, 0.62);
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg-deep: #262624;
-  --bg-surface: #30302e;
-  --bg-elevated: #1f1e1d;
-  --bg-overlay: #3a3a37;
-  --border-subtle: rgba(255, 255, 255, 0.08);
-  --border-medium: rgba(255, 255, 255, 0.15);
-  --text-primary: #f0eee6;
-  --text-secondary: #a8a29a;
-  --text-muted: #736e67;
-  --accent: #d97757;
-  --accent-glow: rgba(217, 119, 87, 0.22);
-  --accent-2: #63a6e8;
-  --accent-3: #4cc38a;
-  --accent-4: #e0a92b;
-  --accent-5: #d07ab4;
-  --danger: #ef6b5e;
-  --success: #4cc38a;
-  --user-bubble: #141413;
+  --bg-deep: #0f1e20;
+  --bg-surface: #162a2d;
+  --bg-elevated: #0b1618;
+  --bg-overlay: #20383b;
+  --border-subtle: rgba(190, 228, 220, 0.10);
+  --border-medium: rgba(190, 228, 220, 0.19);
+  --text-primary: #efe7da;
+  --text-secondary: #cbbfae;
+  --text-muted: #a39684;
+  --accent: #f0b44c;
+  --accent-ink: #241b14;
+  --accent-glow: rgba(240, 180, 76, 0.20);
+  --pond: #58b8aa;
+  --link: #78cfc2;
+  --accent-2: #58b8aa;
+  --accent-3: #c99a66;
+  --accent-4: #e59a93;
+  --accent-5: #b89a80;
+  --warn: #e8a63a;
+  --danger: #f28a72;
+  --danger-glow: rgba(242, 138, 114, 0.14);
+  --success: #58b8aa;
+  --user-bubble: #1c3336;
+  --scrim: rgba(3, 10, 11, 0.62);
+}
+
+/* Keyboard focus is always visible, in pond teal so it still shows on the
+   amber of a primary button. */
+:focus-visible { outline: 2px solid var(--pond); outline-offset: 2px; border-radius: var(--radius-sm); }
+#input:focus-visible { outline: none; }
+
+/* Less movement for anyone who asked their Mac for less. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -164,10 +211,8 @@ body.sidebar-hidden #sidebar { transform: translateX(-100%); }
 
 .sidebar-label {
   padding: 0 8px 6px;
-  font-size: 11px;
+  font-size: 12.5px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--text-muted);
 }
 
@@ -224,7 +269,8 @@ body.sidebar-hidden #sidebar { transform: translateX(-100%); }
 }
 
 .status-dot.ok { background: var(--success); }
-.status-dot.busy { background: var(--accent-4); animation: pulse 1.1s infinite; }
+.status-dot.busy { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow);
+  animation: pulse 1.1s infinite; }
 .status-dot.off { background: var(--danger); }
 
 /* ── Main column ─────────────────────────────────────────────────── */
@@ -269,8 +315,7 @@ body.sidebar-hidden #btn-show-sidebar { display: grid; }
   border-radius: 999px;
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
-  font-size: 11.5px;
-  font-family: var(--font-mono);
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
@@ -286,7 +331,11 @@ body.sidebar-hidden #btn-show-sidebar { display: grid; }
   scroll-behavior: smooth;
 }
 
-.thread > * { width: 100%; max-width: 720px; margin: 0 auto; }
+.thread > * { width: 100%; max-width: 720px; margin: 0 auto; flex-shrink: 0; }
+/* flex-shrink: 0 — the thread is a column that scrolls, and an item with
+   overflow: hidden (the activity card) has no content floor, so once the
+   thread was taller than the window each activity card was squeezed down to
+   its two border lines. */
 
 .welcome { text-align: center; margin-top: 12vh; }
 .welcome h1 { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; }
@@ -331,7 +380,7 @@ body.sidebar-hidden #btn-show-sidebar { display: grid; }
 .msg-body h3 { font-size: 1.05em; margin: 0.9em 0 0.35em; }
 .msg-body ul { margin: 0.5em 0 0.5em 1.2em; }
 .msg-body li { margin: 0.2em 0; }
-.msg-body a { color: var(--accent-2); }
+.msg-body a { color: var(--link); }
 
 .msg-body code {
   font-family: var(--font-mono);
@@ -452,7 +501,7 @@ body.busy #btn-send { opacity: 0.4; }
   text-align: left;
 }
 
-.activity-label { flex: 1; font-family: var(--font-mono); font-size: 12px; }
+.activity-label { flex: 1; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-chevron { color: var(--text-muted); transition: transform var(--transition); }
 .activity.open .activity-chevron { transform: rotate(180deg); }
 
@@ -467,7 +516,7 @@ body.busy #btn-send { opacity: 0.4; }
 
 .activity.done .spinner { border: 1.6px solid var(--success); animation: none; }
 
-.activity-log {
+.activity-log {  /* avoid-ai-design-ignore: SD4m — raw tool output, read as a log */
   display: none;
   padding: 0 13px 12px;
   font-family: var(--font-mono);
@@ -482,17 +531,20 @@ body.busy #btn-send { opacity: 0.4; }
 
 .activity.open .activity-log { display: block; }
 
-/* ── Confirmation ────────────────────────────────────────────────── */
+/* ── Confirmation ────────────────────────────────────────────────
+   Symbio asking before it acts. What will happen is said in its own voice
+   (the display face); exactly what — the post, the command — sits under it
+   as data. The charm beside the reason is the one thing that glows. */
 
 .confirm-card {
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-md);
-  background: var(--accent-glow);
-  padding: 14px 16px;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  padding: 14px 16px 12px;
 }
 
 .confirm-text { font-size: 13.5px; white-space: pre-wrap; font-family: var(--font-mono); }
-.confirm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 14px; }
 
 .btn {
   padding: 6px 16px;
@@ -501,12 +553,52 @@ body.busy #btn-send { opacity: 0.4; }
   background: var(--bg-surface);
   font-size: 13px;
   font-weight: 550;
+  transition: background var(--transition), border-color var(--transition), color var(--transition), box-shadow var(--transition);
 }
 
-.btn.allow { background: var(--accent); border-color: var(--accent); color: #fff; }
-.btn.deny:hover { color: var(--danger); border-color: var(--danger); }
-.confirm-card.answered { opacity: 0.65; border-color: var(--border-subtle); background: var(--bg-surface); }
+.btn:hover { background: var(--bg-overlay); }
+.btn:active { transform: translateY(1px); }
+.btn.allow { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.allow:hover { box-shadow: 0 0 0 3px var(--accent-glow); background: var(--accent); }
+.btn.deny:hover { color: var(--danger); border-color: var(--danger); background: var(--bg-surface); }
+.btn.always { border-color: transparent; background: transparent; color: var(--text-secondary); }
+.btn.always:hover { color: var(--text-primary); background: var(--bg-overlay); }
+.confirm-card.answered { opacity: 0.7; border-color: var(--border-subtle); }
 .confirm-verdict { font-size: 12.5px; color: var(--text-muted); }
+
+.confirm-kind { display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+  font-size: 12.5px; color: var(--text-muted); line-height: 1.4; }
+.charm { width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.confirm-card.answered .charm { background: var(--text-muted); box-shadow: none; }
+.confirm-headline { font-family: var(--font-display); font-size: 16.5px; font-weight: 600;
+  line-height: 1.4; overflow-wrap: anywhere; }
+.confirm-who { color: var(--text-muted); font-weight: 500; }
+.confirm-warning {
+  margin-top: 10px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-glow);
+  color: var(--danger);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.confirm-details {  /* avoid-ai-design-ignore: SD4m — the literal command or post being approved */
+  margin-top: 10px;
+  padding: 9px 11px;
+  max-height: 220px;
+  overflow: auto;
+  border-radius: var(--radius-sm);
+  background: var(--bg-deep);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.confirm-card.warned { border-color: var(--danger); }
+.confirm-card.warned .charm { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-glow); }
+.confirm-card.warned .btn.allow { background: var(--bg-surface); border-color: var(--danger); color: var(--danger); }
+.confirm-card.warned .btn.allow:hover { box-shadow: 0 0 0 3px var(--danger-glow); }
 
 /* ── Composer ────────────────────────────────────────────────────── */
 
@@ -526,7 +618,7 @@ body.busy #btn-send { opacity: 0.4; }
   color: var(--text-secondary);
 }
 
-.link-btn { color: var(--accent); text-decoration: underline; font-size: 12.5px; }
+.link-btn { color: var(--link); text-decoration: underline; font-size: 12.5px; }
 
 .composer {
   display: flex;
@@ -563,13 +655,13 @@ body.busy #btn-send { opacity: 0.4; }
   width: 32px; height: 32px;
   border-radius: 50%;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-ink);
   flex-shrink: 0;
-  transition: opacity var(--transition), transform var(--transition);
+  transition: opacity var(--transition), transform var(--transition), box-shadow var(--transition);
 }
 
 #btn-send:disabled { opacity: 0.35; cursor: not-allowed; }
-#btn-send:not(:disabled):hover { transform: translateY(-1px); }
+#btn-send:not(:disabled):hover { box-shadow: 0 0 0 4px var(--accent-glow); }
 
 .composer-hint {
   margin-top: 8px;
@@ -648,9 +740,9 @@ body.workspace-open #workspace { transform: none; }
 }
 
 .view-header h1 {
+  font-family: var(--font-display);
   font-size: 16px;
-  font-weight: 700;
-  letter-spacing: -0.3px;
+  font-weight: 650;
 }
 
 .view-actions { display: flex; gap: 4px; }
@@ -805,11 +897,9 @@ body.workspace-open #workspace { transform: none; }
 }
 
 .detail-type {
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  color: var(--accent);
+  color: var(--text-secondary);
   margin-bottom: 14px;
 }
 
@@ -823,21 +913,19 @@ body.workspace-open #workspace { transform: none; }
 }
 
 .detail-row .label { color: var(--text-muted); }
-.detail-row .value { color: var(--text-primary); font-weight: 500; font-family: var(--font-mono); font-size: 10px; }
+.detail-row .value { color: var(--text-primary); font-weight: 500; font-size: 11.5px; font-variant-numeric: tabular-nums; }
 
 .detail-section { margin-top: 12px; }
 
 .detail-section h4 {
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
   color: var(--text-muted);
   margin-bottom: 6px;
 }
 
 .detail-prompt {
-  font-size: 10px;
+  font-size: 11.5px;
   color: var(--text-secondary);
   background: var(--bg-deep);
   border-radius: var(--radius-sm);
@@ -847,7 +935,6 @@ body.workspace-open #workspace { transform: none; }
   white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.5;
-  font-family: var(--font-mono);
 }
 
 /* ── Skills Grid ────────────────────────────────────────────────── */
@@ -900,8 +987,8 @@ body.workspace-open #workspace { transform: none; }
 }
 
 .skill-badge.errors { background: var(--danger-glow); color: var(--danger); }
-.skill-badge.corrections { background: rgba(245, 158, 11, 0.15); color: var(--accent-4); }
-.skill-badge.trained { background: rgba(34, 197, 94, 0.15); color: var(--success); }
+.skill-badge.corrections { background: var(--accent-glow); color: var(--warn); }
+.skill-badge.trained { background: var(--bg-overlay); color: var(--success); }
 .skill-badge.untrained { background: var(--bg-overlay); color: var(--text-muted); }
 
 .skill-card-steps {
@@ -945,20 +1032,19 @@ body.workspace-open #workspace { transform: none; }
 }
 
 .stat-value {
+  font-family: var(--font-display);
   font-size: 32px;
-  font-weight: 800;
-  color: var(--accent);
-  letter-spacing: -1px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
   line-height: 1;
   margin-bottom: 5px;
 }
 
 .stat-label {
-  font-size: 11px;
+  font-size: 12.5px;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 /* ── Health ──────────────────────────────────────────────────────── */
@@ -987,23 +1073,22 @@ body.workspace-open #workspace { transform: none; }
 }
 
 .health-card .value {
+  font-family: var(--font-display);
   font-size: 28px;
-  font-weight: 800;
-  letter-spacing: -1px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
   line-height: 1;
   margin-bottom: 3px;
 }
 
 .health-card .value.ok { color: var(--success); }
-.health-card .value.warn { color: var(--accent-4); }
+.health-card .value.warn { color: var(--warn); }
 .health-card .value.bad { color: var(--danger); }
 
 .health-card .label {
-  font-size: 10px;
+  font-size: 12.5px;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .health-issues {
@@ -1038,7 +1123,7 @@ body.workspace-open #workspace { transform: none; }
 }
 
 .health-issue-dot.error { background: var(--danger); }
-.health-issue-dot.correction { background: var(--accent-4); }
+.health-issue-dot.correction { background: var(--warn); }
 
 /* ── Watermark ──────────────────────────────────────────────────── */
 
@@ -1121,8 +1206,7 @@ body.workspace-open #workspace { transform: none; }
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(20, 18, 14, 0.38);
-  backdrop-filter: blur(2px);
+  background: var(--scrim);
 }
 
 .settings-panel {
@@ -1145,18 +1229,18 @@ body.workspace-open #workspace { transform: none; }
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.settings-head h2 { font-size: 15px; font-weight: 600; }
+.settings-head h2 { font-family: var(--font-display); font-size: 17px; font-weight: 650; }
 
 .settings-body { padding: 6px 18px 20px; overflow-y: auto; }
 
 .settings-heading {
-  margin: 20px 0 6px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-muted);
+  margin: 24px 0 4px;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text-primary);
 }
+.settings-lead { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 4px; }
 
 .settings-row {
   display: flex;
@@ -1203,14 +1287,55 @@ body.workspace-open #workspace { transform: none; }
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-medium);
   background: var(--bg-elevated);
-  font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 13px;
   text-align: center;
 }
 
 .key-chip:hover { border-color: var(--accent); }
 .key-chip.listening { border-color: var(--accent); color: var(--accent); background: var(--accent-glow); }
 .key-chip.fixed { opacity: 0.6; cursor: default; }
+
+/* Guardrails: one row per kind of action, four positions each. */
+.guard-row { flex-wrap: wrap; }
+.seg {
+  flex-shrink: 0;
+  display: inline-flex;
+  border: 1px solid var(--border-medium);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.seg button {
+  padding: 5px 9px;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border-subtle);
+}
+.seg button:last-child { border-right: none; }
+.seg button:hover { color: var(--accent); }
+.seg button.on { background: var(--accent); color: #fff; }
+.seg button.on.block { background: var(--danger); }
+.guard-floor { display: flex; gap: 8px; padding: 6px 0; font-size: 13px; color: var(--text-muted); }
+.guard-recent {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 4px 10px;
+  padding: 6px 0;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.guard-recent:last-child { border-bottom: none; }
+.guard-when { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.guard-what { overflow-wrap: anywhere; }
+.guard-answer { font-weight: 600; }
+.guard-answer.denied, .guard-answer.blocked { color: var(--danger); }
+.guard-answer.allowed, .guard-answer.auto { color: var(--success); }
+
+@media (max-width: 560px) {
+  .guard-row .seg { width: 100%; }
+  .guard-row .seg button { flex: 1; }
+}
 
 body.modal-open { overflow: hidden; }
 
@@ -1234,17 +1359,15 @@ body.modal-open { overflow: hidden; }
 
 .session-row:hover { background: var(--bg-elevated); color: var(--text-primary); }
 .session-row.active { background: var(--bg-overlay); color: var(--text-primary); }
-.session-when { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
+.session-when { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .session-opening { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-turns { font-size: 11px; color: var(--text-muted); }
 .session-detail { overflow-y: auto; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
 .session-turn { display: flex; flex-direction: column; gap: 3px; }
 
 .session-role {
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--text-muted);
 }
 
@@ -1304,21 +1427,15 @@ body.swapped.workspace-open[data-layout="below"] #main { inset: min(52vh, 620px)
 #main.empty .composer-wrap { padding-bottom: 12vh; }
 .welcome { margin-top: 0; }
 .welcome h1.greeting {
-  display: flex; align-items: center; justify-content: center; gap: 14px;
-  font-family: var(--font-serif);
-  font-size: 38px; font-weight: 400; letter-spacing: -0.01em;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  font-family: var(--font-display);
+  font-size: 30px; font-weight: 650;
   color: var(--text-primary);
   margin-bottom: 26px;
 }
-/* The mark: two overlapping circles, the project's own sign of two things
-   living together; drawn in CSS so it follows the accent in both themes. */
-.mark { position: relative; width: 34px; height: 24px; flex-shrink: 0; }
-.mark::before, .mark::after {
-  content: ''; position: absolute; top: 0; width: 24px; height: 24px;
-  border-radius: 50%; border: 2.5px solid var(--accent);
-}
-.mark::before { left: 0; }
-.mark::after { left: 10px; background: var(--accent-glow); }
+/* The mark is the icon itself: the cat on the Dock is the same one here. */
+.mark { width: 64px; height: 64px; flex-shrink: 0;
+  background: url('/static/icon.png') center / contain no-repeat; }
 
 .suggestions { display: none; margin-top: 14px; }
 #main.empty .suggestions { display: flex; }
@@ -1327,9 +1444,8 @@ body.swapped.workspace-open[data-layout="below"] #main { inset: min(52vh, 620px)
 /* Messages. */
 .thread { gap: 26px; padding-top: 12px; }
 .msg.assistant .msg-body {
-  font-family: var(--font-serif);
-  font-size: 16.5px;
-  line-height: 1.68;
+  font-size: 15.5px;
+  line-height: 1.65;
   color: var(--text-primary);
 }
 .msg.assistant .msg-body code, .msg.assistant .msg-body pre { font-family: var(--font-mono); }
@@ -1354,7 +1470,7 @@ body.busy .msg-actions { visibility: hidden; }
   display: inline-flex; align-items: center; gap: 6px;
   padding: 5px 10px; border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle); background: var(--bg-surface);
-  font-family: var(--font-sans); font-size: 12.5px; color: var(--text-secondary);
+  font-size: 12.5px; color: var(--text-secondary);
 }
 .thought summary::before {
   content: ''; width: 6px; height: 6px;
@@ -1407,7 +1523,7 @@ body.busy .msg-actions { visibility: hidden; }
 /* Sidebar: quieter, closer to the page. */
 #sidebar { gap: 14px; }
 .new-chat { background: transparent; border-color: transparent; font-weight: 500; }
-.new-chat svg { color: var(--accent); }
+.new-chat svg { color: var(--pond); }
 .chat-row.active { background: var(--bg-overlay); font-weight: 500; }
 
 /* The recents list takes the spare height, so the footer sits at the bottom.
