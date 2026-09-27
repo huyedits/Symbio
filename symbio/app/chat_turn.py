@@ -1245,8 +1245,13 @@ class AgentTurnMixin:
                     ("search", "news", "weather", "look up", "find online")
                 )
                 unsure = bool(display.strip()) and learn.sounds_unsure(display)
+                # A hedged figure a tool printed this turn is a rounding, not
+                # a guess: searching the web for "how much free disk space do
+                # I have" can only replace the right answer with a wrong one.
                 fabricated = (not unsure and bool(display.strip())
-                              and learn.sounds_fabricated(user_input, display))
+                              and learn.sounds_fabricated(user_input, display)
+                              and not learn.figures_grounded(
+                                  display, observations_this_turn))
                 # A confident-sounding non-answer to a price/figure question —
                 # "it depends on the device, check the official website" with no
                 # number — is the model papering over a gap without committing
