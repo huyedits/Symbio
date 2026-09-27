@@ -85,6 +85,33 @@ def test_continue_carries_on_the_task_it_continues():
     assert not session._last_decision["source"].startswith("continues")
 
 
+def test_a_promised_action_still_gets_its_nudge_after_an_empty_reply(monkeypatch, tmp_path):
+    """Live 2026-09-27, "go to x.com and make a tweet 'testing'": an empty
+    first reply spent the one nudge, and the turn ended on "I'll open the
+    Twitter website and post your tweet." with nothing opened."""
+    from tests.test_thinking_truncation import _reply, _session
+
+    output, calls = [], []
+    replies = iter(["<think>\n\n<end>",                       # thinking misfired
+                    "I'll open the Twitter website and post your tweet. <end>",
+                    "Opened it. <end>"])
+
+    def fake_generate(messages, chunk_prefix="", timings=None, think=True, reasoning_budget=0):
+        calls.append(think)
+        return _reply(timings, next(replies, "Done. <end>"))
+
+    session = _session(monkeypatch, tmp_path, output)
+    session.config["agent"]["thinking_level"] = "max"
+    session.config["agent"]["think_when"] = "always"            # force the thinking path
+    monkeypatch.setattr(session, "_generate_reply", fake_generate)
+    session._agent_turn('go to x.com and make a tweet "testing"')
+
+    log = "\n".join(output)
+    assert calls[:2] == [True, False], "an empty thinking reply is answered again without it"
+    assert "[Action] Model described the action" in log, "the promise must still be nudged"
+    assert len(calls) >= 3
+
+
 def test_the_resident_weights_are_wired(monkeypatch):
     """The limit set here is what mlx_lm's per-generation wired_limit restores
     afterwards, so the model stays resident between turns too."""

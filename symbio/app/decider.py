@@ -31,7 +31,11 @@ LABELS = {
     "chat": {"think": False},     # greetings, small talk, quick facts, thanks
     "search": {"think": False},   # needs current or outside information
     "screen": {"think": False},   # look at / read the screen
-    "action": {"think": True},    # do something on the machine: open, click, post, files
+    # Do something on the machine: open, click, post. No reasoning block: the
+    # tool call is the answer. Measured 2026-09-27: with thinking on, an x.com
+    # post opened with 578 words (60 s) of deliberation, and the next one with
+    # an empty "<think>\n\n<end>" that ended the turn.
+    "action": {"think": False},
     "code": {"think": True},      # write, fix, explain code or errors
     "reason": {"think": True},    # plan, compare, analyse, multi-step problems
 }
