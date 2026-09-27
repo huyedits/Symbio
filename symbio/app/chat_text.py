@@ -545,61 +545,6 @@ def _is_navigation_only(text: str) -> bool:
     return len(content) <= 1
 
 
-# posting on X, spelled out word for word
-_QUESTION_START = re.compile(
-    r"^(?:what|how|why|when|where|who|which|whose|should|shall|would it|is|are|"
-    r"was|were|do|does|did|can i|could i|if)\b", re.IGNORECASE)
-# The words right before the quote that make it the post: "tweet “x”",
-# "make a tweet saying “x”", "post a tweet: “x”". "tweet" counts as the verb
-# only where a verb goes, so "look up the tweet “x”" is not a request to post.
-_POST_LEAD = re.compile(
-    r"(?:(?:^|\b(?:and|then|please|pls|to|you|now|just|also)\s+)tweet"
-    r"|\b(?:make|write|post|send|create|publish|compose|share|put out|do)"
-    r"(?:\s+(?:a|an|the|this|my|new|quick|short))*\s+(?:tweet|post))"
-    r"\s*(?::|,|saying|that says|which says|reading|with the text|with)?\s*$",
-    re.IGNORECASE)
-_POST_BARE = re.compile(r"\b(?:post|publish|share)\s*$", re.IGNORECASE)
-_ON_X = re.compile(r"^\s*(?:on|to)\s+(?:x\.com|x|twitter(?:\.com)?)\b", re.IGNORECASE)
-_NOT_A_POST = re.compile(
-    r"\b(?:draft|don'?t post|do not post|without posting|reply|replies|quote|"
-    r"dm|direct message|thread|schedule|later|tomorrow|delete|retweet|repost)\b",
-    re.IGNORECASE)
-
-
-def x_post_request(text: str) -> str | None:
-    """The exact words to post on X when the user spelled them out, else None.
-
-    Narrow on purpose. This is the case where the model has nothing to decide
-    and everything to get wrong: live 2026-09-27, `go to x.com and make a
-    tweet “testing"` became `<type>Hi</type>` and a click on Post, and "Hi"
-    went out under the user's name. When the words are in quotes and the ask
-    is to post them, the harness makes the post_to_x call itself with those
-    words — the approval card still comes first — and anything vaguer ("tweet
-    something about cats", a question, a reply, a draft) stays with the model.
-    """
-    from symbio import guardrails
-
-    t = (text or "").strip()
-    if not t or t.endswith("?") or _QUESTION_START.match(t) or _NOT_A_POST.search(t):
-        return None
-    quotes = guardrails.quoted_texts(t)
-    if len(quotes) != 1:
-        return None
-    words = quotes[0]
-    at = t.find(words)
-    marks = " \"'“”‘’«»"
-    lead, tail = t[:at].rstrip(marks), t[at + len(words):].lstrip(marks)
-    if _POST_LEAD.search(lead):
-        # "post" as a noun names no site: "make a post “hi”" could be anywhere.
-        if re.search(r"\btweet\b", lead, re.IGNORECASE) or re.search(
-                r"\b(?:x\.com|twitter|on x|to x)\b", t, re.IGNORECASE):
-            return words
-        return None
-    if _POST_BARE.search(lead) and _ON_X.match(tail):
-        return words
-    return None
-
-
 def _last_exchange(history: list[dict[str, str]]) -> tuple[str | None, str | None]:
     """Return (last real user question, last assistant answer) from history.
 

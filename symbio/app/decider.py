@@ -63,12 +63,22 @@ SEEDS: dict[str, list[str]] = {
         "can you see the browser window?", "what text is in the sidebar?",
         "take a look at this page", "what app is open right now?",
         "read me what the popup says", "what's written on the button?",
+        # Asking what a page HAS is looking; doing something on it is acting.
+        "is there a sign up link on this page?", "which buttons are on this form?",
     ],
     "action": [
         "open safari", "click the post button", "tweet hello world", "open spotify and play music",
         "create a folder called invoices on my desktop", "delete the old logs in downloads",
         "set a reminder for 5pm to call mum", "send the form", "close all my chrome tabs",
         "move these files into the archive folder", "turn the volume down", "schedule a backup every night",
+        # Doing something ON a website is an action, not a question about it.
+        # Measured 2026-09-27: "go to <url> and reply “testing” to the thread"
+        # voted `screen` by 0.015 and fell to the regex, which turned thinking
+        # on; the turn spent 60 s a round deliberating and lost its task.
+        "go to example.com and reply 'thanks' to the thread", "leave a comment saying great post",
+        "post 'hello everyone' in the forum", "send 'on my way' to sam on whatsapp web",
+        "fill in the signup form on this page", "go to github.com and star the repo",
+        "add the usb-c cable to my amazon cart",
     ],
     "code": [
         "fix this error: KeyError 'model_name'", "write a python script that renames files",

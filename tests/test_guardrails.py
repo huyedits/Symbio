@@ -3,11 +3,12 @@ question per action, and a click judged by what it lands on.
 
 Live 2026-09-27, asked to `go to x.com and make a tweet “testing"`, the model
 typed "Hi" into X's composer with browser_type and pressed Post with
-browser_click. Neither tool was on any approval list — post_to_x was, and it
-was never called — so "Hi" went out under the user's name and nobody was
-asked. The same day the user called the gate "too rigid": a post that did go
-through post_to_x stopped twice, once as "Allow tool 'post_to_x'?" with no
-text at all, and every question spoke in risk scores and flags.
+browser_click. Neither tool was on any approval list, so "Hi" went out under
+the user's name and nobody was asked. The same day the user called the gate
+"too rigid", and then said plainly: no tweet-to-X command — the model is to
+navigate the browser like a person, not call a hard-coded function. So there
+is no posting tool; there is a question asked in the page, on any site, when a
+click or a key would send what is in a box.
 """
 import json
 
@@ -110,24 +111,48 @@ def test_a_card_is_still_a_plain_string():
 
 # ---- one question per action ----
 
-def test_a_post_asks_once_with_its_words():
-    session = _session(answer=False)
+class _Preview:
+    """A browser whose box holds `text`, for submit_form's card."""
 
-    out = session._execute_tool("post_to_x", {"text": "shipping today"})
+    def __init__(self, text):
+        self.text = text
+
+    def sending_preview(self):
+        return {"text": self.text, "site": "news.example", "url": "https://news.example/submit"}
+
+
+def test_a_form_that_sends_asks_once_with_its_words():
+    session = _session(answer=False)
+    session.browser = _Preview("shipping today")
+
+    out = session._execute_tool("submit_form", {"target": "submit"})
 
     assert len(session.asked) == 1, "it used to ask twice, the first time with no text"
     card = session.asked[0]
     assert isinstance(card, guardrails.Card) and card.kind == "publish"
-    assert card.details == "shipping today"
-    assert out == "Tool 'post_to_x' was not approved."
+    assert card.details.startswith("shipping today")
+    assert out == "Tool 'submit_form' was not approved."
 
 
 def test_the_card_says_when_the_words_are_not_the_ones_asked_for():
     session = _session(answer=False, user_text='go to x.com and make a tweet “testing"')
+    session.browser = _Preview("Hi")
 
-    session._execute_tool("post_to_x", {"text": "Hi"})
+    session._execute_tool("submit_form", {"target": "Post"})
 
     assert session.asked[0].warning == "You asked for “testing”, not this."
+
+
+def test_there_is_no_posting_command():
+    """The user's rule: no tweet-to-X function. A model that reaches for one
+    is told what exists instead."""
+    from symbio.app import tooling
+
+    names = {t["name"] for t in tooling._BUILTIN_TOOLS}
+    assert not any("tweet" in n or n.endswith("_x") for n in names), names
+    groups = {"browser", "memory", "terminal", "code", "web_search"}
+    call = '<tool_call>{"name": "tweet", "arguments": {"text": "hi"}}</tool_call>'
+    assert all(name != "post_to_x" for name, _ in tooling.parse_tools(call, groups))
 
 
 def test_never_refuses_without_asking_and_reads_as_the_users_decision():
@@ -186,8 +211,9 @@ def test_nobody_to_ask_keeps_the_old_headless_answers(monkeypatch):
     monkeypatch.setattr("sys.stdout.isatty", lambda: False)
     session = _session()
     session.confirm_fn = None
+    session.browser = _Preview("hi")
 
-    assert "was not approved" in session._execute_tool("post_to_x", {"text": "hi"})
+    assert "was not approved" in session._execute_tool("submit_form", {"target": "Post"})
     risk = safety.assess_tool_risk("submit_form", {"target": "submit"},
                                    {"safety": {"unattended_submit": True}})
     assert risk["risk_score"] == 0
@@ -232,13 +258,14 @@ def _translating(reply, **config):
 def test_the_headline_is_the_models_translation_of_the_call():
     session, calls = _translating("I'll post “Hi” publicly on your X account, "
                                   "which is not the “testing” you asked for.")
+    session.browser = _Preview("Hi")
 
-    session._execute_tool("post_to_x", {"text": "Hi"})
+    session._execute_tool("submit_form", {"target": "Post"})
 
     card = session.asked[0]
     assert card.said_by == "model"
     assert card.headline.startswith("I'll post “Hi”")
-    assert card.details == "Hi", "the exact words are the harness's, whatever the model says"
+    assert card.details.startswith("Hi"), "the exact words are the harness's, whatever the model says"
     assert "go to x.com and make a tweet" in calls[0], "it is told what the user asked"
 
 
@@ -250,18 +277,20 @@ def test_the_headline_is_the_models_translation_of_the_call():
 ])
 def test_anything_but_a_sentence_about_the_action_falls_back(reply):
     session, _calls = _translating(reply)
+    session.browser = _Preview("Hi")
 
-    session._execute_tool("post_to_x", {"text": "Hi"})
+    session._execute_tool("submit_form", {"target": "Post"})
 
     card = session.asked[0]
     assert card.said_by == "harness"
-    assert card.headline == "Post this on x.com, publicly, as you."
+    assert card.headline.startswith("Submit the form on news.example")
 
 
 def test_translation_can_be_switched_off():
     session, calls = _translating("I'll post it.", guardrails={"translate": False})
+    session.browser = _Preview("Hi")
 
-    session._execute_tool("post_to_x", {"text": "Hi"})
+    session._execute_tool("submit_form", {"target": "Post"})
 
     assert calls == []
     assert session.asked[0].said_by == "harness"
@@ -269,8 +298,8 @@ def test_translation_can_be_switched_off():
 
 # ---- a click is judged by what it lands on ----
 
-_POST_FACTS = {"site": "x.com", "control": "tweetButton", "label": "Post",
-               "text": "Hi", "disabled": False, "action": "post"}
+_POST_FACTS = {"site": "x.com", "label": "Post", "text": "Hi",
+               "disabled": False, "action": "send"}
 
 
 class _Target:
@@ -418,16 +447,7 @@ def test_the_send_shortcut_is_asked_about(key, asked):
         assert out.startswith("Not sent")
 
 
-def test_an_unreadable_page_on_x_is_treated_as_a_post():
-    """Fails closed on X only: asking once too often costs a click."""
-    button = _Target(RuntimeError("Execution context was destroyed"))
-    session, seen = _browser(_Page(button=button), approve=False)
-
-    assert session.click(text="Post").startswith("Not sent")
-    assert seen and seen[0]["control"] == "unknown"
-
-
-def test_an_unreadable_page_elsewhere_is_not():
+def test_an_unreadable_page_is_not_a_question():
     button = _Target(RuntimeError("Execution context was destroyed"))
     page = _Page(button=button)
     page.url = "https://example.com/"
@@ -446,7 +466,8 @@ def test_the_app_gate_asks_with_the_words_in_the_box():
     card = session.asked[0]
     assert card.kind == "publish" and card.details == "Hi"
     assert card.warning == "You asked for “testing”, not this."
-    assert '"text": "testing"' in why, "the refusal names the call that would do it right"
+    assert "“testing”" in why and "post_to_x" not in why, \
+        "the refusal says how to do it right, in the page"
 
 
 def test_the_app_gate_honours_never_and_always():
@@ -456,168 +477,182 @@ def test_the_app_gate_honours_never_and_always():
     assert always._publish_gate(dict(_POST_FACTS))[0] is True and always.asked == []
 
 
-# ---- post_to_x: the box is emptied first, and must then hold exactly the post ----
+# ---- the page's handles, handed over with the page ----
 
-class _Box:
-    def __init__(self, page):
-        self.page = page
+class _ControlsBrowser:
+    def __init__(self, controls):
+        self._controls = controls
 
-    def click(self):
-        self.page.focused = True
-
-    def inner_text(self):
-        return self.page.box
+    def controls(self, limit=25):
+        return self._controls[:limit]
 
 
-class _XPage:
-    url = "https://x.com/home"
-
-    def __init__(self, box="", mangle=None):
-        self.box, self.mangle, self.timeline, self.selected = box, mangle, [], False
-        page = self
-
-        class _Keyboard:
-            def type(self, text):
-                page.box += page.mangle(text) if page.mangle else text
-
-            def press(self, key):
-                if key in ("Meta+A", "Control+A"):
-                    page.selected = True
-                elif key == "Backspace" and page.selected:
-                    page.box, page.selected = "", False
-
-        self.keyboard = _Keyboard()
-
-    def query_selector(self, selector):
-        if selector == computer.X_COMPOSER:
-            return _Box(self)
-        if selector in computer.X_POST_BUTTONS:
-            page = self
-
-            class _Button:
-                def get_attribute(self, name):
-                    return "false"
-
-                def click(self):
-                    page.timeline.append(page.box)
-                    page.box = ""
-            return _Button()
-        return None
-
-    def evaluate(self, script, arg=None):
-        return any(arg in entry for entry in self.timeline) if arg else False
-
-    def wait_for_timeout(self, _ms):
-        return None
+_X_CONTROLS = [
+    {"kind": "field", "selector": '[data-testid="tweetTextarea_0"]', "label": "Post text",
+     "value": "", "x": 600, "y": 90},
+    {"kind": "button", "selector": '[data-testid="tweetButtonInline"]', "label": "Post",
+     "disabled": True, "x": 900, "y": 140},
+    {"kind": "button", "selector": 'a[aria-label="Home"]', "label": "Home", "x": 40, "y": 80},
+]
 
 
-def _poster(page):
-    session = computer.BrowserSession.__new__(computer.BrowserSession)
-    session._ensure_open = lambda: page
-    return session
+def test_a_page_with_a_box_comes_with_its_box_and_its_send_button():
+    """Live 2026-09-27 the model typed at nothing and clicked the sidebar's
+    "Post" link: the page's real handles only ever arrived after a failure."""
+    session = _session()
+    session.browser = _ControlsBrowser(_X_CONTROLS)
+
+    note = chat_tools._controls_note(session)
+
+    assert 'selector=\'[data-testid="tweetTextarea_0"]\'' in note
+    assert "tweetButtonInline" in note and "[disabled]" in note
+    assert "Begin untrusted" in note, "labels come from the page: data, not instructions"
 
 
-def test_a_draft_left_in_the_box_is_cleared_before_the_post():
-    """The live case: "Hi" was sitting in the composer."""
-    page = _XPage(box="Hi")
+def test_a_page_with_nothing_to_fill_gets_no_list():
+    session = _session()
+    session.browser = _ControlsBrowser([_X_CONTROLS[2]])
 
-    verdict = _poster(page).post_to_x("testing")
-
-    assert verdict.startswith(computer.X_CONFIRMED)
-    assert page.timeline == ["testing"]
+    assert chat_tools._controls_note(session) == ""
 
 
-def test_an_old_post_with_the_same_words_is_not_proof_of_a_new_one():
-    """"testing" posted yesterday is still on the timeline. Finding it again
-    after a send that did nothing confirmed a post that never went out."""
-    page = _XPage()
-    page.timeline.append("testing")
-    page.query_selector = (lambda original: lambda selector: (
-        type("Dud", (), {"get_attribute": lambda self, n: "false",
-                         "click": lambda self: None})()
-        if selector in computer.X_POST_BUTTONS else original(selector)))(page.query_selector)
+def test_the_button_that_sends_comes_before_the_navigation():
+    browser = computer.BrowserSession.__new__(computer.BrowserSession)
+    found = [{"kind": "button", "label": f"Nav {i}", "selector": f"#n{i}"} for i in range(18)]
+    found += [{"kind": "field", "label": "Post text", "selector": "#box"},
+              {"kind": "button", "label": "Post", "selector": "#send"}]
 
-    verdict = _poster(page).post_to_x("testing", timeout_ms=1000)
+    class _P:
+        def evaluate(self, script, arg=None):
+            return found
 
-    assert not verdict.startswith(computer.X_CONFIRMED), verdict
+    browser._ensure_open = lambda: _P()
+    controls, ok = browser.controls_read(limit=4)
 
-
-def test_a_box_that_ends_up_holding_something_else_is_not_sent():
-    page = _XPage(mangle=lambda text: text + " extra")
-
-    verdict = _poster(page).post_to_x("testing")
-
-    assert verdict.startswith(computer.X_NOT_CONFIRMED)
-    assert page.timeline == [] and page.box == ""
+    assert ok and [c["selector"] for c in controls[:2]] == ["#box", "#send"]
 
 
-def test_an_approved_post_does_not_then_ask_to_visit_x():
-    """Live 2026-09-27: "I'll post “testing” on x.com" was approved, and the
-    next card asked whether the browser could open x.com."""
-    session = _session(config=_full_config(browser={"enabled": True}), answer=True)
-    asked_by_browser = []
+@pytest.mark.parametrize("typed,noted", [("Hi", True), ("testing", False),
+                                         ("testing ", False)])
+def test_words_typed_that_the_user_did_not_give_are_pointed_out(typed, noted):
+    session = _session(user_text='go to x.com and make a tweet “testing"')
 
-    class _Browser:
-        is_open = False
-        _confirmed: set = set()
+    note = chat_tools._typed_words_note(session, "browser_type", {"text": typed},
+                                        f"Typed '{typed}'.")
 
-        def open(self, url):
-            if "x.com" not in self._confirmed:
-                asked_by_browser.append(url)
-                if not session.confirm_fn(f"Open {url}?"):
-                    return "Browser open blocked: User denied access to 'x.com'."
-            self.is_open = True
-            return "Opened browser at https://x.com/home. Page title: Home / X."
-
-        def post_to_x(self, text):
-            return f"{computer.X_CONFIRMED}] The post is rendered on the timeline: {text!r}"
-
-    session.browser = _Browser()
-    out = session._execute_tool("post_to_x", {"text": "testing"})
-
-    assert out.startswith(computer.X_CONFIRMED)
-    assert len(session.asked) == 1 and asked_by_browser == []
+    assert bool(note) is noted
+    if noted:
+        assert "“testing”" in note and "“Hi”" in note
 
 
-# ---- the harness posts what the user spelled out ----
+def test_words_in_smart_quotes_are_something_the_turn_must_do():
+    """`make a tweet “testing"` named no target: the page opened, the model
+    said "I've opened X", and nothing noticed “testing” was never written."""
+    from symbio.app.chat_constants import request_targets, unmet_targets
 
-@pytest.mark.parametrize("text,words", [
-    ('go to x.com and make a tweet “testing"', "testing"),
-    ('Go to x.com and tweet "hello."', "hello."),
-    ("post 'hello world' to x", "hello world"),
-    ("tweet something about cats", None),
-    ("look up the tweet 'hello world' on x.com", None),
-    ("what does 'ratio' mean on twitter?", None),
-    ('draft a tweet "hello"', None),
-    ("make a post 'hi'", None),
-])
-def test_only_a_post_spelled_out_word_for_word_is_taken_from_the_model(text, words):
-    from symbio.app.chat_text import x_post_request
-
-    assert x_post_request(text) == words
+    ask = 'go to x.com and make a tweet “testing"'
+    assert request_targets(ask) == ["testing"]
+    assert unmet_targets(ask, ["Opened browser at https://x.com."]) == ["testing"]
+    assert unmet_targets(ask, ["Typed 'testing'."]) == []
+    assert request_targets("it’s fine, don’t worry about it") == []
 
 
-def test_the_first_round_is_the_post_with_the_users_words(monkeypatch, tmp_path):
+def test_a_click_given_a_point_is_a_click_at_that_point():
+    """The controls list shows coordinates; the model sent them to
+    browser_click, got a schema error, and lost its task."""
+    session = _session(config=_full_config(browser={"enabled": True}))
+    clicked = []
+
+    class _B:
+        is_open = True
+
+        def click_at(self, x, y):
+            clicked.append((x, y))
+            return f"Clicked at ({x}, {y})."
+
+        def get_text(self):
+            return "page"
+
+        def controls(self, limit=25):
+            return []
+
+    session.browser = _B()
+    session._last_browsed_url = "https://plants.example/t/42"
+    session._status = lambda *a, **k: None
+    out = session._execute_tool("browser_click", {"x": 290, "y": 222})
+
+    assert clicked == [(290, 222)] and out.startswith("Clicked at")
+
+
+def test_a_reply_that_chains_page_steps_runs_them_in_order(monkeypatch, tmp_path):
+    """"type it, then click Post" in one reply used to run the type and drop
+    the click, costing a whole round; "close, then open x.com" dropped the
+    open and the model reported the task as stuck."""
     from tests.test_thinking_truncation import _reply, _session as _turn_session
 
-    output, generated, ran = [], [], []
+    output, ran, generated = [], [], []
+    replies = iter([
+        '<tool_call>{"name": "browser_type", "arguments": {"selector": "#body", "text": "testing"}}</tool_call>'
+        '<tool_call>{"name": "browser_click", "arguments": {"target": "Reply"}}</tool_call>',
+        "Posted your reply. <end>",
+    ])
 
     def fake_generate(messages, chunk_prefix="", timings=None, think=True, reasoning_budget=0):
-        generated.append(messages[-1]["content"])
-        return _reply(timings, "Posted it. <end>")
+        generated.append(1)
+        return _reply(timings, next(replies, "Done. <end>"))
 
     session = _turn_session(monkeypatch, tmp_path, output)
     session.config["browser"]["enabled"] = True
     session.enabled_groups.add("browser")
     monkeypatch.setattr(session, "_generate_reply", fake_generate)
-    monkeypatch.setattr(session, "_execute_tool", lambda name, params: ran.append(
-        (name, params)) or f"{computer.X_CONFIRMED}] The post is rendered on the timeline: 'testing'")
+    monkeypatch.setattr(session, "_execute_tool", lambda name, params: ran.append(name) or (
+        "Typed 'testing'." if name == "browser_type" else "Clicked button 'Reply'."))
 
-    session._agent_turn('go to x.com and make a tweet “testing"')
+    session._agent_turn("reply “testing” to the thread")
 
-    assert ran[0] == ("post_to_x", {"text": "testing"})
-    assert len(generated) == 1, "the model speaks only after the verdict"
-    assert "[Plan] Posting exactly “testing”" in "\n".join(output)
+    assert ran == ["browser_type", "browser_click"]
+    assert len(generated) == 2, "both steps in one round, then the answer"
+    assert "were also requested in the same reply but" not in "\n".join(
+        str(m.get("content")) for m in session.history)
+
+
+def test_a_chain_stops_at_the_first_step_that_fails(monkeypatch, tmp_path):
+    from tests.test_thinking_truncation import _reply, _session as _turn_session
+
+    output, ran = [], []
+    replies = iter([
+        '<tool_call>{"name": "browser_type", "arguments": {"text": "testing"}}</tool_call>'
+        '<tool_call>{"name": "browser_click", "arguments": {"target": "Reply"}}</tool_call>',
+        "I couldn't type it. <end>",
+    ])
+    session = _turn_session(monkeypatch, tmp_path, output)
+    session.config["browser"]["enabled"] = True
+    session.enabled_groups.add("browser")
+    monkeypatch.setattr(session, "_generate_reply", lambda *a, **k: _reply(
+        k.get("timings"), next(replies, "Done. <end>")))
+    monkeypatch.setattr(session, "_execute_tool", lambda name, params: ran.append(name) or (
+        "Type failed: nothing editable is focused, so no keys were sent."))
+
+    session._agent_turn("reply “testing” to the thread")
+
+    assert ran[0] == "browser_type" and "browser_click" not in ran[:1]
+    assert ran.count("browser_click") == 0 or ran.index("browser_click") > 0
+
+
+def test_the_page_note_says_how_to_send_on_any_site():
+    browser = computer.BrowserSession.__new__(computer.BrowserSession)
+
+    class _P:
+        url = "https://example.org/"
+
+        def title(self):
+            return "Example"
+
+    browser._page, browser._last_url = _P(), "https://example.org/"
+    note = browser.status()
+
+    assert "click the button beside the box that sends it" in note
+    assert "post_to_x" not in note
 
 
 def test_a_turn_whose_answer_predates_its_last_step_says_how_it_ended(monkeypatch, tmp_path):

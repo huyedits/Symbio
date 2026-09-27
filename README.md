@@ -351,41 +351,37 @@ answer is no, and the refusal is recorded in the heartbeat.
 `cron.unattended_approve` turns that off for someone who has read this
 paragraph.
 
-### Posting to X
+### Posting and sending, on any site
 
-```
-post_to_x  {"text": "shipping the desktop window today"}
-```
+There is no posting command. Symbio posts the way a person does: it opens the
+page, types into the box, clicks the button beside the box that sends it, and
+reads the page back. Nothing in the code names a site.
 
-The browser profile must be signed in to x.com. It fills the composer **by
-selector** (the composer is 28px tall,
-under the vision model's one-patch floor, and a coordinate for it missed by
-~36px every time), sends with x's own Post button, then reads the timeline back
-and returns a verdict the model cannot shape:
+What makes that work on a 14B is what the page hands back:
 
-```
-[Post CONFIRMED] The post is rendered on the timeline: 'shipping the desktop window today'
-[Post NOT confirmed] The composer still holds the text, so it was not sent.
-[Post NOT confirmed] The composer cleared but the post is not on the timeline yet …
-```
+- **The page's boxes and buttons come with the page.** After an open, or a
+  click that changes what is on screen, the observation lists the fields to
+  type into (with the selector that reaches them) and the buttons that send
+  them — send-like labels (Post, Reply, Send, Submit…) ahead of the
+  navigation, `[disabled]` until the box has text. Before this the list only
+  appeared after a step had failed, and the model typed at nothing and clicked
+  the sidebar link that shares the send button's label.
+- **Words the user didn't give are pointed out.** If the user quoted
+  “testing” and the model types "Hi", the result says so, beside the box.
+- **Sending is asked about where it happens.** A click, a coordinate or
+  cmd+enter that would send the text in a box — a post, a reply, a comment, a
+  chat message, a form — is *Post or send*, on any site. The card shows the
+  words in the box and warns when they aren't the ones you asked for. A
+  search box's Go and a login form are not sends.
 
-A cleared composer is not confirmation — a discarded draft clears too. This
-project has already posted something and reported that it had not, which is
-why the proof is read from the DOM rather than from a toast. The proof is a NEW
-article with exactly those words: "testing" posted yesterday is still on the
-timeline, and finding it again once meant confirming a post that never went.
-
-Once the post is approved, the tool opens x.com/home itself. It empties the box
-before typing — a draft left in it is posted along with the words otherwise —
-and sends only when the box holds exactly the post. When a message spells the
-words out (`make a tweet “testing"`), the harness makes the post_to_x call
-itself with those words; the model takes over from the verdict. On 2026-09-27
-the model, asked for “testing”, typed "Hi" into the composer and pressed Post.
+On 2026-09-27 the model, asked for “testing” on x.com, typed "Hi" into the
+composer and pressed Post; that route now stops at a card that says “You asked
+for “testing”, not this.”
 
 ### Guardrails
 
 What Symbio may do without asking is set per **kind of action**, in words you
-would use — *Post publicly*, *Run commands and code*, *Change files*, *Use your
+would use — *Post or send*, *Run commands and code*, *Change files*, *Use your
 desktop*, *Browse the web*, *Forget things*, *Train itself*, *Change its
 settings*, *Schedule work* — each **Allow**, **If risky**, **Ask** or **Never**
 (Settings → the first section in the window, or `guardrails.modes` in
@@ -396,11 +392,10 @@ config.json). The defaults are the old behaviour.
   account"); under it, the exact post or command, from the harness. If the
   words about to go out are not the ones you quoted, the card says so in red.
   It used to ask twice for one post, once with no text at all.
-- **A click is judged by what it lands on.** Pressing X's Post button, its
-  cmd+enter shortcut, a DM's send, a repost — by text, selector, coordinates
-  or key — is *Post publicly*, whichever tool did it. Before this, only
-  post_to_x was gated, and browser_type plus browser_click posted "Hi" with
-  nobody asked.
+- **A click is judged by what it lands on.** A button that sends the text in
+  a box — by text, selector, coordinates or cmd+enter — is *Post or send* on
+  any site, whichever tool did it. Before this, browser_type plus
+  browser_click posted "Hi" with nobody asked.
 - **Always allow** on a card switches that kind to Allow; anything the risk
   scorer rates destructive still asks. **Never** is refused, and the model is
   told the refusal is yours.

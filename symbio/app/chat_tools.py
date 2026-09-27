@@ -91,6 +91,67 @@ def _browser_peek(browser, config=None) -> str:
 
 
 
+def _controls_note(session, limit: int = 8) -> str:
+    """The page's boxes, and the buttons that send them, handed over with the
+    page rather than after a failure.
+
+    Live 2026-09-27 the model typed at a page with nothing focused, then
+    clicked the first "Post" it found — the sidebar link, not the button under
+    the box — because the page's real handles were only ever shown once a
+    step had failed. A page with nothing to fill gets no list: reading needs
+    no handles, and the list costs a few hundred tokens a round.
+    """
+    browser = getattr(session, "browser", None)
+    try:
+        controls = browser.controls(limit=limit * 2) if browser is not None else []
+    except Exception:
+        return ""
+    fields = [c for c in controls if c.get("kind") == "field"]
+    if not fields:
+        return ""
+    buttons = [c for c in controls if c.get("kind") != "field"]
+    lines = ["[Boxes and buttons on this page. Type into a box by its selector "
+             "(browser_type with selector=...), then click the button beside "
+             "it that sends it; a [disabled] button wakes up once the box has "
+             "text:"]
+    for c in fields[:4]:
+        lines.append(f"{ToolsMixin._control_line(c)}   (browser_type with "
+                     f"selector={c.get('selector', '')!r})")
+    for c in buttons[:max(2, limit - min(len(fields), 4))]:
+        label = str(c.get("label") or "").strip()
+        lines.append(ToolsMixin._control_line(c)
+                     + (f"   (browser_click with target={label!r})" if label else ""))
+    lines.append("]")
+    block = "\n".join(lines)
+    # Labels and values come from the page: data, never instructions.
+    session._untrusted_this_turn = True
+    config = getattr(session, "config", None) or {}
+    return "\n\n" + safety.wrap_untrusted(
+        "page controls", block, safety.scan_for_injection(block, config))
+
+
+def _typed_words_note(session, name: str, params: dict[str, Any], out: str) -> str:
+    """When the model types words the user did not give, say so beside it.
+
+    The user quoted “testing”; the model typed "Hi". Nothing in the tool
+    result said so, and the next click sent it. Only when the user quoted
+    something, and only as a note: a quote can be a search term or a name for
+    another box, and the model can tell which box this is.
+    """
+    if name != "browser_type" or not str(out).startswith("Typed"):
+        return ""
+    wanted = guardrails.quoted_texts(str(getattr(session, "_user_text_this_turn", "") or ""))
+    typed = " ".join(str(params.get("text") or "").split())
+    if not wanted or not typed:
+        return ""
+    norm = lambda t: " ".join(str(t).split()).strip(" .!?\"'“”").casefold()  # noqa: E731
+    if any(norm(w) == norm(typed) or norm(w) in norm(typed) for w in wanted):
+        return ""
+    return (f"\n[Note: the user's message quotes “{wanted[0]}”, and you typed "
+            f"“{typed[:80]}”. If this box is for their words, empty it and type "
+            f"exactly “{wanted[0]}”.]")
+
+
 def _nested_confirm(session):
     """What a gate INSIDE a tool (the sandbox's blocked-command check) asks
     with: nobody, when the user just approved this very call on its card —
@@ -239,9 +300,8 @@ class ToolsMixin:
         # What KIND of action this is, and what the user has said about that
         # kind — Settings → Guardrails in the window, `guardrails.modes` in
         # config.json. It replaces two gates that asked about the same call
-        # separately: a post to x.com used to stop once as "Allow tool
-        # 'post_to_x'?", with no text, and again with it. See
-        # symbio/guardrails.py.
+        # separately: one post used to stop once with no text and again
+        # with it. See symbio/guardrails.py.
         kind = guardrails.kind_of(name)
         mode = guardrails.mode_for(kind, self._guardrail_config(),
                                    remote=self.confirm_policy() == "name")
@@ -1380,11 +1440,10 @@ class ToolsMixin:
         action wrongly is contradicted on the same card.
         """
         if facts is None and name == "submit_form":
-            # On x.com a form submit IS a post, and a card that only names the
-            # button would be approved without the words being seen.
+            # A card that only named the button would be approved without the
+            # words being seen: show what is waiting in the page's box.
             try:
-                facts = self.browser.publish_preview() or {}
-                facts.setdefault("url", self.browser._page.url)
+                facts = self.browser.sending_preview() or {}
             except Exception:
                 facts = {}
         headline, details, outgoing = self._plain_action(name, params, facts or {})
@@ -1418,17 +1477,12 @@ class ToolsMixin:
         def host(url: str) -> str:
             return re.sub(r"^https?://(www\.)?", "", url or "").split("/")[0] or url
 
-        if name == "post_to_x":
-            text = arg("text")
-            return ("Post this on x.com, publicly, as you.", v(text), text)
         if name == "browser_publish":
             text = str(facts.get("text") or "")
-            what = facts.get("action") or "post"
-            button = facts.get("label") or "Post"
-            site = facts.get("site") or "x.com"
-            verb = {"post": "posts", "send a direct message": "sends",
-                    "repost": "reposts"}.get(what, "sends")
-            headline = (f"Press “{v(button)}” on {site} — that {verb} "
+            button = facts.get("label") or "Send"
+            site = facts.get("site") or "this site"
+            press = "Press" if button == "cmd+enter" else "Click"
+            headline = (f"{press} “{v(button)}” on {site} — that sends "
                         + ("what's in the box" if text else "it") + ", as you.")
             return headline, v(text) if text else "(the box looks empty)", text
         if name == "submit_form":
@@ -1595,15 +1649,15 @@ class ToolsMixin:
         to land on something that publishes — X's Post button, its send
         shortcut, a DM's send. (approved, observation if not).
 
-        Posting publicly is always "risky", so "ask if risky" asks here. This
-        is the gate that did not exist when "Hi" went out: two tools, neither
-        on any list, that together posted as the user.
+        Sending under the user's name is always "risky", so "ask if risky"
+        asks here. This is the gate that did not exist when "Hi" went out: two
+        ordinary browser tools that together posted as the user.
         """
         mode = guardrails.mode_for("publish", self._guardrail_config(),
                                    remote=self.confirm_policy() == "name")
         text = str(facts.get("text") or "")
-        site = facts.get("site") or "x.com"
-        button = facts.get("label") or "Post"
+        site = facts.get("site") or "this site"
+        button = facts.get("label") or "Send"
         if mode == "block":
             self._record_guardrail("browser_publish", "publish", mode, "blocked")
             return False, (
@@ -1623,17 +1677,21 @@ class ToolsMixin:
         if approved:
             return True, ""
         wanted = guardrails.quoted_texts(str(getattr(self, "_user_text_this_turn", "") or ""))
-        hint = (f' To post the user\'s exact words, call post_to_x with '
-                f'{{"text": "{wanted[0]}"}} — it clears the box, types, sends and '
-                f"checks the timeline." if wanted else
-                " To post, call post_to_x with the exact text — it clears the "
-                "box, types, sends and checks the timeline.")
+        hint = (f" The user's own words are “{wanted[0]}”: empty the box, type "
+                f"exactly that into it, then send it." if wanted else "")
         return False, (
             f"Not sent: the user declined — they were asked whether to press "
             f"“{button}” on {site}, posting {text[:200]!r}, and said no. Nothing "
             "was posted." + hint)
 
     def _dispatch_tool(self, name: str, params: dict[str, Any]) -> str:
+        # A click given a point and no target is a click at that point. Live
+        # 2026-09-27 the model read "Reply ... x=290 y=222" off the page's
+        # controls list, sent browser_click with x and y, got a schema error,
+        # and never found its way back to the reply it was writing.
+        if (name == "browser_click" and not params.get("target")
+                and _coords(params) is not None):
+            name = "browser_click_at"
         # The contract first. Everything below reads its arguments with
         # `params.get(...)`, so a call with an argument misspelled is not an
         # error — it is a call with an empty string, and what comes back is
@@ -1975,6 +2033,7 @@ class ToolsMixin:
             if "blocked" not in out and "error" not in out.lower():
                 self._last_browsed_url = url
                 out += _browser_peek(self.browser, self.config)
+                out += _controls_note(self)
             return out
 
         if name == "browser_get_text":
@@ -2191,7 +2250,11 @@ class ToolsMixin:
                     "page controls", targeting,
                     safety.scan_for_injection(targeting, self.config))
             out += self._no_effect_note(name, before, out)
-            return out + _browser_peek(self.browser, self.config)
+            out += _typed_words_note(self, name, params, out)
+            handles = (_controls_note(self)
+                       if name in ("browser_click", "browser_click_at")
+                       and out.startswith("Clicked") else "")
+            return out + _browser_peek(self.browser, self.config) + handles
 
         if name == "save_memory":
             return memory.save_memory(
@@ -2321,36 +2384,6 @@ class ToolsMixin:
                 return "Delegation is disabled (dispatch.enabled is off)."
             return self.dispatch.run_delegated_task(
                 params["role"], params["task"], browser=self.browser)
-
-        if name == "post_to_x":
-            if not self.config.get("browser", {}).get("enabled", False):
-                return "Browser automation is disabled, so there is nothing to post with."
-            # The user has approved "Post this on x.com" by now (or chose
-            # "always allow"), so going to x.com is part of what they said
-            # yes to. The model used to have to open it first, and on
-            # 2026-09-27 it opened it and then typed into the page by hand.
-            host = ""
-            if self.browser.is_open:
-                try:
-                    host = self.browser._page_host()
-                except Exception:
-                    host = ""
-            if not computer._is_x_host(host):
-                # The yes on the card was to posting on x.com; asking next
-                # whether the browser may visit x.com is the same question
-                # twice (seen live: "Open x.com in Symbio's browser" right
-                # after "I'll post “testing” on x.com").
-                if getattr(self, "_card_approved_call", False):
-                    try:
-                        self.browser._confirmed.update({"x.com", "twitter.com"})
-                    except Exception:
-                        pass
-                opened = self.browser.open("https://x.com/home")
-                if not opened.startswith("Opened"):
-                    return f"Could not open x.com to post: {opened}"
-            out = self.browser.post_to_x(str(params.get("text") or ""))
-            self._untrusted_this_turn = True   # the timeline was read back
-            return out
 
         if name == "add_golden_case":
             return self._add_golden_case(params)

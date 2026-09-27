@@ -30,12 +30,27 @@ from symbio.app.chat_text import (
     _EXPLICIT_SEARCH_RE, _MOOD_TAG_RE, _VALID_MOODS, _asks_for_action,
     _is_action_request, _is_greeting, _is_navigation_only, _is_substantive,
     _last_exchange, _looks_like_verification_followup,
-    _subjectless_search_command, infer_user_affect, x_post_request,
+    _subjectless_search_command, infer_user_affect,
 )
 
 
 # User turns between re-reads of the standing context (memory, soul, env).
 STANDING_REFRESH_TURNS = 10
+
+# Page steps a single reply may chain, and how many. Only the browser's own
+# actions: a burst of searches or shell commands is still one per reply.
+_CHAINABLE_STEPS = frozenset({
+    "browser_open", "browser_close", "browser_type", "browser_click",
+    "browser_click_at", "browser_press", "browser_scroll", "fill_form",
+})
+_CHAIN_STEPS = 3
+
+
+def _step_summary(observation: str) -> str:
+    """An earlier step's result without the page dump that followed it: the
+    page as it stands is what the LAST step reports."""
+    head = observation.split("\n\nPage text now:")[0]
+    return head.split("[Begin untrusted page controls")[0].rstrip()
 
 class AgentTurnMixin:
     # How much of a tool's result is shown as it happens. The model gets the
@@ -463,22 +478,6 @@ class AgentTurnMixin:
         thinking_cut_retried = False
         turn_think = False           # what this round was actually served with
         turn_decision = None         # (think, budget), decided on the first round
-        # A post the user spelled out word for word is made by the harness:
-        # the first round's reply is the post_to_x call with THEIR words, and
-        # the model takes over from the verdict. Live 2026-09-27 the model,
-        # asked for `a tweet “testing"`, typed "Hi" and pressed Post. The call
-        # still goes through _execute_tool, so the approval card comes first.
-        forced_reply = None
-        planned_post = x_post_request(user_input)
-        if (planned_post
-                and self.config.get("browser", {}).get("enabled", False)
-                and tooling.tool_group_enabled("post_to_x",
-                                               getattr(self, "enabled_groups", None))):
-            forced_reply = ("<tool_call>" + json.dumps(
-                {"name": "post_to_x", "arguments": {"text": planned_post}},
-                ensure_ascii=False) + "</tool_call>")
-            self.output_fn(f"  [Plan] Posting exactly “{planned_post}” on x.com — "
-                           "the harness makes this call itself, so the words are yours.")
         # The round index used to select thinking (think=round_num > 0);
         # agent.thinking_level owns that now, so nothing reads the counter.
         for _round_num in range(max_rounds):
@@ -635,14 +634,10 @@ class AgentTurnMixin:
                         turn_decision = self.turn_thinking(user_input)
                     _think, _budget = turn_decision
                     turn_think = _think
-                    if forced_reply is not None:
-                        raw_reply, streamed_live, forced_reply = forced_reply, False, None
-                        turn_think = False
-                    else:
-                        raw_reply, streamed_live = self._generate_reply(
-                            messages, chunk_prefix=chunk_prefix, timings=timings,
-                            think=_think, reasoning_budget=_budget,
-                            )
+                    raw_reply, streamed_live = self._generate_reply(
+                        messages, chunk_prefix=chunk_prefix, timings=timings,
+                        think=_think, reasoning_budget=_budget,
+                        )
                     # The thinking block is surfaced to the user (streamed by
                     # StreamingStripper, or printed below when not streaming);
                     # the reply itself stays reasoning-free so tools and
@@ -1466,9 +1461,10 @@ class AgentTurnMixin:
                         "<press>Enter</press>. To read one: "
                         "<read>https://...</read> for its text, "
                         "<fetch_html>https://...</fetch_html> for its markup. "
-                        "To post on x.com: open https://x.com/home, then call "
-                        "post_to_x with the text — it types, sends and checks "
-                        "the timeline itself. "
+                        "To post or send on a site: type the user's exact "
+                        "words into its box by the box's selector, click the "
+                        "button beside it that sends them, then read the page "
+                        "to see that they went. "
                         "To compute, fetch or write files: <py>...</py>. "
                         "To run a command: <cmd>...</cmd>. Pick the one that "
                         "fits what you were already doing — do not switch "
@@ -1645,6 +1641,42 @@ class AgentTurnMixin:
                 if learn.is_user_refusal(observation):
                     user_refused_this_turn = True
                 self._show_tool_result(name, observation)
+                # A reply that chains page steps — "type it, then click Post",
+                # "close the tab, then open x.com" — runs them in order, up to
+                # _CHAIN_STEPS, stopping at the first that fails or is declined.
+                # One step a reply cost a whole round per step (10-20 s on the
+                # 14B), and live 2026-09-27 the second half of "close, then
+                # open x.com" was dropped and the model reported the task as
+                # stuck. Each step still goes through _execute_tool, so every
+                # guardrail and card applies to it exactly as on its own.
+                if (extra and name in _CHAINABLE_STEPS and not over_family_budget
+                        and not user_refused_this_turn
+                        and not learn.sounds_like_tool_error(observation)):
+                    remaining = []
+                    for step_index, (next_name, next_params) in enumerate(extra):
+                        next_key = json.dumps([next_name, next_params], sort_keys=True)
+                        if (step_index >= _CHAIN_STEPS - 1 or remaining
+                                or next_name not in _CHAINABLE_STEPS
+                                or next_key in executed_calls):
+                            remaining.append((next_name, next_params))
+                            continue
+                        executed_calls.add(next_key)
+                        distinct_attempts.append((next_name, next_params))
+                        attempted_names.add(next_name)
+                        self.output_fn(f"  [Tool: {next_name}]")
+                        next_obs = self._execute_tool(next_name, next_params)
+                        self._show_tool_result(next_name, next_obs)
+                        # The earlier step keeps its result line; the page as
+                        # it stands comes from the last step alone.
+                        observation = (_step_summary(observation)
+                                       + f"\n\n[Then {next_name}:] {next_obs}")
+                        name, params = next_name, next_params
+                        if learn.is_user_refusal(next_obs):
+                            user_refused_this_turn = True
+                            remaining.append(("(the rest)", {}))
+                        elif learn.sounds_like_tool_error(next_obs):
+                            remaining.append(("(the rest)", {}))
+                    extra = [e for e in remaining if e[0] != "(the rest)"]
             local_telemetry.log_event(
                 "tool", name=name, ok=not learn.sounds_like_tool_error(observation),
                 result=observation,
@@ -1768,6 +1800,17 @@ class AgentTurnMixin:
                     "the answer, say plainly that you could not find it — do not "
                     "repeat your earlier claim or guess.]"
                 )
+            # A failed browser step, with what the user asked for beside it.
+            # Live 2026-09-27, one schema error into "reply “testing” on
+            # plants.example", the model went back to the turn before's task,
+            # reopened x.com and posted there. The history above an error is
+            # long, and the request is the one line that must not be lost.
+            if ((name.startswith("browser_") or name in ("fill_form", "submit_form"))
+                    and not learn.is_user_refusal(observation)
+                    and (learn.sounds_like_tool_error(observation)
+                         or "This is the call, not the task" in observation)):
+                observation += (f"\n\n[Still to do — the user's message this "
+                                f"turn: “{user_input.strip()[:240]}”]")
             if learn.is_user_refusal(observation):
                 # Without this the turn ends on the sentence the model wrote
                 # *before* the tool ran — "Opening apple.com for you." — which

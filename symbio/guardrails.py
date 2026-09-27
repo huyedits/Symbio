@@ -11,10 +11,12 @@ publicly, as the user, with no question asked. The approval that existed for
 posting guarded one route to it.
 
 So the gate now asks about KINDS of action, which the user can read and set:
-"Post publicly: always ask". A click is judged by what it lands on — the
-button that sends X's composer is `publish` however the model reached it — and
-every question is one plain-English card saying what will happen, with the
-exact text or command underneath it.
+"Post or send: always ask". A click is judged by what it lands on — a button
+that sends the text in a box is `publish` on any site, however the model
+reached it — and every question is one plain-English card saying what will
+happen, with the exact text or command underneath it. There is no posting
+command: the model posts the way a person does, in the page, and the page is
+where the question is asked.
 
 Standard library only. The desktop window loads this file by path, the same
 way it loads constants.py, because importing the `symbio` package costs it
@@ -49,9 +51,9 @@ MODE_HINTS = {
 # The defaults are the old behaviour: what used to ask by name asks, what was
 # left to the risk score is "risky".
 KINDS: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
-    ("publish", "Post publicly",
-     "Posts on x.com, and web forms that send something out under your name.",
-     "ask", ("post_to_x", "submit_form")),
+    ("publish", "Post or send",
+     "Posting, replying, sending messages and submitting forms on websites, under your name.",
+     "ask", ("submit_form",)),
     ("commands", "Run commands and code",
      "Shell commands and Python on this Mac, and commands on machines you've added.",
      "risky", ("run_command", "terminal", "execute_code", "run_remote")),

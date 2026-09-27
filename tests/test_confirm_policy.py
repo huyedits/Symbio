@@ -55,12 +55,12 @@ def test_the_two_lists_are_disjoint_and_cover_the_old_one():
     assert _ALWAYS_CONFIRM_TOOLS | _LOCAL_TRUSTED_TOOLS == _TELEGRAM_CONFIRM_TOOLS
 
 
-@pytest.mark.parametrize("tool", ["post_to_x", "submit_form", "config_set",
+@pytest.mark.parametrize("tool", ["submit_form", "config_set",
                                   "train_adapter", "realign", "delete_note",
                                   "schedule_job"])
 def test_what_asks_wherever_you_are(tool):
     """Their cost does not depend on their arguments. There is no version of
-    post_to_x that is fine unasked."""
+    a form submitted on a live site that is fine unasked."""
     assert _session("risk")._asks_by_name(tool) is True
     assert _session("name")._asks_by_name(tool) is True
 

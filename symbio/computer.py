@@ -108,9 +108,10 @@ def _normalize_key(key: str) -> str:
     return key[:1].upper() + key[1:]
 
 
-def _is_x_host(host: str) -> bool:
-    host = (host or "").lower()
-    return host in ("x.com", "twitter.com") or host.endswith((".x.com", ".twitter.com"))
+# A control whose label says it sends something: the same words _SENDS_JS reads.
+_SEND_LABEL = re.compile(
+    r"\b(post|tweet|send|publish|reply|comment|share|submit|toot|repost|retweet)\b",
+    re.IGNORECASE)
 
 
 def _first_visible(locator: Any) -> tuple[Any | None, int]:
@@ -205,21 +206,21 @@ class BrowserSession:
         # Spell the tags out rather than naming the tools. Naming them is what
         # taught the model to invent <browser_open>; and this note exists
         # precisely for the moment it has forgotten how to act on the page.
-        # On X the tags below are the wrong tools for the job the user
-        # usually has there. Live 2026-09-27: told only this, the model typed
-        # "Hi" into the composer and clicked Post — the user had asked for
-        # "testing".
-        on_x = (' To post here, call post_to_x with {"text": "<the exact '
-                'words>"} — it clears the box, types, sends and checks the '
-                "timeline. Pressing Post yourself asks the user first."
-                if _is_x_host(self._page_host()) else "")
+        # How a person gets words onto a site, on any site. Live 2026-09-27
+        # the model typed at an unfocused page, pressed Enter in a post box
+        # (a new line, not a send) and clicked the sidebar link that shares
+        # the send button's label.
         return (
             f"Browser is open at {self._last_url} "
             f"(page title: \"{title}\"). "
             f"Act on THIS page directly — do not reopen it and do not use a "
             f"shell command. Emit exactly one of: "
             f"<click>visible text</click>, <type>words</type>, "
-            f"<press>Enter</press>, <scroll />, <browser_close />." + on_x
+            f"<press>Enter</press>, <scroll />, <browser_close />. "
+            f"To write in a box, type into it by its selector; to send it, "
+            f"click the button beside the box that sends it (Enter only adds "
+            f"a line in most post and comment boxes); then read the page to "
+            f"see that it went."
         )
 
     def _page_host(self) -> str:
@@ -489,85 +490,94 @@ class BrowserSession:
 
     _TIMEOUT_MS = 4000
 
-    # What a click, a key or a point would PUBLISH on X, read off the element
-    # it lands on: the composer's own send button (inline, or in the compose
-    # dialog), a DM's send button, the repost confirmation — and for a key,
-    # the box that has focus. null when it publishes nothing.
+    # What a click, a key or a point would SEND from the page, under the
+    # user's name: the text in the box that a send-like control submits. null
+    # when it sends nothing. No site is named: a post box, a reply, a chat
+    # message and a comment form have the same shape everywhere — a filled
+    # box, and beside it a button that says what it does.
     #
     # Judged by what is hit, not by how it was aimed. Live 2026-09-27 the
-    # model typed "Hi" with browser_type and pressed Post with browser_click:
-    # two tools on no approval list, and between them a public post under the
-    # user's name that nobody was asked about.
-    _PUBLISH_JS = r"""(el, how) => {
-        const host = (location.hostname || '').replace(/^www\./, '').toLowerCase();
-        if (!/(^|\.)(x|twitter)\.com$/.test(host)) return null;
-        const SEND = '[data-testid="tweetButton"],[data-testid="tweetButtonInline"],'
-                   + '[data-testid="dmComposerSendButton"],[data-testid="retweetConfirm"]';
-        const BOXES = '[data-testid^="tweetTextarea_"],[data-testid="dmComposerTextInput"]';
-        const isBox = (n) => {
-            const id = (n && n.getAttribute && n.getAttribute('data-testid')) || '';
-            return /^tweetTextarea_\d+$/.test(id) || id === 'dmComposerTextInput';
-        };
+    # model typed "Hi" with browser_type and pressed Post with browser_click,
+    # and "Hi" went out under the user's name with nobody asked.
+    _SENDS_JS = r"""(el, how) => {
+        const SENDY = /\b(post|tweet|send|publish|reply|comment|share|submit|toot|repost|retweet)\b/i;
+        const nameOf = (b) => ((b.innerText || b.value || b.getAttribute('aria-label')
+            || b.getAttribute('title') || '').trim().replace(/\s+/g, ' ')).slice(0, 60);
+        const isSearch = (n) => (n.getAttribute('type') || '').toLowerCase() === 'search'
+            || (n.getAttribute('role') || '') === 'searchbox' || !!n.closest('[role=search]')
+            || /search/i.test((n.getAttribute('aria-label') || '') + ' '
+                              + (n.getAttribute('placeholder') || '') + ' ' + (n.getAttribute('name') || ''));
+        const isBox = (n) => !!n && !isSearch(n) && (n.isContentEditable || n.tagName === 'TEXTAREA'
+            || n.getAttribute('role') === 'textbox'
+            || (n.tagName === 'INPUT' && /^(text|email|url|)$/i.test(n.getAttribute('type') || '')));
         const boxText = (n) => ((n.tagName === 'TEXTAREA' || n.tagName === 'INPUT')
-            ? n.value : (n.innerText || '')).trim();
-        const scopeOf = (n) => {
-            for (let p = n; p; p = p.parentElement) {
-                if (p.querySelector && p.querySelector(BOXES)) return p;
-            }
-            return document;
+            ? (n.value || '') : (n.innerText || '')).trim();
+        const boxesIn = (scope) => {
+            const seen = new Set();
+            return [...scope.querySelectorAll('textarea, input, [contenteditable="true"], [role="textbox"]')]
+                .filter((b) => !seen.has(b) && seen.add(b) && isBox(b) && boxText(b));
         };
-        const textIn = (scope) => [...scope.querySelectorAll(BOXES)]
-            .filter(isBox).map(boxText).filter(Boolean).join('\n\n');
-        const nameOf = (b, fallback) => (((b && (b.innerText || b.getAttribute('aria-label'))) || '')
-            .trim() || fallback).slice(0, 40);
+        const scopeOf = (n) => {
+            const form = n.closest('form');
+            if (form && boxesIn(form).length) return form;
+            let depth = 0;
+            for (let p = n.parentElement; p && p !== document.body && depth < 14; p = p.parentElement, depth++) {
+                if (boxesIn(p).length) return p;
+            }
+            return null;
+        };
         if (!el || !el.closest) return null;
+        const site = (location.hostname || '').replace(/^www\./, '');
         if (how === 'click') {
-            const button = el.closest(SEND);
-            if (!button) return null;
-            const id = button.getAttribute('data-testid');
-            return {site: host, control: id, label: nameOf(button, 'Post'),
-                    text: id === 'retweetConfirm' ? '' : textIn(scopeOf(button)),
-                    disabled: !!(button.disabled || button.getAttribute('aria-disabled') === 'true'),
-                    action: id === 'dmComposerSendButton' ? 'send a direct message'
-                          : id === 'retweetConfirm' ? 'repost' : 'post'};
+            const control = el.closest('button, [role="button"], input[type="submit"], input[type="button"]');
+            if (!control) return null;
+            const label = nameOf(control);
+            const form = control.form || control.closest('form');
+            const submits = !!form && control.tagName !== 'DIV'
+                && (control.getAttribute('type') || 'submit').toLowerCase() === 'submit';
+            if (!SENDY.test(label) && !submits) return null;
+            const scope = submits ? form : scopeOf(control);
+            if (!scope) return null;
+            const boxes = boxesIn(scope);
+            if (!boxes.length) return null;
+            // Single-line fields behind a neutral button: a login or a search.
+            if (!SENDY.test(label) && boxes.every((b) => b.tagName === 'INPUT')) return null;
+            return {site, label: label || 'Submit', text: boxes.map(boxText).join('\n\n').slice(0, 2000),
+                    disabled: !!(control.disabled || control.getAttribute('aria-disabled') === 'true'),
+                    action: 'send'};
         }
-        const box = el.closest(BOXES);
-        if (!box) return null;
-        const dm = !!el.closest('[data-testid="dmComposerTextInput"]');
-        if (how === 'enter' && !dm) return null;   // Enter in a post is a new line
-        const scope = scopeOf(box);
-        const button = scope.querySelector(dm ? '[data-testid="dmComposerSendButton"]'
-            : '[data-testid="tweetButton"],[data-testid="tweetButtonInline"]');
-        return {site: host, control: button ? button.getAttribute('data-testid')
-                    : (dm ? 'dmComposerSendButton' : 'tweetButton'),
-                label: nameOf(button, dm ? 'Send' : 'Post'), text: textIn(scope),
-                disabled: false, action: dm ? 'send a direct message' : 'post'};
+        const box = el.closest('textarea, [contenteditable="true"], [role="textbox"]');
+        if (!box || !isBox(box) || !boxText(box)) return null;
+        if (how === 'enter') {
+            // Plain Enter adds a line in a post or comment box. It sends in a
+            // chat box, and a chat box has a Send button beside it.
+            const scope = scopeOf(box) || box.parentElement;
+            const send = scope && [...scope.querySelectorAll('button, [role="button"]')]
+                .find((b) => /\bsend\b/i.test(nameOf(b)));
+            if (!send) return null;
+            return {site, label: nameOf(send) || 'Send', text: boxText(box), disabled: false, action: 'send'};
+        }
+        return {site, label: 'cmd+enter', text: boxText(box), disabled: false, action: 'send'};
     }"""
 
     def _publish_facts(self, page: Any, target: Any = None, point: Any = None,
                        key: str = "") -> dict[str, Any] | None:
-        """What this action would publish, or None when it publishes nothing.
+        """What this action would send, or None when it sends nothing.
 
-        Fails CLOSED on X alone: a page that cannot be read there is treated
-        as a possible post, because the cost of asking once needlessly is a
-        click and the cost of the other mistake is a public post. Anywhere
-        else an unreadable page is not a reason to ask.
+        A page that cannot be read (it navigated mid-action) sends nothing
+        this code can show, so it is not asked about.
         """
         try:
             if target is not None:
-                return target.evaluate(self._PUBLISH_JS, "click")
+                return target.evaluate(self._SENDS_JS, "click")
             if point is not None:
                 return page.evaluate(
-                    f"([x, y]) => ({self._PUBLISH_JS})(document.elementFromPoint(x, y), 'click')",
+                    f"([x, y]) => ({self._SENDS_JS})(document.elementFromPoint(x, y), 'click')",
                     [int(point[0]), int(point[1])])
             return page.evaluate(
-                f"(how) => ({self._PUBLISH_JS})(document.activeElement, how)", key)
+                f"(how) => ({self._SENDS_JS})(document.activeElement, how)", key)
         except Exception:
-            host = self._page_host()
-            if not _is_x_host(host):
-                return None
-            return {"site": host, "control": "unknown", "label": "this control",
-                    "text": "", "disabled": False, "action": "post", "unread": True}
+            return None
 
     def _gate_publish(self, page: Any, target: Any = None, point: Any = None,
                       key: str = "") -> str:
@@ -586,20 +596,16 @@ class BrowserSession:
             approved, why = False, f"Not sent: the approval could not be asked ({_short_error(e)})."
         return "" if approved else (why or "Not sent: the user did not approve posting.")
 
-    def publish_preview(self) -> dict[str, Any] | None:
-        """What X's open composer would post right now — for the card that
-        asks about a submit_form on x.com, which otherwise shows only a
-        button's name."""
+    def sending_preview(self) -> dict[str, Any] | None:
+        """What a submit on the open page would send: the text waiting in its
+        box, and the site — for the card that asks about submit_form, which
+        otherwise shows only a button's name."""
         try:
             page = self._ensure_open()
-            return page.evaluate(
-                f"() => {{ const b = document.querySelector("
-                f"'[role=\"dialog\"] [data-testid=\"tweetButton\"]') || "
-                f"document.querySelector('[data-testid=\"tweetButtonInline\"],"
-                f"[data-testid=\"tweetButton\"]'); "
-                f"return b ? ({self._PUBLISH_JS})(b, 'click') : null; }}")
         except Exception:
             return None
+        text, url = self._pending_state(page)
+        return {"text": text, "site": self._page_host(), "url": url}
 
     def click(self, selector: str = "", text: str = "") -> str:
         try:
@@ -1479,8 +1485,11 @@ class BrowserSession:
             return uniq(s) ? s : '';
         };
         const firstLine = (t) => (t || '').trim().split(String.fromCharCode(10))[0];
+        // A form's <label for=...> is the name a person reads beside the box;
+        // without it a plain <textarea> was listed with no name at all.
+        const labelled = (el) => (el.labels && el.labels[0] && firstLine(el.labels[0].innerText)) || '';
         const label = (el) => (
-            el.getAttribute('aria-label') || el.getAttribute('placeholder')
+            el.getAttribute('aria-label') || labelled(el) || el.getAttribute('placeholder')
             || firstLine(el.innerText) || el.value || ''
         ).slice(0, 60);
         const out = [];
@@ -1519,148 +1528,6 @@ class BrowserSession:
         return out;
     }"""
 
-    def post_to_x(self, text: str, timeout_ms: int = 15000) -> str:
-        """Write a post on x.com and MACHINE-VERIFY that it went out.
-
-        Everything about this is shaped by two failures already recorded
-        against this project. A post was made and the model reported that it
-        had not been ("clicked" is what the mouse did, never what it
-        achieved), and the composer could not be grounded by vision at all
-        because it is 28px tall. So: fill by selector, send by the button x's
-        own code labels, and then prove it by reading the timeline back.
-
-        The verdict is a string the model cannot shape. CONFIRMED means this
-        code found the exact text rendered in a timeline article after the
-        click. Anything else says so plainly, because a post nobody can prove
-        is a post that has to be checked by a person.
-        """
-        body = (text or "").strip()
-        if not body:
-            return f"{X_NOT_CONFIRMED}] Nothing to post: the text was empty."
-        if len(body) > 280:
-            return (f"{X_NOT_CONFIRMED}] That is {len(body)} characters; x.com "
-                    "takes 280. Shorten it and try again.")
-        try:
-            page = self._ensure_open()
-        except Exception as e:
-            return f"{X_UNVERIFIABLE}] The browser is not open: {e}"
-
-        try:
-            url = page.url or ""
-        except Exception:
-            url = ""
-        if "x.com" not in url and "twitter.com" not in url:
-            # The app opens x.com/home first once the user has approved the
-            # post; this layer still refuses to post from a page nobody chose.
-            return (f"{X_UNVERIFIABLE}] The open page is {url or 'unknown'}, not "
-                    "x.com. Open https://x.com/home first — this does not "
-                    "navigate on its own, because a post is not something to "
-                    "do on a page nobody asked for.")
-
-        for selector in X_LOGGED_OUT:
-            try:
-                if page.query_selector(selector):
-                    return (f"{X_NOT_CONFIRMED}] Not signed in to x.com — the "
-                            "page is showing a login link. Sign in in this "
-                            "browser window, then ask again.")
-            except Exception:
-                pass
-
-        # The compose WINDOW when one is open, else the box on the timeline.
-        # A dialog makes everything behind it inert, and the first composer
-        # in the document is the one behind it: typing there does nothing and
-        # its Post button cannot be pressed.
-        try:
-            composer = page.query_selector(f'[role="dialog"] {X_COMPOSER}')
-            buttons = tuple(f'[role="dialog"] {b}' for b in X_POST_BUTTONS)
-            if composer is None:
-                composer, buttons = page.query_selector(X_COMPOSER), X_POST_BUTTONS
-        except Exception as e:
-            return f"{X_UNVERIFIABLE}] Could not read the page: {_short_error(e)}"
-        if composer is None:
-            return (f"{X_NOT_CONFIRMED}] No composer on this page. Open "
-                    "https://x.com/home, or click the Post button to open one.")
-
-        # Empty the box first. It can already hold a draft — live 2026-09-27
-        # the model had typed "Hi" into it before this was called — and typing
-        # on top of a draft posts both.
-        try:
-            composer.click()
-            if _x_box_text(composer):
-                _x_clear_box(page, composer)
-            left = _x_box_text(composer)
-            if left:
-                return (f"{X_NOT_CONFIRMED}] The box already held {left[:80]!r} "
-                        "and could not be emptied. Nothing was sent.")
-            page.keyboard.type(body)
-        except Exception as e:
-            return f"{X_NOT_CONFIRMED}] Could not write the post: {_short_error(e)}"
-
-        # What the box holds now, BEFORE sending, and it has to be exactly
-        # the post. A prefix check passed a box holding more than the text,
-        # which is the draft-plus-post case above.
-        in_box = _x_box_text(composer)
-        if in_box != " ".join(body.split()):
-            try:
-                _x_clear_box(page, composer)
-            except Exception:
-                pass
-            held = f"it held {in_box[:80]!r}" if in_box else "it stayed empty"
-            return (f"{X_NOT_CONFIRMED}] The text did not land exactly in the "
-                    f"composer — {held}. It was cleared and nothing was sent.")
-
-        # How many posts with these exact words are on the timeline already.
-        # "testing" posted yesterday is still there, and finding it again is
-        # not proof that today's went out.
-        before = _x_text_on_timeline(page, body)
-        clicked = False
-        for selector in buttons:
-            try:
-                button = page.query_selector(selector)
-                if button is None:
-                    continue
-                if button.get_attribute("aria-disabled") == "true":
-                    return (f"{X_NOT_CONFIRMED}] The Post button is disabled. "
-                            "The composer may not have registered the text.")
-                button.click()
-                clicked = True
-                break
-            except Exception:
-                continue
-        if not clicked:
-            # cmd+enter is x.com's own send shortcut, and the reason
-            # browser_press's description warns that plain enter posts nothing.
-            try:
-                page.keyboard.press("Meta+Enter")
-                clicked = True
-            except Exception as e:
-                return f"{X_NOT_CONFIRMED}] Could not send: {_short_error(e)}"
-
-        # Proof, or the absence of it. The composer clearing is necessary and
-        # not sufficient — a discarded draft clears too — so the text has to
-        # be found on the timeline.
-        deadline = time.time() + max(1.0, timeout_ms / 1000.0)
-        while time.time() < deadline:
-            if _x_text_on_timeline(page, body) > before:
-                return (f"{X_CONFIRMED}] The post is rendered on the timeline: "
-                        f"{body[:80]!r}")
-            try:
-                page.wait_for_timeout(500)
-            except Exception:
-                time.sleep(0.5)
-
-        try:
-            still_there = " ".join((page.query_selector(X_COMPOSER).inner_text()
-                                    or "").split())
-        except Exception:
-            still_there = ""
-        if still_there:
-            return (f"{X_NOT_CONFIRMED}] The composer still holds the text, so "
-                    "it was not sent. Nothing was posted.")
-        return (f"{X_NOT_CONFIRMED}] The composer cleared but the post is not "
-                "on the timeline yet. It may have gone out — check x.com "
-                "before posting it again, or it will go out twice.")
-
     def controls(self, limit: int = 25) -> list[dict]:
         """Visible fields and buttons, each with a selector that addresses it.
 
@@ -1698,6 +1565,10 @@ class BrowserSession:
             return [], False
         fields = [c for c in found if c.get("kind") == "field"]
         buttons = [c for c in found if c.get("kind") != "field"]
+        # The button that sends what is in a box before the navigation around
+        # it: on a post page the sidebar alone is eighteen links, and the one
+        # button anyone needs was past the cut.
+        buttons.sort(key=lambda c: 0 if _SEND_LABEL.search(str(c.get("label") or "")) else 1)
         return (fields + buttons)[:limit], True
 
     def focused_description(self) -> str:
@@ -2041,68 +1912,3 @@ def open_app(name: str) -> str:
         return f"Opened {name}. It is now frontmost."
     except Exception as e:
         return f"Open error: {e}"
-
-
-# ── Posting to X ────────────────────────────────────────────────────
-
-# The composer and the post button, by the attributes x.com's own code uses.
-# Not by coordinates and not by vision: the composer is 28px tall, under the
-# vision worker's one-patch floor, and a coordinate for it was wrong by ~36px
-# every time it was tried (2026-09-07). A selector is exact or it fails
-# loudly, which is the property that matters for something irreversible.
-X_COMPOSER = 'div[data-testid="tweetTextarea_0"]'
-X_POST_BUTTONS = ('button[data-testid="tweetButtonInline"]',
-                  'button[data-testid="tweetButton"]')
-X_LOGGED_OUT = ('a[data-testid="loginButton"]', 'a[href="/login"]')
-
-# Verdict heads, matching submit_form's contract so the app layer can read
-# either with the same rule.
-def _x_box_text(box: Any) -> str:
-    """What X's compose box holds, whitespace collapsed; "" when unreadable."""
-    try:
-        text = box.inner_text() or ""
-    except Exception:
-        return ""
-    return " ".join(text.replace("\u200b", "").split())
-
-
-def _x_clear_box(page: Any, box: Any) -> None:
-    """Select everything in the box and delete it. Select-all inside a
-    contenteditable selects only its own content."""
-    box.click()
-    page.keyboard.press("Meta+A" if sys.platform == "darwin" else "Control+A")
-    page.keyboard.press("Backspace")
-
-
-X_CONFIRMED = "[Post CONFIRMED"
-X_NOT_CONFIRMED = "[Post NOT confirmed"
-X_UNVERIFIABLE = "[Post verification could not run"
-
-
-def _x_text_on_timeline(page: Any, text: str) -> int:
-    """How many timeline articles show exactly this post. 0 when none.
-
-    The proof that a post went out is this number going UP across the send.
-    Read from the DOM rather than from a toast: a toast is a transient element
-    that may already be gone, and its text says "Your post was sent" whether
-    or not the network call returned. An article's own post text
-    (`tweetText`) must equal the post; an article without one is matched on
-    containing it, as before.
-    """
-    probe = " ".join(text.split())[:280]
-    if not probe:
-        return 0
-    try:
-        return int(page.evaluate(
-            """(needle) => {
-                const norm = (t) => (t || '').replace(/\\s+/g, ' ').trim();
-                let n = 0;
-                for (const article of document.querySelectorAll('article')) {
-                    const own = article.querySelector('[data-testid="tweetText"]');
-                    if (own ? norm(own.innerText) === needle
-                            : norm(article.innerText).includes(needle)) n += 1;
-                }
-                return n;
-            }""", probe) or 0)
-    except Exception:
-        return 0

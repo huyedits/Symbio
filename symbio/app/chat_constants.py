@@ -80,9 +80,9 @@ _MAX_RATE_LIMIT_WAIT = 5.0
 # per call rather than per name. These are the actions whose cost does not
 # depend on the arguments: they reach outside the machine, they rewrite what
 # the assistant is, or they schedule something to happen when nobody is
-# watching. There is no version of `post_to_x` that is fine unasked.
+# watching. A form submitted on a live site is under the user's name.
 _ALWAYS_CONFIRM_TOOLS = frozenset({
-    "post_to_x", "submit_form",
+    "submit_form",
     "train_adapter", "digest_notes", "realign",
     "config_set",
     "schedule_job", "delete_cron_job", "update_cron_job",
@@ -357,6 +357,15 @@ def request_targets(user_text: str, limit: int = 6) -> list[str]:
                      else match.group(0))
             if _take(token):
                 return out
+    # Curly and mixed quotes too. A Mac types “smart” quotes, and the pattern
+    # above only knows straight ones, so `make a tweet “testing"` named no
+    # target at all: the turn opened the page, said "I've opened X", and
+    # nothing noticed that “testing” had not been written anywhere.
+    from symbio import guardrails
+
+    for token in guardrails.quoted_texts(text):
+        if _take(token):
+            return out
     return out
 
 

@@ -37,7 +37,6 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_close": "browser",
     "submit_form": "browser",
     "fill_form": "browser",
-    "post_to_x": "browser",
     "browser_get_text": "browser",
     # Looking is grouped with the browser, not with desktop control: seeing the
     # page the assistant already drives is the same capability as reading it,
@@ -137,7 +136,6 @@ _TOOL_FAMILIES: dict[str, str] = {
     "desktop_wait": "desktop",
     "open_app": "desktop",
     "obs_record": "desktop",
-    "post_to_x": "browser",
     "write_note": "memory",
     "recall": "memory",
     "delete_note": "memory",
@@ -314,7 +312,7 @@ _TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "text": {"type": "string", "description": "The text to type."},
-                "selector": {"type": "string", "description": "Optional CSS selector for the field to fill, e.g. '[data-testid=\"tweetTextarea_0\"]' or '#search'. Fills it directly; no clicking or focus needed."},
+                "selector": {"type": "string", "description": "Optional CSS selector for the field to fill, e.g. 'textarea[name=\"comment\"]' or '#search' — the controls list the page shows gives the exact one. Fills it directly; no clicking or focus needed."},
                 "enter": {"type": "boolean", "description": "Press Enter after typing. Default false."},
             },
             "required": ["text"],
@@ -475,15 +473,6 @@ _TOOLS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {"seconds": {"type": "number", "description": "How long to wait. Default 2, maximum 10."}},
-        },
-    },
-    {
-        "name": "post_to_x",
-        "description": "Post on x.com, as the user, with exactly this text — the ONLY way to post there. The user sees the text and approves it first; then this opens x.com/home, empties the composer, types the text, sends, and checks the timeline. Never type into X's composer and press Post yourself: pass the user's exact words here. Returns a verdict you cannot shape: '[Post CONFIRMED' only when a new post with exactly this text is on the timeline. Never report a post as made without that verdict; if it says NOT confirmed, check x.com before trying again or it goes out twice.",
-        "parameters": {
-            "type": "object",
-            "properties": {"text": {"type": "string", "description": "The post, 280 characters or fewer."}},
-            "required": ["text"],
         },
     },
     {
@@ -1018,10 +1007,6 @@ _HERMES_NAME_MAP: dict[str, str] = {
     "fill_form": "fill_form",
     "fill_fields": "fill_form",
     "fill_in_form": "fill_form",
-    "post_to_x": "post_to_x",
-    "tweet": "post_to_x",
-    "post_tweet": "post_to_x",
-    "send_tweet": "post_to_x",
     "launch_app": "open_app",
     "open_application": "open_app",
     "switch_app": "open_app",
@@ -1062,8 +1047,6 @@ _ARG_ALIASES: dict[str, dict[str, str]] = {
                      "x": "x", "y": "y"},
     "desktop_wait": {"seconds": "seconds", "duration": "seconds", "time": "seconds",
                      "amount": "seconds"},
-    "post_to_x": {"text": "text", "message": "text", "content": "text",
-                  "body": "text", "tweet": "text", "status": "text"},
     "open_app": {"name": "name", "app": "name", "application": "name",
                  "app_name": "name", "target": "name"},
     "browser_open": {"url": "url", "link": "url", "page": "url", "site": "url", "address": "url", "to": "url"},
