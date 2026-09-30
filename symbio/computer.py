@@ -1137,9 +1137,9 @@ class BrowserSession:
             page.keyboard.press(normalized)
             if normalized == "Enter" and not self._enter_submitted(page):
                 return (
-                    f"Press failed: Enter did not submit the form — the "
-                    f"focused field still contains text, so it likely "
-                    f"inserted a newline. Click the submit button to submit."
+                    "Press failed: Enter did not submit the form — the "
+                    "focused field still contains text, so it likely "
+                    "inserted a newline. Click the submit button to submit."
                 )
             # cmd+enter, the combination that actually posts on X, reached
             # neither check: _enter_submitted is spelled for bare Enter, so

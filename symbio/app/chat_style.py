@@ -32,10 +32,19 @@ _BLUE = "\033[38;5;39m"
 _GREEN = "\033[38;5;71m"
 _YELLOW = "\033[38;5;179m"
 _RED = "\033[38;5;167m"
-_ACCENT = "\033[38;5;173m"
+# Hermes Agent's gold, #ffd700 — which is exactly xterm colour 220, so it
+# renders honestly on a 256-colour terminal as well as a truecolour one.
+# It marks what is live: the prompt you type on, the status spinner, the
+# welcome frame. The hex form of the same value lives in
+# symbio_tui/theme.py (the Textual side) and the desktop's :root tokens in
+# symbio_desktop/static/style.css — ANSI-256, hex and CSS are three
+# representations for three media, so the value is repeated, not the meaning.
+_ACCENT = "\033[38;5;220m"
 
 BULLET = "⏺"
 ELBOW = "⎿"
+# Hermes Agent's caduceus. The terminal's identity mark, beside the name.
+MARK = "☤"
 
 
 def colors_enabled(stream=None) -> bool:
@@ -269,7 +278,7 @@ def welcome_panel(config: dict, *, width: int | None = None,
             else "/ for commands")
     rows = [
         ("", ()),
-        (f"✦ {name} · personal agent", (_BOLD,)),
+        (f"{MARK} {name} · personal agent", (_BOLD,)),
         (f"{greeting} What are we working on?", (_DIM,)),
         ("", ()),
         (f"Model  {model}", (_GREY,)),
@@ -280,8 +289,8 @@ def welcome_panel(config: dict, *, width: int | None = None,
     rows += [("", ()), (menu, (_DIM,))]
     # The fixed header is ten cells before the closing corner. Reserve that
     # corner explicitly so the frame never autowraps at the right edge.
-    lines = ["", _paint("╭─ Symbio " + "─" * max(0, width - 11) + "╮",
-                         _ACCENT, enabled=on)]
+    lines = ["", _paint(f"╭─ {MARK} Symbio " + "─" * max(0, width - 13) + "╮",
+                        _ACCENT, enabled=on)]
     edge = _paint("│", _ACCENT, enabled=on)
     for text, codes in rows:
         body = _fit(text, room)

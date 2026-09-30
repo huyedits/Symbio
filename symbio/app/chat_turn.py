@@ -210,7 +210,7 @@ class AgentTurnMixin:
                     "new_tokens": timings.get("new_tokens"),
                 })
             else:
-                self.output_fn(f"  [Canary] OK — the model still follows the system prompt.")
+                self.output_fn("  [Canary] OK — the model still follows the system prompt.")
             return
 
         self.history.append({"role": "user", "content": user_input})

@@ -331,7 +331,6 @@ def test_realign_is_diagnostic_unless_explicitly_told_otherwise():
     """The model examining itself is useful. The model rewriting its own
     weights on its own initiative is not something an injected instruction
     should be able to reach, so the default is report-only."""
-    import inspect
 
     from symbio.app import chat
 
