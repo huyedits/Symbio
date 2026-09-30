@@ -17,6 +17,8 @@ import pytest
 from symbio import ax, computer, desk, safety
 from symbio.app import chat_tools
 
+pytestmark = pytest.mark.uses_desk
+
 
 # ---------- geometry ----------
 
