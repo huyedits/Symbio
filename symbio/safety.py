@@ -74,6 +74,10 @@ SENSITIVE_PREFIXES: tuple[str, ...] = (
     "safety.",
     # The model loosening its own guardrails is a change the user must see.
     "guardrails",
+    # The desk is the user's word that Symbio works on its own screen and
+    # leaves theirs alone; turning it off, or borrowing their pointer sooner,
+    # is theirs to change and not the model's.
+    "desk.",
     "telegram.",
     "remote.hosts",
     "sandbox.blocked",

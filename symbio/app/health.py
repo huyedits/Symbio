@@ -379,6 +379,36 @@ def _check_desktop(config: dict[str, Any]) -> _CheckResult:
         severity="warning")
 
 
+def _check_desk(config: dict[str, Any]) -> _CheckResult:
+    """With desk mode on, say whether Symbio's own screen is up or can come up.
+
+    Never creates the display: a self-check that adds a monitor to the Mac is
+    a side effect nobody asked for. It checks the helper builds, and reports
+    the running desk if there is one.
+    """
+    from symbio import desk
+
+    if not desk.enabled(config):
+        return _CheckResult("desk", False, message="Desk mode off; skipped.",
+                            severity="info")
+    if not desk.available():
+        return _CheckResult("desk", False, severity="warning",
+                            message=("Desk mode is on, but Symbio's desk needs "
+                                     "macOS; the desktop tools will refuse rather "
+                                     "than use your screen."))
+    running = desk.current()
+    if running is not None:
+        return _CheckResult("desk", True, message=desk.describe(config).replace("\n", " "))
+    if desk.helper_binary() is None:
+        return _CheckResult("desk", False, severity="warning",
+                            message=(f"Desk mode is on but the desk cannot start: "
+                                     f"{desk._build_error} The desktop tools will "
+                                     "refuse rather than use your screen."))
+    return _CheckResult("desk", True,
+                        message=("Desk mode is on; the desk comes up on the first "
+                                 "desktop action (or `symb desk start`)."))
+
+
 def _check_browser(config: dict[str, Any]) -> _CheckResult:
     """If browser automation is enabled, verify Playwright can open a page.
     Auto-fix: disable browser.enabled if it is clearly broken and tell the user."""
@@ -619,6 +649,7 @@ def verify_enabled_features(
         _check_web_search(config),
         _check_browser(config),
         _check_desktop(config),
+        _check_desk(config),
         _check_telegram(config),
         _check_dispatch(config),
         _check_cron(config),

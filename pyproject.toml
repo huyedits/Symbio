@@ -111,7 +111,8 @@ include = ["symbio*", "symbio_desktop*", "symbio_tui*", "symbio_pet*"]
 # models.json, the prompt default and the security default — all three of which
 # live at the repository root — were simply absent from every pip install.
 [tool.setuptools.package-data]
-symbio = ["defaults/*"]
+# native/ holds the desk helper's Objective-C source, compiled on first use.
+symbio = ["defaults/*", "native/*"]
 symbio_desktop = ["static/*"]
 
 [tool.pytest.ini_options]

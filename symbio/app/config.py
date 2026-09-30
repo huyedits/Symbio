@@ -420,6 +420,31 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # on, e.g. news.ycombinator.com for the autonomous-submit flow.
         "allowed_domains": ["localhost", "127.0.0.1", "example.com"],
     },
+    # Symbio's own screen (symbio/desk.py, `symb desk`): a virtual display
+    # macOS treats as a second monitor that nobody is looking at. On, every
+    # desktop tool works there -- apps open on it in the background, a look
+    # captures it and nothing else, clicks and typing go to its windows -- and
+    # the screen, pointer and keyboard in front of the user stay theirs. Off,
+    # the desktop tools act on the user's screen as they always have. macOS
+    # only; `symb desk on` turns it on and starts it.
+    "desk": {
+        "enabled": False,
+        # Its size in points, at 1x: a capture's pixels are then points.
+        "width": 1440,
+        "height": 900,
+        # "corner" touches the user's screens at one corner only, so a
+        # pointer pushed off an edge never vanishes onto it. "leave" keeps
+        # wherever macOS put it (beside the main screen).
+        "placement": "corner",
+        # A control the accessibility API cannot press or fill needs real
+        # mouse or keyboard events, which move THE USER'S pointer and type at
+        # their focus for a moment. Those are borrowed only after this many
+        # seconds without the user touching the Mac, then handed back; 0
+        # never borrows, and such an action is reported as not done.
+        "borrow_input_after_idle_s": 30,
+        # Open the automated browser's window on the desk too.
+        "browser": True,
+    },
     "web": {
         "search_results": 5,
         "http_timeout": 15,

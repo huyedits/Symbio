@@ -161,6 +161,43 @@ terminal running Symbio is granted Accessibility. `python3 -m symbio.ax` shows
 the grant dialog and then prints the live control listing; `/selfcheck` in
 chat reports the same thing.
 
+### Its own screen (the desk)
+
+```bash
+symb desk on      # Symbio works on a screen of its own from now on
+symb desk peek    # a picture of what it is doing there
+symb desk check   # drives it once, for real, on a scratch TextEdit document
+symb desk off     # the desktop tools go back to your screen
+```
+
+Two people cannot share one mouse, and a Mac has one. With the desk on,
+Symbio gets a second display that has no panel behind it — a virtual display
+macOS lays out, draws and captures like any monitor, that nobody is looking
+at — and every desktop tool works there instead of on yours:
+
+- `open_app` launches in the background and moves the app's windows onto the
+  desk. An app you already have open is never taken: it gets asked for a new
+  window through its own File menu, and only that one moves.
+- `see_screen target='desktop'` reads the desk's front window, and a capture
+  is of the desk alone. `target='user'` still looks at your screen.
+- Clicks and typing go through the accessibility API first, which needs no
+  pointer and no keyboard focus. Only a control that ignores it gets real
+  input, posted to that one app; and only if that changes nothing does
+  Symbio borrow your pointer and keyboard — after 30 s without you touching
+  the Mac (`desk.borrow_input_after_idle_s`), for one action, put straight
+  back.
+- The browser Symbio drives opens its window on the desk too.
+
+The desk touches your screen at one corner only, so your pointer cannot
+wander onto it. Turning it off is `symb desk off`, and only you can: the
+model cannot change `desk.*` settings itself.
+
+Measured on macOS 26.5, and worth knowing: **while the Mac is locked** every
+app window drops out of the accessibility tree and out of captures — on the
+desk too — so desktop work waits for you to unlock (the browser keeps
+working; it is driven through Chrome, not the screen). And a desk stopped
+while your screen sleeps is only removed by macOS when the screen next wakes.
+
 ### The window
 
 ```bash

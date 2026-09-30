@@ -130,6 +130,19 @@ def _build_parser() -> argparse.ArgumentParser:
     pet_parser.add_argument("--demo", action="store_true",
                             help="Play a scripted run instead of watching this install")
 
+    # Symbio's own screen. One optional action, like `symb pet`.
+    desk_parser = sub.add_parser(
+        "desk", help="Symbio's own screen, so yours stays yours (macOS)")
+    desk_parser.add_argument(
+        "desk_command", nargs="?", default="status",
+        choices=["status", "on", "off", "start", "stop", "peek", "check"],
+        help=("status (default); on/off switch the desktop tools onto the desk "
+              "or back to your screen; start/stop only the display; peek saves "
+              "a picture of the desk and opens it; check drives it once, for "
+              "real, on a scratch TextEdit document"))
+    desk_parser.add_argument("--no-open", action="store_true",
+                             help="peek: print the picture's path, do not open it")
+
     train_parser = sub.add_parser("train", help="Run LoRA training")
     train_parser.add_argument(
         "skill",
@@ -1203,6 +1216,69 @@ def _wake_resident_model() -> tuple[bool, str]:
     return ok, why
 
 
+def _cmd_desk(config: dict[str, Any], args: argparse.Namespace) -> int:
+    """`symb desk`: Symbio's own screen (symbio/desk.py)."""
+    import subprocess
+
+    from symbio import desk
+
+    action = getattr(args, "desk_command", None) or "status"
+    if action == "status":
+        print(desk.describe(config))
+        return 0
+    if action in ("on", "start"):
+        if action == "on":
+            print(set_config_value(config, "desk.enabled", "true", allow_sandbox=True))
+        section = {**(config.get("desk") or {}), "enabled": True}
+        try:
+            running = desk.ensure({**config, "desk": section})
+        except desk.DeskError as e:
+            print(e)
+            return 1
+        print(f"Desk running: display {running.display}, {running.width}x"
+              f"{running.height} at ({running.x}, {running.y}). "
+              + desk.arrangement_note(running))
+        if not desk.enabled(config):
+            print("Desk mode is off, so the desktop tools still act on your "
+                  "screen. `symb desk on` moves them onto the desk.")
+        else:
+            print("Apps Symbio opens, what it looks at and what it clicks are on "
+                  "the desk now; your screen, pointer and keyboard stay yours. "
+                  "`symb desk peek` shows you the desk.")
+        return 0
+    if action in ("off", "stop"):
+        if action == "off":
+            print(set_config_value(config, "desk.enabled", "false", allow_sandbox=True))
+        print(desk.stop())
+        return 0
+    if action == "peek":
+        running = desk.current()
+        if running is None:
+            print("No desk is running. `symb desk start` brings one up.")
+            return 1
+        try:
+            path = desk.capture(running)
+        except desk.DeskError as e:
+            print(e)
+            return 1
+        print(path)
+        if desk.session_locked():
+            print("The Mac is locked, so the desk shows no windows until it is unlocked.")
+        if not getattr(args, "no_open", False):
+            subprocess.run(["open", str(path)], check=False)
+        return 0
+    if action == "check":
+        steps = desk.self_test(config)
+        for name, ok, detail in steps:
+            mark = "ok  " if ok else ("info" if "informational" in name else "FAIL")
+            print(f"  [{mark}] {name}" + (f" — {detail}" if detail else ""))
+        failed = [s for s in steps if not s[1] and "informational" not in s[0]]
+        print("All good." if not failed else f"{len(failed)} step(s) failed.")
+        return 0 if not failed else 1
+    print("Usage: symb desk [status | on | off | start | stop | peek | check]")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1456,6 +1532,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print("Usage: symb daemon [start | stop | status]")
         return 1
+
+    if command == "desk":
+        return _cmd_desk(config, args)
 
     if command == "pet":
         from symbio.app import pet

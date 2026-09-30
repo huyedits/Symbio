@@ -432,6 +432,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if _domains:
             _kw["allowed_domains"] = list(_domains)
         self.browser = BrowserSession(**_kw)
+        from symbio import desk as _desk
+
+        # Through _desk_config, so `symb desk on` reaches a running daemon's
+        # next browser window the same way it reaches its desktop tools.
+        _desk.attach(self.browser, self._desk_config)
         # Worker models are loaded lazily on first delegated task — this
         # just holds the (empty) pool, no extra RAM until dispatch.enabled
         # and something actually delegates. Status messages go through the
