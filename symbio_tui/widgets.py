@@ -1,13 +1,16 @@
 """The pieces of the screen, each owning one job.
 
-The shape is Claude Code's, because that shape has been through more hours of
-real use than anything invented here: a quiet header, a transcript that reads
-as a list of events rather than as a wall of text, a rounded composer docked to
-the bottom with a chevron in it, and one line of hints under it. What the
-transcript gains from that is legibility at a glance — an accent dot for a turn
+The shape is Hermes Agent's: a quiet header, a transcript that reads as a list
+of events rather than as a wall of text, a rounded composer docked to the
+bottom with a chevron in it, and one line of hints under it. What the
+transcript gains from that is legibility at a glance — a gold dot for a turn
 the assistant took, a hooked line for what came back out of it, a dim chevron
 for what you typed — so a screenful of scrollback can be skimmed for the one
 event you are looking for instead of read.
+
+The palette is not borrowed: gold marks what is live, and the ground stays
+Symbio's own pond and ink. See symbio_tui/theme.py for why that split is the
+whole point.
 
 Face on top, conversation in the middle, the composer docked to the bottom.
 History is a RichLog because the daemon's frames already carry ANSI — the skin
@@ -28,8 +31,9 @@ from textual.widgets import Input, OptionList, RichLog, Static
 from textual.widgets.option_list import Option
 
 from symbio_tui.faces import banner
+from symbio_tui.theme import DIM, GOLD, MARK
 
-# The marks Claude Code uses, and what each one means here.
+# The marks Hermes Agent uses, and what each one means here.
 #   ● a turn the assistant took            ⎿ what came back out of it
 #   > what you typed                       ✻ the session working
 BULLET = "●"
@@ -107,7 +111,7 @@ class History(RichLog):
         of the paragraph is indented under it so a long answer stays one
         visible block rather than merging with what follows."""
         lines = (text or "").splitlines() or [""]
-        first = Text(f"{BULLET} ", style="bold #d97757")
+        first = Text(f"{BULLET} ", style=f"bold {GOLD}")
         first.append(lines[0], style="")
         self.write(first)
         for line in lines[1:]:
@@ -159,7 +163,7 @@ class StatusLine(Static):
         if not self._busy:
             self.update(Text(f"  {self._text}", style="dim"))
             return
-        line = Text(f"  {SPINNER[self._frame]} ", style="#d97757")
+        line = Text(f"  {SPINNER[self._frame]} ", style=GOLD)
         line.append(self._text, style="dim")
         line.append("  (esc to interrupt)", style="dim")
         self.update(line)

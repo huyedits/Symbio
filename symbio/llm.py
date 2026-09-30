@@ -134,7 +134,7 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         ("Hello", f"Hello {user}! What can I do for you?"),
         ("Hey", f"Hey {user}! What's up?"),
         ("How are you?", f"I'm doing well, thanks for asking, {user}."),
-        ("What can you do?", f"I can chat, save memories, read and edit files, search files, run sandboxed commands, execute Python code, search the web, check email, and fine-tune myself on what I learn."),
+        ("What can you do?", "I can chat, save memories, read and edit files, search files, run sandboxed commands, execute Python code, search the web, check email, and fine-tune myself on what I learn."),
         # --- Identity: assistant ---
         ("What is your name?", f"My name is {assistant}."),
         ("Who are you?", f"I am {assistant}, your personal AI assistant."),
@@ -267,12 +267,12 @@ def seed_training_data(tokenizer, system_prompt: str, config: dict[str, Any]):
         # --- Email Q&A ---
         (
             "Can you read my emails?",
-            f"I can check your email if you configure IMAP/SMTP via environment variables (EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_IMAP_HOST, EMAIL_SMTP_HOST). Once configured, I can list threads, read messages, and send replies.",
+            "I can check your email if you configure IMAP/SMTP via environment variables (EMAIL_ADDRESS, EMAIL_PASSWORD, EMAIL_IMAP_HOST, EMAIL_SMTP_HOST). Once configured, I can list threads, read messages, and send replies.",
         ),
         # --- Domain task ---
         (
             "How do you read an email inbox?",
-            f"I can read an inbox if you give me access. <note title=\"Email Reading\">To read email, I need the user's mail credentials or an API key, then I fetch messages, summarize them, and ask before acting.</note>",
+            "I can read an inbox if you give me access. <note title=\"Email Reading\">To read email, I need the user's mail credentials or an API key, then I fetch messages, summarize them, and ask before acting.</note>",
         ),
     ]
 

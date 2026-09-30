@@ -2293,7 +2293,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             ):
                 text = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
             return text.strip()
-        except Exception as e:
+        except Exception:
             return ""
 
     def _claims_incapacity(self, reply: str, user_input: str) -> bool:
@@ -3458,6 +3458,16 @@ def _install_command_completion(session) -> bool:
     return chat_style.install_command_completion(session.command_names)
 
 
+def _default_stream_chunk(text: str) -> None:
+    """Write one streamed fragment to the terminal and flush it.
+
+    A module-level function rather than a lambda assigned in the call site:
+    the loop takes a `stream_chunk_fn` seam, and a named default is what a
+    traceback can point at when a stream write misbehaves.
+    """
+    print(text, end="", flush=True)
+
+
 def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
               adapter_loaded: bool | None = None,
               generate_fn=None, stream_fn=None,
@@ -3470,7 +3480,7 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
     loading weights.
     """
     if stream_chunk_fn is None:
-        stream_chunk_fn = lambda s: print(s, end="", flush=True)
+        stream_chunk_fn = _default_stream_chunk
     # Never run with a blank identity: a skipped wizard or a reset config.json
     # can leave names empty, which blanks the chat banner and the input prompt.
     # Fill sane defaults in-memory now (cheap); persist only on a real CLI run

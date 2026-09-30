@@ -199,7 +199,7 @@ def _adapter_lock_step(config: dict[str, Any],
     # locked means — so asking "is anything trained" before "is it already
     # locked" reads an encrypted adapter as an absent one.
     if adapter_crypto.is_locked(adapters):
-        output_fn(f"\n  Adapter is already locked to a key.")
+        output_fn("\n  Adapter is already locked to a key.")
         return
     if not any(adapters.glob("*.safetensors")):
         return                       # nothing trained yet; nothing to lock

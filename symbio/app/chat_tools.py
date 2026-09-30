@@ -828,8 +828,8 @@ class ToolsMixin:
                 self._status("  [Page] Answered from the page's own controls "
                              "(no screenshot needed).")
                 lines = [
-                    f"The page's own controls answer that — no screenshot "
-                    f"needed, these coordinates and selectors are exact:",
+                    "The page's own controls answer that — no screenshot "
+                    "needed, these coordinates and selectors are exact:",
                     *(self._control_line(c) for c in hits[:6]),
                 ]
                 rest = [c for c in controls if c not in hits]
@@ -1294,12 +1294,10 @@ class ToolsMixin:
         before = self._ax_state()
         clicks = int(params.get("clicks") or 1)
         button = str(params.get("button") or "left").lower()
-        how = "pressed"
         if clicks == 1 and button == "left" and ax.press(element):
             out = (f"Pressed {element['label']!r} ({element['role'][2:]}, "
                    f"element {element['index']}).")
         else:
-            how = "clicked"
             x, y = _ax_centre(element)
             out = computer.desktop_click(x, y, clicks=clicks, button=button)
             out = (f"{out} That is {element['label']!r} "
@@ -1488,7 +1486,7 @@ class ToolsMixin:
         if name == "submit_form":
             where = host(str(facts.get("url") or ""))
             text = str(facts.get("text") or "")
-            headline = (f"Submit the form" + (f" on {where}" if where else "")
+            headline = ("Submit the form" + (f" on {where}" if where else "")
                         + f" by pressing “{v(arg('target', 'selector'))}”.")
             lines = [v(text)] if text else []
             if arg("expected_url"):

@@ -6,6 +6,9 @@ of the daemon — the model, the tools and the history all live there — so
 closing this window does not end the session and two of them can watch the
 same one.
 
+The shape is Hermes Agent's and the palette is Symbio's own; see
+symbio_tui/theme.py for why that split is deliberate.
+
 Resizing is Textual's to handle and is deliberately not second-guessed here:
 every width in the layout is a fraction or a dock, so a narrow window reflows
 instead of truncating. The one thing that must not move is the input box,
@@ -23,35 +26,36 @@ from textual.widgets import Input, Static
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
 from symbio_tui.protocol import DaemonLink  # noqa: E402
+from symbio_tui.theme import DIM, GOLD  # noqa: E402
 from symbio_tui.widgets import (  # noqa: E402
     HOOK, CommandStrip, Composer, Face, History, StatusLine, Suggestions)
 
 # The tag chat_turn prints once a turn: "  [Mood: curious]".
 _MOOD_RE = re.compile(r"\[Mood:\s*([^\]]+)\]")
 
-CSS = """
-/* Claude Code's proportions: a quiet header, an elastic transcript, and a
-   composer docked to the bottom that never moves at any size. The accent is
-   one colour (#d97757) and it is used for exactly three things — the turn
-   bullet, the spinner and the box you type in — so what is accented is what
-   is live. */
-Screen { layout: vertical; background: $surface; }
-#face { height: auto; color: #d97757; text-align: left; padding: 1 0 0 2; }
-#history { height: 1fr; min-height: 3; border: none; padding: 0 2;
-           scrollbar-size-vertical: 1; }
-#commands { height: auto; color: $text-muted; padding: 0 2; }
-#composer { dock: bottom; height: auto; padding: 0 1; }
-#suggestions { max-height: 8; border: round #d97757; display: none; }
-#status { height: auto; padding: 0 1; }
+# A quiet header, an elastic transcript, and a composer docked to the bottom
+# that never moves at any size — Hermes Agent's proportions. The gold marks
+# exactly what is live (the turn bullet, the spinner, the box you type in) and
+# nothing else; the pond and ink are Symbio's own, so the window keeps its
+# identity while the shape is borrowed. See symbio_tui/theme.py.
+CSS = f"""
+Screen {{ layout: vertical; background: $surface; }}
+#face {{ height: auto; color: {GOLD}; text-align: left; padding: 1 0 0 2; }}
+#history {{ height: 1fr; min-height: 3; border: none; padding: 0 2;
+           scrollbar-size-vertical: 1; }}
+#commands {{ height: auto; color: {DIM}; padding: 0 2; }}
+#composer {{ dock: bottom; height: auto; padding: 0 1; }}
+#suggestions {{ max-height: 8; border: round {GOLD}; display: none; }}
+#status {{ height: auto; padding: 0 1; }}
 /* The box: the border belongs to the ROW so the chevron sits inside it, the
    way a prompt does. An Input that draws its own border can hold nothing but
    text. */
-#promptrow { height: auto; border: round #d97757; padding: 0 1; }
-#chevron { width: 2; height: 1; color: #d97757; }
-#prompt { border: none; background: transparent; padding: 0; height: 1;
-          width: 1fr; }
-#prompt:focus { border: none; background: transparent; }
-#hints { height: auto; color: $text-muted; padding: 0 1; }
+#promptrow {{ height: auto; border: round {GOLD}; padding: 0 1; }}
+#chevron {{ width: 2; height: 1; color: {GOLD}; }}
+#prompt {{ border: none; background: transparent; padding: 0; height: 1;
+          width: 1fr; }}
+#prompt:focus {{ border: none; background: transparent; }}
+#hints {{ height: auto; color: {DIM}; padding: 0 1; }}
 """
 
 
@@ -223,15 +227,14 @@ class SymbioTUI(App):
 
 
 def main() -> int:
-    """Inline by default, which is the Claude Code shape rather than a
+    """Inline by default, which is the Hermes inline shape rather than a
     full-screen app.
 
     An alternate-buffer TUI takes the whole terminal and with it your
     scrollback and your native selection: copying a stack trace out of it goes
-    through the app's own selection instead of the terminal's. Claude Code does
-    not do that, and neither does the chat_style path in this repo, which says
-    so in as many words. Inline mode keeps the composer live at the bottom and
-    leaves everything above it in ordinary scrollback.
+    through the app's own selection instead of the terminal's. The inline shape
+    keeps the composer live at the bottom and leaves everything above it in
+    ordinary scrollback.
 
     --fullscreen is still there for a dedicated window, where owning the screen
     is the point.

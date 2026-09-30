@@ -2186,11 +2186,11 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
                 # because the run otherwise proceeds and teaches turn markers
                 # this model will never emit.
                 if not counts["upgraded"]:
-                    _say(f"  [Train] Not one sample matched this model's chat "
-                          f"template. If you changed models, the corpus still "
-                          f"belongs to the old one — delete train/valid.jsonl "
-                          f"and let seeding rebuild it before trusting this "
-                          f"adapter.")
+                    _say("  [Train] Not one sample matched this model's chat "
+                          "template. If you changed models, the corpus still "
+                          "belongs to the old one — delete train/valid.jsonl "
+                          "and let seeding rebuild it before trusting this "
+                          "adapter.")
         except Exception as e:
             _say(f"  [Train] Prompt-masking preflight failed ({e}); "
                   f"training unmasked.")
