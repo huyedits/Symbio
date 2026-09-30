@@ -189,6 +189,10 @@ class BrowserSession:
         # means nothing is gated, which is what a bare BrowserSession in a
         # script has always been.
         self.publish_gate: Any | None = None
+        # () -> Chrome flags that open the window on Symbio's own screen, or
+        # []. Set by the app, which knows whether desk mode is on; None here
+        # is the window on the user's screen, as it has always been.
+        self.desk_window: Any | None = None
 
     @property
     def is_open(self) -> bool:
@@ -234,7 +238,30 @@ class BrowserSession:
     def _init(self, channel: str = "") -> tuple[Any, Any]:
         if self._page is not None:
             return self._browser, self._page
+        # Symbio's own screen, when it has one (symbio/desk.py): the window
+        # opens there, and whatever the user had in front keeps its focus --
+        # Chrome activates itself on launch wherever its window is.
+        desk_args = self._desk_args()
+        if not desk_args:
+            return self._launch(channel, [])
+        from symbio import desk
 
+        with desk.keep_user_front():
+            return self._launch(channel, desk_args)
+
+    def _desk_args(self) -> list[str]:
+        """Chrome flags that put the window on the desk; [] with no desk."""
+        hook = getattr(self, "desk_window", None)
+        if not callable(hook):
+            return []
+        try:
+            return [str(a) for a in (hook() or [])]
+        except Exception:
+            # The desk not starting is no reason to have no browser: the
+            # window lands on the user's screen, as it always did.
+            return []
+
+    def _launch(self, channel: str, extra_args: list[str]) -> tuple[Any, Any]:
         from playwright.sync_api import sync_playwright
 
         if self._playwright is None:
@@ -277,6 +304,8 @@ class BrowserSession:
         if self._chrome_profile:
             stealth["args"] = stealth["args"] + [
                 f"--profile-directory={self._chrome_profile}"]
+        if extra_args:
+            stealth["args"] = stealth["args"] + list(extra_args)
 
         if self._profile_dir is not None:
             # launch_persistent_context returns a CONTEXT, not a Browser. It
@@ -302,14 +331,17 @@ class BrowserSession:
             self._page = context.pages[0] if context.pages else context.new_page()
             return self._browser, self._page
 
+        # Grown only when there is a desk, so the plain call stays the call
+        # every stub in the suite was written against.
+        placed = {"args": list(extra_args)} if extra_args else {}
         try:
             self._browser = self._playwright.chromium.launch(
-                headless=False, channel=preferred
+                headless=False, channel=preferred, **placed
             )
             self._channel = preferred
         except Exception:
             # Chrome not installed or channel unknown — use bundled Chromium.
-            self._browser = self._playwright.chromium.launch(headless=False)
+            self._browser = self._playwright.chromium.launch(headless=False, **placed)
             self._channel = ""
         context = self._browser.new_context(**view)
         self._page = context.new_page()

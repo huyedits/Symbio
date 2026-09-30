@@ -350,7 +350,7 @@ _TOOLS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "description": "'browser' to look at the open browser page (default), or 'desktop' to look at the whole screen."},
+                "target": {"type": "string", "description": "'browser' to look at the open browser page (default), or 'desktop' to look at the whole screen — with desk mode on, that is your own desk, a screen the user does not see. 'user' looks at the user's own screen instead."},
                 "question": {"type": "string", "description": "Optional. What you want to know, e.g. 'is the composer empty and where is the Post button?'. Leave out for a general description."},
             },
         },
@@ -477,7 +477,7 @@ _TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "open_app",
-        "description": "Launch a macOS application by name, or bring it to the front if it is already running ('Safari', 'Notes', 'System Settings'). Everything else on the desktop acts on the frontmost window, so this is the first step of any task in an app that is not already in front.",
+        "description": "Launch a macOS application by name, or bring it to the front if it is already running ('Safari', 'Notes', 'System Settings'). Everything else on the desktop acts on the frontmost window, so this is the first step of any task in an app that is not already in front. With desk mode on it opens on your own desk instead, in the background, without taking the user's screen or keyboard.",
         "parameters": {
             "type": "object",
             "properties": {"name": {"type": "string", "description": "The application's name, e.g. 'Notes'."}},

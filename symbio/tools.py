@@ -1291,9 +1291,21 @@ def _tool_browser_close(agent: AIAgent, _args: dict[str, Any]) -> str:
 
 
 def _tool_desktop_screenshot(agent: AIAgent, _args: dict[str, Any]) -> str:
+    from symbio import computer, desk
+
+    config = getattr(agent, "config", {})
+    if desk.enabled(config):
+        # Symbio's own screen, and only it: with desk mode on the user's
+        # screen is not where this agent works, and is not captured either.
+        try:
+            shot = desk.capture(desk.ensure(config))
+        except Exception as e:
+            return f"Desk screenshot error: {e}"
+        if desk.session_locked():
+            return desk.LOCKED_NOTE
+        return _look(shot, config)
     if desktop_screenshot is None:
         return "Desktop automation is not available (pyautogui not installed)."
-    from symbio import computer
 
     try:
         shot = computer.desktop_screenshot_path()

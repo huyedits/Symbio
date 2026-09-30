@@ -177,6 +177,23 @@ def fixture_worker_catalog():
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "uses_ane: runs the real Neural Engine helper (macOS)")
+    config.addinivalue_line("markers", "uses_desk: exercises desk mode (the helper stubbed)")
+
+
+@pytest.fixture(autouse=True)
+def no_desk(request, monkeypatch):
+    """Keep Symbio's own screen out of the suite unless a test asks for it.
+
+    With desk.enabled in the developer's config.json, a test that loads the
+    real config and reaches a desktop tool or the browser would start the
+    helper and add a display to the Mac. Tests of the desk itself mark
+    themselves `uses_desk`, and stub the helper.
+    """
+    if request.node.get_closest_marker("uses_desk"):
+        return
+    from symbio import desk
+
+    monkeypatch.setattr(desk, "enabled", lambda config=None: False)
 
 
 @pytest.fixture(autouse=True)

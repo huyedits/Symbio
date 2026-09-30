@@ -726,6 +726,11 @@ class ToolsMixin:
 
         target = str(params.get("target") or "browser").strip().lower()
         question = str(params.get("question") or "").strip()
+        # The user's own screen, asked for by name. With a desk that is not
+        # what 'desktop' means any more, and looking is all it is for.
+        users_screen = target.startswith(("user", "my", "main"))
+        wants_desktop = users_screen or target.startswith(("desk", "screen"))
+        on_desk = None
 
         # The desktop's own answer, before any model is asked. macOS publishes
         # every native control's role, title and frame through the same API a
@@ -734,14 +739,25 @@ class ToolsMixin:
         # second set of weights resident next to the headmaster. Vision stays
         # for what has no tree — a canvas, a game, a screen share — which is
         # the only place it was ever the better instrument.
-        if target.startswith("desk") or target.startswith("screen"):
+        if wants_desktop:
             if not self._desktop_enabled():
                 return ("Looking at the whole desktop is disabled. Enable the "
                         "'desktop' tool group first, or use target='browser' "
                         "to look at the open page.")
-            listing = self._ax_look(question)
+            if not users_screen:
+                on_desk, why = self._desk_or_reason()
+                if why:
+                    return why
+            if on_desk is not None:
+                from symbio import desk
+
+                if desk.session_locked():
+                    return desk.LOCKED_NOTE
+                if desk.front_window(on_desk) is None:
+                    return self._empty_desk_note(on_desk)
+            listing = self._ax_look(question, on_desk=on_desk)
             if listing:
-                return self._wrap_look(listing)
+                return self._wrap_look(self._desk_header(on_desk) + listing)
             # No tree. If the reason is the Accessibility grant, say that
             # rather than falling through to a vision failure: one setting
             # away is the exact list of controls, and a model told only
@@ -766,13 +782,20 @@ class ToolsMixin:
         if vision_off and not ane_on:
             return vision_off
 
-        if target.startswith("desk") or target.startswith("screen"):
+        if wants_desktop:
             if not self._desktop_enabled():
                 return ("Looking at the whole desktop is disabled. Enable the "
                         "'desktop' tool group first, or use target='browser' "
                         "to look at the open page.")
             try:
-                shot = computer.desktop_screenshot_path()
+                if on_desk is not None:
+                    from symbio import desk
+
+                    # The desk alone: nothing of the user's screen is in it.
+                    shot = desk.capture(on_desk)
+                    self._last_desk_shot_size = _image_size(shot)
+                else:
+                    shot = computer.desktop_screenshot_path()
                 # Remember the capture size: desktop_click has to undo the
                 # Retina scale factor, and that factor is only knowable by
                 # comparing this image against the logical screen size.
@@ -784,7 +807,7 @@ class ToolsMixin:
                 # accurately ("the image is entirely black") and that reads as
                 # a fact about the screen instead of a missing permission.
                 return computer.SCREEN_PERMISSION_HINT
-            where = "the desktop"
+            where = "your desk" if on_desk is not None else "the desktop"
         else:
             if not self.config.get("browser", {}).get("enabled", False):
                 return "Browser automation is disabled, so there is no page to look at."
@@ -861,7 +884,7 @@ class ToolsMixin:
         # waste for what it SAYS. So a question about text (or no question)
         # is answered from the text, and the VLM is woken only for the rest.
         text_elements = self._ane_read(shot) if ane_on else []
-        click_tool = "desktop_click" if where == "the desktop" else "browser_click_at"
+        click_tool = "desktop_click" if where != "the browser page" else "browser_click_at"
         if text_elements and (vision_off or ane.is_reading_question(question)):
             lines = [f"Text on {where} ({shot.name}), read on the Neural Engine — "
                      f"exact words, centre coordinates first:",
@@ -890,7 +913,7 @@ class ToolsMixin:
             lines.append("\nText read on the Neural Engine (exact, centre first):")
             lines.append(ane.text_block(text_elements, limit=40))
         if elements:
-            click_tool = ("desktop_click" if where == "the desktop"
+            click_tool = ("desktop_click" if where != "the browser page"
                           else "browser_click_at")
             lines.append(f"\nClickable elements — pass these to {click_tool}:")
             lines.append(vision.format_elements(elements))
@@ -941,7 +964,7 @@ class ToolsMixin:
                 "fill a field exactly, rather than clicking and hoping):")
             for c in controls:
                 lines.append(self._control_line(
-                    c, "desktop_click" if where == "the desktop"
+                    c, "desktop_click" if where != "the browser page"
                     else "browser_click_at"))
         elif not elements and question:
             # Nothing seen AND nothing in the DOM to contradict it: now "not
@@ -1077,18 +1100,19 @@ class ToolsMixin:
     # re-reads rather than pressing whatever now sits in that slot.
     _AX_TTL = 60.0
 
-    def _ax_look(self, question: str = "", limit: int = 40) -> str:
+    def _ax_look(self, question: str = "", limit: int = 40, on_desk: Any = None) -> str:
         """The frontmost window as a numbered list of controls, or "".
 
         An empty string means "this is not answerable from the tree" — no
         Accessibility grant, or a window that draws its own interface — and
         the caller falls through to vision, which is the instrument for that.
+        With a desk, the window is the desk's front one, not the user's.
         """
         from symbio import ax
 
         if not ax.available():
             return ""
-        snap = ax.snapshot(limit=limit)
+        snap = self._ax_snapshot(limit, on_desk)
         if not snap.get("ok"):
             # A missing grant is worth saying out loud rather than silently
             # spending 10 GB of model swap on a screenshot: it is one setting
@@ -1131,9 +1155,16 @@ class ToolsMixin:
             return None, (f"{index!r} is not an element number. Call "
                           "see_screen with target='desktop' and use the "
                           "numbers it lists.")
+        on_desk, why = self._desk_or_reason()
+        if why:
+            return None, why
         snap = getattr(self, "_last_ax", None)
-        if not snap or time.time() - snap.get("taken_at", 0) > self._AX_TTL:
-            snap = ax.snapshot(limit=60)
+        # A listing of the user's own screen (see_screen target='user') is for
+        # looking at. With a desk, a number from it must never press one of
+        # their controls, so only a listing of the desk's window is reused.
+        foreign = bool(snap) and ("desk_window" in snap) != (on_desk is not None)
+        if not snap or foreign or time.time() - snap.get("taken_at", 0) > self._AX_TTL:
+            snap = self._ax_snapshot(60, on_desk)
             if not snap.get("ok"):
                 return None, str(snap.get("reason"))
             self._last_ax = snap
@@ -1152,6 +1183,9 @@ class ToolsMixin:
 
         if not ax.available() or not ax.trusted():
             return ""
+        on_desk, _why = self._desk_or_reason()
+        if on_desk is not None:
+            return self._desk_state(on_desk)
         focused = ax.focused_element()
         snap = getattr(self, "_last_ax", None)
         window = (snap or {}).get("window", "")
@@ -1163,6 +1197,15 @@ class ToolsMixin:
         if not self._desktop_enabled():
             return (f"Tool '{name}' is disabled. Enable the 'desktop' tool "
                     f"group to let me control the screen directly.")
+
+        # With a desk, every one of these acts THERE. Waiting and the OBS
+        # socket touch no screen, so they are the same either way.
+        if name not in ("desktop_wait", "obs_record"):
+            on_desk, why = self._desk_or_reason()
+            if why:
+                return why
+            if on_desk is not None:
+                return self._desk_action(on_desk, name, params)
 
         if name == "open_app":
             out = computer.open_app(str(params.get("name") or ""))
@@ -1301,6 +1344,13 @@ class ToolsMixin:
         else:
             how = "clicked"
             x, y = _ax_centre(element)
+            on_desk, _why = self._desk_or_reason()
+            if on_desk is not None:
+                # Its own report says whether the desk changed; the title and
+                # focus check below would only repeat it.
+                return (self._desk_input(on_desk, "click", x, y, clicks=clicks,
+                                         button=button)
+                        + f" That is {element['label']!r} (element {element['index']}).")
             out = computer.desktop_click(x, y, clicks=clicks, button=button)
             out = (f"{out} That is {element['label']!r} "
                    f"(element {element['index']}).")
@@ -1363,6 +1413,394 @@ class ToolsMixin:
             out += " " + computer.desktop_press("enter")
         self._last_ax = None
         return out
+
+    # ── Symbio's own screen ───────────────────────────────────────────
+    #
+    # With desk mode on (symbio/desk.py) every desktop tool acts on a display
+    # of Symbio's own, and on nothing of the user's. In order: the
+    # accessibility API, which needs no pointer and no focus; then events
+    # posted to the one app, which leave the pointer where it is; and last the
+    # user's real pointer and keyboard, borrowed only while they are away from
+    # the Mac and handed straight back. Each step is checked against a capture
+    # of the desk, so "sent" is never reported as "done" on its own.
+
+    def _desk_or_reason(self) -> tuple[Any, str]:
+        """(desk, "") in desk mode, (None, "") out of it, (None, why) if it cannot run.
+
+        On and broken does not fall back to the user's screen: the setting is
+        the user saying that screen is not where Symbio works.
+        """
+        from symbio import desk
+
+        config = self._desk_config()
+        if not desk.enabled(config):
+            return None, ""
+        try:
+            return desk.ensure(config), ""
+        except desk.DeskError as e:
+            return None, (f"{e} Symbio's desk is switched on, so the desktop tools "
+                          "do not fall back to the user's screen. `symb desk "
+                          "status` says more; `symb desk off` gives the desktop "
+                          "tools the user's screen back.")
+
+    def _desk_config(self) -> dict[str, Any]:
+        """The config, with the desk section as `symb desk on/off` last left it.
+
+        The CLI writes config.json while the daemon holds its config in
+        memory: the same split as the guardrails, re-read the same way, and
+        only where a front-end named the file (the daemon does).
+        """
+        config = getattr(self, "config", None)
+        if not isinstance(config, dict):
+            config = {}
+        path = getattr(self, "_guardrails_file", None)
+        if path is None:
+            return config
+        try:
+            stamp = Path(path).stat().st_mtime_ns
+        except OSError:
+            return config
+        if stamp != getattr(self, "_desk_stamp", None):
+            self._desk_stamp = stamp
+            try:
+                data = json.loads(Path(path).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = {}
+            section = data.get("desk") if isinstance(data, dict) else None
+            if isinstance(section, dict):
+                config["desk"] = {**(config.get("desk") or {}), **section}
+        return config
+
+    @staticmethod
+    def _desk_header(on_desk: Any) -> str:
+        if on_desk is None:
+            return ""
+        return ("[This is YOUR desk: a screen of your own that the user does not "
+                "see. Their screen, pointer and keyboard are untouched by what "
+                "you do here. Coordinates below are on the desk. To look at the "
+                "user's own screen instead, call see_screen with target='user'.]\n")
+
+    @staticmethod
+    def _empty_desk_note(on_desk: Any) -> str:
+        return (f"Your desk ({on_desk.width}x{on_desk.height}, a screen of your "
+                "own that the user does not see) is empty: nothing is open on it. "
+                "Open an app there with open_app — it launches in the background, "
+                "straight onto the desk — or use the browser, whose window opens "
+                "there too.")
+
+    def _desk_state(self, on_desk: Any) -> str:
+        """What the desk shows, as one comparable line: window, focus, pixels."""
+        from symbio import ax, desk
+
+        window = desk.front_window(on_desk)
+        if window is None:
+            return "empty|" + desk.fingerprint(on_desk)
+        focused = ax.focused_element(window.pid) or {}
+        return (f"{window.number}|{window.title}|{focused.get('role')}|"
+                f"{focused.get('label')}|{desk.fingerprint(on_desk)}")
+
+    def _ax_snapshot(self, limit: int, on_desk: Any = None) -> dict[str, Any]:
+        """The controls of the front window: the user's, or with a desk, the desk's."""
+        from symbio import ax, desk
+
+        if on_desk is None:
+            return ax.snapshot(limit=limit)
+        window = desk.front_window(on_desk)
+        if window is None:
+            return {"ok": False, "reason": self._empty_desk_note(on_desk), "elements": []}
+        ref = None
+        for candidate in ax.window_elements(window.pid):
+            same = (candidate["number"] == window.number if candidate["number"]
+                    else candidate["frame"] == window.rect)
+            if same:
+                ref = candidate["_ref"]
+                break
+        if ref is None:
+            # Never the app's other window instead: that one may be the user's.
+            return {"ok": False, "elements": [], "reason": (
+                f"{window.owner}'s window on your desk is not in the "
+                "accessibility tree yet. Wait a moment (desktop_wait) and look "
+                "again.")}
+        snap = ax.snapshot(limit=limit, pid=window.pid, window=ref,
+                           origin=(on_desk.x, on_desk.y))
+        snap["desk_window"] = window.number
+        return snap
+
+    def _desk_borrow_after(self) -> float:
+        section = (getattr(self, "config", None) or {}).get("desk") or {}
+        try:
+            return float(section.get("borrow_input_after_idle_s", 30))
+        except (TypeError, ValueError):
+            return 30.0
+
+    def _desk_global(self, on_desk: Any, coords: tuple[int, int]) -> tuple[tuple[int, int], str]:
+        """A point read off a capture of the desk, in the window server's space."""
+        size = getattr(self, "_last_desk_shot_size", None) or (0, 0)
+        scale = size[0] / on_desk.width if size and size[0] else 1.0
+        point = on_desk.to_global(*coords, scale=scale)
+        if not on_desk.contains(*point):
+            return (0, 0), (f"({coords[0]}, {coords[1]}) is off your desk, which is "
+                            f"{on_desk.width}x{on_desk.height}. Look with see_screen "
+                            "target='desktop' for points on it.")
+        return point, ""
+
+    def _desk_point(self, on_desk: Any, params: dict[str, Any], end: str = "",
+                    default_front: bool = False) -> tuple[tuple[int, int], str]:
+        """A global point from an element number or desk coordinates."""
+        from symbio import desk
+
+        prefix = f"{end}_" if end else ""
+        if params.get(f"{prefix}element") is not None:
+            element, problem = self._ax_element(params.get(f"{prefix}element"))
+            if problem:
+                return (0, 0), problem
+            return _ax_centre(element), ""
+        x, y = params.get(f"{prefix}x"), params.get(f"{prefix}y")
+        if x is None and y is None and default_front:
+            window = desk.front_window(on_desk)
+            if window is None:
+                return (0, 0), self._empty_desk_note(on_desk)
+            return window.centre, ""
+        coords = _coords({"x": x, "y": y})
+        if coords is None:
+            return (0, 0), (
+                f"Give {prefix}element, or {prefix}x and {prefix}y as numbers. "
+                "Look with see_screen target='desktop' first — it numbers "
+                "every control on your desk, and a number cannot miss.")
+        return self._desk_global(on_desk, coords)
+
+    def _desk_action(self, on_desk: Any, name: str, params: dict[str, Any]) -> str:
+        """One desktop tool, on the desk. See the block comment above."""
+        from symbio import desk
+
+        if desk.session_locked():
+            return desk.LOCKED_NOTE
+        if name == "open_app":
+            out = desk.open_app(str(params.get("name") or ""), on_desk)
+            self._last_ax = None
+            return out
+        if name == "desktop_click":
+            if params.get("element") is not None:
+                return self._click_element(params)
+            coords = _coords(params)
+            if coords is None:
+                return ("Click failed: desktop_click needs an 'element', or numeric "
+                        "'x' and 'y'. Call see_screen with target='desktop' first "
+                        "— it numbers every control on your desk.")
+            return self._desk_click_point(on_desk, coords, params)
+        if name == "desktop_type":
+            return self._desk_type(on_desk, params)
+        if name == "desktop_press":
+            key = str(params.get("key") or params.get("keys") or "")
+            if not key:
+                return "Press failed: missing 'key'."
+            return self._desk_press(on_desk, key)
+        if name == "desktop_scroll":
+            direction = str(params.get("direction") or "down").strip().lower()
+            if direction not in ("up", "down", "left", "right"):
+                return (f"Scroll failed: direction {direction!r} is not one of "
+                        "up, down, left, right.")
+            point, problem = self._desk_point(on_desk, params, "", default_front=True)
+            if problem:
+                return problem
+            amount = int(params.get("amount") or 5)
+            lines = max(1, amount) * 3
+            dy = {"down": -lines, "up": lines}.get(direction, 0)
+            dx = {"left": -lines, "right": lines}.get(direction, 0)
+            return self._desk_input(on_desk, "scroll", *point, dy=dy, dx=dx,
+                                    label=f"Scrolled {direction} by {amount}")
+        if name == "desktop_move":
+            point, problem = self._desk_point(on_desk, params, "")
+            if problem:
+                return problem
+            return self._desk_input(on_desk, "move", *point)
+        if name == "desktop_drag":
+            start, problem = self._desk_point(on_desk, params, "from")
+            if problem:
+                return problem
+            end, problem = self._desk_point(on_desk, params, "to")
+            if problem:
+                return problem
+            return self._desk_input(on_desk, "drag", *start, x2=end[0], y2=end[1])
+        return f"Tool {name!r} has no desk version."
+
+    def _desk_click_point(self, on_desk: Any, coords: tuple[int, int],
+                          params: dict[str, Any]) -> str:
+        """A click at desk coordinates: the control under it pressed, if it has one."""
+        from symbio import ax, desk
+
+        point, problem = self._desk_global(on_desk, coords)
+        if problem:
+            return problem
+        window = desk.window_at(on_desk, *point)
+        if window is None:
+            return (f"Nothing is open at ({coords[0]}, {coords[1]}) on your desk. "
+                    "Look again with see_screen target='desktop'.")
+        clicks = int(params.get("clicks") or 1)
+        button = str(params.get("button") or "left").lower()
+        if clicks == 1 and button == "left":
+            hit = ax.element_at(window.pid, *point)
+            if (hit and hit.get("role") in ax.ACTIONABLE_ROLES
+                    and hit.get("enabled", True) and ax.press(hit)):
+                self._last_ax = None
+                label = hit.get("label") or hit["role"][2:]
+                return (f"Pressed {label!r} ({hit['role'][2:]}) at ({coords[0]}, "
+                        f"{coords[1]}) on your desk, through the accessibility API.")
+        return self._desk_input(on_desk, "click", *point, clicks=clicks, button=button)
+
+    def _desk_type(self, on_desk: Any, params: dict[str, Any]) -> str:
+        """Type on the desk: into a numbered field, or at the desk app's own focus."""
+        from symbio import ax, desk
+
+        text = str(params.get("text") or "")
+        if not text:
+            return "Type failed: missing 'text'."
+        if params.get("element") is not None:
+            element, problem = self._ax_element(params.get("element"))
+            if problem:
+                return problem
+            ax.focus(element)
+            if ax.set_text(element, text):
+                landed = ax.value_of(element)
+                self._last_ax = None
+                if text.strip() and text.strip() not in landed:
+                    return (f"Set {element['label']!r} but it now reads "
+                            f"{landed[:80]!r}, not what was sent. The field "
+                            "may reformat or reject input — look again.")
+                out = (f"Typed into {element['label']!r} (element "
+                       f"{element['index']}); it now holds {landed[:80]!r}.")
+            else:
+                out = (self._desk_input(on_desk, "text", *_ax_centre(element), text=text)
+                       + f" (Into {element['label']!r}.)")
+        else:
+            window = desk.front_window(on_desk)
+            if window is None:
+                return self._empty_desk_note(on_desk)
+            focused = ax.focused_element(window.pid)
+            if focused is not None and not focused.get("takes_text"):
+                return (f"Refused to type: the focused control in {window.owner} "
+                        f"is a {focused['role'][2:]} ({focused['label']!r}), not a "
+                        "text field. Keys sent there are shortcuts, not text. Look "
+                        "with see_screen target='desktop' and type into the field "
+                        "by its number: "
+                        '{"name": "desktop_type", "arguments": '
+                        '{"element": 2, "text": "..."}}')
+            if (focused is not None and ax.insert_text(focused, text)
+                    and text.strip() in ax.value_of(focused)):
+                out = (f"Typed into {focused['label']!r} in {window.owner} on your "
+                       "desk, through the accessibility API.")
+            else:
+                out = self._desk_input(on_desk, "text", text=text)
+            self._last_ax = None
+        if params.get("press_enter"):
+            out += " " + self._desk_press(on_desk, "enter")
+        return out
+
+    def _desk_press(self, on_desk: Any, key: str) -> str:
+        """A key or chord on the desk. A cmd chord is its menu item, pressed."""
+        from symbio import ax, desk
+
+        chord = desk.parse_chord(key)
+        if chord is None:
+            return (f"Press failed: {key!r} is not a key I can send. Use names "
+                    "like 'enter', 'tab', 'esc', 'down', or chords like 'cmd+s'.")
+        keycode, flags, name, mods = chord
+        window = desk.front_window(on_desk)
+        if window is None:
+            return self._empty_desk_note(on_desk)
+        self._last_ax = None
+        if "cmd" in mods:
+            item = ax.menu_item_for_chord(window.pid, name, mods)
+            if item is not None and ax.press(item):
+                return (f"Pressed {key} in {window.owner} on your desk: its menu "
+                        f"item {item['label']!r}, through the accessibility API.")
+        return self._desk_input(on_desk, "key", keycode=keycode, flags=flags,
+                                label=f"Pressed {key}")
+
+    def _desk_input(self, on_desk: Any, kind: str, x: float | None = None,
+                    y: float | None = None, **kw: Any) -> str:
+        """Real input for the desk, checked against a capture of it.
+
+        Posted to the app first: the pointer stays where the user left it. An
+        app that ignored that -- most do for keys, since keystrokes go to the
+        key window and a background app has none -- gets the user's own
+        pointer and keyboard for the one action, and only while they are away.
+        """
+        from symbio import desk
+
+        if x is not None:
+            window = desk.window_at(on_desk, x, y)
+            if window is None:
+                lx, ly = on_desk.to_local(x, y)
+                return (f"Nothing is open at ({lx}, {ly}) on your desk. Look again "
+                        "with see_screen target='desktop'.")
+        else:
+            window = desk.front_window(on_desk)
+            if window is None:
+                return self._empty_desk_note(on_desk)
+        what = kw.pop("label", "") or self._desk_label(on_desk, kind, x, y, kw)
+
+        def send(pid: int | None, number: int) -> None:
+            if kind == "click":
+                desk.click(pid, x, y, kw.get("button", "left"), kw.get("clicks", 1), number)
+            elif kind == "move":
+                desk.move(pid, x, y, number)
+            elif kind == "drag":
+                desk.drag(pid, x, y, kw["x2"], kw["y2"], window=number)
+            elif kind == "scroll":
+                desk.scroll(pid, x, y, kw.get("dy", 0), kw.get("dx", 0))
+            elif kind == "key":
+                desk.key(pid, kw["keycode"], kw.get("flags", 0))
+            elif kind == "text":
+                desk.type_text(pid, kw["text"])
+
+        before = desk.fingerprint(on_desk)
+        send(window.pid, window.number)
+        time.sleep(0.3)
+        after = desk.fingerprint(on_desk)
+        self._last_ax = None
+        if before and after and before != after:
+            return (f"{what} — sent to {window.owner} on your desk directly, and "
+                    "the desk changed. The user's pointer and keyboard were not used.")
+        if kind == "move":
+            return (f"{what} — sent to {window.owner} directly. Something that "
+                    "only opens under the real pointer may not show; look to check.")
+        try:
+            with desk.borrowed(window.pid, self._desk_borrow_after(), window.number):
+                if kind in ("key", "text") and not desk.focus_on_desk(on_desk, window.pid):
+                    raise desk.NotNow(
+                        f"{window.owner}'s keyboard focus is in a window that is "
+                        "not on the desk — the user's — so no keys were sent.")
+                send(None, 0)
+        except desk.NotNow as e:
+            return (f"{what} was sent to {window.owner} directly, but nothing on "
+                    f"the desk changed, so it most likely did not land. {e}")
+        time.sleep(0.3)
+        final = desk.fingerprint(on_desk)
+        tail = ("" if (before and final and final != before) else
+                " Nothing on the desk changed even so — look again before "
+                "reporting it as done.")
+        return (f"{what} in {window.owner} with the real pointer and keyboard, "
+                "borrowed while the user was away and handed straight back." + tail)
+
+    @staticmethod
+    def _desk_label(on_desk: Any, kind: str, x: float | None, y: float | None,
+                    kw: dict[str, Any]) -> str:
+        if kind == "text":
+            return f"Typed {str(kw.get('text'))[:80]!r}"
+        lx, ly = on_desk.to_local(x or 0, y or 0)
+        if kind == "click":
+            clicks = int(kw.get("clicks", 1))
+            button = kw.get("button", "left")
+            return (f"Clicked ({button}, x{clicks}) at ({lx}, {ly}) on your desk"
+                    if clicks != 1 or button != "left" else
+                    f"Clicked at ({lx}, {ly}) on your desk")
+        if kind == "move":
+            return f"Moved to ({lx}, {ly}) on your desk"
+        if kind == "drag":
+            ex, ey = on_desk.to_local(kw["x2"], kw["y2"])
+            return f"Dragged from ({lx}, {ly}) to ({ex}, {ey}) on your desk"
+        return kind.capitalize()
 
     def confirm_policy(self) -> str:
         """"risk" when the person is at this machine, "name" when they are not.

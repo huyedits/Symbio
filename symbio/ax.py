@@ -41,6 +41,7 @@ _CG_PATH = ("/System/Library/Frameworks/CoreGraphics.framework"
             "/Versions/A/CoreGraphics")
 
 _LOAD_ERROR = ""
+_get_window_number = None
 try:
     _ax = ctypes.cdll.LoadLibrary(_APPSERV_PATH)
     _cf = ctypes.cdll.LoadLibrary(_CF_PATH)
@@ -110,6 +111,21 @@ if _ax is not None:
     _cf.CFDictionaryGetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     _cg.CGWindowListCopyWindowInfo.restype = ctypes.c_void_p
     _cg.CGWindowListCopyWindowInfo.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+
+    _ax.AXValueCreate.restype = ctypes.c_void_p
+    _ax.AXValueCreate.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    # Floats, not doubles: this one takes its point as two C floats.
+    _ax.AXUIElementCopyElementAtPosition.restype = ctypes.c_int
+    _ax.AXUIElementCopyElementAtPosition.argtypes = [
+        ctypes.c_void_p, ctypes.c_float, ctypes.c_float, ctypes.POINTER(ctypes.c_void_p)]
+    # Private, and what every macOS window manager uses to tie an AX window to
+    # the window server's window number. Absent, windows are matched by frame.
+    try:
+        _get_window_number = _ax._AXUIElementGetWindow
+        _get_window_number.restype = ctypes.c_int
+        _get_window_number.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    except AttributeError:  # pragma: no cover - removed in some future macOS
+        _get_window_number = None
 
 _UTF8 = 0x08000100
 _AX_ERROR_SUCCESS = 0
@@ -326,7 +342,9 @@ def _app_name(app) -> str:
     return "?"
 
 
-def snapshot(limit: int = 40, include_text: bool = False) -> dict[str, Any]:
+def snapshot(limit: int = 40, include_text: bool = False, pid: int | None = None,
+             window: Any = None,
+             origin: tuple[int, int] | None = None) -> dict[str, Any]:
     """The frontmost window's controls, as a list the model can act on.
 
     Returns a dict rather than a string so the caller can both render it and
@@ -334,17 +352,24 @@ def snapshot(limit: int = 40, include_text: bool = False) -> dict[str, Any]:
     `elements`, and `click`/`set_text` below take the same number. The handles
     stay valid while the app's tree does, which is why the snapshot is taken
     again after anything that changes the screen.
+
+    `pid` and `window` aim it at one app's window instead of whatever is in
+    front -- the desk's window (symbio/desk.py), which is never in front of
+    anything the user can see. `origin` is where that screen's top-left sits:
+    the listing is rendered relative to it, so its coordinates are the ones a
+    capture of that screen shows. Frames stay global for clicking.
     """
     if _ax is None:
         return {"ok": False, "reason": f"Not available here: {_LOAD_ERROR}",
                 "elements": []}
     if not trusted():
         return {"ok": False, "reason": PERMISSION_HINT, "elements": []}
-    app = _focused_app()
+    app = app_element(pid) if pid else _focused_app()
     if not app:
         return {"ok": False, "reason": PERMISSION_HINT, "elements": []}
 
-    window = _attr(app, "AXFocusedWindow") or _attr(app, "AXMainWindow")
+    if window is None:
+        window = _attr(app, "AXFocusedWindow") or _attr(app, "AXMainWindow")
     roots = [window] if window else (_attr(app, "AXWindows") or [])
     title = _attr(window, "AXTitle") if window else None
 
@@ -385,7 +410,8 @@ def snapshot(limit: int = 40, include_text: bool = False) -> dict[str, Any]:
 
     return {"ok": True, "app": _app_name(app), "window": title or "",
             "elements": elements, "truncated": truncated,
-            "taken_at": time.time()}
+            "taken_at": time.time(), "pid": pid or 0,
+            "origin": tuple(origin or (0, 0))}
 
 
 def render(snap: dict[str, Any], limit: int = 40) -> str:
@@ -393,6 +419,7 @@ def render(snap: dict[str, Any], limit: int = 40) -> str:
     if not snap.get("ok"):
         return str(snap.get("reason") or "The accessibility tree is unavailable.")
     elements = snap.get("elements", [])[:limit]
+    ox, oy = snap.get("origin") or (0, 0)
     head = f"{snap.get('app', '?')}"
     if snap.get("window"):
         head += f" — window \"{snap['window']}\""
@@ -409,7 +436,7 @@ def render(snap: dict[str, Any], limit: int = 40) -> str:
             flags += " [disabled]"
         lines.append(
             f"  {element['index']:>2} {element['role'][2:]:<14} "
-            f"{element['label'][:60]!r} at ({element['x']},{element['y']}) "
+            f"{element['label'][:60]!r} at ({element['x'] - ox},{element['y'] - oy}) "
             f"{element['w']}x{element['h']}{flags}")
     if snap.get("truncated"):
         lines.append("  … more controls exist than were listed; ask for a "
@@ -484,15 +511,17 @@ def value_of(element: dict[str, Any]) -> str:
     return value if isinstance(value, str) else ""
 
 
-def focused_element() -> dict[str, Any] | None:
+def focused_element(pid: int | None = None) -> dict[str, Any] | None:
     """The control that currently has keyboard focus, or None.
 
     This is the question to ask BEFORE typing: keys sent at a window with no
-    text field focused are not discarded, they are shortcuts.
+    text field focused are not discarded, they are shortcuts. With `pid`, the
+    control that app would type into -- every app keeps its own focus, in
+    front or not, which is what lets the desk's app be typed into unseen.
     """
     if _ax is None or not trusted():
         return None
-    app = _focused_app()
+    app = app_element(pid) if pid else _focused_app()
     if not app:
         return None
     ref = _attr(app, "AXFocusedUIElement")
@@ -504,6 +533,231 @@ def focused_element() -> dict[str, Any] | None:
     return {"role": role, "label": _label(ref, role), "x": frame[0],
             "y": frame[1], "w": frame[2], "h": frame[3],
             "takes_text": role in _TEXT_ROLES, "_ref": ref}
+
+
+# ---------- one app, not the front one ----------
+#
+# What symbio/desk.py needs to work an app nobody is looking at: its windows,
+# moving them, pressing its menu items and finding what sits under a point.
+# None of it needs the app in front, the pointer, or the keyboard.
+
+_AX_VALUE_CGPOINT_TYPE = 1
+_AX_VALUE_CGSIZE_TYPE = 2
+
+
+def app_element(pid: int | None):
+    """The accessibility element for one running app, or None."""
+    if _ax is None or not pid:
+        return None
+    return _ax.AXUIElementCreateApplication(int(pid))
+
+
+def frame_of(ref) -> tuple[int, int, int, int] | None:
+    """(x, y, width, height) of an element, in global points."""
+    return _frame(ref) if ref else None
+
+
+def window_number(ref) -> int:
+    """The window server's number for an AX window, or 0 if it cannot say."""
+    if not ref or _get_window_number is None:
+        return 0
+    out = ctypes.c_uint32()
+    if _get_window_number(ref, ctypes.byref(out)) != _AX_ERROR_SUCCESS:
+        return 0
+    return int(out.value)
+
+
+def window_elements(pid: int) -> list[dict[str, Any]]:
+    """The app's windows: element, window number, title, subrole and frame.
+
+    An element is a fresh object on every call, so two calls cannot be
+    compared by it; the window number is the identity that holds.
+    """
+    app = app_element(pid)
+    if not app:
+        return []
+    out = []
+    for ref in _attr(app, "AXWindows") or []:
+        if _attr(ref, "AXRole") != "AXWindow":
+            continue
+        out.append({"_ref": ref, "number": window_number(ref),
+                    "title": _attr(ref, "AXTitle") or "",
+                    "subrole": _attr(ref, "AXSubrole") or "",
+                    "frame": _frame(ref)})
+    return out
+
+
+def _set_value(ref, attribute: str, value) -> bool:
+    key = _cfstr(attribute)
+    try:
+        return _ax.AXUIElementSetAttributeValue(ref, key, value) == _AX_ERROR_SUCCESS
+    finally:
+        _cf.CFRelease(key)
+
+
+def set_position(ref, x: float, y: float) -> bool:
+    """Move a window (or anything with a settable AXPosition) to a global point."""
+    if not ref or _ax is None:
+        return False
+    point = _CGPoint(float(x), float(y))
+    value = _ax.AXValueCreate(_AX_VALUE_CGPOINT_TYPE, ctypes.byref(point))
+    if not value:
+        return False
+    try:
+        return _set_value(ref, "AXPosition", value)
+    finally:
+        _cf.CFRelease(value)
+
+
+def set_size(ref, width: float, height: float) -> bool:
+    if not ref or _ax is None:
+        return False
+    size = _CGSize(float(width), float(height))
+    value = _ax.AXValueCreate(_AX_VALUE_CGSIZE_TYPE, ctypes.byref(size))
+    if not value:
+        return False
+    try:
+        return _set_value(ref, "AXSize", value)
+    finally:
+        _cf.CFRelease(value)
+
+
+def set_frontmost(pid: int) -> bool:
+    """Make an app the active one: its menu bar, its keyboard focus."""
+    app = app_element(pid)
+    if not app:
+        return False
+    true_ref = ctypes.c_void_p.in_dll(_cf, "kCFBooleanTrue")
+    return _set_value(app, "AXFrontmost", true_ref)
+
+
+def raise_window(pid: int, number: int) -> bool:
+    """Bring one of an app's windows to the top of the app and make it main.
+
+    What makes it the key window when the app is next in front, so real
+    keystrokes go to it and not to the app's other window.
+    """
+    for window in window_elements(pid):
+        if number and window["number"] == number:
+            raised = perform({"_ref": window["_ref"]}, "AXRaise")
+            true_ref = ctypes.c_void_p.in_dll(_cf, "kCFBooleanTrue")
+            _set_value(window["_ref"], "AXMain", true_ref)
+            return raised
+    return False
+
+
+def actions_of(element: dict[str, Any]) -> list[str]:
+    ref = element.get("_ref")
+    return _actions(ref) if ref else []
+
+
+def perform(element: dict[str, Any], action: str) -> bool:
+    """Run one named accessibility action on a control (AXConfirm, AXCancel, ...)."""
+    ref = element.get("_ref")
+    if not ref or action not in _actions(ref):
+        return False
+    key = _cfstr(action)
+    try:
+        return _ax.AXUIElementPerformAction(ref, key) == _AX_ERROR_SUCCESS
+    finally:
+        _cf.CFRelease(key)
+
+
+def insert_text(element: dict[str, Any], text: str) -> bool:
+    """Type at the field's caret, the way keys would, without sending any.
+
+    Setting AXSelectedText replaces the selection -- which, with nothing
+    selected, is inserting at the caret. set_text replaces the whole value.
+    """
+    ref = element.get("_ref")
+    if not ref:
+        return False
+    value = _cfstr(text)
+    try:
+        return _set_value(ref, "AXSelectedText", value)
+    finally:
+        _cf.CFRelease(value)
+
+
+def element_at(pid: int, x: float, y: float) -> dict[str, Any] | None:
+    """The control of app `pid` at a global point, as a listing entry, or None."""
+    app = app_element(pid)
+    if not app:
+        return None
+    out = ctypes.c_void_p()
+    if _ax.AXUIElementCopyElementAtPosition(app, float(x), float(y),
+                                            ctypes.byref(out)) != _AX_ERROR_SUCCESS:
+        return None
+    if not out.value:
+        return None
+    ref = out.value
+    role = _attr(ref, "AXRole")
+    role = role if isinstance(role, str) else ""
+    frame = _frame(ref) or (int(x), int(y), 1, 1)
+    return {"index": 0, "role": role, "label": _label(ref, role), "x": frame[0],
+            "y": frame[1], "w": frame[2], "h": frame[3],
+            "enabled": _attr(ref, "AXEnabled") is not False, "_ref": ref}
+
+
+# AXMenuItemCmdModifiers: bit 0 shift, bit 1 option, bit 2 control, bit 3
+# means "no command key". So plain cmd+S is 0, cmd+shift+S is 1.
+_MENU_MODIFIER_BITS = {"shift": 1, "option": 2, "ctrl": 4}
+_MENU_NODE_CAP = 1200
+
+
+def _menu_items(pid: int):
+    """Every menu item of the app's menu bar, depth first, capped."""
+    app = app_element(pid)
+    bar = _attr(app, "AXMenuBar") if app else None
+    if not bar:
+        return
+    stack = list(reversed(_attr(bar, "AXChildren") or []))
+    seen = 0
+    while stack and seen < _MENU_NODE_CAP:
+        node = stack.pop()
+        seen += 1
+        role = _attr(node, "AXRole")
+        if role == "AXMenuItem":
+            yield node
+        children = _attr(node, "AXChildren")
+        if isinstance(children, list):
+            stack.extend(reversed(children))
+
+
+def menu_item_for_chord(pid: int, key: str, modifiers: list[str]) -> dict[str, Any] | None:
+    """The menu item a keyboard shortcut would trigger, e.g. File > Save for cmd+s.
+
+    Pressing it is the shortcut without a keystroke: it reaches an app that
+    is not in front and has no keyboard focus to give.
+    """
+    if "cmd" not in modifiers or len(key) != 1:
+        return None
+    wanted = 0
+    for mod in modifiers:
+        wanted |= _MENU_MODIFIER_BITS.get(mod, 0)
+    for item in _menu_items(pid):
+        char = _attr(item, "AXMenuItemCmdChar")
+        if not isinstance(char, str) or char.strip().lower() != key.lower():
+            continue
+        mods = _attr(item, "AXMenuItemCmdModifiers")
+        mods = mods if isinstance(mods, int) else 0
+        if mods == wanted and _attr(item, "AXEnabled") is not False:
+            return {"index": 0, "role": "AXMenuItem",
+                    "label": _attr(item, "AXTitle") or char, "_ref": item,
+                    "x": 0, "y": 0, "w": 0, "h": 0}
+    return None
+
+
+def press_menu_item(pid: int, title) -> bool:
+    """Press the first enabled menu item whose title matches (a regex or a string)."""
+    for item in _menu_items(pid):
+        text = _attr(item, "AXTitle")
+        if not isinstance(text, str) or not text:
+            continue
+        hit = title.search(text) if hasattr(title, "search") else text == title
+        if hit and _attr(item, "AXEnabled") is not False:
+            return press({"_ref": item})
+    return False
 
 
 def request_trust() -> bool:

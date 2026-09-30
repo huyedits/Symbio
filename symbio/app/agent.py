@@ -250,6 +250,9 @@ class AIAgent:
         self.planner = TrainingPlanner(config)
         self._code_calls_this_turn = 0
         self._browser_session = BrowserSession() if BrowserSession else None
+        from symbio import desk as _desk
+
+        _desk.attach(self._browser_session, self.config)
 
     def _openai_tool_schemas(self) -> list[dict[str, Any]]:
         return openai_tool_schemas(self.tools)
