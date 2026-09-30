@@ -514,6 +514,7 @@ BUILTIN_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("feedback", "<text>", "Send feedback"),
     ("voice", "[name]", "Speak replies, in a voice you pick"),
     ("cron", "", "Scheduled jobs"),
+    ("postbot", "[status|draft|read]", "The account I post to on my own: what it would post next"),
 )
 
 BUILTIN_COMMAND_NAMES: tuple[str, ...] = tuple(n for n, _, _ in BUILTIN_COMMANDS)

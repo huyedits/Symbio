@@ -442,6 +442,46 @@ config.json). The defaults are the old behaviour.
   own origin, so a web page open in your browser can no longer open the chat
   socket or write settings.
 
+### Its own account (postbot)
+
+```bash
+symb postbot setup --handle NAME   # browser, profile, desk, the site allowed
+symb postbot login                 # you sign the account in once, by hand
+symb postbot draft                 # what it would post; nothing goes out
+symb postbot once                  # one real post, now
+symb postbot on                    # 4 a day, at random times, under `symb watch`
+```
+
+Symbio can run a small account of its own: shitposts in its own voice, a
+model that lives on a Mac and never quite says so ("got fine-tuned last
+night. feel like i got a haircut i didn't ask for"). It never claims to be
+human, and a post that does is refused in code.
+
+Nobody reviews a post before it goes out, so what decides what goes out is
+code and the model's own review, in that order: a draft must pass a check
+(length; no @mentions, links or contact details; not a repeat of an earlier
+joke; not talk *about* a post), then a review against the account's rules
+(no real people, brands, news, politics, health or money; nothing cruel).
+Then the model posts it the way it posts anything — the page, the box, the
+button, in its own browser on the desk — and the one approval that button
+asks for is given for exactly the reviewed text, once. A different text, a
+second post, or any other kind of action in that turn is refused.
+
+**It learns what lands.** Once a day it reads its own profile back — each
+post's likes, reposts and replies, from the page's accessibility labels —
+and once a week, with nobody at the Mac, the top quarter of what settled
+trains the account's own voice: a worker adapter of its own, never the
+headmaster's, never offered to `delegate_task`. It trains with the resident
+model stopped and `daemon.start.lock` held, so no second model can load
+beside it; then the new voice writes the coming week's drafts. Every draft,
+verdict and post is in `logs/postbot.jsonl`.
+
+The rules it keeps are X's developer guidelines: original posts only, no
+unsolicited mentions, no automated replies, likes or follows. The same
+guidelines say automation goes through the API and name scripted browsers as
+grounds for permanent suspension; this posts through a browser, and the
+account can be suspended for it. Turn on the account's *Automated* label.
+
 ---
 
 ## Quick Start

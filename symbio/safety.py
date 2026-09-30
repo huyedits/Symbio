@@ -78,6 +78,9 @@ SENSITIVE_PREFIXES: tuple[str, ...] = (
     # leaves theirs alone; turning it off, or borrowing their pointer sooner,
     # is theirs to change and not the model's.
     "desk.",
+    # Posting on its own, as the user, to the public: switching it on, or
+    # changing where and as whom, is the user's call and never the model's.
+    "postbot.",
     "telegram.",
     "remote.hosts",
     "sandbox.blocked",

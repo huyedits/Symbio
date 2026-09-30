@@ -445,6 +445,38 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Open the automated browser's window on the desk too.
         "browser": True,
     },
+    # An account Symbio runs on its own (symbio/app/postbot.py, `symb
+    # postbot`): on a schedule it writes a post in the account's voice,
+    # checks it, and posts it through its own browser on the desk -- in the
+    # page, the way a person would; no site-specific code -- then reads back
+    # how its posts land and, weekly, fine-tunes that voice on the ones that
+    # did. Off until `symb postbot setup` and `symb postbot on`; it runs
+    # under `symb watch`. Operator-owned: the model cannot change postbot.*.
+    "postbot": {
+        "enabled": False,
+        "site": "https://x.com",
+        # The account's handle, to read its own posts back from its profile.
+        "handle": "",
+        # Who the account is. Empty uses postbot.DEFAULT_PERSONA.
+        "persona": "",
+        "posts_per_day": 4,
+        # Local hours a post may go out in, [first, last].
+        "active_hours": [10, 23],
+        "min_gap_minutes": 90,
+        "max_chars": 260,
+        # When the day's engagement is read back from the profile.
+        "read_hour": 3,
+        # Weekly fine-tune of the account's own voice on what landed. It runs
+        # with the resident model stopped and nothing else training, so it
+        # waits for the Mac to be idle for learn_idle_minutes.
+        "learn": True,
+        "learn_weekday": 6,
+        "learn_hour": 4,
+        "learn_idle_minutes": 30,
+        # No training on fewer earned posts than this: a voice fine-tuned on a
+        # dozen lines learns to say those lines again.
+        "learn_min_posts": 20,
+    },
     "web": {
         "search_results": 5,
         "http_timeout": 15,

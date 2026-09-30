@@ -143,6 +143,21 @@ def _build_parser() -> argparse.ArgumentParser:
     desk_parser.add_argument("--no-open", action="store_true",
                              help="peek: print the picture's path, do not open it")
 
+    postbot_parser = sub.add_parser(
+        "postbot", help="The account Symbio posts to on its own, and learns what lands")
+    postbot_parser.add_argument(
+        "postbot_command", nargs="?", default="status",
+        choices=["status", "setup", "login", "draft", "once", "on", "off", "learn"],
+        help=("status (default); setup prepares the browser, profile and desk; "
+              "login opens the account's site so you sign in once; draft shows "
+              "what it would post; once posts one now; on/off the schedule "
+              "under `symb watch`; learn trains its voice now"))
+    postbot_parser.add_argument("--handle", help="setup: the account's handle")
+    postbot_parser.add_argument("--site", help="setup: where it lives (default https://x.com)")
+    postbot_parser.add_argument("--count", type=int, default=3,
+                                help="draft: how many to write (none are posted)")
+    postbot_parser.add_argument("--in-window", action="store_true", help=argparse.SUPPRESS)
+
     train_parser = sub.add_parser("train", help="Run LoRA training")
     train_parser.add_argument(
         "skill",
@@ -1279,6 +1294,123 @@ def _cmd_desk(config: dict[str, Any], args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_postbot(config: dict[str, Any], args: argparse.Namespace) -> int:
+    """`symb postbot`: the account Symbio runs on its own (symbio/app/postbot.py)."""
+    from symbio.app import postbot, supervisor
+
+    action = getattr(args, "postbot_command", None) or "status"
+    cfg = postbot.settings(config)
+    if action == "status":
+        print(postbot.status(config))
+        beat = supervisor.read_heartbeat()
+        if cfg.get("enabled") and not beat.get("checked_at"):
+            print("  Nothing posts on its own until `symb watch` is running.")
+        return 0
+    if action == "setup":
+        site = args.site or cfg["site"]
+        site_host = postbot.host(site)
+        if args.site:
+            print(set_config_value(config, "postbot.site", site, allow_sandbox=True))
+        if args.handle:
+            print(set_config_value(config, "postbot.handle", args.handle.lstrip("@"),
+                                   allow_sandbox=True))
+        domains = list((config.get("browser") or {}).get("allowed_domains") or [])
+        if site_host not in domains:
+            domains.append(site_host)
+            print(set_config_value(config, "browser.allowed_domains", json.dumps(domains),
+                                   allow_sandbox=True))
+        groups = list((config.get("tools") or {}).get("enabled_groups") or [])
+        if "browser" not in groups:
+            print(set_config_value(config, "tools.enabled_groups",
+                                   json.dumps(groups + ["browser"]), allow_sandbox=True))
+        for key in ("browser.enabled", "browser.persistent_profile", "desk.enabled"):
+            print(set_config_value(config, key, "true", allow_sandbox=True))
+        print(f"\nNext:\n  1. Make the account on {site_host} yourself, and turn on its "
+              "'Automated' label in the account settings (X's rules want it; the posts "
+              "can still play coy).\n"
+              "  2. symb postbot login   — sign in to it once, by hand.\n"
+              "  3. symb postbot draft   — see what it would say. Nothing is posted.\n"
+              "  4. symb postbot once    — one real post, now.\n"
+              "  5. symb postbot on, then keep `symb watch` running.\n"
+              "It posts through a browser, not X's API: X's developer guidelines name "
+              "scripted browsers as grounds for permanent suspension.")
+        return 0
+    if action == "login":
+        from pathlib import Path
+
+        from symbio.computer import BrowserSession
+
+        profile = (config.get("browser") or {}).get("profile_dir") or constants.BROWSER_PROFILE_DIR
+        # On YOUR screen, not the desk: you are the one signing in.
+        session = BrowserSession(confirm_fn=lambda prompt: True,
+                                 profile_dir=Path(str(profile)).expanduser())
+        opened = session.open(cfg["site"])
+        print(opened)
+        if not session.is_open:
+            print("If the profile is in use, stop the resident model first "
+                  "(`symb daemon stop`) and try again.")
+            return 1
+        try:
+            input("Sign in to the account in that window, then press Enter here... ")
+        except (EOFError, KeyboardInterrupt):
+            pass
+        print(session.close())
+        print("Signed-in cookies stay in Symbio's browser profile; the desk uses the same one.")
+        return 0
+    if action in ("draft", "once"):
+        if not supervisor.daemon_ready():
+            print("  This needs the resident model: `symb daemon start`, then try again.")
+            return 1
+        if action == "once":
+            result = postbot.run_once(config, supervisor.ask_daemon)
+            print(("  Posted: " if result.get("posted") else "  Not posted: ")
+                  + str(result.get("text") or result.get("reason") or ""))
+            if not result.get("posted") and result.get("reason"):
+                print(f"  Why: {result['reason']}")
+            return 0 if result.get("posted") else 1
+        recent = [p.get("text", "") for p in postbot.history()[-200:]]
+        for _ in range(max(1, int(args.count or 1))):
+            reply = supervisor.ask_daemon("/postbot draft", collect_output=True, timeout=300)
+            text = postbot.clean(str((postbot.read_mark(reply, "draft") or {}).get("text") or ""))
+            problems = postbot.check(text, recent, int(cfg["max_chars"]))
+            if not problems:
+                verdict = postbot.read_mark(supervisor.ask_daemon(
+                    "/postbot review " + json.dumps({"text": text}, ensure_ascii=False),
+                    collect_output=True, timeout=300), "review") or {}
+                if not verdict.get("ok"):
+                    problems = [str(verdict.get("reason") or "no verdict")]
+            print(f"  {'ok  ' if not problems else 'NO  '} {text!r}"
+                  + (f"  — {'; '.join(problems)}" if problems else ""))
+        print("  Nothing was posted.")
+        return 0
+    if action in ("on", "off"):
+        print(set_config_value(config, "postbot.enabled",
+                               "true" if action == "on" else "false", allow_sandbox=True))
+        if action == "on":
+            print(f"  {cfg['posts_per_day']} posts a day between {cfg['active_hours'][0]}:00 "
+                  f"and {cfg['active_hours'][1]}:59, while `symb watch` runs. "
+                  "`symb postbot off` stops it.")
+        return 0
+    if action == "learn":
+        if getattr(args, "in_window", False):
+            result = postbot.learn_in_process(config)
+            print(result.get("message"))
+            return 0 if result.get("ok") else 1
+        try:
+            sure = input("  This stops the resident model while the voice trains "
+                         "(minutes to an hour). Go ahead? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            sure = ""
+        if sure not in ("y", "yes"):
+            print("  Left alone.")
+            return 1
+        result = postbot.run_learn_window(config)
+        print(result.get("message"))
+        return 0 if result.get("ok") else 1
+    print("Usage: symb postbot [status | setup | login | draft | once | on | off | learn]")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1535,6 +1667,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if command == "desk":
         return _cmd_desk(config, args)
+
+    if command == "postbot":
+        return _cmd_postbot(config, args)
 
     if command == "pet":
         from symbio.app import pet

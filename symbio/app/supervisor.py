@@ -74,13 +74,15 @@ def start_daemon() -> bool:
         return False
 
 
-def ask_daemon(text: str, approve: bool = False, timeout: float = 600.0,
+def ask_daemon(text: str, approve: Any = False, timeout: float = 600.0,
                collect_output: bool = False) -> str:
     """Put one turn to the resident model and return what it said.
 
     Speaks the daemon's own line protocol -- the same one `symb chat` and the
     desktop window use. `approve` answers the confirmation gate; it is False
-    here because nobody is reading the prompt.
+    here because nobody is reading the prompt. It may instead be a function of
+    the confirm frame -- the guardrail card rides on it -- for a caller that
+    knows exactly which one question it means to say yes to (postbot.Approver).
     """
     try:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -123,8 +125,15 @@ def ask_daemon(text: str, approve: bool = False, timeout: float = 600.0,
                 # from memory" needs them; a cron job does not.
                 reply.append("\n" + message.get("text", ""))
             elif kind == "confirm":
-                denied += 0 if approve else 1
-                send({"type": "confirm", "answer": bool(approve)})
+                if callable(approve):
+                    try:
+                        answer = bool(approve(message))
+                    except Exception:
+                        answer = False
+                else:
+                    answer = bool(approve)
+                denied += 0 if answer else 1
+                send({"type": "confirm", "answer": answer})
             elif kind == "done":
                 break
     except (OSError, socket.timeout):
@@ -190,17 +199,26 @@ def tick(config: dict[str, Any], state: dict[str, Any],
         state["last_error"] = f"cron check failed: {e}"
         return state
 
-    if not fired:
-        return state
+    if fired:
+        state["last_error"] = ""
+        ran = list(state.get("ran", []))
+        for job in fired:
+            answer = ask(job, approve=approve)
+            ran.append({"at": _now(), "job": job.splitlines()[0][:160],
+                        "answer": answer[:400]})
+        state["ran"] = ran[-20:]
+        state["jobs_run"] = int(state.get("jobs_run", 0)) + len(fired)
 
-    state["last_error"] = ""
-    ran = list(state.get("ran", []))
-    for job in fired:
-        answer = ask(job, approve=approve)
-        ran.append({"at": _now(), "job": job.splitlines()[0][:160],
-                    "answer": answer[:400]})
-    state["ran"] = ran[-20:]
-    state["jobs_run"] = int(state.get("jobs_run", 0)) + len(fired)
+    # The account Symbio posts to on its own. Its one approval per post is
+    # given by its own Approver, never by cron.unattended_approve.
+    try:
+        from symbio.app import postbot
+
+        summary = postbot.tick(config, ask, now=now)
+        if summary:
+            state["postbot"] = {"at": _now(), **{k: str(v)[:300] for k, v in summary.items()}}
+    except Exception as e:
+        state["last_error"] = f"postbot failed: {e}"
     return state
 
 

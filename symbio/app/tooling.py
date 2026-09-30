@@ -1550,7 +1550,9 @@ def refresh_delegate_roles() -> list[str]:
         return []
     for entry in catalog.values():
         role = entry.get("role")
-        if not role or role in roles:
+        # A worker that answers one fixed request (the postbot's voice) is
+        # not a place to send tasks, so it is never offered as one.
+        if not role or role in roles or entry.get("delegatable") is False:
             continue
         roles.append(role)
         label = entry.get("skill_name") or entry.get("description") or role

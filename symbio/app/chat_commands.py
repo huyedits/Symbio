@@ -1297,6 +1297,12 @@ class CommandsMixin:
         elif cmd.startswith("/constitution"):
             self._constitution_command(user_input[len("/constitution"):])
 
+        elif cmd == "/postbot" or cmd.startswith("/postbot "):
+            # The original text: a draft under review keeps its capitals.
+            from symbio.app import postbot
+
+            postbot.command(self, user_input[len("/postbot"):])
+
         else:
             # Not a built-in: it may be one of theirs. The ORIGINAL text is
             # what carries the arguments — `cmd` is lowercased for matching,

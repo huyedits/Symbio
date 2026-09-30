@@ -684,8 +684,10 @@ class WorkerPool:
         # deleted since the model last saw the list — unloaded the 8B, found
         # nothing to run, and reloaded it. A full model reload as the price of
         # a misspelling, for a turn that returns an error string either way.
-        if catalog_entry_for_role(role) is None:
-            known = sorted({e.get("role") for e in load_catalog().values() if e.get("role")})
+        entry = catalog_entry_for_role(role)
+        if entry is None or entry.get("delegatable") is False:
+            known = sorted({e.get("role") for e in load_catalog().values()
+                            if e.get("role") and e.get("delegatable") is not False})
             return f"No worker configured for role '{role}'. Known roles: {', '.join(known) or 'none'}."
 
         # A worker receives `task` and nothing else — no page, no history, no
