@@ -517,7 +517,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         while True:
             time.sleep(int(self.config["agent"]["cron_poll_seconds"]))
             try:
-                fired = cron.check_due_jobs(self.config)
+                # Tasks are left for `symb watch`, which runs them as turns.
+                # Fired here one would only become a line of text at the
+                # user's next message, and never be done.
+                fired = cron.check_due_jobs(self.config, include_tasks=False)
             except Exception:
                 continue
             if fired:

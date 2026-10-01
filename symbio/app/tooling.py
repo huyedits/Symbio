@@ -26,6 +26,10 @@ _TOOL_GROUPS: dict[str, str] = {
     "save_skill": "notes",
     "run_command": "terminal",
     "execute_code": "code",
+    "save_script": "code",
+    "run_script": "code",
+    "list_saved_scripts": "code",
+    "delete_script": "code",
     "web_search": "web_search",
     "read_page": "browser",
     "fetch_html": "browser",
@@ -113,6 +117,10 @@ _TOOL_FAMILIES: dict[str, str] = {
     "run_command": "shell",
     "run_remote": "shell",
     "execute_code": "code",
+    "save_script": "code",
+    "run_script": "code",
+    "list_saved_scripts": "code",
+    "delete_script": "code",
     "web_search": "web",
     "read_page": "web",
     "fetch_html": "web",
@@ -250,6 +258,53 @@ _TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {"code": {"type": "string", "description": "The Python code to execute."}},
             "required": ["code"],
+        },
+    },
+    {
+        "name": "save_script",
+        "description": (
+            "Save a Python script under a name, to run again later: yourself with "
+            "run_script, or on a schedule with schedule_job text 'script:<name> [args]'. "
+            "It runs in the same sandbox as execute_code (same imports, symbio_tools for "
+            "files and fetch); its arguments arrive as the list ARGS. Saving an existing "
+            "name replaces it. Use it for work that will come round again; for a one-off, "
+            "execute_code."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "lowercase_name, e.g. 'count_posts'."},
+                "code": {"type": "string", "description": "The Python code. print() what you want back."},
+                "description": {"type": "string", "description": "One line: what it is for."},
+            },
+            "required": ["name", "code"],
+        },
+    },
+    {
+        "name": "run_script",
+        "description": "Run a script you saved with save_script. Its arguments arrive as the list ARGS; what it prints comes back.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The script's name, from list_saved_scripts."},
+                "args": {"type": "array", "items": {"type": "string"},
+                         "description": "Optional arguments, as strings."},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "list_saved_scripts",
+        "description": "List the scripts you have saved, and what each one is for.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "delete_script",
+        "description": "Delete a saved script by name.",
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "The script's name."}},
+            "required": ["name"],
         },
     },
     {
@@ -673,9 +728,16 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "schedule_job",
         "description": (
-            "Create a new scheduled reminder or command. Always creates a new job; "
-            "use delete_cron_job/update_cron_job to change existing jobs. "
-            "Use a 5-field cron expression for recurring jobs or 'at YYYY-MM-DD HH:MM' for one-time jobs."
+            "Schedule work for later, once or on repeat: a reminder, a command, a saved "
+            "script, or a TASK — something you do yourself, with all your tools, when it "
+            "comes due ('post on x.com four times a day', 'every Sunday, check which "
+            "posts did best and note why'). A task runs while nobody is watching, so "
+            "whatever it needs that would normally ask the user — posting, browsing a "
+            "site, changing files, running code — must be granted now in 'allow' "
+            "(narrowed to 'sites'); the user approves that grant once, here. Always "
+            "creates a new job; use update_cron_job/delete_cron_job for existing ones. "
+            "Use a 5-field cron expression for recurring jobs or 'at YYYY-MM-DD HH:MM' "
+            "for one-time jobs."
         ),
         "parameters": {
             "type": "object",
@@ -686,7 +748,23 @@ _TOOLS: list[dict[str, Any]] = [
                 },
                 "text": {
                     "type": "string",
-                    "description": "Reminder text, or 'cmd:<shell command>' to run a command when the job fires.",
+                    "description": ("What to do, in full — a task is read cold when it fires, so "
+                                    "say everything it needs. Or 'cmd:<shell command>' to run a "
+                                    "command, or 'script:<name> [args]' to run a saved script."),
+                },
+                "allow": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["publish", "browser", "files",
+                                                         "commands", "desktop"]},
+                    "description": ("Makes it a task, and what it may do with nobody there to "
+                                    "ask: 'publish' (post or send), 'browser', 'files', "
+                                    "'commands' (code and shell), 'desktop'. Leave out for a "
+                                    "plain reminder."),
+                },
+                "sites": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Sites 'publish' and 'browser' are limited to, e.g. ['x.com'].",
                 },
             },
             "required": ["schedule", "text"],
@@ -722,7 +800,18 @@ _TOOLS: list[dict[str, Any]] = [
                 },
                 "text": {
                     "type": "string",
-                    "description": "New reminder text or 'cmd:<shell command>'.",
+                    "description": "New text: the task, a reminder, 'cmd:<shell command>' or 'script:<name> [args]'.",
+                },
+                "allow": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["publish", "browser", "files",
+                                                         "commands", "desktop"]},
+                    "description": "Replace what the task may do unattended; [] makes it a reminder again.",
+                },
+                "sites": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Replace the sites 'publish' and 'browser' are limited to.",
                 },
             },
             "required": ["job_id"],

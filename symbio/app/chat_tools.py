@@ -312,6 +312,15 @@ class ToolsMixin:
                     f"'{name}' did not run. Tell them so, and that Settings → "
                     "Guardrails is where it changes. Do not try to reach the same "
                     "result another way.")
+        # A task that may act with nobody watching is the user's standing
+        # word, given once. So it is asked for every time — whatever the
+        # switch for scheduling says — and never granted with nobody here.
+        standing = ToolsMixin._grants_standing(name, params)
+        if standing and not safety.can_prompt(self.confirm_fn):
+            self._record_guardrail(name, kind, mode, "denied")
+            return (f"Not scheduled: a task that may act on its own ({standing}) "
+                    "needs the user to approve it in person, and nobody is here "
+                    "to ask. Ask them when they are.")
 
         # Risk-based escalation: the more dangerous an action is, the louder
         # the alert. High-risk actions require explicit approval; medium-risk
@@ -358,7 +367,7 @@ class ToolsMixin:
         # script) the call keeps the risk score it earned, as it always did,
         # and a high one is refused.
         safety_cfg = (getattr(self, "config", None) or {}).get("safety", {})
-        by_mode = mode == "ask" and someone
+        by_mode = (mode == "ask" or bool(standing)) and someone
         threshold = int(safety_cfg.get("require_confirm_score", 3))
         if mode == "allow":
             threshold = max(threshold, 3)
@@ -1802,6 +1811,45 @@ class ToolsMixin:
             return f"Dragged from ({lx}, {ly}) to ({ex}, {ey}) on your desk"
         return kind.capitalize()
 
+    # ── tasks: scheduled work that acts on its own ────────────────────
+
+    @staticmethod
+    def _grants_standing(name: str, params: dict[str, Any]) -> str:
+        """What a scheduling call would let a task do unattended, in words, or "".
+
+        A new task's grant, a grant being changed, or any change at all to a
+        job that already holds one: editing a granted task's text is a new
+        thing done with the old permission.
+        """
+        if name not in ("schedule_job", "update_cron_job"):
+            return ""
+        allow, sites = params.get("allow"), params.get("sites")
+        if name == "update_cron_job":
+            try:
+                wanted = int(params.get("job_id"))
+            except (TypeError, ValueError):
+                return ""
+            job = next((j for j in cron.load_cron_jobs() if j.get("id") == wanted), {})
+            if allow is None:
+                allow = job.get("allow")
+            if sites is None:
+                sites = job.get("sites")
+        try:
+            kinds, hosts = cron.normalize_grant(allow, sites)
+        except ValueError:
+            return ""  # the tool itself refuses, with the reason
+        return cron.describe_grant(kinds, hosts) if kinds else ""
+
+    @staticmethod
+    def _task_runner_note() -> str:
+        """Whether anything will actually run a task, said where it is scheduled."""
+        from symbio.app import supervisor
+
+        if supervisor.running():
+            return "`symb watch` is running, so it will run on time."
+        return ("Nothing runs tasks right now: they run while `symb watch` is "
+                "running. Tell the user to start it.")
+
     def confirm_policy(self) -> str:
         """"risk" when the person is at this machine, "name" when they are not.
 
@@ -1989,11 +2037,30 @@ class ToolsMixin:
             return ("Realign my adapter.", "", "")
         if name == "config_set":
             return (f"Change the setting {v(arg('key'))} to {v(arg('value'))}.", "", "")
-        if name == "schedule_job":
-            return (f"Schedule “{v(arg('text'))}” to run {v(arg('schedule'))}.", "", "")
-        if name == "update_cron_job":
-            return (f"Change scheduled job {v(arg('job_id'))} to “{v(arg('text'))}” "
-                    f"at {v(arg('schedule'))}.", "", "")
+        if name in ("schedule_job", "update_cron_job"):
+            if name == "schedule_job":
+                headline = f"Schedule “{v(arg('text'))}” to run {v(arg('schedule'))}."
+            else:
+                headline = (f"Change scheduled job {v(arg('job_id'))}"
+                            + (f" to “{v(arg('text'))}”" if arg("text") else "")
+                            + (f" at {v(arg('schedule'))}" if arg("schedule") else "") + ".")
+            standing = ToolsMixin._grants_standing(name, params)
+            details = ("" if not standing else
+                       "It becomes a task I do on my own each time it comes due "
+                       "(while `symb watch` runs). With you not there, I may do "
+                       f"this without asking you: {standing}. Anything else it "
+                       "needs is declined.")
+            return headline, details, ""
+        if name == "save_script":
+            return (f"Save the script “{v(arg('name'))}” to run again later.",
+                    safety._render_code(arg("code"), max_lines=8), "")
+        if name == "run_script":
+            extra = params.get("args")
+            return (f"Run my saved script “{v(arg('name'))}”"
+                    + (f" with {v(json.dumps(extra, ensure_ascii=False))}" if extra else "")
+                    + ".", "", "")
+        if name == "delete_script":
+            return (f"Delete my saved script “{v(arg('name'))}”.", "", "")
         if name == "delete_cron_job":
             return (f"Delete scheduled job {v(arg('job_id'))}.", "", "")
         shown = json.dumps(params, ensure_ascii=False, default=str)
@@ -2390,6 +2457,52 @@ class ToolsMixin:
                         "seen in this output.")
             return f"Python script exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
+        if name == "save_script":
+            from symbio.app import scripts
+
+            try:
+                saved = scripts.save_script(params.get("name"), params.get("code"),
+                                            params.get("description"), self.config)
+            except ValueError as e:
+                return f"Script not saved: {e}"
+            return (f"{'Replaced' if saved['replaced'] else 'Saved'} script "
+                    f"{saved['name']!r}. Run it with run_script "
+                    f"{{\"name\": \"{saved['name']}\"}}, or on a schedule with "
+                    f"schedule_job text 'script:{saved['name']}'.")
+
+        if name == "run_script":
+            from symbio.app import scripts
+
+            try:
+                ok, out = scripts.run_script(params.get("name"), params.get("args"),
+                                             self.config)
+            except ValueError as e:
+                return f"Script not run: {e}"
+            if ok and not out.strip():
+                return ("The script exited ok but printed NOTHING, so it produced no "
+                        "result. A value is only visible if the script prints it. Do "
+                        "not state a result you have not seen in this output.")
+            return f"Script {params.get('name')!r} exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
+
+        if name == "list_saved_scripts":
+            from symbio.app import scripts
+
+            found = scripts.list_scripts()
+            if not found:
+                return "No saved scripts yet. save_script makes one."
+            return "Saved scripts:\n" + "\n".join(
+                f"  {s['name']} — {s['description'] or '(no description)'} ({s['lines']} lines)"
+                for s in found)
+
+        if name == "delete_script":
+            from symbio.app import scripts
+
+            try:
+                gone = scripts.delete_script(params.get("name"))
+            except ValueError as e:
+                return f"Script not deleted: {e}"
+            return f"Deleted script {gone['name']!r}."
+
         if name == "web_search":
             query = params.get("query", "") or ""
             # If the user gave a subjectless "check online" command, the model
@@ -2751,10 +2864,17 @@ class ToolsMixin:
                     params["schedule"], params["text"],
                     blocked_commands=set(self.config["sandbox"].get("blocked_commands", [])),
                     owner=self.owner,
+                    allow=params.get("allow"), sites=params.get("sites"),
                 )
-                return f"Scheduled job {job['id']}: {job['schedule']} — {job['text']}"
             except ValueError as e:
                 return f"Could not schedule job: {e}"
+            out = f"Scheduled job {job['id']}: {job['schedule']} — {job['text']}"
+            if cron.is_task(job):
+                out += ("\nIt is a task: you do it yourself each time it comes due, and "
+                        "may do this without asking: "
+                        + cron.describe_grant(job["allow"], job.get("sites") or [])
+                        + ". " + ToolsMixin._task_runner_note())
+            return out
 
         if name == "list_cron_jobs":
             jobs = cron.list_cron_jobs()
@@ -2763,7 +2883,9 @@ class ToolsMixin:
             lines = ["Scheduled jobs:"]
             for job in jobs:
                 owner_tag = f" (owner: {job['owner']})" if job.get("owner") else ""
-                lines.append(f"  {job['id']}: {job['schedule']} — {job['text']}{owner_tag}")
+                grant = (f" [task; may: {cron.describe_grant(job['allow'], job.get('sites') or [])}]"
+                         if cron.is_task(job) else "")
+                lines.append(f"  {job['id']}: {job['schedule']} — {job['text']}{owner_tag}{grant}")
             return "\n".join(lines)
 
         if name == "delete_cron_job":
@@ -2781,6 +2903,7 @@ class ToolsMixin:
                     text=params.get("text"),
                     blocked_commands=set(self.config["sandbox"].get("blocked_commands", [])),
                     owner=self.owner,
+                    allow=params.get("allow"), sites=params.get("sites"),
                 )
                 return f"Updated job {job['id']}: {job['schedule']} — {job['text']}"
             except (ValueError, KeyError) as e:
@@ -2999,6 +3122,17 @@ def recall_for(agent: Any, params: dict[str, Any]) -> str:
     if getattr(stand_in, "_untrusted_this_turn", False):
         agent._untrusted_this_turn = True
     return out
+
+
+def script_for(agent: Any, name: str, params: dict[str, Any]) -> str:
+    """Run a saved-script tool for a caller that is not a ChatSession.
+
+    The same branch of _dispatch_tool the chat loop runs, lent a `self`; the
+    script tools need nothing of it but the config.
+    """
+    if name not in ("save_script", "run_script", "list_saved_scripts", "delete_script"):
+        return f"Unknown script tool: {name}"
+    return ToolsMixin._dispatch_tool(_StandIn(agent), name, dict(params or {}))
 
 
 def desktop_for(agent: Any, name: str, params: dict[str, Any]) -> str:
