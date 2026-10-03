@@ -302,8 +302,19 @@ def trainer_command(model_name: str, data_dir: str, adapter_dir: str,
     memory the OS reclaims completely when it exits.
     """
     if not is_cuda(config):
+        # A 248k vocabulary or gated-delta layers (Qwen3.5, Bonsai 27B) train
+        # through symbio.trim_lora — mlx_lm lora with the loss scored over the
+        # corpus's own tokens and the linear-attention backward checkpointed,
+        # which is what lets them fit 16 GB. It takes the same flags. Every
+        # other model keeps this exact command.
+        from symbio import trim_lora
+
+        entry = ["-m", "mlx_lm", "lora"]
+        if trim_lora.wants_lean_trainer(model_name, lora):
+            entry = ["-m", "symbio.trim_lora",
+                     trim_lora.TRIM_FLAG, str(lora.get("trim_vocab", "auto"))]
         return [
-            sys.executable, "-m", "mlx_lm", "lora",
+            sys.executable, *entry,
             "--model", model_name,
             "--train",
             "--data", data_dir,

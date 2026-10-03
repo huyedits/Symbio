@@ -65,6 +65,12 @@
     "adapter_compatible": true,
     "memory_note": "7.9 GB on disk, ~8.4 GB in GPU memory. Requires gpu.wired_limit_mb set (11264 works on 16 GB); unwired it pages to SSD and stalls."
   },
+  "bonsai2_27b": {
+    "model_name": "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
+    "description": "Qwen3.8-27B in ternary weights (Prism's Bonsai 2): 98.2% of the FP16 model's score across Prism's 14 thinking-mode benchmarks (84.78 vs 86.32), against the 1-bit Bonsai 27B's 89.5% of the older Qwen3.6-27B -- the closest this 16 GB machine gets to Qwen3.8-27B (the plain MLX 4-bit is ~15 GB). A Hadamard-rotated pack (model_type prism_hadamard_qwen35): stock mlx_lm refuses it, symbio/app/prism_pack.py loads it. Measured 2026-10-03 on the 16 GB M4, greedy: 6.2s load, ~9 tok/s decode, ~53 tok/s prefill at 460 tokens; 17*23, a word problem and native Qwen3.5 XML tool calls all right. Its own vision tower serves looks (symbio/app/eyes.py).",
+    "adapter_compatible": false,
+    "memory_note": "8.6 GB on disk, 0.9 GB of it the vision tower, read only during a look. 7.68 GB resident; 8.3 GB peak at a short prompt, ~10 GB at 460 tokens -- above the ~6.5 GB this machine is comfortable with, so close the browser or expect swap. LoRA goes through symbio/trim_lora.py (248k vocab trimmed, linear-attention backward checkpointed), not yet run on this model."
+  },
   "nemo_12b": {
     "model_name": "mlx-community/Mistral-Nemo-Instruct-2407-4bit",
     "description": "Dense 12.2B Mistral-Nemo (2407), 4-bit MLX. Measured here 2026-09-03 on bfcl_simple n=120: 92.50% against Qwen3-8B-4bit's 80.83% and Qwen3-14B-3bit's 78.33% -- and in 516s against the 8B's 1157s, WITHOUT a draft model where the Qwen runs had one. Plain MistralForCausalLM, so a trimmable KV cache and stock mlx_lm support, no fork. Vocab 131,072 -- BELOW the 14B's 151,936, so the output-logit memory that governs the LoRA ceiling on this 16 GB machine is cheaper here than on the model that already fine-tunes. No draft model shares its tokenizer, so agent.draft_model must be cleared or speculative decoding runs against the wrong vocab. Older than it looks: July 2024, against Qwen3-8B's April 2025.",

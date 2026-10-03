@@ -387,6 +387,46 @@ answer is no, and the refusal is recorded in the heartbeat.
 `cron.unattended_approve` turns that off for someone who has read this
 paragraph.
 
+### Tasks it does on its own
+
+There is no command for "run an X account". You ask in chat — *"post a
+shitpost on x.com four times a day, the kind that hints you're not quite a
+person; every Sunday check which ones did best and keep doing more of that"*
+— and Symbio schedules it the way it schedules anything, with `schedule_job`.
+What makes it a **task** rather than a reminder is a grant: what it may do with
+nobody there to ask, and where.
+
+```
+Schedule “Write one new post for my x.com account … post it there and check
+it shows” to run 17 10,14,18,22 * * *.
+  It becomes a task I do on my own each time it comes due (while `symb watch`
+  runs). With you not there, I may do this without asking you: Post or send,
+  only on x.com. Anything else it needs is declined.
+```
+
+You approve that card once. A grant is always put to you — even with
+scheduling set to *Always allow* — and is never given with nobody there:
+a task cannot schedule another, change a setting or train itself. Editing a
+granted task asks again.
+
+When it comes due, `symb watch` hands the task to the model as an ordinary
+turn, with every tool (with the desk on, its browser opens there), and answers that turn's
+questions from the grant and nothing else: *Post or send* on x.com, yes; a
+post on any other site, a shell command, a new schedule, no. A card the
+harness flagged (the words in the box aren't the ones the task asked for) is
+refused too. Tasks run only under `symb watch`; a chat session leaves them for
+it rather than turning them into a reminder line nobody acts on, and
+scheduling one says so when nothing is running them.
+
+### Scripts it keeps
+
+`execute_code` runs Python once. `save_script` keeps it under a name — same
+sandbox, same refusals, its arguments in `ARGS` — and `run_script` runs it
+again. A job whose text is `script:<name> [args]` runs it on a schedule with no
+model turn at all: a tally, a scrape, a check that only needs re-running.
+`list_saved_scripts` and `delete_script` round it out. Saving is *Change
+files* and running is *Run commands and code*, the switches you already have.
+
 ### Posting and sending, on any site
 
 There is no posting command. Symbio posts the way a person does: it opens the

@@ -74,13 +74,16 @@ def start_daemon() -> bool:
         return False
 
 
-def ask_daemon(text: str, approve: bool = False, timeout: float = 600.0,
+def ask_daemon(text: str, approve: Any = False, timeout: float = 600.0,
                collect_output: bool = False) -> str:
     """Put one turn to the resident model and return what it said.
 
     Speaks the daemon's own line protocol -- the same one `symb chat` and the
     desktop window use. `approve` answers the confirmation gate; it is False
-    here because nobody is reading the prompt.
+    here because nobody is reading the prompt. It may instead be a function of
+    the confirm frame, whose guardrail card says what is being asked -- for a
+    scheduled task, cron.UnattendedApprover answers from the grant the user
+    gave that task.
     """
     try:
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -123,8 +126,15 @@ def ask_daemon(text: str, approve: bool = False, timeout: float = 600.0,
                 # from memory" needs them; a cron job does not.
                 reply.append("\n" + message.get("text", ""))
             elif kind == "confirm":
-                denied += 0 if approve else 1
-                send({"type": "confirm", "answer": bool(approve)})
+                if callable(approve):
+                    try:
+                        answer = bool(approve(message))
+                    except Exception:
+                        answer = False
+                else:
+                    answer = bool(approve)
+                denied += 0 if answer else 1
+                send({"type": "confirm", "answer": answer})
             elif kind == "done":
                 break
     except (OSError, socket.timeout):
@@ -154,6 +164,18 @@ def read_heartbeat() -> dict[str, Any]:
         return json.loads(HEARTBEAT_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+
+
+def running(max_age_s: float = 300.0) -> bool:
+    """Has a supervisor written its heartbeat recently? Tasks run only under one."""
+    stamp = read_heartbeat().get("checked_at")
+    if not stamp or read_heartbeat().get("model") == "stopped":
+        return False
+    try:
+        age = (datetime.now() - datetime.fromisoformat(str(stamp))).total_seconds()
+    except ValueError:
+        return False
+    return 0 <= age <= max_age_s
 
 
 def tick(config: dict[str, Any], state: dict[str, Any],
@@ -196,7 +218,16 @@ def tick(config: dict[str, Any], state: dict[str, Any],
     state["last_error"] = ""
     ran = list(state.get("ran", []))
     for job in fired:
-        answer = ask(job, approve=approve)
+        record = getattr(job, "job", None)
+        if record is not None and cron.is_task(record):
+            # A task: its questions are answered from what the user granted it
+            # when it was made -- that and nothing else.
+            approver = cron.UnattendedApprover(record, approve_all=approve)
+            answer = ask(str(job), approve=approver)
+            if approver.denied:
+                answer += "\n[supervisor] declined: " + "; ".join(approver.denied[:3])
+        else:
+            answer = ask(job, approve=approve)
         ran.append({"at": _now(), "job": job.splitlines()[0][:160],
                     "answer": answer[:400]})
     state["ran"] = ran[-20:]

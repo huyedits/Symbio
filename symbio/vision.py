@@ -123,9 +123,45 @@ class VisionUnavailable(RuntimeError):
     """mlx-vlm is missing, or the model could not be loaded."""
 
 
+# `vision.model_name: headmaster` — look with the main model's own vision
+# tower. Also what an unset model_name means whenever the resident main model
+# HAS one (a Qwen3.5 checkpoint such as 1-bit Bonsai 27B): there is then no
+# second model to swap in, so a look costs a 0.9 GB tower instead of a swap.
+# Naming the main model's own repo here means the same thing; loading it a
+# second time through mlx-vlm would be two copies of it.
+HEADMASTER = "headmaster"
+
+
+def _eyes():
+    """symbio.app.eyes if the engine was ever prepared, else None.
+
+    Looked up, never imported here: it is installed with the engine, and a
+    process that never loaded a model has no main model to look with.
+    """
+    import sys
+
+    return sys.modules.get("symbio.app.eyes")
+
+
+def headmaster_has_eyes(config: dict[str, Any] | None = None) -> bool:
+    eyes = _eyes()
+    main = (config or {}).get("model_name")
+    return bool(eyes is not None and main and eyes.resident(main) is not None)
+
+
 def model_name(config: dict[str, Any] | None = None) -> str:
     cfg = (config or {}).get("vision", {})
-    return str(cfg.get("model_name") or DEFAULT_VISION_MODEL)
+    chosen = str(cfg.get("model_name") or "")
+    main = str((config or {}).get("model_name") or "")
+    if chosen == HEADMASTER or (chosen in ("", main) and headmaster_has_eyes(config)):
+        return f"{HEADMASTER}:{main}"
+    return chosen or DEFAULT_VISION_MODEL
+
+
+def uses_headmaster(config: dict[str, Any] | None = None) -> bool:
+    """Will a look run on the main model itself? Then it must not be put to
+    sleep for the look — it is the thing doing the looking."""
+    return model_name(config).startswith(HEADMASTER + ":")
 
 
 def is_enabled(config: dict[str, Any] | None = None) -> bool:
@@ -160,6 +196,8 @@ def load(name: str = "") -> tuple[Any, Any]:
         # avoiding.
         if _MODEL is not None:
             _release_locked()
+        if target.startswith(HEADMASTER + ":"):
+            return _load_headmaster_eyes(target)
         try:
             from symbio.mlx_gate import attr as _vlm
             vlm_load = _vlm("mlx_vlm.load")
@@ -188,12 +226,43 @@ def load(name: str = "") -> tuple[Any, Any]:
         return _MODEL, _PROCESSOR
 
 
+# The main model's eyes add only the vision tower and the image's activations
+# to what is already resident: measured with 1-bit Bonsai 27B on the 16 GB M4,
+# 2.4-2.8 GB over the model at the peak of a look (0.9 GB of it the tower),
+# under eyes.memory_ceiling, and nothing left behind after release().
+_HEADMASTER_NEEDED_GB = 3.0
+
+
+def _load_headmaster_eyes(target: str) -> tuple[Any, Any]:
+    """Caller holds _LOCK. The resident main model's own vision, or
+    VisionUnavailable."""
+    global _MODEL, _PROCESSOR, _LOADED_NAME
+    main = target.split(":", 1)[1]
+    eyes = _eyes()
+    if eyes is None or eyes.resident(main) is None:
+        raise VisionUnavailable(
+            "vision.model_name is 'headmaster', but the main model has no "
+            "vision tower of its own (or is not loaded right now). Set "
+            "vision.model_name to a vision model instead.")
+    shortfall = _memory_shortfall(_HEADMASTER_NEEDED_GB)
+    if shortfall:
+        raise VisionUnavailable(shortfall)
+    try:
+        with _quiet():
+            _MODEL, _PROCESSOR = eyes.open_eyes(main)
+    except Exception as e:
+        _MODEL = _PROCESSOR = None
+        raise VisionUnavailable(f"Could not open the main model's eyes: {e}") from e
+    _LOADED_NAME = target
+    return _MODEL, _PROCESSOR
+
+
 # What the VLM peaks at while generating, measured on this machine, plus a
 # little room to land in.
 _NEEDED_GB = 5.0
 
 
-def _memory_shortfall() -> str:
+def _memory_shortfall(needed_gb: float = _NEEDED_GB) -> str:
     """A refusal message when there is not enough RAM, or "" to go ahead.
 
     Not every caller can put the headmaster to sleep first — AIAgent holds its
@@ -213,11 +282,18 @@ def _memory_shortfall() -> str:
     if free is None:
         return ""
     free_gb = free / 1e9
-    if free_gb >= _NEEDED_GB:
+    if free_gb >= needed_gb:
         return ""
+    if needed_gb != _NEEDED_GB:
+        return (
+            f"Not enough free memory to look: the main model's vision tower "
+            f"and the image need about {needed_gb:.1f} GB on top of the model "
+            f"and only {free_gb:.1f} GB is free. Something else is holding the "
+            f"RAM — close the browser and try again."
+        )
     return (
         f"Not enough free memory to look: the vision model needs about "
-        f"{_NEEDED_GB:.0f} GB while generating and only {free_gb:.1f} GB is "
+        f"{needed_gb:.0f} GB while generating and only {free_gb:.1f} GB is "
         f"free. Something else is holding the RAM — close the browser, or "
         f"unload the main model first. Refusing rather than loading a second "
         f"model on top of the first."
@@ -260,12 +336,23 @@ def _generate(image_path: str, question: str, max_tokens: int, name: str) -> str
     from symbio.mlx_gate import attr as _vlm
     vlm_generate = _vlm("mlx_vlm.generate")
     apply_chat_template = _vlm("mlx_vlm.prompt_utils.apply_chat_template")
+    # A look with the main model's own eyes runs beside the main model's
+    # weights, so its scratch is held to a ceiling (see eyes.memory_ceiling).
+    eyes = _eyes() if name.startswith(HEADMASTER + ":") else None
+    ceiling = eyes.memory_ceiling(model) if eyes is not None else contextlib.nullcontext()
 
-    with _quiet():
+    # A model that prefills better in other than mlx-vlm's default chunks says
+    # so (prism_pack.PREFILL_STEP); everything else keeps the default.
+    extra = {}
+    step = getattr(model, "symbio_prefill_step", None)
+    if isinstance(step, int) and step > 0:
+        extra["prefill_step_size"] = step
+
+    with _quiet(), ceiling:
         prompt = apply_chat_template(processor, model.config, question, num_images=1)
         out = vlm_generate(
             model, processor, prompt, [str(image_path)],
-            max_tokens=max_tokens, verbose=False,
+            max_tokens=max_tokens, verbose=False, **extra,
         )
     # mlx-vlm returns a result object on current versions and a bare string on
     # older ones. Both are in the wild; neither is worth pinning a version for.

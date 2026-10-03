@@ -170,6 +170,18 @@ def build_tool_registry(agent: AIAgent) -> list[dict[str, Any]]:
             "readonly": False,
             "run": lambda params, a=agent: _tool_execute_code(a, params),
         },
+        # Scripts it saves and runs again, through the chat dispatcher's own
+        # code so the two loops cannot drift (see _tool_desktop for why).
+        *({
+            "name": script_tool,
+            "description": "Saved scripts: save, run, list or delete one.",
+            "parameters": {"type": "object", "properties": {
+                "name": {"type": "string"}, "code": {"type": "string"},
+                "description": {"type": "string"},
+                "args": {"type": "array", "items": {"type": "string"}}}},
+            "readonly": script_tool == "list_saved_scripts",
+            "run": lambda params, a=agent, t=script_tool: _tool_script(a, t, params),
+        } for script_tool in ("save_script", "run_script", "list_saved_scripts", "delete_script")),
         {
             "name": "web_search",
             "description": "Search the web for a query. Returns stub unless configured.",
@@ -1367,6 +1379,13 @@ def _tool_desktop_click_at(agent: AIAgent, args: dict[str, Any]) -> str:
         clicks=int(args.get("clicks", 1)),
         button=args.get("button", "left"),
     )
+
+
+def _tool_script(agent: AIAgent, name: str, args: dict[str, Any]) -> str:
+    """Saved scripts, through the chat dispatcher's implementation."""
+    from symbio.app.chat_tools import script_for
+
+    return script_for(agent, name, args)
 
 
 def _tool_desktop(agent: AIAgent, name: str, args: dict[str, Any]) -> str:

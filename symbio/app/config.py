@@ -58,6 +58,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Trade compute for activation memory. Worth turning on before
         # lowering max_seq_length, since activations are what scale with it.
         "grad_checkpoint": False,
+        # Score the loss over only the tokens the corpus uses, not the whole
+        # vocabulary (symbio/trim_lora.py). "auto" does it for vocabularies
+        # of 200k+ (Qwen3.5 / Bonsai, 248k), where the full logit array is
+        # what runs a 16 GB Mac out of memory; "on"/"off" force it. Models
+        # under that size, and without linear attention, train exactly as
+        # before, through `mlx_lm lora` itself.
+        "trim_vocab": "auto",
         "batch_size": 1,
         "learning_rate": 1e-4,
         # Floor for a full retrain, not the count itself: run_training scales
