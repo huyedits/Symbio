@@ -1057,6 +1057,11 @@ class ToolsMixin:
         # the RAM is not there, for the callers that cannot sleep at all.
         deep_sleep = bool(self.config.get("vision", {}).get(
             "sleep_main_model", True))
+        # Unless the main model is the one looking: a vision pack's eyes are
+        # its own weights plus a 0.9 GB tower, and sleeping it would free the
+        # very arrays the look is about to run on (then reload all 8 GB).
+        if vision.uses_headmaster(self.config):
+            deep_sleep = False
         # Resolved rather than called directly: several tests drive
         # _dispatch_tool with a duck-typed stand-in for the session, and a
         # missing sleep hook must not turn a look into an AttributeError. If
