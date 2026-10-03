@@ -63,6 +63,20 @@ def test_the_backend_runs_the_lean_trainer_with_mlx_lms_flags(tmp_path):
         assert cmd[cmd.index(flag) + 1] == value, flag
 
 
+def test_a_learning_rate_that_diverged_here_is_lowered_and_said():
+    argv = ["--model", "m", "--learning-rate", "1e-4", "--iters", "9"]
+    note = trim_lora.cap_learning_rate(argv, "5e-5")
+    assert argv[argv.index("--learning-rate") + 1] == "5e-05"
+    assert "lowered" in note
+
+
+def test_a_lower_rate_and_an_explicit_off_are_left_alone():
+    argv = ["--learning-rate", "2e-5"]
+    assert trim_lora.cap_learning_rate(argv, "5e-5") is None and argv[1] == "2e-5"
+    argv = ["--learning-rate", "2e-4"]
+    assert trim_lora.cap_learning_rate(argv, "off") is None and argv[1] == "2e-4"
+
+
 def test_the_trim_flag_is_taken_out_before_mlx_lm_sees_it():
     argv = ["--model", "m", trim_lora.TRIM_FLAG, "off", "--train"]
     assert trim_lora._pop_flag(argv, trim_lora.TRIM_FLAG, "auto") == "off"
@@ -128,6 +142,40 @@ def test_the_trimmed_loss_is_cross_entropy_over_the_models_own_logits(tie):
     assert abs(float(got) - float(want)) < 1e-4
 
 
+def test_mlx_lms_compiled_trainer_runs_the_trimmed_loss(monkeypatch, tmp_path):
+    """mlx_lm compiles the training step over the model's state. An array the
+    loss reaches by closure is an 'uncaptured input' and mx.compile refuses
+    it — which only shows inside trainer.train, never in a bare loss call. This
+    is the first real Bonsai-2 run's failure, at small scale, through the same
+    trainer, with the same lean gated-delta path."""
+    import mlx.optimizers as optim
+    from mlx_lm.models import gated_delta
+    from mlx_lm.tuner import trainer
+    from mlx_lm.tuner.utils import linear_to_lora_layers
+
+    monkeypatch.setattr(gated_delta, "gated_delta_ops", gated_delta.gated_delta_ops)
+    trim_lora.checkpoint_gated_delta(chunk=8)
+    model = _tiny_qwen35()
+    samples = [([1, 4, 9, 4, 30, 2, 9, 61, 30, 1] * 3, 4), ([7, 2, 9, 61, 4, 1] * 4, 3)]
+    rows = sorted({t for s, _ in samples for t in s} | {0})
+    loss = trim_lora.build_trimmed_loss(model, rows, samples[0][0])
+    assert loss is not None
+    model.freeze()
+    linear_to_lora_layers(model, 1, {"rank": 2, "scale": 10.0, "dropout": 0.0})
+    assert trim_lora.kernel_below_adapters(model) >= 1
+    args = trainer.TrainingArgs(batch_size=1, iters=3, val_batches=1, steps_per_report=1,
+                                steps_per_eval=100, steps_per_save=100, max_seq_length=64,
+                                adapter_file=str(tmp_path / "adapters.safetensors"),
+                                grad_checkpoint=True)
+    trainer.train(model, optim.Adam(learning_rate=1e-2), samples, samples, args=args, loss=loss)
+
+    from mlx.utils import tree_flatten
+
+    saved = mx.load(str(tmp_path / "adapters.safetensors"))
+    assert saved and all("lora" in k for k in saved)  # the cut head is not adapter
+    assert not any(trim_lora.TRIM_ATTR in k for k, _ in tree_flatten(model.trainable_parameters()))
+
+
 def test_a_head_it_cannot_reproduce_trains_on_the_full_vocabulary(monkeypatch):
     """A logit scale the cut head does not apply would train a different
     model than the one that serves; the check refuses it."""
@@ -136,6 +184,7 @@ def test_a_head_it_cannot_reproduce_trains_on_the_full_vocabulary(monkeypatch):
     monkeypatch.setattr(type(model), "__call__",
                         lambda self, *a, **k: real(self, *a, **k) * 3.0 + 1.0)
     assert trim_lora.build_trimmed_loss(model, [0, 1, 2, 3], [1, 2, 3, 1]) is None
+    assert trim_lora.TRIM_ATTR not in model  # nothing left behind on the model
 
 
 # ---- the gated-delta backward -----------------------------------------------

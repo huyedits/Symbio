@@ -35,6 +35,7 @@ Everything else is mlx_lm's own trainer, untouched.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import sys
@@ -48,6 +49,15 @@ CHUNK = 64
 # the 14B fine on 16 GB; Qwen3.5's 248,320 is the one that does not.
 AUTO_TRIM_VOCAB = 200_000
 TRIM_FLAG = "--symbio-trim-vocab"
+# The learning rate these models take. Measured on the facts corpus (36
+# samples, rank 8, scale 20, 8 layers): Qwen3.5-0.8B diverged at 2e-4 (val
+# loss 2.57 -> 7.06), wobbled at 1e-4 (0.03 -> 0.47) and converged at 5e-5
+# (0.003); Ternary-Bonsai-2 27B diverged at 2e-4 (val 1.74 -> 3.69) and at
+# 5e-5 reached val 0.000 and 6/6 held-out questions. Symbio's default 1e-4 is
+# tuned on Qwen3 and is not a safe rate for these. A higher one asked for is
+# lowered to this, and the log says so; --symbio-max-lr off lifts the cap.
+MAX_LR = 5e-5
+MAX_LR_FLAG = "--symbio-max-lr"
 # Model types whose layers include gated-delta linear attention.
 _LINEAR_ATTENTION = ("qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_next")
 
@@ -136,18 +146,44 @@ def output_head(model: Any) -> tuple[Any, bool]:
     return getattr(inner, "embed_tokens", None), True
 
 
-def subset_projection(head: Any, rows: Any, tied: bool) -> Callable[[Any], Any]:
-    """hidden -> logits over `rows` of `head` only.
-
-    The head is copied with every per-row array cut down to those rows, so its
-    own forward runs on them: plain, quantized and 1-bit layers alike, with
-    whatever kernel the layer already uses.
-    """
+def cut_head(head: Any, rows: Any) -> Any:
+    """A copy of `head` with every per-row array cut down to `rows`, so its own
+    forward runs on just those rows: plain, quantized, 1-bit and Prism-packed
+    layers alike, with whatever kernel the layer already uses."""
     sub = copy.copy(head)
     for name in ("weight", "scales", "biases", "bias"):
         if name in head:
             sub[name] = head[name][rows]
+    return sub
+
+
+def subset_projection(head: Any, rows: Any, tied: bool) -> Callable[[Any], Any]:
+    """hidden -> logits over `rows` of `head` only."""
+    sub = cut_head(head, rows)
     return sub.as_linear if tied else sub
+
+
+# Where the cut head and the vocabulary -> row map live on the model while it
+# trains. mlx_lm compiles the training step with the model's state as its
+# inputs, and mx.compile refuses any array the step reaches that is not among
+# them ("Attempting to compile a function with uncaptured inputs") — so they
+# cannot be closed over, they have to BE model state. Frozen, so the adapter
+# file never sees them.
+TRIM_ATTR = "symbio_trim"
+
+
+def _trim_module(head_cut: Any, remap: Any):
+    import mlx.nn as nn
+
+    class Trim(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.head = head_cut
+            self.remap = remap
+
+    trim = Trim()
+    trim.freeze()
+    return trim
 
 
 def build_trimmed_loss(model: Any, rows_list: list[int], sample: list[int]):
@@ -157,48 +193,50 @@ def build_trimmed_loss(model: Any, rows_list: list[int], sample: list[int]):
 
     lm = _language_model(model)
     head, tied = output_head(model)
-    inner = getattr(lm, "model", None)
-    if head is None or inner is None:
+    if head is None or getattr(lm, "model", None) is None:
         say("[trim-vocab] no output head found; training with the full vocabulary.")
         return None
     rows = mx.array(rows_list, dtype=mx.uint32)
     try:
-        project = subset_projection(head, rows, tied)
+        head_cut = cut_head(head, rows)
     except Exception as e:  # noqa: BLE001 - any layer this cannot cut
         say(f"[trim-vocab] could not cut the output head ({e}); training with the "
             f"full vocabulary.")
         return None
     cap = getattr(getattr(lm, "args", None), "final_logit_softcapping", None)
 
-    def logits_of(inputs):
-        out = project(inner(inputs))
+    def logits_of(model, inputs):
+        # Everything is reached through `model`, never a closure: see TRIM_ATTR.
+        cut = model[TRIM_ATTR].head
+        hidden = _language_model(model).model(inputs)
+        out = cut.as_linear(hidden) if tied else cut(hidden)
         return mx.tanh(out / cap) * cap if cap else out
 
     # The same numbers or nothing: checked on a real sample before training.
     probe = mx.array([sample[:64]])
     full = model(probe)
     vocab = full.shape[-1]
-    want = mx.take(full, rows, axis=-1).astype(mx.float32)
-    got = logits_of(probe).astype(mx.float32)
-    scale = float(mx.abs(want).max().item()) or 1.0
-    error = float(mx.abs(want - got).max().item())
-    del full, want, got
-    if error > 2e-2 * scale:
-        say(f"[trim-vocab] trimmed logits differ from the model's own by {error:.3g} "
-            f"(scale {scale:.3g}); training with the full vocabulary.")
-        return None
-
     remap_list = [0] * vocab
     for index, token in enumerate(rows_list):
         if token < vocab:
             remap_list[token] = index
-    remap = mx.array(remap_list, dtype=mx.int32)
+    setattr(model, TRIM_ATTR, _trim_module(head_cut, mx.array(remap_list, dtype=mx.int32)))
+    want = mx.take(full, rows, axis=-1).astype(mx.float32)
+    got = logits_of(model, probe).astype(mx.float32)
+    scale = float(mx.abs(want).max().item()) or 1.0
+    error = float(mx.abs(want - got).max().item())
+    del full, want, got
+    if error > 2e-2 * scale:
+        del model[TRIM_ATTR]
+        say(f"[trim-vocab] trimmed logits differ from the model's own by {error:.3g} "
+            f"(scale {scale:.3g}); training with the full vocabulary.")
+        return None
 
     def loss(model, batch, lengths):
         # mlx_lm's default_loss, over the trimmed logits.
         inputs = batch[:, :-1]
-        targets = remap[batch[:, 1:]]
-        logits = logits_of(inputs)
+        targets = model[TRIM_ATTR].remap[batch[:, 1:]]
+        logits = logits_of(model, inputs)
         steps = mx.arange(1, targets.shape[1] + 1)
         mask = mx.logical_and(steps >= lengths[:, 0:1], steps <= lengths[:, 1:])
         ce = nn.losses.cross_entropy(logits, targets) * mask
@@ -283,6 +321,37 @@ def kernel_below_adapters(model: Any) -> int:
     return switched
 
 
+# ------------------------------------------------------------------ memory
+
+# Measured on Ternary-Bonsai-2 27B (7.68 GB of weights), one LoRA step over 8
+# layers at ~100 tokens: 9.5-9.8 GB peak. Under mlx_lm's own settings the run
+# died anyway, at free memory 7% — MLX kept ~2 GB of freed buffers in its
+# cache for reuse, and trainer.train wires memory up to the device's whole
+# recommended working set (12.7 GB here), so the OS could not even page it.
+# Same step with the cache held to 512 MB: lowest free memory 29%.
+CACHE_LIMIT_MB = 512
+WIRED_HEADROOM_GB = 2.5
+
+
+@contextlib.contextmanager
+def memory_bounds(model: Any):
+    """Cap MLX's buffer cache, and the wired limit at weights + headroom."""
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+
+    weights = sum(v.nbytes for _, v in tree_flatten(model.parameters()))
+    ceiling = int(weights + WIRED_HEADROOM_GB * 2**30)
+    old_cache = mx.set_cache_limit(CACHE_LIMIT_MB * 2**20)
+    real = mx.set_wired_limit
+    # trainer.train sets the wired limit itself, to the device maximum.
+    mx.set_wired_limit = lambda limit: real(min(int(limit), ceiling))
+    try:
+        yield
+    finally:
+        mx.set_wired_limit = real
+        mx.set_cache_limit(old_cache)
+
+
 # ------------------------------------------------------------------- driver
 
 
@@ -301,9 +370,29 @@ def _vocab_size(model: Any) -> int:
     return int(weight.shape[0]) if weight is not None else 0
 
 
+def cap_learning_rate(argv: list[str], cap: str) -> str | None:
+    """Lower --learning-rate in argv to `cap`; the note to log, or None."""
+    if cap.lower() == "off":
+        return None
+    limit = float(cap)
+    for flag in ("--learning-rate", "--learning_rate"):
+        if flag in argv and argv.index(flag) + 1 < len(argv):
+            at = argv.index(flag) + 1
+            asked = float(argv[at])
+            if asked > limit:
+                argv[at] = f"{limit:g}"
+                return (f"[lean-lr] learning rate {asked:g} lowered to {limit:g}: higher rates "
+                        f"diverged on this model family ({MAX_LR_FLAG} off to keep it).")
+            return None
+    return None
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     trim_mode = _pop_flag(argv, TRIM_FLAG, "auto").lower()
+    note = cap_learning_rate(argv, _pop_flag(argv, MAX_LR_FLAG, f"{MAX_LR:g}"))
+    if note:
+        say(note)
 
     from symbio.app import mlx_compat
 
@@ -343,8 +432,10 @@ def main(argv: list[str] | None = None) -> None:
                 say(f"[lean-gdn] {switched} linear-attention layer(s) below the "
                     f"adapters run on the inference kernel.")
             kwargs.setdefault("loss", loss)
-            return trainer.train(model, optimizer, train_dataset, val_dataset,
-                                 args=args, training_callback=training_callback, **kwargs)
+            with memory_bounds(model):
+                return trainer.train(model, optimizer, train_dataset, val_dataset,
+                                     args=args, training_callback=training_callback,
+                                     **kwargs)
 
         mlx_lora.train = train
         return original_train_model(args, model, train_set, valid_set, training_callback)

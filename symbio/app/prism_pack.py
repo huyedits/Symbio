@@ -349,6 +349,9 @@ def load_vl_pack(model_path: str | Path, host: Any = None, lazy: bool = False):
         # mlx-vlm's generate() stops on model.config.eos_token_id unless told
         # otherwise; a pack ends turns on <|im_end|> AND <|endoftext|>.
         model.config.eos_token_id = eos
+    # A look's image prompt is a long prefill too; vision._generate passes this
+    # to mlx-vlm, whose default chunk is mlx_lm's 2,048 (see PREFILL_STEP).
+    model.symbio_prefill_step = PREFILL_STEP
     return model, build_processor(model_path)
 
 
@@ -379,11 +382,25 @@ def build_processor(model_path: str | Path):
     return processor
 
 
+# Prompt-prefill chunk for a pack. mlx_lm's default is 2,048 tokens, and a
+# pack's 16 full-attention layers (head_dim 256: no fused kernel serves it)
+# build the whole [24 heads, chunk, context] score matrix in fp32 per chunk.
+# Measured 2026-10-04, Ternary-Bonsai-2 27B, 4,000-token prompt, 16 GB M4:
+#     chunk 2048   124 s   +6.29 GB over the model   (the boot that hit 6% free)
+#     chunk 1024   100 s   +3.94 GB
+#     chunk  512    79 s   +2.84 GB
+#     chunk  256    75 s   +2.21 GB
+PREFILL_STEP = 256
+
+
 def install() -> bool:
-    """Teach mlx_lm.utils.load_model to load packs. Idempotent."""
+    """Teach mlx_lm to load packs, and to prefill them in PREFILL_STEP chunks.
+    Idempotent."""
     global _installed
     if _installed:
         return False
+    import importlib
+
     from mlx_lm import utils
 
     original = utils.load_model
@@ -395,5 +412,17 @@ def install() -> bool:
 
     load_model.__wrapped__ = original
     utils.load_model = load_model
+
+    # mlx_lm.generate (the module) is shadowed by its function of that name.
+    gen = importlib.import_module("mlx_lm.generate")
+    original_step = gen.generate_step
+
+    def generate_step(prompt, model, *args, **kwargs):
+        if "prefill_step_size" not in kwargs and getattr(model, "prism_pack_path", None):
+            kwargs["prefill_step_size"] = PREFILL_STEP
+        return original_step(prompt, model, *args, **kwargs)
+
+    generate_step.__wrapped__ = original_step
+    gen.generate_step = generate_step
     _installed = True
     return True

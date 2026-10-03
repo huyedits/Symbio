@@ -341,11 +341,18 @@ def _generate(image_path: str, question: str, max_tokens: int, name: str) -> str
     eyes = _eyes() if name.startswith(HEADMASTER + ":") else None
     ceiling = eyes.memory_ceiling(model) if eyes is not None else contextlib.nullcontext()
 
+    # A model that prefills better in other than mlx-vlm's default chunks says
+    # so (prism_pack.PREFILL_STEP); everything else keeps the default.
+    extra = {}
+    step = getattr(model, "symbio_prefill_step", None)
+    if isinstance(step, int) and step > 0:
+        extra["prefill_step_size"] = step
+
     with _quiet(), ceiling:
         prompt = apply_chat_template(processor, model.config, question, num_images=1)
         out = vlm_generate(
             model, processor, prompt, [str(image_path)],
-            max_tokens=max_tokens, verbose=False,
+            max_tokens=max_tokens, verbose=False, **extra,
         )
     # mlx-vlm returns a result object on current versions and a bare string on
     # older ones. Both are in the wild; neither is worth pinning a version for.

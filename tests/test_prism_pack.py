@@ -242,3 +242,62 @@ def test_a_look_shares_the_resident_pack_and_reads_only_the_tower(tmp_path):
     assert float(mx.abs(got - want).max()) < 1e-3 * float(mx.abs(want).max()) + 1e-4
     assert vl.config.model_type == "qwen3_5"
     assert vl.config.eos_token_id == [95, 94]
+
+
+def test_a_pack_prefills_in_small_chunks_and_nothing_else_changes(monkeypatch):
+    """mlx_lm's 2,048-token prefill chunk cost a pack +6.3 GB at 4k tokens
+    (and boot hit 6% free memory); 256 cost +2.2 GB and was faster."""
+    import importlib
+
+    from mlx_lm import utils
+
+    gen = importlib.import_module("mlx_lm.generate")
+    seen = []
+    monkeypatch.setattr(gen, "generate_step", lambda prompt, model, *a, **k: seen.append(k))
+    monkeypatch.setattr(utils, "load_model", utils.load_model)
+    monkeypatch.setattr(prism_pack, "_installed", False)
+    prism_pack.install()
+
+    class Pack:
+        prism_pack_path = "/somewhere"
+
+    gen.generate_step(None, Pack())
+    gen.generate_step(None, object())
+    gen.generate_step(None, Pack(), prefill_step_size=1024)
+    assert seen == [{"prefill_step_size": prism_pack.PREFILL_STEP}, {},
+                    {"prefill_step_size": 1024}]
+
+
+# ---- fine-tuning one ---------------------------------------------------------
+
+def test_a_pack_fine_tunes_through_mlx_lms_compiled_trainer(tmp_path, monkeypatch):
+    """The first real Bonsai-2 run died at its first step: mx.compile refused
+    the trimmed head as an 'uncaptured input'. A tiny pack through the same
+    trainer, the same lean loss and the same gated-delta path reproduces it
+    with the closure-held head and passes with the head held as model state."""
+    import mlx.optimizers as optim
+    from mlx_lm.models import gated_delta
+    from mlx_lm.tuner import trainer
+    from mlx_lm.tuner.utils import linear_to_lora_layers
+
+    from symbio import trim_lora
+
+    monkeypatch.setattr(gated_delta, "gated_delta_ops", gated_delta.gated_delta_ops)
+    _write_pack(tmp_path)
+    model, _ = prism_pack.load_pack(tmp_path)
+    trim_lora.checkpoint_gated_delta(chunk=8)
+    samples = [([1, 4, 9, 4, 30, 2, 9, 61, 30, 1] * 3, 4), ([7, 2, 9, 61, 4, 1] * 4, 3)]
+    rows = sorted({t for s, _ in samples for t in s} | {0})
+    loss = trim_lora.build_trimmed_loss(model, rows, samples[0][0])
+    assert loss is not None
+    model.freeze()
+    linear_to_lora_layers(model, 1, {"rank": 2, "scale": 10.0, "dropout": 0.0})
+    assert any(isinstance(m, prism_pack.PackedLoRA) for _, m in model.named_modules())
+    assert trim_lora.kernel_below_adapters(model) == 3
+    args = trainer.TrainingArgs(batch_size=1, iters=3, val_batches=1, steps_per_report=1,
+                                steps_per_eval=100, steps_per_save=100, max_seq_length=64,
+                                adapter_file=str(tmp_path / "adapters.safetensors"),
+                                grad_checkpoint=True)
+    trainer.train(model, optim.Adam(learning_rate=1e-2), samples, samples, args=args, loss=loss)
+    saved = mx.load(str(tmp_path / "adapters.safetensors"))
+    assert saved and all(k.endswith(("lora_a", "lora_b")) for k in saved)
