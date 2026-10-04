@@ -208,7 +208,6 @@ def _warm_prefix(config: dict[str, Any], model: Any, tokenizer: Any,
         # The signature the session will check its adapter fingerprint against.
         # Built here rather than re-derived there so a session that starts
         # while an adapter is being retrained can tell.
-        import hashlib
         from symbio import constants as _constants
         adapter_sig = "none"
         if adapter_loaded:
@@ -430,37 +429,40 @@ def daemon_main(config: dict[str, Any]) -> int:
     # the re-warm running under it, two live KV caches on one model. Now the
     # re-warm runs only when accept() has been idle for IDLE_REWARM_S — the
     # model is provably not needed that second — and a connection arriving
-    # mid-wait aborts the wait and is served at once. The re-warm itself
-    # holds a flag the loop checks before serving: if a client connects
-    # while the ~35s prefill runs, it waits for it to finish and then takes
-    # a fresh hand-over — one long wait instead of a corrupted model.
+    # mid-wait aborts the wait and is served at once; one connecting DURING
+    # the ~35 s prefill just sits in the listen backlog until accept() takes
+    # it — one long wait instead of a corrupted model.
     #
     # Sessions that connect before the idle window closes take the persisted
     # FILE path instead (a ~10s read at session boot, before the user types —
     # verified 21:03: file hit at 21:03:51.165, first message 21:03:58.990).
     # That path is strictly safe: it loads a snapshot, not shared live state.
     IDLE_REWARM_S = 45.0
-    _rewarming = {"active": False}
 
     def _rewarm_if_idle() -> None:
-        """Wait out an idle window, then rebuild the hand-over in place."""
+        """Rebuild a spent hand-over once the daemon has been idle a while.
+
+        Once. A session pops the hand-over, so there is something to rebuild
+        only after one has run; the old `while True` re-prefilled the whole
+        system prompt (401 MB, ~35 s of GPU) every 45 s for as long as nobody
+        connected — 27 times in one evening, the swap churn and the 45 s
+        stalls of a message that arrived mid-rebuild.
+        """
         import select
 
-        while True:
-            ready, _, _ = select.select([sock], [], [], IDLE_REWARM_S)
-            if ready:
-                return                     # a client is waiting: serve it
-            _rewarming["active"] = True
-            try:
-                warmed = _warm_prefix(config, model, tokenizer, adapter_loaded)
-                if warmed is not None:
-                    warm["prefix"] = warmed
-                    print("Re-warmed for the next session.", flush=True)
-            except Exception as e:
-                print(f"Re-warm failed ({e!r}); next session uses the "
-                      f"persisted cache.", flush=True)
-            finally:
-                _rewarming["active"] = False
+        if warm.get("prefix") is not None:
+            return                         # still intact: nothing to rebuild
+        ready, _, _ = select.select([sock], [], [], IDLE_REWARM_S)
+        if ready:
+            return                         # a client is waiting: serve it
+        try:
+            warmed = _warm_prefix(config, model, tokenizer, adapter_loaded)
+            if warmed is not None:
+                warm["prefix"] = warmed
+                print("Re-warmed for the next session.", flush=True)
+        except Exception as e:
+            print(f"Re-warm failed ({e!r}); next session uses the "
+                  f"persisted cache.", flush=True)
 
     try:
         while True:

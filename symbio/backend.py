@@ -302,8 +302,22 @@ def trainer_command(model_name: str, data_dir: str, adapter_dir: str,
     memory the OS reclaims completely when it exits.
     """
     if not is_cuda(config):
+        # Bare `mlx_lm lora` stays the command for every model it can train.
+        # A 1-bit checkpoint (loads only with symbio's onebit patch) or a head
+        # past the 16 GB vocab wall goes through symbio.app.lora_runner, which
+        # takes the same flags plus the vocab skin's.
+        from symbio.app import vocab_skin
+
+        skin = lora.get("vocab_skin", "auto")
+        if vocab_skin.needs_runner(model_name, skin):
+            entry = [sys.executable, "-m", "symbio.app.lora_runner",
+                     "--vocab-skin", str(skin).lower(),
+                     "--vocab-skin-base",
+                     str(lora.get("vocab_skin_base", vocab_skin.DEFAULT_BASE))]
+        else:
+            entry = [sys.executable, "-m", "mlx_lm", "lora"]
         return [
-            sys.executable, "-m", "mlx_lm", "lora",
+            *entry,
             "--model", model_name,
             "--train",
             "--data", data_dir,

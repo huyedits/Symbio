@@ -65,6 +65,12 @@
     "adapter_compatible": false,
     "memory_note": "7.9 GB on disk, ~8.4 GB in GPU memory. Requires gpu.wired_limit_mb set (11264 works on 16 GB); unwired it pages to SSD and stalls."
   },
+  "bonsai_27b_1bit": {
+    "model_name": "prism-ml/Bonsai-27B-mlx-1bit",
+    "description": "1-bit 27B (binary {-s,+s} weights, g128), Qwen3.6-27B hybrid attention, multimodal checkpoint loaded text-only. Stock MLX has no 1-bit kernels; symbio/app/onebit.py runs the packed weights unexpanded (Metal kernel for decode, exact 2-bit respread into quantized_matmul for prefill), so no Prism MLX fork is needed. Measured 2026-10-03 on the 16 GB M4, greedy, no draft: 3.5s load, 18.3 tok/s decode, 65 tok/s prefill at 1.5k tokens — faster than both the ternary 27B (11.5) and the 14B (12.7). Quality not yet benched here (Prism claims 89.5% of FP16 vs the ternary's 94.6%).",
+    "adapter_compatible": false,
+    "memory_note": "5.1 GB on disk (vision tower included, not loaded), 4.21 GB resident, 6.7 GB peak at 1.5k context. 248k vocab: base-only, LoRA is past the 16 GB vocab wall."
+  },
   "nemo_12b": {
     "model_name": "mlx-community/Mistral-Nemo-Instruct-2407-4bit",
     "description": "Dense 12.2B Mistral-Nemo (2407), 4-bit MLX. Measured here 2026-09-03 on bfcl_simple n=120: 92.50% against Qwen3-8B-4bit's 80.83% and Qwen3-14B-3bit's 78.33% -- and in 516s against the 8B's 1157s, WITHOUT a draft model where the Qwen runs had one. Plain MistralForCausalLM, so a trimmable KV cache and stock mlx_lm support, no fork. Vocab 131,072 -- BELOW the 14B's 151,936, so the output-logit memory that governs the LoRA ceiling on this 16 GB machine is cheaper here than on the model that already fine-tunes. No draft model shares its tokenizer, so agent.draft_model must be cleared or speculative decoding runs against the wrong vocab. Older than it looks: July 2024, against Qwen3-8B's April 2025.",
