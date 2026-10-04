@@ -326,6 +326,17 @@ def _apply() -> None:
 
         _eyes.install()
 
+        # --- tool results a Qwen3.5-family template recognises -------------
+        #
+        # Those templates skip user turns that are only a <tool_response>
+        # when they look for the user's request; Symbio's observation turns
+        # begin "[System observation:", so each read as a new, empty request
+        # and Bonsai 27B lost the task after its first tool call. Rendering
+        # only (symbio/app/template_compat.py).
+        from symbio.app import template_compat as _template_compat
+
+        _template_compat.install()
+
         # --- flash attention over the 8-bit KV cache (mlx-lm 0.31.3) --------
         #
         # agent.kv_bits sent every prefill through mlx_lm's unfused quantized
