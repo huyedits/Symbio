@@ -77,6 +77,21 @@ def test_a_lower_rate_and_an_explicit_off_are_left_alone():
     assert trim_lora.cap_learning_rate(argv, "off") is None and argv[1] == "2e-4"
 
 
+def test_a_packed_head_without_a_weight_still_reports_its_vocabulary():
+    """ternel's head stores codes/scales, no weight; reading 0 rows once sent a
+    248k-vocabulary 27B to the full-logit loss."""
+    import types
+
+    head = types.SimpleNamespace(layout=types.SimpleNamespace(rows=248320))
+    model = types.SimpleNamespace(language_model=types.SimpleNamespace(
+        lm_head=head, model=object()))
+    assert trim_lora._vocab_size(model) == 248320
+    bare = types.SimpleNamespace(language_model=types.SimpleNamespace(
+        lm_head=types.SimpleNamespace(), model=object(),
+        args=types.SimpleNamespace(vocab_size=151936)))
+    assert trim_lora._vocab_size(bare) == 151936
+
+
 def test_the_trim_flag_is_taken_out_before_mlx_lm_sees_it():
     argv = ["--model", "m", trim_lora.TRIM_FLAG, "off", "--train"]
     assert trim_lora._pop_flag(argv, trim_lora.TRIM_FLAG, "auto") == "off"

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import math
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 PREFILL_STEP = 256  # see adapt(); measured like prism_pack.PREFILL_STEP
@@ -59,7 +60,10 @@ def adapt(model: Any) -> bool:
     import mlx.core as mx
     import mlx.nn as nn
 
-    code = sys.modules[cls.__module__]  # the checkpoint's own module
+    # The checkpoint's own module. mlx_lm execs it from a spec without
+    # registering it in sys.modules, so it is reached through the globals its
+    # functions were defined in.
+    code = sys.modules.get(cls.__module__) or SimpleNamespace(**cls.__call__.__globals__)
     shipped_call = cls.__call__
 
     def decode(codes, scales, layout, rows, dtype):

@@ -378,9 +378,18 @@ def _pop_flag(argv: list[str], flag: str, default: str) -> str:
 
 
 def _vocab_size(model: Any) -> int:
+    """Rows of the output head. A packed head may hold no `weight` at all (ternel
+    stores codes/scales), and 0 here once meant "small vocabulary: no trim" and a
+    full 248k-logit run that took free memory to 4%; the config says it too."""
     head, _tied = output_head(model)
     weight = getattr(head, "weight", None)
-    return int(weight.shape[0]) if weight is not None else 0
+    if weight is not None:
+        return int(weight.shape[0])
+    layout = getattr(head, "layout", None)
+    if getattr(layout, "rows", None):
+        return int(layout.rows)
+    args = getattr(_language_model(model), "args", None)
+    return int(getattr(args, "vocab_size", 0) or 0)
 
 
 def cap_learning_rate(argv: list[str], cap: str) -> str | None:

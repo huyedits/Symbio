@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import sys
 import types
-from dataclasses import dataclass
 
 import pytest
 
@@ -20,41 +19,51 @@ nn = pytest.importorskip("mlx.nn")
 from symbio.app import ternel_pack  # noqa: E402
 
 
+_STANDIN = '''
+from dataclasses import dataclass
+
+import mlx.core as mx
+import mlx.nn as nn
+
+INDEX_DTYPE = mx.uint32
+GET_ROWS_THREADS = 256
+
+
+@dataclass(frozen=True)
+class Layout:
+    rows: int
+    columns: int
+    groups_per_row: int = 1
+    tile: int = 1
+
+
+def packed_matmul(codes, scales, x, *, layout):
+    return x @ codes.astype(x.dtype).T
+
+
+def tq1_get_rows(codes, scales, indices, *, groups_per_row, tile, dtype, threads, safe_clamp):
+    assert indices.dtype == INDEX_DTYPE
+    return codes[indices].astype(dtype)
+
+
+class PackedLinear(nn.Module):
+    def __init__(self, weight):
+        super().__init__()
+        self.layout = Layout(*weight.shape)
+        self.codes = weight
+        self.scales = mx.zeros((1,), dtype=mx.uint16)
+
+    def __call__(self, x):
+        return packed_matmul(self.codes, self.scales, x, layout=self.layout)
+'''
+
+
 def _fake_checkpoint_module():
-    """The checkpoint module's interface, with codes holding a dense weight."""
-    mod = types.ModuleType("custom_model_standin")
-    mod.INDEX_DTYPE = mx.uint32
-    mod.GET_ROWS_THREADS = 256
-
-    @dataclass(frozen=True)
-    class Layout:
-        rows: int
-        columns: int
-        groups_per_row: int = 1
-        tile: int = 1
-
-    def packed_matmul(codes, scales, x, *, layout):
-        return x @ codes.astype(x.dtype).T
-
-    def tq1_get_rows(codes, scales, indices, *, groups_per_row, tile, dtype, threads,
-                     safe_clamp):
-        assert indices.dtype == mod.INDEX_DTYPE
-        return codes[indices].astype(dtype)
-
-    class PackedLinear(nn.Module):
-        def __init__(self, weight):
-            super().__init__()
-            self.layout = Layout(*weight.shape)
-            self.codes = weight
-            self.scales = mx.zeros((1,), dtype=mx.uint16)
-
-        def __call__(self, x):
-            return packed_matmul(self.codes, self.scales, x, layout=self.layout)
-
-    mod.Layout, mod.packed_matmul, mod.tq1_get_rows = Layout, packed_matmul, tq1_get_rows
-    mod.PackedLinear = PackedLinear
-    PackedLinear.__module__ = mod.__name__
-    sys.modules[mod.__name__] = mod
+    """The checkpoint module's interface, with codes holding a dense weight —
+    exec'd from source into an unregistered module, the way mlx_lm runs a
+    checkpoint's model_file."""
+    mod = types.ModuleType("custom_model")
+    exec(compile(_STANDIN, "ternel_standin.py", "exec", dont_inherit=True), mod.__dict__)
     return mod
 
 
@@ -71,11 +80,14 @@ class _Model(nn.Module):
 
 @pytest.fixture
 def model():
+    # mlx_lm execs a checkpoint's model_file without registering the module,
+    # so adapt() must reach it without sys.modules (the first real load died
+    # on KeyError: 'custom_model').
     mod = _fake_checkpoint_module()
+    assert "custom_model" not in sys.modules
     m = _Model(mod.PackedLinear)
     assert ternel_pack.is_ternel(m) and ternel_pack.adapt(m)
     yield m
-    sys.modules.pop(mod.__name__, None)
 
 
 def test_a_ternel_model_prefills_in_small_chunks(model):
