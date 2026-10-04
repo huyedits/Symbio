@@ -70,7 +70,7 @@ class SymbioTUI(App):
     ]
 
     def __init__(self, command_names: list[str] | None = None,
-                 link_factory=DaemonLink, inline_lines: int = 14):
+                 link_factory=DaemonLink, inline_lines: int | None = None):
         super().__init__()
         self._inline_lines = inline_lines
         if command_names is None:
@@ -92,9 +92,15 @@ class SymbioTUI(App):
 
     def on_mount(self) -> None:
         if self.is_inline:
-            # The panel is a fixed slice of the terminal; everything above it
-            # stays in the scrollback the terminal already owns.
-            self.screen.styles.height = self._inline_lines
+            # The panel is a slice of the terminal; everything above it stays
+            # in the scrollback the terminal already owns. Claimed from the
+            # terminal itself (see inline_panel_height), never a fixed slice.
+            try:
+                rows = self.size.height or 24
+            except Exception:
+                rows = 24
+            self.screen.styles.height = inline_panel_height(
+                rows, self._inline_lines)
         self.query_one("#prompt", Input).focus()
         self.link = self._link_factory(self._on_frame, self._on_close)
         problem = self.link.connect()
@@ -244,8 +250,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fullscreen", action="store_true",
                     help="take over the terminal instead of running inline")
-    ap.add_argument("--lines", type=int, default=14,
-                    help="how many lines the inline panel occupies")
+    ap.add_argument("--lines", type=int, default=None,
+                    help="how many lines the inline panel occupies "
+                         "(default: half the terminal, at least 20)")
     args = ap.parse_args()
     app = SymbioTUI(inline_lines=args.lines)
     app.run(inline=not args.fullscreen)

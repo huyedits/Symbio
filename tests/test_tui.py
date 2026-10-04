@@ -46,6 +46,28 @@ async def test_the_input_box_has_focus_the_moment_it_opens():
         assert app.focused is app.query_one("#prompt")
 
 
+def test_the_inline_panel_gets_room():
+    """Inline mode sized the panel to a hardcoded 14 lines — a slice too short
+    to show the face, three turns and the composer at once, i.e. the squashed
+    UI. The default must claim room from the terminal (half of it, floored so
+    the chrome cannot eat the history), while an explicit --lines still wins.
+
+    Asserted on inline_panel_height directly: run_test is headless full-screen,
+    where is_inline is False and on_mount never takes the inline branch, so
+    the layout engine cannot witness the function the app actually calls.
+    """
+    from symbio_tui.app import inline_panel_height as h
+
+    assert h(48, None) == 24          # half of a 48-row terminal
+    assert h(30, None) == 20          # 15 < floor(20): the floor applies
+    assert h(80, None) == 40          # scales with the terminal, not a constant
+    assert h(24, None) == 20          # exactly a small terminal: floored
+    assert h(18, None) == 18          # a tiny window: capped, not overflowed
+    assert h(48, 14) == 14            # an explicit --lines still wins
+    assert h(0, None) == 20           # a meaningless size reads as the default
+    assert h(24, None) == 20
+
+
 @pytest.mark.asyncio
 async def test_typing_a_slash_offers_matching_commands():
     app = _app()
