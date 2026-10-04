@@ -35,7 +35,6 @@ import base64
 import hashlib
 import json
 import mimetypes
-import fcntl
 import os
 import re
 import socket
@@ -75,6 +74,21 @@ def _load_constants():
 
 
 constants = _load_constants()
+
+
+def _load_guardrails():
+    """symbio/guardrails.py, by path, for the same reason as constants: it
+    is standard library only, and the package behind it is 105 MB."""
+    import importlib.util
+
+    path = APP_DIR.parent / "symbio" / "guardrails.py"
+    spec = importlib.util.spec_from_file_location("_symbio_guardrails", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+guardrails = _load_guardrails()
 
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -362,6 +376,25 @@ def set_settings(patch: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "changed": changed}
 
 
+def get_guardrails() -> dict[str, Any]:
+    """The Guardrails panel: every kind of action with its mode, the floors
+    nothing can switch off, and what was asked lately and how it went."""
+    try:
+        config = json.loads(constants.CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        config = {}
+    out = guardrails.describe_all(config)
+    out["recent"] = guardrails.recent(constants.LOG_DIR, limit=20)
+    return out
+
+
+def set_guardrail(patch: dict[str, Any]) -> dict[str, Any]:
+    """One kind's mode, from the panel. guardrails.set_mode accepts only a
+    known kind and a known mode, and writes nothing else."""
+    return guardrails.set_mode(constants.CONFIG_FILE, str(patch.get("kind", "")),
+                               str(patch.get("mode", "")))
+
+
 def get_sessions(limit: int = 60, session_id: str = "") -> dict[str, Any]:
     """Every conversation this agent has had, across every front end.
 
@@ -552,11 +585,11 @@ def _daemon_log_tail(lines: int = 4) -> str:
 def wake_daemon(report=None, timeout: float = DAEMON_START_S) -> tuple[bool, str]:
     """The resident model up and answering, started if it has to be.
 
-    One starter at a time, across processes as well as threads: the check and
-    `symb daemon start` run under an flock on PROJECT_DIR/daemon.start.lock,
-    and `start` returns only once the new pid file is written. Two windows, or
-    a window and an ACP host, that both saw "down" would otherwise both start
-    one — two copies of a 14B, the out-of-memory kill this Mac keeps having.
+    One starter at a time: a lock here for this process, and an flock inside
+    `symb daemon start` for every process (see symbio/app/daemon.py). Two
+    windows, or a window and an ACP host, that both saw "down" would otherwise
+    both start one — two copies of a 14B, the out-of-memory kill this Mac
+    keeps having.
 
     `report(text)` gets a progress line every couple of seconds while it loads.
     A load that dies (usually memory) is reported when it dies, with the end
@@ -564,40 +597,36 @@ def wake_daemon(report=None, timeout: float = DAEMON_START_S) -> tuple[bool, str
     """
     report = report or (lambda _text: None)
     started = time.monotonic()
+    # One starter per process here; across processes `symb daemon start`
+    # itself holds an flock around check-and-start (symbio/app/daemon.py), so
+    # a window, an ACP host and `symb watch` that all find it down start one.
     with _WAKE_LOCK:
-        try:
-            constants.PROJECT_DIR.mkdir(parents=True, exist_ok=True)
-            lock = open(constants.PROJECT_DIR / "daemon.start.lock", "a")
-        except OSError as e:
-            return False, f"Could not start Symbio's model: {e}"
-        with lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            state = daemon_state()
-            if state == "loading":
-                try:
-                    pid = int(constants.DAEMON_PID_FILE.read_text(encoding="utf-8").strip())
-                except (OSError, ValueError):
-                    pid = 0
-                if pid and not _is_our_daemon(pid):
-                    for stale in (constants.DAEMON_PID_FILE, constants.DAEMON_SOCKET):
-                        try:
-                            stale.unlink()
-                        except OSError:
-                            pass
-                    state = "down"
-            if state == "down":
-                report("Waking Symbio — starting the model…")
-                try:
-                    done = subprocess.run(
-                        [sys.executable, "-m", "symbio.app.cli", "daemon", "start"],
-                        cwd=str(APP_DIR.parent), stdin=subprocess.DEVNULL,
-                        capture_output=True, text=True, timeout=60, check=False)
-                    said = (done.stdout + done.stderr).strip()
-                except (OSError, subprocess.SubprocessError) as e:
-                    said = str(e)
-                if daemon_state() == "down":
-                    return False, ("Symbio could not start its model"
-                                   + (f": {said[-400:]}" if said else "."))
+        state = daemon_state()
+        if state == "loading":
+            try:
+                pid = int(constants.DAEMON_PID_FILE.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                pid = 0
+            if pid and not _is_our_daemon(pid):
+                for stale in (constants.DAEMON_PID_FILE, constants.DAEMON_SOCKET):
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
+                state = "down"
+        if state == "down":
+            report("Waking Symbio — starting the model…")
+            try:
+                done = subprocess.run(
+                    [sys.executable, "-m", "symbio.app.cli", "daemon", "start"],
+                    cwd=str(APP_DIR.parent), stdin=subprocess.DEVNULL,
+                    capture_output=True, text=True, timeout=60, check=False)
+                said = (done.stdout + done.stderr).strip()
+            except (OSError, subprocess.SubprocessError) as e:
+                said = str(e)
+            if daemon_state() == "down":
+                return False, ("Symbio could not start its model"
+                               + (f": {said[-400:]}" if said else "."))
     last = 0.0
     while time.monotonic() - started < timeout:
         state = daemon_state()
@@ -683,7 +712,11 @@ class DaemonBridge:
         self.waking = False
         self._wake_lock = threading.Lock()
         self._connect_lock = threading.Lock()
-        self.woke_at = 0.0             # when a wake by this bridge finished
+        # say() and the first-prompt hand-off of `pending` both read `ready`
+        # and touch `pending`; unlocked, a message sent in between could jump
+        # ahead of the held ones or be stranded in the list.
+        self._pending_lock = threading.Lock()
+        self.woke_at = 0.0             # when a wake by this bridge loaded a model
         # The session prints its banner and THEN asks for input, so a message
         # sent the moment the socket opens arrives before the session is
         # listening: the banner's own input_prompt closed a turn that had not
@@ -693,6 +726,12 @@ class DaemonBridge:
         self.ready = False
         self.pending: list[str] = []
         self.spoke = False
+        # The approval card the daemon is blocked on, if any. Kept so a window
+        # that reloads mid-question gets the card again: the daemon's
+        # confirm_fn is a real thread waiting for this answer, and a card that
+        # vanished with the old page left the turn hanging with no way to
+        # answer it.
+        self.pending_confirm: dict | None = None
 
     @property
     def turn_open(self) -> bool:
@@ -777,6 +816,7 @@ class DaemonBridge:
         threading.Thread(target=self._wake, args=(then_connect,), daemon=True).start()
 
     def _wake(self, then_connect: bool) -> None:
+        loaded_here = daemon_state() != "ready"
         try:
             ok, why = wake_daemon(lambda text: self.send_json({"type": "waking", "text": text}))
         except Exception as e:           # never leave `waking` stuck on
@@ -785,7 +825,11 @@ class DaemonBridge:
             with self._wake_lock:
                 self.waking = False
         if ok:
-            self.woke_at = time.monotonic()
+            if loaded_here:
+                # Only a model this bridge watched load has a cold first
+                # session; one already up that is slow to answer is being
+                # held by another client, and the old warning is right.
+                self.woke_at = time.monotonic()
             self.send_json({"type": "awake", "text": ""})
             # A pre-warm opens no session, but a message typed while it was
             # loading is waiting in `pending`. Seen live: it waited forever.
@@ -794,6 +838,7 @@ class DaemonBridge:
             if then_connect or self.pending:
                 ok, why = self.connect()
         if not ok:
+            self.send_json({"type": "asleep", "text": why})
             self.send_json({"type": "system", "text": why})
             if self.pending:
                 self.pending.clear()
@@ -857,6 +902,8 @@ class DaemonBridge:
 
     def attach(self, send_json) -> None:
         self.sink = send_json
+        if self.pending_confirm is not None:
+            self.send_json(self.pending_confirm)
 
     def detach(self) -> None:
         self.sink = None
@@ -888,6 +935,7 @@ class DaemonBridge:
         self.rfile = None
         self.wfile = None
         self.ready = False
+        self.pending_confirm = None
 
     def _pump(self) -> None:
         """Daemon frames in, browser frames out, until either end hangs up."""
@@ -915,18 +963,25 @@ class DaemonBridge:
                     self.send_json({"type": "system", "text": msg.get("text", "")})
                 elif kind == "confirm":
                     self._flush_prefix()
-                    self.send_json({"type": "confirm", "prompt": msg.get("prompt", "")})
+                    frame = {"type": "confirm", "prompt": msg.get("prompt", "")}
+                    # The guardrails card's parts, when the daemon sent them:
+                    # what will happen, exactly what, and why it is asking.
+                    if isinstance(msg.get("card"), dict):
+                        frame["card"] = msg["card"]
+                    self.pending_confirm = frame
+                    self.send_json(frame)
                 elif kind == "input_prompt":
                     # The session is asking for the next message. After a turn
                     # that means the turn is over -- the text has already gone
                     # out as tokens, so this carries no body. Before the first
                     # one it means the session has finished starting up.
                     if not self.ready:
-                        self.ready = True
+                        with self._pending_lock:
+                            self.ready = True
+                            queued, self.pending = self.pending, []
+                            for text in queued:
+                                self._send({"type": "input", "text": text})
                         self.send_json({"type": "awake", "text": ""})
-                        queued, self.pending = self.pending, []
-                        for text in queued:
-                            self._send({"type": "input", "text": text})
                     elif self.open_turns:
                         self._end_of_turn()
                         self.open_turns -= 1
@@ -944,6 +999,8 @@ class DaemonBridge:
             # message wakes the model again rather than writing into it.
             if self.open_turns:
                 self.open_turns = 0
+                with self._pending_lock:
+                    self.pending.clear()
                 self.send_json({"type": "done", "text": ""})
             if self.rfile is not None and self.sock is not None:
                 self._forget_connection()
@@ -1080,16 +1137,24 @@ class DaemonBridge:
         if not self.open_turns:
             self._new_turn()     # not mid-stream: a queued turn resets at its start
         self.open_turns += 1
-        if not self.ready:
+        with self._pending_lock:
+            if not self.ready:
+                self.pending.append(text)
+                return True
+            if self._send({"type": "input", "text": text}):
+                return True
             self.pending.append(text)
-            return True
-        if self._send({"type": "input", "text": text}):
-            return True
-        self.pending.append(text)
-        return False
+            return False
 
-    def confirm(self, approved: bool) -> None:
-        self._send({"type": "confirm", "answer": bool(approved)})
+    def confirm(self, approved: bool, always: bool = False) -> None:
+        """The answer the daemon's confirm_fn is waiting for. `always` is
+        "Always allow" on the card: the daemon switches that kind of action
+        to allow, where Settings → Guardrails reads it."""
+        self.pending_confirm = None
+        answer = {"type": "confirm", "answer": bool(approved)}
+        if approved and always:
+            answer["always"] = True
+        self._send(answer)
 
     def close(self) -> None:
         try:
@@ -1097,6 +1162,54 @@ class DaemonBridge:
                 self.sock.close()
         except OSError:
             pass
+
+
+# ── who may talk to this server ──────────────────────────────────────
+#
+# It listens on localhost, and that is not the same as "only this window":
+# every web page open in any browser on this Mac can reach 127.0.0.1:8742
+# too. The same-origin policy stops a page from READING a cross-site
+# response, but a WebSocket is exempt from it — so until this check any site
+# could open /ws/chat, type to an agent that runs shell commands, and answer
+# its approval cards. A form posted as text/plain reached /api/settings the
+# same way. Browsers always send Origin on a WebSocket handshake and on a
+# cross-site POST, and a page cannot forge it; a client that sends none is
+# not a browser, and so is not a web page acting behind the user's back.
+#
+# Host is checked on every request for DNS rebinding: a name that resolves
+# to 127.0.0.1 turns an attacker's page into a same-origin one, but its
+# requests still say `Host: attacker.example:8742`.
+_LOCAL_NAMES = ("127.0.0.1", "localhost", "[::1]")
+
+
+def _is_local_hostport(value: str, port: int, bound: str = "") -> bool:
+    value = (value or "").strip().lower()
+    # The address it was started on counts too: `--host` is what the
+    # launcher puts in the window's URL.
+    names = _LOCAL_NAMES + ((bound.lower(),) if bound else ())
+    return value in {f"{name}:{port}" for name in names}
+
+
+def request_refusal(headers: Any, port: int, websocket: bool = False,
+                    writes: bool = False, bound: str = "") -> str:
+    """Why this request is refused, or "" when it may proceed."""
+    if not _is_local_hostport(headers.get("Host", ""), port, bound):
+        return "Host is not this machine's window server."
+    if not (websocket or writes):
+        return ""
+    origin = headers.get("Origin")
+    if origin is not None:
+        parts = urllib.parse.urlsplit(origin)
+        if parts.scheme != "http" or not _is_local_hostport(parts.netloc, port, bound):
+            return f"Origin {origin!r} is not this window."
+    if writes and not websocket:
+        # A cross-site form can only send text/plain, form-urlencoded or
+        # multipart; JSON from a page needs a preflight this server never
+        # answers.
+        kind = (headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if kind != "application/json":
+            return "Settings are written as application/json only."
+    return ""
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────
@@ -1111,8 +1224,18 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- routing --
 
+    def _refuse(self, websocket: bool = False, writes: bool = False) -> bool:
+        bound, port = self.server.server_address[:2]
+        why = request_refusal(self.headers, port, websocket=websocket,
+                              writes=writes, bound=str(bound))
+        if why:
+            self.send_error(403, why)
+        return bool(why)
+
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's name
         path = self.path.split("?", 1)[0]
+        if self._refuse(websocket=path == "/ws/chat"):
+            return
         if path == "/ws/chat":
             return self._websocket()
         if path == "/api/ecosystem":
@@ -1121,6 +1244,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(get_health())
         if path == "/api/settings":
             return self._json(get_settings())
+        if path == "/api/guardrails":
+            return self._json(get_guardrails())
         if path == "/api/sessions":
             query = self.path.partition("?")[2]
             wanted = ""
@@ -1139,7 +1264,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404, "Not found")
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's name
-        if self.path.split("?", 1)[0] != "/api/settings":
+        if self._refuse(writes=True):
+            return
+        path = self.path.split("?", 1)[0]
+        writers = {"/api/settings": set_settings, "/api/guardrails": set_guardrail}
+        if path not in writers:
             return self.send_error(404, "Not found")
         try:
             length = int(self.headers.get("Content-Length") or 0)
@@ -1148,7 +1277,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": False, "error": "Malformed request."})
         if not isinstance(body, dict):
             return self._json({"ok": False, "error": "Malformed request."})
-        return self._json(set_settings(body))
+        return self._json(writers[path](body))
 
     def _json(self, payload: dict) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -1274,7 +1403,8 @@ class Handler(BaseHTTPRequestHandler):
                     elif bridge.pending and not (bridge.connecting() or bridge.waking):
                         bridge.start_waking()
                 elif kind == "confirm_response":
-                    bridge.confirm(msg.get("approved", False))
+                    bridge.confirm(bool(msg.get("approved", False)),
+                                   always=bool(msg.get("always", False)))
                 elif kind == "ping":
                     send_json({"type": "pong"})
         except (WSError, OSError):

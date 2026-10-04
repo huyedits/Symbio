@@ -45,6 +45,10 @@ import sys
 # Query rows at or above which the fused path is taken. Decode is 1; a
 # speculative verify is draft+1 (4 by default); a prefill chunk is up to 2,048.
 MIN_QUERY_ROWS = 8
+# Head sizes mlx 0.32's fused prefill kernel serves. Anything else falls back
+# inside mx.fast to the unfused path, which builds the score matrix anyway —
+# and dequantizing first would then only ADD memory. Qwen3 is 128.
+FUSED_HEAD_DIMS = (64, 80, 128)
 
 _installed = False
 
@@ -55,7 +59,8 @@ def _flash_sdpa(original):
     def scaled_dot_product_attention(queries, keys, values, cache, scale, mask, sinks=None):
         bits = getattr(cache, "bits", None)
         if (bits and sinks is None and isinstance(keys, (tuple, list))
-                and queries.shape[-2] >= MIN_QUERY_ROWS):
+                and queries.shape[-2] >= MIN_QUERY_ROWS
+                and queries.shape[-1] in FUSED_HEAD_DIMS):
             group_size = getattr(cache, "group_size", 64)
             k = mx.dequantize(*keys, group_size=group_size, bits=bits).astype(queries.dtype)
             v = mx.dequantize(*values, group_size=group_size, bits=bits).astype(queries.dtype)

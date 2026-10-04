@@ -31,7 +31,11 @@ it is not a place to let an untrusted model run arbitrary code on a host you
 keep on. A real sandbox-exec / container boundary would be the honest end
 state; until then the refusal list errs toward the blunt side.
 """
-import json, re, shutil, subprocess, tempfile
+import json
+import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
 # Anything that reaches outside the scratch directory or needs privileges.

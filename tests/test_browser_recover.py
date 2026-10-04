@@ -66,6 +66,15 @@ class Session:
     _MUST_CHANGE_THE_PAGE = chat.ChatSession._MUST_CHANGE_THE_PAGE
     _targeting_help = chat.ChatSession._targeting_help
     _TARGETING_FAILURES = chat.ChatSession._TARGETING_FAILURES
+    # The guardrails every call now passes through.
+    _guardrail_config = chat.ChatSession._guardrail_config
+    confirm_policy = chat.ChatSession.confirm_policy
+    _record_guardrail = chat.ChatSession._record_guardrail
+    _action_card = chat.ChatSession._action_card
+    _plain_action = chat.ChatSession._plain_action
+    _translate_action = chat.ChatSession._translate_action
+    _log_guardrail = chat.ChatSession._log_guardrail
+    _publish_gate = chat.ChatSession._publish_gate
 
     def __init__(self, browser, last_url=""):
         self.browser = browser

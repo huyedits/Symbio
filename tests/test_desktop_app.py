@@ -410,8 +410,9 @@ def test_a_model_that_will_not_load_says_why_and_ends_the_turn(monkeypatch):
     bridge.say("hello")
     bridge._wake(then_connect=True)
 
-    assert [m["type"] for m in sent] == ["system", "done"]
-    assert "stopped while it was loading" in sent[0]["text"]
+    # `asleep` clears the page's waking state; the reason follows as a line.
+    assert [m["type"] for m in sent] == ["asleep", "system", "done"]
+    assert "stopped while it was loading" in sent[1]["text"]
     assert bridge.pending == [] and not bridge.turn_open
 
 

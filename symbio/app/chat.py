@@ -1,6 +1,7 @@
 """The interactive chat REPL: slash commands, the autonomous agent loop,
 and the growth loop (memory nudges, exit flush, cron surfacing)."""
 
+import copy
 import gc
 import hashlib
 import json
@@ -71,7 +72,8 @@ from symbio.computer import BrowserSession
 from symbio import safety
 from symbio.tools import tool_few_shots
 from symbio.app import cron, dispatch, golden, health, learn, local_telemetry, memory, mcp_bridge, pending, prompts, prune, sandbox, security, sessions, setup, skills, tooling, training, web
-from symbio.app.config import apply_gpu_limits, config_show, set_config_value
+from symbio.app.config import (apply_gpu_limits, config_show, keep_model_resident,
+                               set_config_value)
 try:
     # tag_rag lives at the repo root rather than inside the package, so it is
     # only importable when the root is on sys.path — true for `./symb` (which
@@ -102,6 +104,7 @@ from symbio.app.chat_constants import (  # noqa: F401  (re-exported; see above)
     _COMPLETION_CLAIM, _CLAIM_HEDGE,
     _claims_completion
 )
+from symbio.app.chat_text import needs_thinking
 from symbio.app.chat_text import (  # noqa: F401  (re-exported; see above)
     _GUI_APP_ALIASES, _GUI_APP_STEMS, _gui_app_from_stem, _gui_app_for,
     _looks_like_shell_command, _VERIFICATION_FOLLOWUPS, _VERIFICATION_TRAILING,
@@ -214,6 +217,13 @@ def _reset_headroom() -> None:
     _headroom_mb, _headroom_at = None, 0.0
 
 
+# A message that only says "keep going" with the task already in hand.
+_CONTINUE_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:continue|go on|keep going|carry on|go ahead|proceed|"
+    r"finish(?: it| up)?|do it|and\??|next|resume|ok(?:ay)?(?:,? (?:do it|go|continue))?|"
+    r"yes(?: please)?|yep|sure)\s*[.!]*\s*$", re.IGNORECASE)
+
+
 class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
     """One interactive chat session: model, stores, browser, cron thread.
 
@@ -269,6 +279,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # under it (adapter reload, a generation that errored mid-stream).
         self._prompt_cache: list | None = None
         self._cached_prompt_ids: list[int] | None = None
+        # Copies of a cache that cannot be trimmed, as slot -> (ids, cache).
+        # See _keep_checkpoint for the slots.
+        self._cache_checkpoints: dict[str, tuple[list[int], list]] = {}
         # What one cached token actually costs on this box, measured off the
         # live cache rather than derived from layer counts and head dimensions
         # — the arithmetic changes with every headmaster swap and with
@@ -432,6 +445,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         if _domains:
             _kw["allowed_domains"] = list(_domains)
         self.browser = BrowserSession(**_kw)
+        from symbio import desk as _desk
+
+        # Through _desk_config, so `symb desk on` reaches a running daemon's
+        # next browser window the same way it reaches its desktop tools.
+        _desk.attach(self.browser, self._desk_config)
         # Worker models are loaded lazily on first delegated task — this
         # just holds the (empty) pool, no extra RAM until dispatch.enabled
         # and something actually delegates. Status messages go through the
@@ -532,7 +550,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         while True:
             time.sleep(int(self.config["agent"]["cron_poll_seconds"]))
             try:
-                fired = cron.check_due_jobs(self.config)
+                # Tasks are left for `symb watch`, which runs them as turns.
+                # Fired here one would only become a line of text at the
+                # user's next message, and never be done.
+                fired = cron.check_due_jobs(self.config, include_tasks=False)
             except Exception:
                 continue
             if fired:
@@ -578,6 +599,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         had_cache = self._prompt_cache is not None
         self._prompt_cache = None
         self._cached_prompt_ids = None
+        # Copies of a cache that is unusable are unusable too.
+        self._cache_checkpoints = {}
         if not had_cache:
             return
         # The cache is already gone by here. Nothing below may raise, or a
@@ -825,6 +848,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         Called either immediately (when a model is supplied by the caller) or
         from _ensure_model_loaded() the first time the model is needed.
         """
+        # The daemon hands its sessions a model it loaded itself, so the
+        # _ensure_model_loaded path that applies these never ran there: the
+        # buffer-cache cap was ignored and the weights were never kept wired.
+        apply_gpu_limits(self.config)
+        keep_model_resident(self.model, self.config)
         self._check_idle_adapter()
 
         # Seed identity notes + clean training corpus on first run.
@@ -1112,6 +1140,10 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         nbytes = _cache_nbytes(self._prompt_cache)
         if nbytes <= 0:
             return
+        # The copies a cache that cannot be rewound keeps are memory the
+        # prompt costs as well, so they are weighed with it.
+        for _, copied in getattr(self, "_cache_checkpoints", {}).values():
+            nbytes += _cache_nbytes(copied)
         per_token = nbytes / tokens
         if per_token < 1024:  # smaller than any real model's per-token KV
             return
@@ -1370,6 +1402,99 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         self._log_info(f"Warmed prefix handed over: {len(ids)} tokens")
         self._warmed_prefix = None
         return True
+    # A hybrid model (Qwen3.5's linear-attention layers, LFM2's convolutions)
+    # carries recurrent state that cannot be rewound, so can_trim_prompt_cache
+    # is False for it, and every prefix change used to rebuild the cache from
+    # token 0. Measured 2026-09-27 on Qwen3.5-9B: ~32s to first token on every
+    # generation of a 6.5k-token prompt that was 94% unchanged, because the
+    # previous reply's tokens never render back identically. So a cache like
+    # that is copied where a later prompt is likely to pick up from, and a
+    # stale cache restarts from the longest copy instead of from zero — what
+    # llama.cpp does for recurrent models. A trimmable cache never takes this
+    # path.
+
+    def _prefill_into(self, cache: list, ids: list[int]) -> None:
+        """Walk `ids` into an existing cache — both models' halves of it."""
+        if not ids:
+            return
+        kv_kw = self._kv_quant_kwargs()
+        n_main = len(make_prompt_cache(self.model))
+        # generate_step may swap list entries for quantized ones, so each half
+        # is walked as its own list and written back.
+        main = cache[:n_main]
+        for _ in generate_step(_mx().array(ids), self.model, max_tokens=0,
+                               sampler=self.sampler, prompt_cache=main, **kv_kw):
+            pass
+        cache[:n_main] = main
+        draft = self._ensure_draft_model()
+        if draft is not None and len(cache) > n_main:
+            rest = cache[n_main:]
+            for _ in generate_step(_mx().array(ids), draft, max_tokens=0,
+                                   sampler=self.sampler, prompt_cache=rest, **kv_kw):
+                pass
+            cache[n_main:] = rest
+
+    def _message_boundary(self, messages: list[dict[str, str]], ids: list[int],
+                          think: bool) -> int:
+        """How far `ids` agrees with `messages` rendered on their own.
+
+        The agreement, not the render's length: a template may draw the last
+        message differently when nothing follows it (Qwen3.5 gives a final
+        assistant message an empty think block that the same message loses
+        once a user message follows), and any prefix of `ids` is a place the
+        cache can be copied from.
+        """
+        try:
+            head = self.tokenizer.encode(self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False,
+                enable_thinking=think,
+            ))
+        except Exception:
+            return 0
+        return _common_prefix_len(head, ids)
+
+    @staticmethod
+    def _newest_user_index(messages: list[dict[str, str]]) -> int:
+        """The newest message the user wrote, or 0.
+
+        chat_turn prepends the per-turn context (time, retrieval, the page the
+        browser is on) to it, so it is where a tool loop's prompt first
+        changes from one round to the next.
+        """
+        for i in range(len(messages) - 1, 0, -1):
+            m = messages[i]
+            if (m.get("role") == "user" and not str(m.get("content", ""))
+                    .startswith("[System observation:")):
+                return i
+        return 0
+
+    def _keep_checkpoint(self, ids: list[int], slot: str) -> None:
+        """Copy the live cache as it stands after exactly `ids`.
+
+        Slots: "boot", the system prefix; "user", everything before the
+        newest user message, which a tool loop's next round starts from once
+        that message's context has moved on; "turn", everything up to the
+        last message, which the next turn starts from. The copy shares its
+        buffers with the live cache until the live one is next written, so
+        each costs at most one cache's worth of memory.
+        """
+        self._cache_checkpoints[slot] = (list(ids), copy.deepcopy(self._prompt_cache))
+
+    def _restore_checkpoint(self, ids: list[int]) -> tuple[list, int]:
+        """A fresh copy of the longest checkpoint `ids` extends, and its length.
+
+        Strictly shorter than `ids`, so there is always a token left to feed.
+        With no match it is an empty cache and 0 — what the old path did.
+        """
+        best = None
+        for checkpoint in getattr(self, "_cache_checkpoints", {}).values():
+            n = len(checkpoint[0])
+            if (0 < n < len(ids) and (best is None or n > len(best[0]))
+                    and ids[:n] == checkpoint[0]):
+                best = checkpoint
+        if best is None:
+            return self._new_prompt_cache(), 0
+        return copy.deepcopy(best[1]), len(best[0])
 
     def _prefill_system_prompt_cache(self, show_spinner: bool = True):
         """Process the system prompt through the model once at boot so the
@@ -1430,6 +1555,21 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 system_ids = self.tokenizer.encode(templated)
                 if not system_ids:
                     return
+                # A cache that cannot be trimmed cannot shed the empty user
+                # turn's closing tokens either, so it stops where a real user
+                # message would start and keeps a copy there.
+                rewindable = can_trim_prompt_cache(make_prompt_cache(self.model))
+                if not rewindable:
+                    probe = self.tokenizer.encode(self.tokenizer.apply_chat_template(
+                        [{"role": "system", "content": self.system_prompt},
+                         *tool_few_shots(self.config),
+                         {"role": "user", "content": "x"}],
+                        tokenize=False, add_generation_prompt=False,
+                        enable_thinking=False,
+                    ))
+                    system_ids = system_ids[:_common_prefix_len(system_ids, probe)]
+                    if not system_ids:
+                        return
                 # A cache saved by an earlier run covers this exact prefix and
                 # these exact weights — load it and skip the prefill entirely.
                 # This used to be switched off whenever a draft model was
@@ -1444,11 +1584,15 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # re-prefilled the whole system prompt through the 14B.
                 if (self.config.get("agent", {}).get("persist_prompt_cache", True)
                         and self._load_persisted_prompt_cache(system_ids)):
+                    if not rewindable:
+                        self._keep_checkpoint(system_ids, "boot")
                     return
                 # max_tokens=0 processes the prompt into the KV cache and
                 # stops before generating any output tokens.
                 self._prompt_cache = self._prefill_new_cache(system_ids)
                 self._cached_prompt_ids = list(system_ids)
+                if not rewindable:
+                    self._keep_checkpoint(system_ids, "boot")
                 # Weigh it here too, so the very first user turn sizes its cap
                 # against this model rather than the fallback constant.
                 self._measure_kv_cost(len(system_ids))
@@ -1764,6 +1908,49 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         level = str(self.config.get("agent", {}).get("thinking_level", "none")).lower()
         return THINKING_LEVELS.get(level, THINKING_LEVELS["none"])
 
+    def turn_thinking(self, user_input: str, working: bool = False) -> tuple[bool, int]:
+        """The thinking setting for THIS turn.
+
+        agent.think_when "auto" (the default) keeps thinking_level for work —
+        a task, code, a link, a tool round already under way — and answers
+        plain conversation without a reasoning block. "always" is the old
+        behaviour: every turn at thinking_level.
+        """
+        think, budget = self.thinking_setting()
+        if not think:
+            return think, budget
+        mode = str(self.config.get("agent", {}).get("think_when", "auto")).lower()
+        if mode == "always" or working:
+            return think, budget
+        # The decision model (symbio/app/decider.py): Apple Intelligence when
+        # it is on, else a vote over Apple's on-device embedding, else the
+        # regex. Held out, the vote got think/no-think right 28/31 against
+        # the regex's 19/31, at ~7 ms a message off the GPU.
+        previous = getattr(self, "_last_decision", None)
+        if previous and _CONTINUE_RE.match(user_input or ""):
+            # "continue" carries on the task before it, so it is decided the
+            # way that task was. Classified on its own it read as small talk:
+            # live 2026-09-26 an x.com post resumed with thinking off and the
+            # model fell back to bare <click>Post</click> tags, clicking Post
+            # until the round budget ran out.
+            decision = {**previous, "source": f"continues {previous.get('source')}"}
+        else:
+            try:
+                from symbio.app import decider
+
+                decision = decider.decide(user_input, self.config)
+            except Exception:
+                decision = {"think": needs_thinking(user_input), "source": "regex"}
+        self._last_decision = decision
+        # Logged as a label: the decision model can only be graded, or later
+        # trained on this user's own turns, if its calls are on record.
+        self._log_info("Decision: " + ", ".join(
+            f"{k}={decision[k] if not isinstance(decision[k], float) else round(decision[k], 3)}"
+            for k in ("label", "think", "source", "margin", "ms") if k in decision))
+        if decision.get("think"):
+            return think, budget
+        return False, 0
+
     def _skill_example_generator(self):
         """A teacher callable for skills._seed_worked_examples, or None.
 
@@ -1950,20 +2137,17 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # _prefill_system_prompt_cache) so the first turn feeds only the
             # user message, not the whole system+tools prefix.
             reused = _common_prefix_len(self._cached_prompt_ids, ids)
-            if timings is not None:
-                timings["cached_tokens"] = reused
-                timings["new_tokens"] = len(ids) - reused
             if self._prompt_cache is None or reused == 0:
-                self._prompt_cache = self._new_prompt_cache()
-                feed = ids
+                self._prompt_cache, reused = self._restore_checkpoint(ids)
             else:
                 stale = len(self._cached_prompt_ids) - reused
                 if stale and can_trim_prompt_cache(self._prompt_cache):
                     trim_prompt_cache(self._prompt_cache, stale)
                 elif stale:
-                    self._prompt_cache = self._new_prompt_cache()
-                    reused = 0
-                feed = ids[reused:] if reused else ids
+                    # Cannot be rewound: restart from the longest copy this
+                    # prompt extends (see _prefill_into), not from token 0.
+                    self._prompt_cache, reused = self._restore_checkpoint(ids)
+            feed = ids[reused:]
             if not feed:
                 # The new prompt is exactly what the cache already holds —
                 # a resample of an unchanged prompt. Generation still needs
@@ -1974,10 +2158,16 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # length that is off by one.
                 if can_trim_prompt_cache(self._prompt_cache):
                     trim_prompt_cache(self._prompt_cache, 1)
-                    feed = ids[-1:]
+                    reused -= 1
                 else:
-                    self._prompt_cache = self._new_prompt_cache()
-                    feed = ids
+                    self._prompt_cache, reused = self._restore_checkpoint(ids)
+                feed = ids[reused:]
+            # After the cache is settled, so a rebuild reports what it really
+            # reused — this used to be recorded before it, and a hybrid model
+            # showed "cached 6379" on turns that re-read all 6,807 tokens.
+            if timings is not None:
+                timings["cached_tokens"] = reused
+                timings["new_tokens"] = len(ids) - reused
         finally:
             tokenizing_spinner.stop()
 
@@ -2051,6 +2241,25 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             # speculative_generate_step takes these as well, so the draft path
             # is covered.
             _spec_kw.update(self._kv_quant_kwargs())
+            # A cache that cannot be rewound is walked up to the places a
+            # later prompt picks up from and copied at each (_keep_checkpoint):
+            # the reply generated after the last message never renders back
+            # token for token, so nothing could extend the cache past it.
+            if (self._mlx_generation() and len(feed) > 1
+                    and not can_trim_prompt_cache(self._prompt_cache)):
+                done = len(ids) - len(feed)
+                newest = self._newest_user_index(messages)
+                # An empty user message in its place renders everything before
+                # it the way the real prompt does, up to where its text starts.
+                before = (messages[:newest] + [{"role": "user", "content": ""}]
+                          if newest else None)
+                for slot, upto in (("user", before), ("turn", messages)):
+                    boundary = self._message_boundary(upto, ids, think) if upto else 0
+                    if done < boundary < len(ids):
+                        self._prefill_into(self._prompt_cache, ids[done:boundary])
+                        self._keep_checkpoint(ids[:boundary], slot)
+                        done = boundary
+                feed = ids[done:]
             for response in self.stream_fn(
                 self.model, self.tokenizer, feed, max_tokens=max_tokens,
                 sampler=self.sampler, prompt_cache=self._prompt_cache,
@@ -2100,6 +2309,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             raise
         finally:
             self._indexing_now = False
+            # When the user last got a reply: the soul pass waits for a quiet
+            # spell after this rather than starting under their next message.
+            self._last_reply_at = time.monotonic()
             spinner.stop()
 
         if stripper is not None:
@@ -2173,7 +2385,7 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             ):
                 text = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
             return text.strip()
-        except Exception as e:
+        except Exception:
             return ""
 
     def _claims_incapacity(self, reply: str, user_input: str) -> bool:
@@ -2335,7 +2547,15 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 return
             if not self._soul_pending:
                 continue
-            while self._indexing_now and not self._index_stop.is_set():
+            # Wait for a quiet spell, not just for the current reply to end.
+            # A reflection is a full 14B generation (~10 s): started the moment
+            # a reply finished, it ran under the user's NEXT message — measured
+            # 2026-09-26, a follow-up with 264 new tokens took 5.5 s to its
+            # first token instead of ~2.5. Nobody is waiting for this note.
+            quiet = float(self.config.get("memory", {}).get("soul_quiet_seconds", 45))
+            while not self._index_stop.is_set() and (
+                    self._indexing_now
+                    or time.monotonic() - getattr(self, "_last_reply_at", 0.0) < quiet):
                 time.sleep(0.5)
             if self._index_stop.is_set():
                 return
@@ -3330,6 +3550,16 @@ def _install_command_completion(session) -> bool:
     return chat_style.install_command_completion(session.command_names)
 
 
+def _default_stream_chunk(text: str) -> None:
+    """Write one streamed fragment to the terminal and flush it.
+
+    A module-level function rather than a lambda assigned in the call site:
+    the loop takes a `stream_chunk_fn` seam, and a named default is what a
+    traceback can point at when a stream write misbehaves.
+    """
+    print(text, end="", flush=True)
+
+
 def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
               adapter_loaded: bool | None = None,
               generate_fn=None, stream_fn=None,
@@ -3342,7 +3572,7 @@ def chat_loop(config: dict[str, Any], model=None, tokenizer=None,
     loading weights.
     """
     if stream_chunk_fn is None:
-        stream_chunk_fn = lambda s: print(s, end="", flush=True)
+        stream_chunk_fn = _default_stream_chunk
     # Never run with a blank identity: a skipped wizard or a reset config.json
     # can leave names empty, which blanks the chat banner and the input prompt.
     # Fill sane defaults in-memory now (cheap); persist only on a real CLI run

@@ -237,13 +237,11 @@ def test_every_extended_case_has_a_distinct_id():
 def test_the_worker_delegation_cases_name_real_registered_roles():
     """A delegate_task case is worthless if it names a worker that does not
     exist — the model would be right to refuse, and the case would read as a
-    dispatch failure forever."""
-    import json
-
-    from symbio import constants
-    catalog = json.loads(
-        constants.WORKER_MODELS_FILE.read_text(encoding="utf-8"))
-    roles = {e.get("role") for e in catalog.values()}
+    dispatch failure forever. Checked against the BUILT-IN roster, not this
+    machine's catalog: saved skills differ per install, and a case naming one
+    only passes on the machine that saved it."""
+    from symbio.app.worker_defaults import BUILTIN_WORKERS
+    roles = {e.get("role") for e in BUILTIN_WORKERS.values()}
     checked = 0
     for case in tool_eval.EXTENDED_CASES:
         if case.expect_tool != "delegate_task":

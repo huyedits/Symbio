@@ -81,7 +81,8 @@ def test_every_prompt_example_resolves_in_both_stacks(label):
 
 def test_every_few_shot_example_resolves_in_both_stacks():
     """The few-shots are shared verbatim by both stacks — see symbio/tools.py."""
-    config = json.loads(Path("config.json").read_text(encoding="utf-8"))
+    from symbio.app.config import load_config
+    config = load_config()
     chat, agent = _chat_stack_names(), _agent_stack_names()
     # Every rotation, not just the default: a family only shown for file work
     # is exactly the one nobody would notice had gone stale.

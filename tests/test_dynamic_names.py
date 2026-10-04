@@ -9,6 +9,8 @@ identity notes at the end.
 import json
 from pathlib import Path
 
+import pytest
+pytest.importorskip("mlx_lm")  # MLX is Apple Silicon only; skip elsewhere
 from mlx_lm import load
 
 from symbio import AIAgent, load_config, save_config, ADAPTER_DIR, NOTES_DIR, maybe_update_names_from_message

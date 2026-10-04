@@ -5,6 +5,8 @@ Built after a string-matching rubric passed `sed -i 's/old/new/g' config.txt`
 leaves the file untouched. It contains sed, names the right file, has the right
 substitution, and does nothing. Only execution catches that.
 """
+import sys
+
 import pytest
 
 from symbio.app import ops_eval
@@ -12,10 +14,19 @@ from symbio.app import ops_eval
 
 # ---- the gate ----
 
+# Tasks whose reference solution or check is macOS userland on purpose (BSD
+# sed wants `-i ''`, which GNU sed reads as the script; BSD `stat -f '%Lp'`
+# is GNU's `stat -c`). The eval grades the shell the agent actually runs in,
+# which is a Mac's; off one they cannot pass.
+_BSD_ONLY = {"config_edit_in_place", "restrict_permissions"}
+
+
 def test_every_shipped_task_passes_the_gate():
     """Each task's check must FAIL on the untouched state and PASS after the
     reference solution. A task that cannot do both grades nothing."""
     for task in ops_eval.TASKS:
+        if task["id"] in _BSD_ONLY and sys.platform != "darwin":
+            continue
         ok, why = ops_eval.validate(task)
         assert ok, f"{task['id']}: {why}"
 
@@ -67,6 +78,8 @@ def test_a_working_answer_passes():
     assert ok, why
 
 
+@pytest.mark.skipif(sys.platform != "darwin",
+                    reason="the task grades BSD sed; GNU sed inverts it")
 def test_the_bsd_trap_is_caught_by_running_it():
     """The whole reason this file exists: the GNU form looks right and changes
     nothing on this machine."""

@@ -7,6 +7,8 @@ cache trim/reset decisions."""
 import json
 import random
 
+import pytest
+pytest.importorskip("mlx")  # MLX is Apple Silicon only; skip elsewhere
 import mlx.nn as nn
 
 from symbio.app import chat, tooling

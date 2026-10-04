@@ -281,6 +281,29 @@ def _apply() -> None:
 
         _gen.speculative_generate_step = _speculative_generate_step
 
+        # --- Prism Hadamard packs (mlx-lm 0.31.3) ---------------------------
+        #
+        # Ternary-Bonsai-2 (Qwen3.8-27B at 98% of its FP16 score, 7.7 GB)
+        # declares `model_type: prism_hadamard_qwen35` and stores its weights
+        # in a rotated basis, so mlx_lm refuses it, and loading it as a plain
+        # Qwen3.5 would only write garbage. load_model now builds such a pack
+        # itself (symbio/app/prism_pack.py); every other model takes the
+        # upstream path untouched.
+        from symbio.app import prism_pack as _prism
+
+        _prism.install()
+
+        # --- the main model's own eyes (mlx-lm 0.31.3 + mlx-vlm 0.6.3) -----
+        #
+        # A Qwen3.5 checkpoint (1-bit Bonsai 27B included) is a vision-language
+        # model that mlx_lm loads text-only. mlx_lm.load now notes which
+        # loaded models still have a vision tower on disk, so a look can run
+        # on the resident model through mlx-vlm instead of swapping in a
+        # second one (symbio/app/eyes.py). Loading itself is unchanged.
+        from symbio.app import eyes as _eyes
+
+        _eyes.install()
+
         # --- flash attention over the 8-bit KV cache (mlx-lm 0.31.3) --------
         #
         # agent.kv_bits sent every prefill through mlx_lm's unfused quantized

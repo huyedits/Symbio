@@ -47,6 +47,11 @@ classifiers = [
 # opted out of. Both live together in the `mlx` extra now, both marked darwin.
 dependencies = [
     "transformers>=4.40.0",
+    # transformers renders chat templates with jinja2 but does not depend on
+    # it; without it every training sample fails to render
+    # (apply_chat_template raises ImportError). A Mac install usually had it
+    # by accident, through mlx-lm; nothing guaranteed it.
+    "jinja2>=3.1.0",
     "safetensors>=0.4.0",
     "pyyaml>=6.0",
     "playwright>=1.45.0",
@@ -111,7 +116,8 @@ include = ["symbio*", "symbio_desktop*", "symbio_tui*", "symbio_pet*"]
 # models.json, the prompt default and the security default — all three of which
 # live at the repository root — were simply absent from every pip install.
 [tool.setuptools.package-data]
-symbio = ["defaults/*"]
+# native/ holds the desk helper's Objective-C source, compiled on first use.
+symbio = ["defaults/*", "native/*"]
 symbio_desktop = ["static/*"]
 
 [tool.pytest.ini_options]

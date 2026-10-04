@@ -1358,7 +1358,7 @@ class CommandsMixin:
             app = _gui_app_for(shell_cmd, output)
             if app:
                 shell_cmd = f"open -a {shlex.quote(app)}"
-                self.output_fn(f"  [Shell] that names a GUI app; retrying as:")
+                self.output_fn("  [Shell] that names a GUI app; retrying as:")
                 self.output_fn(f"\n  $ {shell_cmd}")
                 ok, output = sandbox.run_sandboxed(
                     shell_cmd, self.config, confirm_fn=self.confirm_fn)

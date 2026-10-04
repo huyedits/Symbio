@@ -301,12 +301,24 @@ def build_prompt(history: list[dict[str, str]], config: dict[str, Any],
                  turns: int = 6) -> str:
     from symbio.app import chat_constants
 
+    from symbio.app import learn
+
     recent = [h for h in history[-turns * 2:] if h.get("content")]
     lines = []
     for turn in recent:
         who = ("them" if chat_constants.is_real_user_turn(turn)
                else "me" if turn.get("role") == "assistant" else "tool")
         body = _without_harness_asides(str(turn.get("content", "")))
+        # A tool's output is the machine talking, and often a web page
+        # talking through it — not the user. Shown here it was read back as
+        # their values: live 2026-09-27 an x.com "Press failed ... click the
+        # submit button" became "Wants consistent and direct feedback on user
+        # actions (... guides the user to click the submit button)", written
+        # into the soul store every prompt carries. Page text reaching that
+        # store is also a way in for anything a page wants said. A decline is
+        # kept: it is the user's own decision, recorded by the runtime.
+        if who == "tool" and not learn.is_user_refusal(body):
+            body = "(a tool ran; its output is not about the user)"
         body = body[:400].replace("\n", " ")
         lines.append(f"{who}: {body}")
     return _PROMPT.format(user=config.get("user_name", "the user"),

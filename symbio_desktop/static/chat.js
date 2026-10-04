@@ -144,22 +144,41 @@ function setTitle(text) {
 
 // ── rendering ───────────────────────────────────────────────────────
 
+/* The empty window is a greeting with the composer under it, in the middle
+ * of the page; the first message moves the composer to the bottom where a
+ * conversation needs it. One function owns each direction, so no path can
+ * leave the greeting on screen above a reply. */
+function greetingText() {
+  return window.__assistantName || 'Symbio';
+}
+
+function showWelcome() {
+  thread.innerHTML = `<div class="welcome">
+    <h1 class="greeting"><span class="mark" aria-hidden="true"></span><span class="greeting-name">${escHtml(greetingText())}</span></h1>
+  </div>`;
+  document.getElementById('main').classList.add('empty');
+}
+
+function clearWelcome() {
+  const welcome = thread.querySelector('.welcome');
+  if (welcome) welcome.remove();
+  document.getElementById('main').classList.remove('empty');
+}
+
 function renderThread(messages) {
   thread.innerHTML = '';
   if (!messages.length) {
-    thread.innerHTML = `<div class="welcome">
-      <h1>${escHtml(window.__assistantName || 'Symbio')}</h1>
-      <p class="welcome-sub">A local agent that trains itself on what you correct.</p>
-    </div>`;
+    showWelcome();
     return;
   }
+  document.getElementById('main').classList.remove('empty');
   for (const m of messages) addBubble(m.role, m.text, false, m.thought);
+  markLastAssistant();
   scrollToEnd();
 }
 
 function addBubble(role, text, store = true, thought = '') {
-  const welcome = thread.querySelector('.welcome');
-  if (welcome) welcome.remove();
+  clearWelcome();
   const el = document.createElement('div');
   el.className = `msg ${role}`;
   // The reasoning is KEPT, not dropped: it is the most interesting thing a
@@ -168,13 +187,16 @@ function addBubble(role, text, store = true, thought = '') {
   const lines = thought ? thought.trim().split(/\s+/).length : 0;
   el.innerHTML =
     (thought
-      ? `<details class="thought"><summary>Thought for ${lines} words</summary>`
+      ? `<details class="thought"><summary>Reasoning (${lines} words)</summary>`
         + `<div class="thought-body">${escHtml(thought.trim())}</div></details>`
       : '')
     + `<div class="msg-body">${renderMarkdown(text)}</div>`;
   if (role === 'assistant') {
+    const actions = document.createElement('div');
+    actions.className = 'msg-actions';
     const copy = document.createElement('button');
     copy.className = 'copy-btn';
+    copy.type = 'button';
     copy.textContent = 'Copy';
     copy.addEventListener('click', () => {
       navigator.clipboard.writeText(text).then(() => {
@@ -182,7 +204,14 @@ function addBubble(role, text, store = true, thought = '') {
         setTimeout(() => { copy.textContent = 'Copy'; }, 1200);
       });
     });
-    el.appendChild(copy);
+    const retry = document.createElement('button');
+    retry.className = 'retry-btn';
+    retry.type = 'button';
+    retry.textContent = 'Retry';
+    retry.title = 'Ask the same thing again';
+    retry.addEventListener('click', retryLast);
+    actions.append(copy, retry);
+    el.appendChild(actions);
   }
   thread.appendChild(el);
   if (store && viewingId === null) {
@@ -216,8 +245,7 @@ let wakingText = '';
 function startWaiting() {
   waitStarted = Date.now();
   lastFrameAt = Date.now();
-  const welcome = thread.querySelector('.welcome');
-  if (welcome) welcome.remove();
+  clearWelcome();
   let pending = document.getElementById('pending');
   if (!pending) {
     pending = document.createElement('div');
@@ -270,8 +298,7 @@ function stopWaiting() {
 function ensureStream() {
   stopWaiting();
   if (streamEl) return streamEl;
-  const welcome = thread.querySelector('.welcome');
-  if (welcome) welcome.remove();
+  clearWelcome();
   streamText = '';
   streamEl = document.createElement('div');
   streamEl.className = 'msg assistant streaming';
@@ -330,6 +357,21 @@ function appendToken(text) {
   scrollToEnd();
 }
 
+function markLastAssistant() {
+  thread.querySelectorAll('.msg.assistant').forEach(m => m.classList.remove('last'));
+  const all = thread.querySelectorAll('.msg.assistant');
+  if (all.length) all[all.length - 1].classList.add('last');
+}
+
+function retryLast() {
+  if (document.body.classList.contains('busy') || viewingId !== null) return;
+  const lastUser = [...live.messages].reverse().find(m => m.role === 'user');
+  if (!lastUser) return;
+  input.value = lastUser.text;
+  input.dispatchEvent(new Event('input'));
+  submit();
+}
+
 function finishStream(finalText) {
   const raw = finalText || streamText || '';
   const split = splitReasoning(raw, true);
@@ -347,15 +389,22 @@ function finishStream(finalText) {
     activityCard = null;
   }
   if (text || split.thought) addBubble('assistant', text, true, split.thought);
+  markLastAssistant();
 }
 
 // Everything the turn did on its way to the answer, folded into one line.
 function addActivity(text) {
   const clean = (text || '').replace(/\s+$/, '');
   if (!clean.trim()) return;
+  // A message that arrives with no turn in flight — "no resident model is
+  // running" on connect — is about the window, not about a reply. As a card
+  // it pushed the greeting off an empty window; it belongs above the composer.
+  if (!document.body.classList.contains('busy') && !activityCard) {
+    showNotice(clean);
+    return;
+  }
   if (!activityCard) {
-    const welcome = thread.querySelector('.welcome');
-    if (welcome) welcome.remove();
+    clearWelcome();
     activityCard = document.createElement('div');
     activityCard.className = 'activity';
     activityCard.innerHTML = `
@@ -374,38 +423,106 @@ function addActivity(text) {
   }
   const log = activityCard.querySelector('.activity-log');
   log.textContent += (log.textContent ? '\n' : '') + clean;
-  const label = clean.trim().replace(/^\[|\]$/g, '');
+  const trimmed = clean.trim();
+  const tagged = trimmed.match(/^\[([^\]]{1,40})\]\s*(.*)$/s);
+  const label = (tagged ? (tagged[2] ? `${tagged[1]}: ${tagged[2]}` : tagged[1])
+                        : trimmed.replace(/^\[|\]$/g, ''))
+    .replace(/\s+/g, ' ');
   activityCard.querySelector('.activity-label').textContent =
     label.length > 80 ? label.slice(0, 80) + '…' : label;
   scrollToEnd();
 }
 
-function showConfirm(prompt) {
-  pendingConfirm = true;
-  const card = document.createElement('div');
-  card.className = 'confirm-card';
-  card.innerHTML = `
-    <div class="confirm-text">${escHtml(prompt)}</div>
-    <div class="confirm-actions">
-      <button class="btn deny">Deny</button>
-      <button class="btn allow">Allow</button>
-    </div>`;
-  thread.appendChild(card);
-  scrollToEnd();
-  const answer = (approved) => {
-    if (!pendingConfirm) return;
-    pendingConfirm = false;
-    send({ type: 'confirm_response', approved });
-    card.classList.add('answered');
-    card.querySelector('.confirm-actions').innerHTML =
-      `<span class="confirm-verdict">${approved ? 'Allowed' : 'Denied'}</span>`;
-  };
-  card.querySelector('.allow').addEventListener('click', () => answer(true));
-  card.querySelector('.deny').addEventListener('click', () => answer(false));
+function showNotice(text) {
+  const box = document.getElementById('notice');
+  document.getElementById('notice-text').innerHTML = renderMarkdown(text.trim());
+  box.hidden = false;
 }
 
-function scrollToEnd() {
-  thread.scrollTop = thread.scrollHeight;
+function hideNotice() {
+  document.getElementById('notice').hidden = true;
+}
+
+/* An approval, in plain English. The daemon sends the card's parts when it
+ * has them: what will happen (the model's own sentence, or the harness's),
+ * exactly what — the post, the command — and why it is asking. A warning
+ * sits between them when the words about to go out are not the words the
+ * user asked for: "You asked for “testing”, not this." */
+function showConfirm(prompt, card) {
+  // The same question again (a reloaded window is sent the pending card on
+  // reconnect) replaces the unanswered one instead of stacking a second.
+  const stale = thread.querySelector('.confirm-card:not(.answered)');
+  if (stale) stale.remove();
+  pendingConfirm = true;
+  const el = document.createElement('div');
+  el.className = 'confirm-card';
+  const who = window.__assistantName || 'Symbio';
+  if (card && card.headline) {
+    const always = card.kind && !card.warning;
+    el.innerHTML = `
+      <div class="confirm-kind"><span class="charm" aria-hidden="true"></span>
+        <span class="confirm-reason">${escHtml(card.reason || `${who} wants to go ahead with this.`)}</span></div>
+      <div class="confirm-headline">
+        ${card.said_by === 'model' ? `<span class="confirm-who">${escHtml(who)}:</span> ` : ''}${escHtml(card.headline)}
+      </div>
+      ${card.warning ? `<div class="confirm-warning">${escHtml(card.warning)}</div>` : ''}
+      ${card.details ? `<pre class="confirm-details" aria-label="Exactly what it will do">${escHtml(card.details)}</pre>` : ''}
+      <div class="confirm-actions">
+        <button class="btn deny" type="button">Deny</button>
+        ${always ? `<button class="btn always" type="button"
+            title="Stop asking about “${escHtml(card.kind_label)}”. Change it back in Settings → Guardrails.">Always allow</button>` : ''}
+        <button class="btn allow" type="button">Allow</button>
+      </div>`;
+  } else {
+    el.innerHTML = `
+      <div class="confirm-text">${escHtml(prompt)}</div>
+      <div class="confirm-actions">
+        <button class="btn deny" type="button">Deny</button>
+        <button class="btn allow" type="button">Allow</button>
+      </div>`;
+  }
+  if (card && card.warning) el.classList.add('warned');
+  thread.appendChild(el);
+  scrollToEnd(true);
+  const answer = (approved, always = false) => {
+    if (!pendingConfirm) return;
+    pendingConfirm = false;
+    send({ type: 'confirm_response', approved, always });
+    el.classList.add('answered');
+    const verdict = !approved ? 'Denied'
+      : always ? `Allowed — won't ask about “${card.kind_label}” again (Settings → Guardrails)`
+      : 'Allowed';
+    el.querySelector('.confirm-actions').innerHTML =
+      `<span class="confirm-verdict">${escHtml(verdict)}</span>`;
+  };
+  el.querySelector('.allow').addEventListener('click', () => answer(true));
+  el.querySelector('.deny').addEventListener('click', () => answer(false));
+  const alwaysBtn = el.querySelector('.always');
+  if (alwaysBtn) alwaysBtn.addEventListener('click', () => answer(true, true));
+}
+
+function nearBottom() {
+  return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80;
+}
+
+/* Following the conversation is the READER's choice, recorded when they
+ * scroll, not re-guessed from the geometry after each change. It used to ask
+ * nearBottom() at every append: one update that added more than 80px — a
+ * finished reply replacing its streaming bubble, a thought block folding up,
+ * a long tool observation — made the check fail, the window stopped
+ * following, and from about the fifth message on each new answer landed
+ * below the fold behind the down-arrow (measured: 150-196px out of view). */
+let autoFollow = true;
+
+function scrollToEnd(force = false) {
+  if (force) autoFollow = true;
+  if (autoFollow) thread.scrollTop = thread.scrollHeight;
+  updateToBottom();
+}
+
+function updateToBottom() {
+  const btn = document.getElementById('btn-to-bottom');
+  if (btn) btn.hidden = nearBottom();
 }
 
 function setStatus(state, text) {
@@ -431,7 +548,9 @@ function renderMarkdown(src) {
   let out = escHtml(src || '');
   const blocks = [];
   out = out.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
-    blocks.push(`<pre class="code"${lang ? ` data-lang="${lang}"` : ''}><code>${code.replace(/\n$/, '')}</code></pre>`);
+    blocks.push(`<div class="code-block"><div class="code-head"><span>${lang || 'code'}</span>`
+      + `<button type="button" class="code-copy">Copy</button></div>`
+      + `<pre class="code"${lang ? ` data-lang="${lang}"` : ''}><code>${code.replace(/\n$/, '')}</code></pre></div>`);
     return ` ${blocks.length - 1} `;
   });
   out = out.replace(/`([^`\n]+)`/g, '<code>$1</code>');
@@ -447,7 +566,7 @@ function renderMarkdown(src) {
     return `<ul>${lis}</ul>`;
   });
   out = out.split(/\n{2,}/).map(part =>
-    /^\s*<(h\d|ul|pre| )/.test(part) || part.includes(' ')
+    /^\s*<(h\d|ul|pre|div| )/.test(part) || part.includes(' ')
       ? part : `<p>${part.replace(/\n/g, '<br>')}</p>`).join('');
   return out.replace(/ (\d+) /g, (_m, i) => blocks[Number(i)]);
 }
@@ -470,18 +589,20 @@ function connect() {
     switch (data.type) {
       case 'connected':
         window.__assistantName = data.assistant_name || 'Symbio';
+        window.__userName = data.user_name || '';
+        input.placeholder = `Message ${window.__assistantName}…`;
         document.getElementById('model-chip').textContent =
           (data.model_name || '').split('/').pop() || '—';
         // Asleep is not an error: the first message wakes it.
         if (data.model_state === 'down') {
-          setStatus('off', `${data.assistant_name} · asleep — waking up`);
+          setStatus('off', `${data.assistant_name} is asleep. Waking it up…`);
         } else if (data.model_state === 'loading') {
-          setStatus('busy', `${data.assistant_name} · waking up`);
+          setStatus('busy', `${data.assistant_name} is waking up…`);
         } else {
-          setStatus('ok', `${data.assistant_name} · ready`);
+          setStatus('ok', `${data.assistant_name} is ready`);
         }
         if (!live.messages.length) {
-          const title = document.querySelector('.welcome h1');
+          const title = document.querySelector('.welcome .greeting-name');
           if (title) title.textContent = window.__assistantName;
         }
         break;
@@ -490,18 +611,23 @@ function connect() {
         wakingText = data.text || 'Waking Symbio…';
         if (waitTimer) tickWaiting(); else setStatus('busy', wakingText);
         break;
+      case 'asleep':
+        // The model could not be woken (the reason follows as a system line).
+        wakingText = '';
+        setStatus('off', `${window.__assistantName || 'Symbio'} is asleep. Send a message to wake it.`);
+        break;
       case 'awake':
         wakingText = '';
-        if (!waitTimer) setStatus('ok', `${window.__assistantName || 'Symbio'} · ready`);
+        if (!waitTimer) setStatus('ok', `${window.__assistantName || 'Symbio'} is ready`);
         break;
       case 'system':
       case 'progress': addActivity(data.text); break;
-      case 'confirm': showConfirm(data.prompt); break;
+      case 'confirm': showConfirm(data.prompt, data.card); break;
       case 'done':
         wakingText = '';
         stopWaiting();
         finishStream(data.text);
-        setStatus('ok', `Ready · last reply took ${Math.round((Date.now() - waitStarted) / 1000)}s`);
+        setStatus('ok', `Ready. Last reply took ${Math.round((Date.now() - waitStarted) / 1000)} s`);
         setBusy(false);
         break;
       case 'error':
@@ -553,6 +679,7 @@ function submit() {
     return;
   }
   addBubble('user', text);
+  scrollToEnd(true);             // sending is looking at the conversation again
   input.value = '';
   input.style.height = 'auto';
   setBusy(true);
@@ -567,6 +694,13 @@ document.getElementById('composer').addEventListener('submit', (e) => {
   submit();
 });
 
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    submit();
+  }
+});
+
 input.addEventListener('input', () => {
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 200) + 'px';
@@ -574,6 +708,36 @@ input.addEventListener('input', () => {
 });
 
 document.getElementById('btn-new-chat').addEventListener('click', newChat);
+thread.addEventListener('scroll', () => {
+  // Only a scroll the reader made can stop the following; ours land at the
+  // bottom, so they keep it on.
+  autoFollow = nearBottom();
+  updateToBottom();
+});
+// Anything that changes the thread's height — a token, a card, a bubble, a
+// fold opening — keeps the bottom in view while following.
+new MutationObserver(() => {
+  if (autoFollow) requestAnimationFrame(() => { thread.scrollTop = thread.scrollHeight; });
+}).observe(thread, { childList: true, subtree: true, characterData: true });
+document.getElementById('btn-notice-close').addEventListener('click', hideNotice);
+document.getElementById('btn-to-bottom').addEventListener('click', () => scrollToEnd(true));
+thread.addEventListener('click', (e) => {
+  const btn = e.target.closest('.code-copy');
+  if (!btn) return;
+  const code = btn.closest('.code-block').querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(() => {
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+  });
+});
+document.addEventListener('keydown', (e) => {
+  // Cmd/Ctrl+K: new chat, the shortcut the desktop chat apps share.
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    newChat();
+    input.focus();
+  }
+});
 document.getElementById('btn-back-live').addEventListener('click', backToLive);
 
 document.querySelectorAll('.suggestion').forEach(btn => {

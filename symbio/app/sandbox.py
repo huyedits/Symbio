@@ -22,6 +22,16 @@ def _ask_command_permission(command: str, binary: str, ask_fn=None) -> bool:
         f"[Sandbox] '{binary}' is normally blocked. Allow once?\n"
         f"  $ {command}"
     )
+    try:
+        from symbio import guardrails
+
+        # No kind: this allows one run of one command, not a kind of action.
+        prompt = guardrails.Card(
+            f"Run {binary}, which the sandbox normally blocks.", f"$ {command}",
+            reason=f"“{binary}” is on the sandbox's blocked list. "
+                   "Allowing it here allows this one run.")
+    except Exception:
+        pass
     if ask_fn is not None:
         try:
             return ask_fn(prompt)

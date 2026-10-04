@@ -72,6 +72,12 @@ SENSITIVE_CONFIG_KEYS: set[str] = {
 # Prefixes that make any dotted key sensitive.
 SENSITIVE_PREFIXES: tuple[str, ...] = (
     "safety.",
+    # The model loosening its own guardrails is a change the user must see.
+    "guardrails",
+    # The desk is the user's word that Symbio works on its own screen and
+    # leaves theirs alone; turning it off, or borrowing their pointer sooner,
+    # is theirs to change and not the model's.
+    "desk.",
     "telegram.",
     "remote.hosts",
     "sandbox.blocked",
@@ -738,16 +744,16 @@ def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any],
     # clicks would put a confirmation in front of every look.
     if name in ("desktop_move", "desktop_scroll", "open_app"):
         return {"risk_score": 1, "flags": ["desktop_action"]}
+    # Starting a recording captures everything on screen from then on, other
+    # windows included; stopping or checking one captures nothing.
+    if name == "obs_record":
+        if str(params.get("action", "")).strip().lower() == "start":
+            return {"risk_score": 2, "flags": ["screen_capture", "records_screen"]}
+        return {"risk_score": 1, "flags": ["desktop_action"]}
     if name == "desktop_wait":
         return {"risk_score": 0, "flags": []}
     # Reading the screen is not acting on it, but it does pull whatever is on
     # display — including any other window — into the transcript.
-    # Publishing under the user's own name, to an audience, with no undo
-    # that this code controls. Scored with the desktop keystroke that commits
-    # a typed command rather than with the browser clicks: the blast radius is
-    # everyone who follows them.
-    if name == "post_to_x":
-        return {"risk_score": 3, "flags": ["publishes_publicly", "irreversible"]}
     if name == "see_screen":
         return {"risk_score": 1, "flags": ["screen_capture"]}
 
@@ -809,6 +815,9 @@ PROVENANCE_SENSITIVE = frozenset({
     # here for the same reason execute_code does, and especially so because
     # see_screen puts attacker-controlled page text into the same turn.
     "desktop_type", "desktop_press", "desktop_click", "desktop_drag",
+    # A recording the user did not ask for is the model filming the screen on
+    # its own initiative; ask, the same as for a keystroke nobody requested.
+    "obs_record",
 })
 
 
@@ -1067,10 +1076,6 @@ def maybe_confirm(
         prompt = (f"[Security: risk score {score}/3] Let me {what} on your "
                   f"desktop? This acts on the frontmost window, which may not "
                   f"be the one you expect.\n  Flags: {flags}")
-    elif name == "post_to_x":
-        prompt = (f"[Security: risk score {score}/3] Post this to x.com, "
-                  f"publicly, as you?\n  {_visible(params.get('text', ''))}\n"
-                  f"  Flags: {flags}")
     elif name == "config_set":
         prompt = f"[Security: risk score {score}/3] Change config '{_visible(params.get('key'))}' to '{_visible(params.get('value'))}'? Flags: {flags}"
     elif name == "add_golden_case":

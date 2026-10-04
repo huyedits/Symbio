@@ -19,7 +19,7 @@
     "save_every": 50
   },
   "agent": {
-    "max_turns": 5,
+    "max_turns": 15,
     "history_limit": 40,
     "sandbox_timeout": 30,
     "code_timeout": 300,
@@ -76,25 +76,6 @@
     "batch_train_iters": 25,
     "boost_factor": 3,
     "short_train_iters": 10,
-    "correction_phrases": [
-      "no,",
-      "not quite",
-      "that's wrong",
-      "incorrect",
-      "wrong",
-      "you misunderstood",
-      "try again",
-      "actually",
-      "i meant",
-      "i said",
-      "i asked",
-      "not what",
-      "that's not",
-      "you're wrong",
-      "fix it",
-      "correction",
-      "rephrase"
-    ]
   },
   "tools": {
     "enabled_groups": [

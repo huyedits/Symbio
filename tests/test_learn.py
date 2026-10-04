@@ -309,7 +309,6 @@ def _run(session, monkeypatch, compacted=True):
 
     def fake_compact(store, config, summarize_fn=None):
         calls.append(store)
-        from pathlib import Path
         return (f"compacted {store}", Path("/tmp/x") if compacted else None)
 
     monkeypatch.setattr(memory_mod, "compact_store", fake_compact)

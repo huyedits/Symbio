@@ -351,16 +351,16 @@ def setup_secure_enclave(identity_out: Path, recipients_out: Path,
     # from `age` at lock time as "no recipients found".
     if result.returncode != 0 or not _has_recipients(recipients_out):
         detail = (result.stderr or result.stdout).strip()
-        say(f"  --  could not derive recipients"
+        say("  --  could not derive recipients"
             + (f": {detail}" if detail else " (the file came out empty)"))
         return 1
     say(f"{_found(True)}recipients: {recipients_out}")
 
     if access != "none":
-        say(f"\n  Each adapter load will ask for your Mac login password.")
-        say(f"  That includes worker swaps and deep-sleep wakes, which happen")
-        say(f"  several times in a browser session. --access-control none")
-        say(f"  removes the prompt and still binds the adapter to this Mac.")
+        say("\n  Each adapter load will ask for your Mac login password.")
+        say("  That includes worker swaps and deep-sleep wakes, which happen")
+        say("  several times in a browser session. --access-control none")
+        say("  removes the prompt and still binds the adapter to this Mac.")
     return 0
 
 
@@ -411,7 +411,7 @@ def finish(folder: Path, identity_out: Path, recipients_out: Path,
             say(f"  --  could not write {config_file.name} ({e}); set it yourself:")
             say(f"      ./symb config set agent.adapter_identity {identity_out}")
 
-    say(f"\nDone. `./symb chat` will now unlock the adapter at load.")
+    say("\nDone. `./symb chat` will now unlock the adapter at load.")
     say(f"If anything goes wrong: rm -rf {folder} && mv {backup} {folder}")
     return 0
 
@@ -496,7 +496,7 @@ def setup(identity_out: Path, recipients_out: Path, touch: str = "cached",
 
     say("\nNext, and read this line before you run it: locking DELETES the")
     print("plaintext weights. Keep a copy until a real load has worked.")
-    say(f"    cp -R adapters adapters.backup")
+    say("    cp -R adapters adapters.backup")
     print(f"    python3 symbio/adapter_crypto.py lock adapters "
           f"--recipients {recipients_out}")
     say(f"    ./symb config set agent.adapter_identity {identity_out}")

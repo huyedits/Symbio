@@ -1,4 +1,3 @@
-### CUDA SUPPORT NEEDED
 # Symbio - that fine tuning agent.
 
 > **Learns from your corrections, on your machine — and rolls back a fine-tune that made it worse.**
@@ -9,7 +8,7 @@
 [![GitHub](https://img.shields.io/badge/GitHub-Symbio-black?logo=github)](https://github.com/huyedits/Symbio)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](#license)
 
-**[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)** 
+**[Website](https://huyedits.github.io/Symbio/)** · **[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)** 
 
 ---
 
@@ -86,6 +85,9 @@ Everything can stay on your machine, nothing phones "home"
 *  **Self-corrects tool mistakes** — successful recovery from a failed command can become a training example.
 *  **Learnable skills** — create a skill as a Markdown procedure and train a dedicated worker adapter for it.
 *  **LoRA fine-tuning** — only small adapter weights are trained; the base model stays frozen.
+*  **Fine-tunes itself when it decides to** — besides training automatically once enough examples pile up, the model can call its own `train_adapter` tool mid-conversation. With default settings that runs without asking you; it is logged, and the golden set still rolls back a run that made things worse.
+*  **Watches its own weights change** — `scripts/weight_delta.py` shows, module by module, how far each fine-tune moved the weights, and how much the latest run moved them compared with the one before.
+*  **Looks inside the model (experimental)** — record which neurons fire on your own traffic, and grow new neurons that start at exactly zero change. See [Looking inside the weights](#looking-inside-the-weights).
 *  **Mixture of Agents** — a headmaster can delegate bounded tasks to smaller worker models.
 *  **Local memory** — notes, sessions, training data, adapters and caches live locally.
 *  **RAG retrieval** — relevant notes can be retrieved and supplied as context.
@@ -157,6 +159,43 @@ canvas, a game, a screen share — where there is no tree to read.
 terminal running Symbio is granted Accessibility. `python3 -m symbio.ax` shows
 the grant dialog and then prints the live control listing; `/selfcheck` in
 chat reports the same thing.
+
+### Its own screen (the desk)
+
+```bash
+symb desk on      # Symbio works on a screen of its own from now on
+symb desk peek    # a picture of what it is doing there
+symb desk check   # drives it once, for real, on a scratch TextEdit document
+symb desk off     # the desktop tools go back to your screen
+```
+
+Two people cannot share one mouse, and a Mac has one. With the desk on,
+Symbio gets a second display that has no panel behind it — a virtual display
+macOS lays out, draws and captures like any monitor, that nobody is looking
+at — and every desktop tool works there instead of on yours:
+
+- `open_app` launches in the background and moves the app's windows onto the
+  desk. An app you already have open is never taken: it gets asked for a new
+  window through its own File menu, and only that one moves.
+- `see_screen target='desktop'` reads the desk's front window, and a capture
+  is of the desk alone. `target='user'` still looks at your screen.
+- Clicks and typing go through the accessibility API first, which needs no
+  pointer and no keyboard focus. Only a control that ignores it gets real
+  input, posted to that one app; and only if that changes nothing does
+  Symbio borrow your pointer and keyboard — after 30 s without you touching
+  the Mac (`desk.borrow_input_after_idle_s`), for one action, put straight
+  back.
+- The browser Symbio drives opens its window on the desk too.
+
+The desk touches your screen at one corner only, so your pointer cannot
+wander onto it. Turning it off is `symb desk off`, and only you can: the
+model cannot change `desk.*` settings itself.
+
+Measured on macOS 26.5, and worth knowing: **while the Mac is locked** every
+app window drops out of the accessibility tree and out of captures — on the
+desk too — so desktop work waits for you to unlock (the browser keeps
+working; it is driven through Chrome, not the screen). And a desk stopped
+while your screen sleeps is only removed by macOS when the screen next wakes.
 
 ### The window
 
@@ -299,6 +338,42 @@ same answer. `SYMBIO_NO_FLASH_ATTENTION=1` turns it off.
 An adapter whose training went to nan is now refused when it is loaded, and the
 base model answers instead: loaded, it made every reply a row of `!`.
 
+**Side models on the Neural Engine.** `symbio_ane/ane_helper.swift` is a small
+Swift program (built on first use with the command-line tools' `swiftc`, kept
+running, ~108 MB) that does three jobs off the GPU the 14B generates on:
+
+- **OCR**: Vision's text recognizer, pinned to the Neural Engine — ~120 ms for a
+  1080p screen once warm. `see_screen` answers questions about *words* from it
+  and no longer wakes the 4 GB vision model (or sleeps the 14B) to read text;
+  every VLM look also gets the exact text alongside. A blob with words in it is
+  named by its words, not by a VLM generation.
+- **Decision model**: think first or answer now, from a nearest-neighbour vote
+  over Apple's on-device contextual embedding (~7 ms). Held out, it made the
+  think/no-think call right 30/31 against the regex's 19/31. Every decision is
+  logged as a label. With Apple Intelligence turned on it asks Apple's
+  on-device model to fill in a routing schema instead.
+- **Vision requests**: saliency and scene labels on the Neural Engine
+  (`ane.vision`), for callers that want candidate regions without a model.
+
+`ane.enabled: false` turns it all off; every call falls back to the old path.
+
+**Replies in seconds, not half a minute.** Measured on the 14B, same prompts,
+before → after: "hey, how's it going?" 18.3 s → 8.8 s; "what's 17 times 23?"
+30.2 s → 4.5 s; follow-ups 4-5 s. Four changes:
+
+- `agent.think_when: auto` — plain conversation answers without a reasoning
+  block; a task, code, a link or a tool round keeps `thinking_level`
+  (`always` restores the old behaviour).
+- The standing context (curated memory, soul, env: ~840 tokens) moved out of
+  the per-turn block into the cached prefix, snapshotted per session, and each
+  past turn is replayed exactly as sent — a follow-up prefills ~250 tokens
+  instead of ~880.
+- `gpu.keep_model_wired` (default on): the resident weights are wired, like
+  LM Studio's "keep model in memory" or llama.cpp's `--mlock`. An idle daemon
+  had 6.6 GB of its 8.7 GB in the compressor; every turn paid to page it back.
+- The soul reflection waits for 45 quiet seconds instead of running a 14B
+  generation under your next message.
+
 Scheduled jobs used to run inside a chat session's background thread, so
 "every morning at 8" meant "every morning at 8, if a window happens to be
 open". `symb watch` is the process that watches instead: it restarts the
@@ -312,28 +387,99 @@ answer is no, and the refusal is recorded in the heartbeat.
 `cron.unattended_approve` turns that off for someone who has read this
 paragraph.
 
-### Posting to X
+### Tasks it does on its own
+
+There is no command for "run an X account". You ask in chat — *"post a
+shitpost on x.com four times a day, the kind that hints you're not quite a
+person; every Sunday check which ones did best and keep doing more of that"*
+— and Symbio schedules it the way it schedules anything, with `schedule_job`.
+What makes it a **task** rather than a reminder is a grant: what it may do with
+nobody there to ask, and where.
 
 ```
-post_to_x  {"text": "shipping the desktop window today"}
+Schedule “Write one new post for my x.com account … post it there and check
+it shows” to run 17 10,14,18,22 * * *.
+  It becomes a task I do on my own each time it comes due (while `symb watch`
+  runs). With you not there, I may do this without asking you: Post or send,
+  only on x.com. Anything else it needs is declined.
 ```
 
-The browser must already be open at x.com and signed in — it does not navigate
-there on its own, because posting is not something to do on a page nobody
-asked for. It fills the composer **by selector** (the composer is 28px tall,
-under the vision model's one-patch floor, and a coordinate for it missed by
-~36px every time), sends with x's own Post button, then reads the timeline back
-and returns a verdict the model cannot shape:
+You approve that card once. A grant is always put to you — even with
+scheduling set to *Always allow* — and is never given with nobody there:
+a task cannot schedule another, change a setting or train itself. Editing a
+granted task asks again.
 
-```
-[Post CONFIRMED] The post is rendered on the timeline: 'shipping the desktop window today'
-[Post NOT confirmed] The composer still holds the text, so it was not sent.
-[Post NOT confirmed] The composer cleared but the post is not on the timeline yet …
-```
+When it comes due, `symb watch` hands the task to the model as an ordinary
+turn, with every tool (with the desk on, its browser opens there), and answers that turn's
+questions from the grant and nothing else: *Post or send* on x.com, yes; a
+post on any other site, a shell command, a new schedule, no. A card the
+harness flagged (the words in the box aren't the ones the task asked for) is
+refused too. Tasks run only under `symb watch`; a chat session leaves them for
+it rather than turning them into a reminder line nobody acts on, and
+scheduling one says so when nothing is running them.
 
-A cleared composer is not confirmation — a discarded draft clears too. This
-project has already posted something and reported that it had not, which is
-why the proof is read from the DOM rather than from a toast.
+### Scripts it keeps
+
+`execute_code` runs Python once. `save_script` keeps it under a name — same
+sandbox, same refusals, its arguments in `ARGS` — and `run_script` runs it
+again. A job whose text is `script:<name> [args]` runs it on a schedule with no
+model turn at all: a tally, a scrape, a check that only needs re-running.
+`list_saved_scripts` and `delete_script` round it out. Saving is *Change
+files* and running is *Run commands and code*, the switches you already have.
+
+### Posting and sending, on any site
+
+There is no posting command. Symbio posts the way a person does: it opens the
+page, types into the box, clicks the button beside the box that sends it, and
+reads the page back. Nothing in the code names a site.
+
+What makes that work on a 14B is what the page hands back:
+
+- **The page's boxes and buttons come with the page.** After an open, or a
+  click that changes what is on screen, the observation lists the fields to
+  type into (with the selector that reaches them) and the buttons that send
+  them — send-like labels (Post, Reply, Send, Submit…) ahead of the
+  navigation, `[disabled]` until the box has text. Before this the list only
+  appeared after a step had failed, and the model typed at nothing and clicked
+  the sidebar link that shares the send button's label.
+- **Words the user didn't give are pointed out.** If the user quoted
+  “testing” and the model types "Hi", the result says so, beside the box.
+- **Sending is asked about where it happens.** A click, a coordinate or
+  cmd+enter that would send the text in a box — a post, a reply, a comment, a
+  chat message, a form — is *Post or send*, on any site. The card shows the
+  words in the box and warns when they aren't the ones you asked for. A
+  search box's Go and a login form are not sends.
+
+On 2026-09-27 the model, asked for “testing” on x.com, typed "Hi" into the
+composer and pressed Post; that route now stops at a card that says “You asked
+for “testing”, not this.”
+
+### Guardrails
+
+What Symbio may do without asking is set per **kind of action**, in words you
+would use — *Post or send*, *Run commands and code*, *Change files*, *Use your
+desktop*, *Browse the web*, *Forget things*, *Train itself*, *Change its
+settings*, *Schedule work* — each **Allow**, **If risky**, **Ask** or **Never**
+(Settings → the first section in the window, or `guardrails.modes` in
+config.json). The defaults are the old behaviour.
+
+- **One question per action, in plain English.** The card's headline is the
+  model's own sentence for the concrete call ("I'll post “Hi” publicly on your X
+  account"); under it, the exact post or command, from the harness. If the
+  words about to go out are not the ones you quoted, the card says so in red.
+  It used to ask twice for one post, once with no text at all.
+- **A click is judged by what it lands on.** A button that sends the text in
+  a box — by text, selector, coordinates or cmd+enter — is *Post or send* on
+  any site, whichever tool did it. Before this, browser_type plus
+  browser_click posted "Hi" with nobody asked.
+- **Always allow** on a card switches that kind to Allow; anything the risk
+  scorer rates destructive still asks. **Never** is refused, and the model is
+  told the refusal is yours.
+- **Floors** no switch reaches: the security policy, self-destruction, and the
+  model loosening its own guardrails.
+- The window's server only talks to the window: requests must come from its
+  own origin, so a web page open in your browser can no longer open the chat
+  socket or write settings.
 
 ---
 
@@ -751,52 +897,6 @@ By default, Symbio:
 The goal is to make the evaluation auditable rather than flattering.
 
 > A high adapter score demonstrates recall of the trained procedure. It does not prove general intelligence or deep conceptual understanding.
-
----
-
-# Six-skill evaluation
-
-A larger evaluation using six generated skills produced:
-
-| Skill                      | Base | Prompted | Adapter |
-| -------------------------- | ---: | -------: | ------: |
-| Quick Task Helper          |  0/5 |      1/5 | **5/5** |
-| Coffee Making              |  1/5 |      5/5 | **5/5** |
-| Bicycle Tuning             |  1/5 |      5/5 | **5/5** |
-| Repotting a Houseplant     |  2/5 |      5/5 | **5/5** |
-| Shipping a Parcel Overseas |  0/5 |      5/5 | **5/5** |
-| Sharpening a Kitchen Knife |  1/5 |      4/5 | **5/5** |
-
-WOWIE, that is a BIG BIG jump!!!!
-Overall:
-
-```text
-Adapter: 30/30
-Base:     5/30
-```
-
-These numbers should be treated as an experiment, not a benchmark claim. The evaluation metric measures reproduction of the skill's procedure, which is specifically what the experiment is designed to test.
-
-Custom evaluation tasks can be added under:
-
-```text
-training_data/workers/<role>/eval_tasks.json
-```
-
-Example:
-
-```json
-[
-  {
-    "id": "no_wifi",
-    "prompt": "wifi's dead again",
-    "must_include": ["toggle"]
-  },
-  "the network dropped, sort it out"
-]
-```
-
----
 
 # How much does it take to learn something new?
 
@@ -1372,6 +1472,71 @@ Training is **not automatically restarted after a crash**. This prevents a machi
 
 ---
 
+## Looking inside the weights
+
+### It decides when to train
+
+Training starts two ways. The automatic way: corrections and recovered
+mistakes collect as examples, and once enough accumulate a LoRA run starts on
+its own. The other way: the model itself can call `train_adapter` (keep
+training on what it has) or `retrain_adapter` (rebuild from scratch) whenever
+it judges a fine-tune is due. At the default `safety.require_confirm_score`
+of 3 these score 2/3, so they run without a prompt and land in the security
+log. Raise the bar to 2 if you want to approve every self-started run.
+Either way the golden set still grades the result and rolls it back if it
+got worse.
+
+### Seeing what a fine-tune changed
+
+LoRA never rewrites the base model. Each module it touches becomes
+`W + scale · (lora_a @ lora_b)`, so the change is readable straight from the
+adapter file:
+
+```bash
+venv/bin/python scripts/weight_delta.py adapters/ --base mlx-community/Qwen3-14B-3bit
+```
+
+```text
+module                              |dW|      rel
+model.layers.38.self_attn.q_proj     11.616  10.181%  ########################
+model.layers.38.self_attn.v_proj      6.225   9.342%  ############
+model.layers.39.self_attn.q_proj     10.995   9.757%  ######################
+model.layers.39.self_attn.v_proj      5.969   9.635%  ############
+```
+
+That is the live 14B adapter on one machine: four attention modules in the
+last two layers, each moved by about a tenth of its own size. `--since OLD`
+compares two adapters (two checkpoints of one run, or before and after a
+retrain) and prints how much the latest training moved each module.
+
+### Which neurons fire, and growing new ones (experimental)
+
+`bench/activation_recorder.py` hooks every layer and MLP of the headmaster,
+records which neurons fire on one set of prompts, then tests on a second set
+whether that recording means anything, by pruning with it and with a random
+choice. On Qwen3-14B-3bit, measured as how often the pruned model still picks
+the full model's next token:
+
+| cut | chosen by the recording | chosen at random |
+|---|---|---|
+| switch off 10% of neurons | 0.875 | 0.776 |
+| switch off 50% of neurons | 0.584 | 0.200 |
+| drop 8 of 40 layers | 0.478 | 0.484 |
+
+Neuron firing is a real signal. Layer "influence" is not; it did no better
+than random.
+
+`bench/neuron_adapter.py` adds weights instead: new MLP neurons beside the
+frozen base, whose output starts at exactly zero, so at step 0 the model is
+bit-for-bit unchanged. On Qwen3-0.6B, four examples taught it a fact it could
+not have known, and it answered a phrasing it never saw. Left switched on for
+everything, the new neurons also bent unrelated answers (the capital of
+Australia turned into Vancouver). Switched on only for their own skill, the
+same way skill adapters are triggered, unrelated replies were identical to
+the base model's. Neither of these is wired into the agent yet.
+
+---
+
 # 💻 Tools
 
 Symbio can interact with the local machine through several tool groups.
@@ -1445,6 +1610,32 @@ Save information for future retrieval:
 ### Web research
 
 Search the web and save useful discoveries as local `Learned:` notes.
+
+### Screen recording (OBS)
+
+`obs_record` starts, stops or checks an OBS Studio recording, so a task you
+are filming can end itself: Symbio finishes the job, then stops the
+recording, and the clip ends on the result instead of on you reaching for
+the mouse.
+
+It talks to OBS's built-in WebSocket server (OBS 28 and later), not a hotkey
+or a click on the OBS window, so nothing is pulled in front of what is being
+recorded, and every answer is OBS's own report: `stop` names the file OBS
+saved, and only says STOPPED once OBS confirms no recording is running.
+
+One-time setup: in OBS, **Tools → WebSocket Server Settings → Enable
+WebSocket server**. The port and password are read from OBS's own settings on
+the same Mac; set `obs.host`, `obs.port` or `obs.password` in `config.json`
+(or `SYMBIO_OBS_PASSWORD`) to point it elsewhere. Starting a recording is
+scored as a screen capture, so on a turn where you did not ask for it, it
+asks first.
+
+```text
+You: Submit the Show HN post, then stop the recording.
+     ... browser steps, the Allow card for the post ...
+     [Submit CONFIRMED ... /item?id=...]
+     [Recording STOPPED] Saved to ~/Movies/2026-09-25 14-02-11.mov
+```
 
 ### Telegram
 

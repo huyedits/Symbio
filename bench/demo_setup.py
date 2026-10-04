@@ -76,7 +76,7 @@ def arm():
         cfg["agent"]["num_draft_tokens"] = 2
         json.dump(cfg, open(cfg_path, "w"), indent=2)
         print(f"  model -> {TRAINABLE} (trainable on 16GB; adapter + draft both match)")
-        print(f"  previous config saved to config.json.bak.pre-demo")
+        print("  previous config saved to config.json.bak.pre-demo")
 
     golden = ROOT / "golden_cases.json"
     if not golden.exists():
@@ -121,7 +121,7 @@ if __name__ == "__main__":
         reset()
     else:
         arm()
-        print(f"""
+        print("""
   ARMED. Now record:
 
     ./symb chat

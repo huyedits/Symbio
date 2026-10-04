@@ -427,6 +427,11 @@ def wizard(monkeypatch, tmp_path):
     # A real terminal. The step deliberately says nothing without one, so
     # these tests — which are about the interactive offer — have to claim one.
     monkeypatch.setattr(wiz.sys.stdin, "isatty", lambda: True)
+    # And the tools. The step says nothing unless age and a hardware plugin
+    # are installed, so without this the offer tests only passed on a machine
+    # that happened to have them — never in CI.
+    monkeypatch.setattr(crypto, "age_available", lambda: True)
+    monkeypatch.setattr(wiz.shutil, "which", lambda _name: "/usr/bin/thing")
     (tmp_path / "adapters").mkdir()
     return wiz, tmp_path / "adapters"
 

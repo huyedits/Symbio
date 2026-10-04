@@ -197,6 +197,16 @@ class _Page:
         return _p.Path("shot.png")
 
 
+@pytest.fixture(autouse=True)
+def _vision_stack_present(monkeypatch):
+    """These tests fake the vision model itself (_run_vision), so whether
+    mlx-vlm is importable is beside the point. It is not in the [mlx] extra,
+    so without this they failed on any host that had not installed it
+    separately — every Linux box, and a Mac with only `symbio-cli[mlx]`."""
+    from symbio import vision
+    monkeypatch.setattr(vision, "available", lambda: True)
+
+
 def _looker():
     class S(chat_tools.ToolsMixin):
         config = {"browser": {"enabled": True}, "vision": {}, "safety": {}}

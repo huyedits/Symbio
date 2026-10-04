@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="description" content="Symbio is a local agent for Apple Silicon Macs that fine-tunes itself from your corrections with LoRA, and rolls back a fine-tune that made it worse.">
+<meta property="og:title" content="Symbio: correct it once, it fine-tunes itself">
+<meta property="og:description" content="Symbio is a local agent for Apple Silicon Macs that fine-tunes itself from your corrections with LoRA, and rolls back a fine-tune that made it worse.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://huyedits.github.io/Symbio/">
+<meta name="twitter:card" content="summary">
+<title>Symbio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+:root{
+  --paper:#EEF1E9; --paper-2:#E3E8DD; --ink:#18241F; --ink-2:#44524B; --muted:#6B786F;
+  --rule:#C9D1C3; --accent:#8F6A00; --accent-ink:#FFF8E1; --accent-soft:#E9D9A6;
+  --sage:#4F7A5C; --term:#16201B; --term-ink:#DCE5DB; --term-dim:#8FA195; --term-hi:#E8BE45; --term-ok:#8CC79A;
+  --display:"Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --body:"IBM Plex Sans", "Helvetica Neue", Arial, system-ui, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme:dark;
+    --paper:#111815; --paper-2:#18211D; --ink:#E3EAE1; --ink-2:#B7C3BA; --muted:#8C9A91;
+    --rule:#2C3832; --accent:#E3B83F; --accent-ink:#1A1405; --accent-soft:#4A3C12;
+    --sage:#8DB99A; --term:#0B100E; --term-ink:#DCE5DB; --term-dim:#7F9186; --term-hi:#E8BE45; --term-ok:#8CC79A;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --paper:#111815; --paper-2:#18211D; --ink:#E3EAE1; --ink-2:#B7C3BA; --muted:#8C9A91;
+  --rule:#2C3832; --accent:#E3B83F; --accent-ink:#1A1405; --accent-soft:#4A3C12;
+  --sage:#8DB99A; --term:#0B100E; --term-ink:#DCE5DB; --term-dim:#7F9186; --term-hi:#E8BE45; --term-ok:#8CC79A;
+}
+*{box-sizing:border-box}
+body{background:var(--paper);color:var(--ink);font:400 17px/1.6 var(--body);margin:0;-webkit-font-smoothing:antialiased}
+.wrap{max-width:1120px;margin:0 auto;padding-inline:clamp(16px,4vw,40px)}
+a{color:inherit}
+a:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:4px}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;letter-spacing:-.02em}
+p{margin:0}
+.eyebrow{font:500 12px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+code,.mono{font-family:var(--mono);font-size:.88em}
+
+/* nav */
+nav{display:flex;align-items:center;justify-content:space-between;gap:16px;padding-block:22px;flex-wrap:wrap}
+.brand{font:800 22px/1 var(--display);letter-spacing:-.03em;text-decoration:none;display:flex;align-items:center;gap:10px}
+.brand svg{width:26px;height:26px}
+.navlinks{display:flex;gap:20px;flex-wrap:wrap;font-size:15px}
+.navlinks a{text-decoration:none;color:var(--ink-2)}
+.navlinks a:hover{color:var(--ink);text-decoration:underline;text-underline-offset:4px}
+
+/* hero */
+.hero{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:clamp(28px,5vw,64px);align-items:center;padding-block:clamp(28px,6vw,72px) clamp(40px,7vw,88px)}
+.hero h1{font-size:clamp(40px,6.4vw,78px);line-height:.98;font-weight:800}
+.hero h1 em{font-style:normal;color:var(--accent)}
+.lede{font-size:clamp(17px,1.6vw,20px);color:var(--ink-2);max-width:34em;margin-top:22px}
+.ctas{display:flex;gap:12px;flex-wrap:wrap;margin-top:30px}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:12px 18px;border-radius:8px;font:600 15px/1 var(--body);text-decoration:none;border:1px solid var(--ink)}
+.btn.primary{background:var(--ink);color:var(--paper)}
+.btn.primary:hover{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.ghost:hover{background:var(--paper-2)}
+.facts{display:flex;flex-wrap:wrap;gap:8px 20px;margin-top:28px;font:500 13px/1.3 var(--mono);color:var(--muted)}
+.facts span::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--sage);margin-right:8px;vertical-align:1px}
+
+/* terminal */
+.term{background:var(--term);color:var(--term-ink);border-radius:12px;font:400 14px/1.65 var(--mono);box-shadow:0 1px 0 rgba(255,255,255,.04) inset,0 24px 48px -28px rgba(10,20,15,.55);overflow:hidden}
+.term-bar{display:flex;align-items:center;gap:7px;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.07)}
+.term-bar i{width:10px;height:10px;border-radius:50%;background:#3A463F;display:block}
+.term-bar b{margin-left:10px;font-weight:400;color:var(--term-dim);font-size:12px}
+.term pre{margin:0;padding:18px 20px 22px;white-space:pre-wrap;overflow-x:auto}
+.t-you{color:var(--term-hi)} .t-dim{color:var(--term-dim)} .t-ok{color:var(--term-ok)}
+.line{display:block;animation:rise .5s both}
+@keyframes rise{from{opacity:.001;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.line{animation:none}}
+
+section{padding-block:clamp(48px,7vw,88px);border-top:1px solid var(--rule)}
+.sec-head{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:24px 56px;align-items:end;margin-bottom:40px}
+.sec-head h2{font-size:clamp(30px,4vw,48px);line-height:1.02;font-weight:700}
+.sec-head p{color:var(--ink-2);max-width:36em}
+
+/* loop */
+.loop{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;counter-reset:step}
+.loop li{counter-increment:step;padding:22px 20px 0 0;border-top:2px solid var(--ink);position:relative}
+.loop li+li{padding-left:20px;border-left:1px solid var(--rule)}
+.loop li::before{content:counter(step);font:500 12px/1 var(--mono);color:var(--accent);display:block;margin-bottom:14px}
+.loop h3{font-size:20px;font-weight:700;margin-bottom:8px}
+.loop p{font-size:15px;color:var(--ink-2)}
+
+/* evidence */
+.evidence{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:clamp(28px,4vw,56px)}
+figure{margin:0}
+figure h3{font-size:22px;font-weight:700;margin-bottom:6px}
+figcaption{font-size:15px;color:var(--ink-2);margin-top:14px;max-width:34em}
+.chart{width:100%;height:auto;display:block;margin-top:18px;overflow:visible}
+.chart text{font-family:var(--mono);font-size:11px;fill:var(--muted)}
+.chart .val{fill:var(--ink);font-weight:500}
+.chart .grid{stroke:var(--rule);stroke-width:1}
+.chart .bar{fill:var(--sage)}
+.chart .bar.peak{fill:var(--accent)}
+.chart .held{fill:var(--accent)}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font:500 12px/1 var(--mono);color:var(--muted);margin-top:12px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.caveat{margin-top:36px;padding:18px 20px;border-left:3px solid var(--accent);background:var(--paper-2);border-radius:0 8px 8px 0;font-size:15px;color:var(--ink-2);max-width:62em}
+.caveat strong{color:var(--ink)}
+
+/* guards */
+.guards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;border-top:1px solid var(--rule)}
+.guard{padding:24px 24px 26px 0;border-bottom:1px solid var(--rule)}
+.guard:nth-child(3n+2),.guard:nth-child(3n){padding-left:24px;border-left:1px solid var(--rule)}
+.guard .eyebrow{color:var(--sage)}
+.guard h3{font-size:19px;font-weight:700;margin:10px 0 8px}
+.guard p{font-size:15px;color:var(--ink-2)}
+
+/* install */
+.install{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:clamp(28px,5vw,64px);align-items:start}
+.install h2{font-size:clamp(30px,4vw,48px);line-height:1.02;font-weight:700}
+.install p{color:var(--ink-2);margin-top:16px;max-width:30em}
+.req{margin-top:22px;display:grid;grid-template-columns:auto 1fr;gap:8px 18px;font-size:15px}
+.req dt{font:500 12px/1.9 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.req dd{margin:0}
+.copy{position:absolute;top:10px;right:12px;font:500 12px/1 var(--mono);background:transparent;color:var(--term-dim);border:1px solid rgba(255,255,255,.14);border-radius:6px;padding:7px 10px;cursor:pointer}
+.copy:hover{color:var(--term-ink);border-color:rgba(255,255,255,.3)}
+.term.rel{position:relative}
+
+footer{border-top:1px solid var(--rule);padding-block:32px 48px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-size:14px;color:var(--muted)}
+footer a{color:var(--ink-2)}
+
+@media (max-width:900px){
+  .hero,.sec-head,.evidence,.install{grid-template-columns:minmax(0,1fr)}
+  .loop{grid-template-columns:minmax(0,1fr)}
+  .loop li,.loop li+li{padding:18px 0 18px 0;border-left:0;border-top:1px solid var(--rule)}
+  .loop li:first-child{border-top:2px solid var(--ink)}
+  .guards{grid-template-columns:minmax(0,1fr)}
+  .guard,.guard:nth-child(3n+2),.guard:nth-child(3n){padding:20px 0;border-left:0}
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <nav aria-label="Primary">
+    <a class="brand" href="https://github.com/huyedits/Symbio">
+      <svg viewBox="0 0 26 26" aria-hidden="true"><circle cx="10" cy="13" r="7.5" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="16" cy="13" r="7.5" fill="none" stroke="var(--accent)" stroke-width="2.2"/></svg>
+      Symbio
+    </a>
+    <div class="navlinks">
+      <a href="#loop">How it learns</a>
+      <a href="#evidence">Results</a>
+      <a href="#install">Install</a>
+      <a href="https://huggingface.co/spaces/HuyEdits/symbio-demo">Demo</a>
+      <a href="https://github.com/huyedits/Symbio">GitHub</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div>
+      <p class="eyebrow">Local agent · Apple Silicon · Apache 2.0</p>
+      <h1 style="margin-top:18px">Correct it once. It <em>fine-tunes itself</em> so it remembers.</h1>
+      <p class="lede">Symbio is a personal agent that runs on your Mac. When you correct it, the correction becomes training data, a small LoRA update runs on your machine, and a regression battery rolls the update back if it made anything worse.</p>
+      <div class="ctas">
+        <a class="btn primary" href="https://github.com/huyedits/Symbio">Get it on GitHub</a>
+        <a class="btn ghost" href="https://huggingface.co/spaces/HuyEdits/symbio-demo">Try the browser demo</a>
+      </div>
+      <div class="facts">
+        <span>no cloud inference</span><span>no subscription</span><span>telemetry off by default</span>
+      </div>
+    </div>
+    <div class="term" role="img" aria-label="A chat where the user corrects Symbio and the correction is saved as training data">
+      <div class="term-bar"><i></i><i></i><i></i><b>symb chat</b></div>
+<pre><span class="line"><span class="t-you">you</span>     What is my name?</span><span class="line" style="animation-delay:.15s"><span class="t-dim">symbio</span>  Your name is Bob.</span><span class="line" style="animation-delay:.3s"><span class="t-you">you</span>     No, I'm Alice.</span><span class="line" style="animation-delay:.45s"><span class="t-dim">symbio</span>  Your name is Alice.</span>
+<span class="line t-ok" style="animation-delay:.6s">        [correction detected · kind: knowledge]</span><span class="line t-dim" style="animation-delay:.7s">        saved mistake note  1/5 examples</span>
+<span class="line t-dim" style="animation-delay:.85s">        … 4 more corrections later</span>
+<span class="line" style="animation-delay:1s"><span class="t-ok">[train]</span> short LoRA run · adapter reloaded</span><span class="line" style="animation-delay:1.15s"><span class="t-ok">[golden]</span> battery re-run · no regression · adapter kept</span></pre>
+    </div>
+  </header>
+</div>
+
+<section id="loop">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>A correction becomes weights, not a longer prompt.</h2>
+      <p>Putting fixes in a system prompt makes every turn slower and teaches the model nothing. Symbio changes the adapter instead, and only the adapter: the base model stays frozen.</p>
+    </div>
+    <ol class="loop">
+      <li><h3>You correct it</h3><p>A plain "no, it's…" is detected. So is a failed tool call it later recovers from.</p></li>
+      <li><h3>It classifies the mistake</h3><p>Knowledge (a wrong fact) and reflex (the wrong shape of action) get different training recipes.</p></li>
+      <li><h3>Examples accumulate</h3><p>The threshold scales with the corpus, by log, clamped to 2–20. Severe mistakes pull it down.</p></li>
+      <li><h3>LoRA trains locally</h3><p>A short run on MLX. The model can also call its own <code>train_adapter</code> tool mid-conversation.</p></li>
+      <li><h3>The battery decides</h3><p>A golden set is re-scored. A run that made anything worse is rolled back.</p></li>
+    </ol>
+  </div>
+</section>
+
+<section id="evidence">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>Measured, then written down.</h2>
+      <p>These are single runs from the project's README, on a 16 GB Mac. They show direction, and the README says so. It also records where the harness, not the model, was the thing in the way.</p>
+    </div>
+    <div class="evidence">
+      <figure>
+        <p class="eyebrow">Held-out battery · single-shot</p>
+        <h3 style="margin-top:10px">13/13 by iteration 100 of 1000</h3>
+        <svg class="chart" viewBox="0 0 440 210" role="img" aria-label="Bar chart of score out of 13 by training iteration: 0 at 0, 3 at 20, 9 at 40, 11 at 60, 12 at 80, 13 at 100, 12 at 140, 13 at 160 onward">
+          <!-- y: 13 -> 20, 0 -> 170 ; 150px / 13 -->
+          <line class="grid" x1="36" x2="436" y1="170" y2="170"/>
+          <line class="grid" x1="36" x2="436" y1="20" y2="20" stroke-dasharray="3 4"/>
+          <text x="28" y="174" text-anchor="end">0</text>
+          <text x="28" y="24" text-anchor="end">13</text>
+          <g>
+            <rect class="bar" x="48"  y="169" width="34" height="1"/>
+            <rect class="bar" x="98"  y="135.4" width="34" height="34.6"/>
+            <rect class="bar" x="148" y="66.2" width="34" height="103.8"/>
+            <rect class="bar" x="198" y="43.1" width="34" height="126.9"/>
+            <rect class="bar" x="248" y="31.5" width="34" height="138.5"/>
+            <rect class="bar peak" x="298" y="20" width="34" height="150"/>
+            <rect class="bar" x="348" y="31.5" width="34" height="138.5"/>
+            <rect class="bar" x="398" y="20" width="34" height="150"/>
+          </g>
+          <g class="val" text-anchor="middle">
+            <text class="val" x="65" y="162">0</text>
+            <text class="val" x="115" y="129">3</text>
+            <text class="val" x="165" y="60">9</text>
+            <text class="val" x="215" y="37">11</text>
+            <text class="val" x="265" y="25">12</text>
+            <text class="val" x="315" y="14">13</text>
+            <text class="val" x="365" y="25">12</text>
+            <text class="val" x="415" y="14">13</text>
+          </g>
+          <g text-anchor="middle">
+            <text x="65" y="188">0</text><text x="115" y="188">20</text><text x="165" y="188">40</text><text x="215" y="188">60</text>
+            <text x="265" y="188">80</text><text x="315" y="188">100</text><text x="365" y="188">140</text><text x="415" y="188">160+</text>
+            <text x="236" y="206">training iteration</text>
+          </g>
+        </svg>
+        <figcaption>The other 900 iterations changed nothing: 90% of the compute. Training ran at 1.5 s per iteration and 8.4 GB peak. The last bar stands for 43 checkpoints from 160 to 1000, all 13/13.</figcaption>
+      </figure>
+
+      <figure>
+        <p class="eyebrow">Self-taught · no human-written samples</p>
+        <h3 style="margin-top:10px">An unseen environment, 10/45 → 21/45</h3>
+        <svg class="chart" viewBox="0 0 440 210" role="img" aria-label="Five training rounds. Tasks solved out of 45: 10, 16, 19, 26, 21. Held-out tasks solved out of 10: 2, 3, 2, 5, 4.">
+          <!-- left scale: 45 -> 20, 0 -> 170 ; 150/45 = 3.333 per task. held-out drawn as fraction of 10 on the same 0..100% height -->
+          <line class="grid" x1="36" x2="436" y1="170" y2="170"/>
+          <line class="grid" x1="36" x2="436" y1="20" y2="20" stroke-dasharray="3 4"/>
+          <text x="28" y="174" text-anchor="end">0%</text>
+          <text x="28" y="24" text-anchor="end">100%</text>
+          <!-- all-45 bars (sage), held-out bars (accent) -->
+          <rect class="bar" x="52"  y="136.7" width="30" height="33.3"/>
+          <rect class="held" x="84" y="140" width="30" height="30"/>
+          <rect class="bar" x="132" y="116.7" width="30" height="53.3"/>
+          <rect class="held" x="164" y="125" width="30" height="45"/>
+          <rect class="bar" x="212" y="106.7" width="30" height="63.3"/>
+          <rect class="held" x="244" y="140" width="30" height="30"/>
+          <rect class="bar" x="292" y="83.3" width="30" height="86.7"/>
+          <rect class="held" x="324" y="95" width="30" height="75"/>
+          <rect class="bar" x="372" y="100" width="30" height="70"/>
+          <rect class="held" x="404" y="110" width="30" height="60"/>
+          <g text-anchor="middle">
+            <text class="val" x="67" y="130">10</text><text class="val" x="99" y="134">2</text>
+            <text class="val" x="147" y="110">16</text><text class="val" x="179" y="119">3</text>
+            <text class="val" x="227" y="100">19</text><text class="val" x="259" y="134">2</text>
+            <text class="val" x="307" y="77">26</text><text class="val" x="339" y="89">5</text>
+            <text class="val" x="387" y="94">21</text><text class="val" x="419" y="104">4</text>
+          </g>
+          <g text-anchor="middle">
+            <text x="83" y="188">base</text><text x="163" y="188">round 2</text><text x="243" y="188">round 3</text>
+            <text x="323" y="188">round 4*</text><text x="403" y="188">round 5</text>
+          </g>
+        </svg>
+        <div class="legend"><span><i style="background:var(--sage)"></i>all 45 tasks</span><span><i style="background:var(--accent)"></i>10 held-out tasks</span></div>
+        <figcaption>The model acts in a reef simulator it has never seen, and a pair is kept only if the world ended in the state the task asked for. On tasks never in any corpus: 2 solved by the base model, 4 by the self-taught one. *Round 4 scores higher but had five of its answers in training, so round 5 is the honest number.</figcaption>
+      </figure>
+    </div>
+    <p class="caveat"><strong>Why the caveats are on the page:</strong> the first version of one benchmark mimicked the real AWS CLI, and the model scored 13/13 before any training, because it was reciting from pretraining. Symbio's README keeps that story next to the results, along with a silent partial adapter load that once made a working model read 0/13.</p>
+  </div>
+</section>
+
+<section id="guards">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>A loop that trains itself needs brakes.</h2>
+      <p>The training loss will not tell you a run made the agent worse. Each check below can refuse a run rather than print a warning.</p>
+    </div>
+    <div class="guards">
+      <div class="guard"><p class="eyebrow">Before</p><h3>The corpus is checked</h3><p>Broken tool-call samples are dropped, prompt masking is verified against the chat template, and LoRA keys are checked against the module tree.</p></div>
+      <div class="guard"><p class="eyebrow">After</p><h3>Golden-set rollback</h3><p>A regression battery is re-run on the new adapter. Consistent regressions roll back; flaky ones are retried first.</p></div>
+      <div class="guard"><p class="eyebrow">Always</p><h3>Crash-safe training</h3><p>An interrupted run is recorded and can be resumed, and the previous adapter is backed up before it is replaced.</p></div>
+      <div class="guard"><p class="eyebrow">Actions</p><h3>Permission gates</h3><p>Dangerous tools need explicit approval. Scheduled jobs that run unattended are denied by default.</p></div>
+      <div class="guard"><p class="eyebrow">Inputs</p><h3>Untrusted content stays data</h3><p>Web pages and tool output are wrapped as untrusted, and a security policy sits ahead of every editable prompt region.</p></div>
+      <div class="guard"><p class="eyebrow">Inspection</p><h3>See what a fine-tune moved</h3><p><code>weight_delta.py</code> shows, module by module, how far each run moved the weights.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="does">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>What it can do while it learns.</h2>
+      <p>One installation on one machine. Notes, sessions, training data and adapters live in <code>~/.symbio</code>.</p>
+    </div>
+    <div class="guards">
+      <div class="guard"><p class="eyebrow">Desktop</p><h3>Drives the Mac itself</h3><p>Reads windows through the accessibility API, so actions target numbered controls instead of guessed coordinates.</p></div>
+      <div class="guard"><p class="eyebrow">Browser</p><h3>Live browser automation</h3><p>Opens pages, fills forms by selector, and confirms a submission from the page itself rather than a toast.</p></div>
+      <div class="guard"><p class="eyebrow">Skills</p><h3>Learnable skills</h3><p>Write a procedure in Markdown and train a dedicated worker adapter for it. A headmaster model delegates to workers.</p></div>
+      <div class="guard"><p class="eyebrow">Memory</p><h3>Notes and retrieval</h3><p>Web research is saved as notes and retrieved as context. Junk notes and duplicate turns are pruned.</p></div>
+      <div class="guard"><p class="eyebrow">Anywhere</p><h3>Telegram and a light window</h3><p>Talk to your own instance from your phone, or open the desktop window: 28 MB resident when idle.</p></div>
+      <div class="guard"><p class="eyebrow">Always on</p><h3>Scheduled jobs</h3><p><code>symb watch</code> keeps the model loaded and runs the cron table, so "every morning at 8" does not need a window open.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap install">
+    <div>
+      <p class="eyebrow">Install</p>
+      <h2 style="margin-top:14px">Three commands on an Apple Silicon Mac.</h2>
+      <p>The <code>[mlx]</code> extra is the inference and training engine. Upgrading the package never touches your workspace.</p>
+      <dl class="req">
+        <dt>Machine</dt><dd>macOS on an M-series chip</dd>
+        <dt>Memory</dt><dd>16 GB+ recommended for the default 8B-class model; smaller presets exist</dd>
+        <dt>Disk</dt><dd>~8 GB for the default setup</dd>
+        <dt>Python</dt><dd>3.10 or newer</dd>
+      </dl>
+    </div>
+    <div>
+      <div class="term rel">
+        <div class="term-bar"><i></i><i></i><i></i><b>zsh</b></div>
+        <button class="copy" id="copy-install" type="button">Copy</button>
+<pre id="install-cmds"><span class="t-dim">$</span> pip install "symbio-cli[mlx]"
+<span class="t-dim">$</span> symb setup
+<span class="t-dim">$</span> symb chat</pre>
+      </div>
+      <p style="margin-top:18px;color:var(--ink-2);font-size:15px">Want to work on it? <code>git clone https://github.com/huyedits/Symbio &amp;&amp; ./install.sh</code>. The test suite runs on Linux too; tests that need MLX skip there.</p>
+    </div>
+  </div>
+</section>
+
+<div class="wrap">
+  <footer>
+    <span>Symbio is Apache 2.0, built by Huy Tran. A star on GitHub helps other people find it.</span>
+    <span><a href="https://github.com/huyedits/Symbio">GitHub</a> · <a href="https://huggingface.co/spaces/HuyEdits/symbio-demo">Demo</a> · <a href="https://github.com/huyedits/Symbio/issues">Issues</a></span>
+  </footer>
+</div>
+
+<script>
+(function(){
+  var btn=document.getElementById('copy-install');
+  var text='pip install "symbio-cli[mlx]"\nsymb setup\nsymb chat';
+  function selectFallback(){
+    var r=document.createRange();r.selectNodeContents(document.getElementById('install-cmds'));
+    var s=window.getSelection();s.removeAllRanges();s.addRange(r);btn.textContent='Selected';
+  }
+  btn.addEventListener('click',function(){
+    try{
+      navigator.clipboard.writeText(text).then(function(){btn.textContent='Copied';setTimeout(function(){btn.textContent='Copy'},1600)},selectFallback);
+    }catch(e){selectFallback()}
+  });
+})();
+</script>
+</body>
+</html>

@@ -79,6 +79,8 @@ gateway.pid
 daemon.pid
 pet.pid
 daemon.start.lock
+/desk.json
+/desk.json.partial
 # The Merkle root over THIS install's adapters, and the per-adapter seals
 # under it. Every install has its own adapters, so shipping one person's root
 # would only ever tell someone else their own weights are wrong.
@@ -276,6 +278,9 @@ build/
 # whose adapters did not exist on it — and the roster goes into the system
 # prompt, so the model believed it had them.
 /symbio/app/worker_models.json
+# ...and where it lives now (symbio/constants.py: the legacy path above only
+# when that file already exists, else the workspace root).
+/worker_models.json
 
 # The aws_sim research rig and everything it produced. A fake cloud CLI, a
 # self-teaching loop and a checkpoint scorer: nothing in the package imports

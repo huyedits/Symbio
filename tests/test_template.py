@@ -1,3 +1,5 @@
+import pytest
+pytest.importorskip("mlx_lm")  # MLX is Apple Silicon only; skip elsewhere
 from mlx_lm.utils import load_tokenizer
 
 # Build the Qwen3 reasoning delimiters from codepoints so this file contains

@@ -26,6 +26,10 @@ _TOOL_GROUPS: dict[str, str] = {
     "save_skill": "notes",
     "run_command": "terminal",
     "execute_code": "code",
+    "save_script": "code",
+    "run_script": "code",
+    "list_saved_scripts": "code",
+    "delete_script": "code",
     "web_search": "web_search",
     "read_page": "browser",
     "fetch_html": "browser",
@@ -37,7 +41,6 @@ _TOOL_GROUPS: dict[str, str] = {
     "browser_close": "browser",
     "submit_form": "browser",
     "fill_form": "browser",
-    "post_to_x": "browser",
     "browser_get_text": "browser",
     # Looking is grouped with the browser, not with desktop control: seeing the
     # page the assistant already drives is the same capability as reading it,
@@ -61,6 +64,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "desktop_move": "desktop",
     "desktop_wait": "desktop",
     "open_app": "desktop",
+    "obs_record": "desktop",
     "save_memory": "memory",
     "compact_memory": "memory",
     "set_standing_instruction": "memory",
@@ -113,6 +117,10 @@ _TOOL_FAMILIES: dict[str, str] = {
     "run_command": "shell",
     "run_remote": "shell",
     "execute_code": "code",
+    "save_script": "code",
+    "run_script": "code",
+    "list_saved_scripts": "code",
+    "delete_script": "code",
     "web_search": "web",
     "read_page": "web",
     "fetch_html": "web",
@@ -135,7 +143,7 @@ _TOOL_FAMILIES: dict[str, str] = {
     "desktop_move": "desktop",
     "desktop_wait": "desktop",
     "open_app": "desktop",
-    "post_to_x": "browser",
+    "obs_record": "desktop",
     "write_note": "memory",
     "recall": "memory",
     "delete_note": "memory",
@@ -253,6 +261,53 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "save_script",
+        "description": (
+            "Save a Python script under a name, to run again later: yourself with "
+            "run_script, or on a schedule with schedule_job text 'script:<name> [args]'. "
+            "It runs in the same sandbox as execute_code (same imports, symbio_tools for "
+            "files and fetch); its arguments arrive as the list ARGS. Saving an existing "
+            "name replaces it. Use it for work that will come round again; for a one-off, "
+            "execute_code."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "lowercase_name, e.g. 'count_posts'."},
+                "code": {"type": "string", "description": "The Python code. print() what you want back."},
+                "description": {"type": "string", "description": "One line: what it is for."},
+            },
+            "required": ["name", "code"],
+        },
+    },
+    {
+        "name": "run_script",
+        "description": "Run a script you saved with save_script. Its arguments arrive as the list ARGS; what it prints comes back.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The script's name, from list_saved_scripts."},
+                "args": {"type": "array", "items": {"type": "string"},
+                         "description": "Optional arguments, as strings."},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "list_saved_scripts",
+        "description": "List the scripts you have saved, and what each one is for.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "delete_script",
+        "description": "Delete a saved script by name.",
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "The script's name."}},
+            "required": ["name"],
+        },
+    },
+    {
         "name": "web_search",
         "description": "Search the web for a query and return result snippets.",
         "parameters": {
@@ -312,7 +367,7 @@ _TOOLS: list[dict[str, Any]] = [
             "type": "object",
             "properties": {
                 "text": {"type": "string", "description": "The text to type."},
-                "selector": {"type": "string", "description": "Optional CSS selector for the field to fill, e.g. '[data-testid=\"tweetTextarea_0\"]' or '#search'. Fills it directly; no clicking or focus needed."},
+                "selector": {"type": "string", "description": "Optional CSS selector for the field to fill, e.g. 'textarea[name=\"comment\"]' or '#search' — the controls list the page shows gives the exact one. Fills it directly; no clicking or focus needed."},
                 "enter": {"type": "boolean", "description": "Press Enter after typing. Default false."},
             },
             "required": ["text"],
@@ -350,7 +405,7 @@ _TOOLS: list[dict[str, Any]] = [
         "parameters": {
             "type": "object",
             "properties": {
-                "target": {"type": "string", "description": "'browser' to look at the open browser page (default), or 'desktop' to look at the whole screen."},
+                "target": {"type": "string", "description": "'browser' to look at the open browser page (default), or 'desktop' to look at the whole screen — with desk mode on, that is your own desk, a screen the user does not see. 'user' looks at the user's own screen instead."},
                 "question": {"type": "string", "description": "Optional. What you want to know, e.g. 'is the composer empty and where is the Post button?'. Leave out for a general description."},
             },
         },
@@ -476,21 +531,21 @@ _TOOLS: list[dict[str, Any]] = [
         },
     },
     {
-        "name": "post_to_x",
-        "description": "Write a post on x.com and verify it went out. The browser must already be open at x.com and signed in — this does not navigate there, because posting is not something to do on a page nobody asked for. Returns a verdict you cannot shape: '[Post CONFIRMED' only when the exact text was found rendered on the timeline afterwards. Never report a post as made without that verdict; if it says NOT confirmed, check x.com before trying again or it goes out twice.",
-        "parameters": {
-            "type": "object",
-            "properties": {"text": {"type": "string", "description": "The post, 280 characters or fewer."}},
-            "required": ["text"],
-        },
-    },
-    {
         "name": "open_app",
-        "description": "Launch a macOS application by name, or bring it to the front if it is already running ('Safari', 'Notes', 'System Settings'). Everything else on the desktop acts on the frontmost window, so this is the first step of any task in an app that is not already in front.",
+        "description": "Launch a macOS application by name, or bring it to the front if it is already running ('Safari', 'Notes', 'System Settings'). Everything else on the desktop acts on the frontmost window, so this is the first step of any task in an app that is not already in front. With desk mode on it opens on your own desk instead, in the background, without taking the user's screen or keyboard.",
         "parameters": {
             "type": "object",
             "properties": {"name": {"type": "string", "description": "The application's name, e.g. 'Notes'."}},
             "required": ["name"],
+        },
+    },
+    {
+        "name": "obs_record",
+        "description": "Start, stop or check an OBS Studio screen recording. When the user is recording a task, finish the task first, then call this with action 'stop' as the last step; the answer names the file OBS saved, and only says STOPPED once OBS itself confirms no recording is running.",
+        "parameters": {
+            "type": "object",
+            "properties": {"action": {"type": "string", "enum": ["start", "stop", "status"], "description": "'stop' to end the recording, 'start' to begin one, 'status' to check."}},
+            "required": ["action"],
         },
     },
     {
@@ -673,9 +728,16 @@ _TOOLS: list[dict[str, Any]] = [
     {
         "name": "schedule_job",
         "description": (
-            "Create a new scheduled reminder or command. Always creates a new job; "
-            "use delete_cron_job/update_cron_job to change existing jobs. "
-            "Use a 5-field cron expression for recurring jobs or 'at YYYY-MM-DD HH:MM' for one-time jobs."
+            "Schedule work for later, once or on repeat: a reminder, a command, a saved "
+            "script, or a TASK — something you do yourself, with all your tools, when it "
+            "comes due ('post on x.com four times a day', 'every Sunday, check which "
+            "posts did best and note why'). A task runs while nobody is watching, so "
+            "whatever it needs that would normally ask the user — posting, browsing a "
+            "site, changing files, running code — must be granted now in 'allow' "
+            "(narrowed to 'sites'); the user approves that grant once, here. Always "
+            "creates a new job; use update_cron_job/delete_cron_job for existing ones. "
+            "Use a 5-field cron expression for recurring jobs or 'at YYYY-MM-DD HH:MM' "
+            "for one-time jobs."
         ),
         "parameters": {
             "type": "object",
@@ -686,7 +748,23 @@ _TOOLS: list[dict[str, Any]] = [
                 },
                 "text": {
                     "type": "string",
-                    "description": "Reminder text, or 'cmd:<shell command>' to run a command when the job fires.",
+                    "description": ("What to do, in full — a task is read cold when it fires, so "
+                                    "say everything it needs. Or 'cmd:<shell command>' to run a "
+                                    "command, or 'script:<name> [args]' to run a saved script."),
+                },
+                "allow": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["publish", "browser", "files",
+                                                         "commands", "desktop"]},
+                    "description": ("Makes it a task, and what it may do with nobody there to "
+                                    "ask: 'publish' (post or send), 'browser', 'files', "
+                                    "'commands' (code and shell), 'desktop'. Leave out for a "
+                                    "plain reminder."),
+                },
+                "sites": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Sites 'publish' and 'browser' are limited to, e.g. ['x.com'].",
                 },
             },
             "required": ["schedule", "text"],
@@ -722,7 +800,18 @@ _TOOLS: list[dict[str, Any]] = [
                 },
                 "text": {
                     "type": "string",
-                    "description": "New reminder text or 'cmd:<shell command>'.",
+                    "description": "New text: the task, a reminder, 'cmd:<shell command>' or 'script:<name> [args]'.",
+                },
+                "allow": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["publish", "browser", "files",
+                                                         "commands", "desktop"]},
+                    "description": "Replace what the task may do unattended; [] makes it a reminder again.",
+                },
+                "sites": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Replace the sites 'publish' and 'browser' are limited to.",
                 },
             },
             "required": ["job_id"],
@@ -1007,10 +1096,6 @@ _HERMES_NAME_MAP: dict[str, str] = {
     "fill_form": "fill_form",
     "fill_fields": "fill_form",
     "fill_in_form": "fill_form",
-    "post_to_x": "post_to_x",
-    "tweet": "post_to_x",
-    "post_tweet": "post_to_x",
-    "send_tweet": "post_to_x",
     "launch_app": "open_app",
     "open_application": "open_app",
     "switch_app": "open_app",
@@ -1051,8 +1136,6 @@ _ARG_ALIASES: dict[str, dict[str, str]] = {
                      "x": "x", "y": "y"},
     "desktop_wait": {"seconds": "seconds", "duration": "seconds", "time": "seconds",
                      "amount": "seconds"},
-    "post_to_x": {"text": "text", "message": "text", "content": "text",
-                  "body": "text", "tweet": "text", "status": "text"},
     "open_app": {"name": "name", "app": "name", "application": "name",
                  "app_name": "name", "target": "name"},
     "browser_open": {"url": "url", "link": "url", "page": "url", "site": "url", "address": "url", "to": "url"},
@@ -2156,6 +2239,39 @@ def _string_leaves(value: Any) -> list[str]:
     return []
 
 
+# The call format Qwen3.5-family and Qwen3-Coder models are trained on:
+#   <tool_call><function=browser_type><parameter=text>testing</parameter>
+#   </function></tool_call>
+# Nothing here read it, so a model emitting its own native format had every
+# call dropped and was scored as if it never acted.
+_XML_CALL_RE = re.compile(
+    r"(?:<tool_call>\s*)?<function=([\w.\-]+)>(.*?)</function>(?:\s*</tool_call>)?",
+    re.DOTALL)
+_XML_PARAM_RE = re.compile(r"<parameter=([\w.\-]+)>\n?(.*?)\n?</parameter>", re.DOTALL)
+
+
+def _xml_calls_to_json(reply: str) -> str:
+    """Rewrite `<function=name><parameter=k>v</parameter></function>` calls as
+    the JSON `<tool_call>` form. Values that parse as JSON (numbers, booleans,
+    objects) keep their type; anything else is the string as written."""
+    if "<function=" not in reply:
+        return reply
+
+    def one(match: re.Match) -> str:
+        arguments: dict[str, Any] = {}
+        for param in _XML_PARAM_RE.finditer(match.group(2)):
+            raw = param.group(2)
+            try:
+                value = json.loads(raw)
+            except (ValueError, TypeError):
+                value = raw
+            arguments[param.group(1)] = value
+        call = {"name": match.group(1), "arguments": arguments}
+        return "<tool_call>" + json.dumps(call, ensure_ascii=False) + "</tool_call>"
+
+    return _XML_CALL_RE.sub(one, reply)
+
+
 def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tuple[str, dict[str, Any]]]:
     """Extract tool calls from the model reply.
 
@@ -2167,6 +2283,8 @@ def parse_tools(reply: str, enabled_groups: set[str] | None = None) -> list[tupl
     # and both scanner families were fooled by it -- the legacy ones through
     # `scan`, the JSON ones through `reply`. Rebinding here covers both.
     reply = _blank_tool_responses(reply)
+    # A model's own call format, read as the JSON one everything below knows.
+    reply = _xml_calls_to_json(reply)
 
     # The legacy tag scanners below read `scan`, not `reply`: a tag
     # quoted inside a well-formed <tool_call>'s arguments is that call's

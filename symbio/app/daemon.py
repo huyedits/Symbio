@@ -22,7 +22,7 @@ import sys
 import threading
 from typing import Any
 
-from symbio import constants
+from symbio import constants, guardrails
 from symbio.app import chat_style, chat_ui
 
 
@@ -85,6 +85,24 @@ def _decode_msg(line: bytes) -> dict:
 
 
 def start_daemon(config: dict[str, Any]) -> int:
+    """Start the resident model unless one is running or loading.
+
+    Check-then-start runs under an flock on PROJECT_DIR/daemon.start.lock,
+    held until the new pid file is written. Every starter comes through here —
+    the desktop window's waker, the ACP and MCP bridges, `symb watch`
+    restarting a crashed model, a terminal — and two that both saw "not
+    running" would otherwise each load a copy: two 14Bs on 16 GB, the
+    out-of-memory kill this project keeps having.
+    """
+    import fcntl
+
+    constants.PROJECT_DIR.mkdir(parents=True, exist_ok=True)
+    with open(constants.PROJECT_DIR / "daemon.start.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _start_daemon_locked(config)
+
+
+def _start_daemon_locked(config: dict[str, Any]) -> int:
     running, pid = daemon_running()
     if running and pid is not None:
         print(f"Daemon already running (PID {pid}).")
@@ -317,11 +335,23 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         # holds the only model on the machine until the process is killed.
         if client_gone.is_set():
             return False
-        send_msg({"type": "confirm", "prompt": prompt})
+        frame = {"type": "confirm", "prompt": str(prompt)}
+        # A guardrails card carries its parts for a client that lays them out
+        # (the window); every other client reads `prompt`, which is the same
+        # card as plain text.
+        if isinstance(prompt, guardrails.Card):
+            frame["card"] = prompt.as_dict()
+        send_msg(frame)
         while True:
             msg = recv_msg()
             if msg.get("type") == "confirm":
-                return bool(msg.get("answer", False))
+                answer = bool(msg.get("answer", False))
+                # "Always allow" on the card: this kind stops asking, written
+                # where the Settings panel reads it.
+                if (answer and msg.get("always") and isinstance(prompt, guardrails.Card)
+                        and prompt.kind):
+                    guardrails.set_mode(constants.CONFIG_FILE, prompt.kind, "allow")
+                return answer
 
     def status_fn(text) -> None:
         # Its own frame type, not an output line: a spinner is drawn over
@@ -355,6 +385,9 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         banner_fn=banner_fn,
         warmed_prefix=hand,
     )
+    # The window writes guardrail switches straight to config.json while this
+    # session holds its config in memory; this is where it re-reads them.
+    session._guardrails_file = constants.CONFIG_FILE
     try:
         session.run()
     except (_ClientGone, EOFError):
@@ -383,6 +416,22 @@ def daemon_main(config: dict[str, Any]) -> int:
 
     print("Loading model...", flush=True)
     (model, tokenizer), adapter_loaded = _load_model(config)
+    from symbio.app.config import apply_gpu_limits, keep_model_resident
+
+    apply_gpu_limits(config)
+    wired = keep_model_resident(model, config)
+    # The Neural Engine side (decision model, OCR) starts now, off the GPU and
+    # in the background, so the first turn does not pay for it.
+    try:
+        from symbio.app import ane, decider
+
+        if ane.enabled(config):
+            threading.Thread(target=decider.warm, daemon=True).start()
+    except Exception:
+        pass
+    if wired:
+        print(f"Keeping {wired / 2**30:.1f} GB wired: the model stays in RAM "
+              f"between turns.", flush=True)
     print("Model loaded. Listening for clients.", flush=True)
     # The system prompt is processed now, once, rather than inside the first
     # session — which is where the person's "first message takes a minute"

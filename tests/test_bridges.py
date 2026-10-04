@@ -39,6 +39,9 @@ class FakeBridge:
     def alive(self):
         return self.ready
 
+    def connecting(self):
+        return False
+
     def close(self):
         self.ready = False
 
@@ -335,6 +338,23 @@ def test_a_commands_output_is_the_reply_not_thinking(agent):
     assert kinds == [("agent_message_chunk", "Model: Qwen3-14B · adapter 400 steps"),
                      ("agent_thought_chunk", "[Search] otters"),
                      ("agent_message_chunk", "Otters hold hands.")]
+
+
+def test_a_model_that_died_between_turns_is_woken_not_waited_on(agent, monkeypatch):
+    """Found in review: after the daemon died, say() held the text for a
+    session that no longer existed and the ACP turn waited forever."""
+    agent_, out = agent
+    session_id = agent_.new_session({"cwd": "/tmp", "mcpServers": []})["sessionId"]
+    session = agent_.sessions[session_id]
+    session.bridge.ready = False             # the daemon went away
+    woken = []
+    monkeypatch.setattr(acp, "ensure_daemon", lambda: woken.append(1) or (True, ""))
+    FakeBridge.script = [("token", "back again")]
+    result = agent_.prompt({"sessionId": session_id, "prompt": [{"type": "text", "text": "hi"}]})
+
+    assert result == {"stopReason": "end_turn"} and woken == [1]
+    texts = [u["content"]["text"] for u in _updates(out) if "content" in u and "text" in u["content"]]
+    assert any("fresh conversation" in t for t in texts) and "back again" in texts
 
 
 def test_an_unknown_method_is_a_json_rpc_error(agent):

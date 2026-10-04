@@ -2,6 +2,7 @@ mlx-lm>=0.21.0
 # Vision: lets the assistant see screenshots instead of guessing from page text.
 mlx-vlm>=0.6.0
 transformers>=4.40.0
+jinja2>=3.1.0
 torch
 safetensors>=0.4.0
 pyyaml>=6.0

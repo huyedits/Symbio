@@ -586,7 +586,7 @@ class Retriever:
                 role = r.get("role", "?")
                 header = f"[Past session {ts} / {role}]"
             else:
-                header = f"[Training sample]"
+                header = "[Training sample]"
             body = r["text"].strip().replace("\n", " ")
             snippet = f"{header}\n{body}"
             tokens = _token_count_approx(snippet)

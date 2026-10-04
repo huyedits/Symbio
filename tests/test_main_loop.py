@@ -224,7 +224,8 @@ def test_system_prompt_preserves_customized_prompt_md():
         prompt_path.unlink(missing_ok=True)
         default_path.unlink(missing_ok=True)
     # prompt.md is no longer the head of the system prompt: build_system_prompt
-    # prepends the <trust> block (symbio/app/security.py). Its position is the
+    # prepends the <security> block (symbio/app/security.py; it was <trust>
+    # before the policy moved out of prompt.md into security.md). Its position is the
     # point, not an artefact -- the untrusted-content rules have to precede
     # every editable region, or a prompt.md edit could front-run the rules that
     # govern it. So this checks the order rather than just co-presence.
@@ -232,9 +233,9 @@ def test_system_prompt_preserves_customized_prompt_md():
     # Assertion messages stay short deliberately. Passing `sp` dumps the whole
     # system prompt -- trust block and tool schemas -- into the failure output.
     custom_at = sp.find("My custom prompt for Caine and Huy")
-    assert sp.startswith("<trust>"), f"prompt does not open with <trust>: {sp[:80]!r}"
+    assert sp.startswith("<security>"), f"prompt does not open with <security>: {sp[:80]!r}"
     assert custom_at != -1, "customized prompt.md text missing from system prompt"
-    assert sp.index("</trust>") < custom_at, "prompt.md precedes the trust block"
+    assert sp.index("</security>") < custom_at, "prompt.md precedes the security block"
     assert "<tools>" in sp, "tool schemas missing from system prompt"
     print("test_system_prompt_preserves_customized_prompt_md passed")
 
@@ -2254,6 +2255,39 @@ def test_agent_loop_auto_searches_on_fabricated_number():
     finally:
         web.web_search = real_search
     print("test_agent_loop_auto_searches_on_fabricated_number passed")
+
+
+def test_figures_grounded():
+    df = ["/dev/disk3s5  228Gi  192Gi  4.96Gi  98%  /System/Volumes/Data"]
+    assert learn.figures_grounded("You have about 5.0 GB free.", df)
+    assert learn.figures_grounded("Roughly 5 GB is left, give or take.", df)
+    # A figure no printed number rounds to came from somewhere else.
+    assert not learn.figures_grounded("You have about 12 GB free.", df)
+    # Near is not enough: 4.9 is not 4.96 at one decimal place.
+    assert not learn.figures_grounded("About 4.9 GB.", df)
+    assert not learn.figures_grounded("About 5 GB.", [])
+
+
+def test_agent_loop_does_not_search_a_figure_a_tool_printed():
+    # Live 2026-09-27: `df -h`, then "You have about 5.0 GB", then a web
+    # search for the user's own disk, then "couldn't find it in the results".
+    real_search = web.web_search
+    searched = []
+    web.web_search = lambda q, c, max_results=5: (searched.append(q) or (True, "nothing"))
+    try:
+        with scratch_notes_dir():
+            session = ScriptedSession(
+                user_inputs=["How much free disk space do I have?", "/quit", "n"],
+                model_replies=[
+                    "<cmd>echo /dev/disk3s5 228Gi 192Gi 5.0Gi 98%</cmd>",
+                    "You have about 5.0 GB free.",
+                ],
+            )
+            session.run()
+        assert searched == [], searched
+        assert len(session.prompts_seen) == 2, len(session.prompts_seen)
+    finally:
+        web.web_search = real_search
 
 
 def test_agent_loop_auto_searches_on_blank_reply():

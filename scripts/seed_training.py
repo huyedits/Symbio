@@ -106,7 +106,7 @@ def main():
             f"You are {user} and I am {assistant}.",
         ),
         (
-            f"Who am I and who are you?",
+            "Who am I and who are you?",
             f"You are {user}, and I am {assistant}.",
         ),
         (
@@ -460,7 +460,7 @@ def main():
         # --- Domain Q&A / boundaries ---
         (
             "Can you read my emails?",
-            f"I can check your email if you configure IMAP/SMTP via environment variables. Once configured, I can list threads, read messages, and send replies.",
+            "I can check your email if you configure IMAP/SMTP via environment variables. Once configured, I can list threads, read messages, and send replies.",
         ),
     ]
 
@@ -514,15 +514,15 @@ def main():
         ],
         [
             {"role": "user", "content": "Call yourself Friday."},
-            {"role": "assistant", "content": f"Got it — my name is Friday."},
+            {"role": "assistant", "content": "Got it — my name is Friday."},
             {"role": "user", "content": "What is your name?"},
-            {"role": "assistant", "content": f"My name is Friday."},
+            {"role": "assistant", "content": "My name is Friday."},
         ],
         [
             {"role": "user", "content": "Call me Alice."},
-            {"role": "assistant", "content": f"Got it — I'll call you Alice."},
+            {"role": "assistant", "content": "Got it — I'll call you Alice."},
             {"role": "user", "content": "What is my name?"},
-            {"role": "assistant", "content": f"Your name is Alice."},
+            {"role": "assistant", "content": "Your name is Alice."},
         ],
     ]
 

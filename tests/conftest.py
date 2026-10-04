@@ -27,6 +27,7 @@ That also stops the developer's personal notes from steering retrieval
 assertions. symbio/rag.py keeps its own module-level NOTES_DIR, so both must move.
 test_prune.py covers the pruner directly against its own isolated store.
 """
+import importlib.util
 import json
 import shutil
 
@@ -201,3 +202,78 @@ def fixture_worker_catalog():
     test_skill_adapters.py's isolated_skill_env for the pattern)."""
     path = constants.PROJECT_DIR / "tests" / "fixtures" / "worker_models.json"
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "uses_ane: runs the real Neural Engine helper (macOS)")
+    config.addinivalue_line("markers", "uses_desk: exercises desk mode (the helper stubbed)")
+
+
+@pytest.fixture(autouse=True)
+def no_desk(request, monkeypatch):
+    """Keep Symbio's own screen out of the suite unless a test asks for it.
+
+    With desk.enabled in the developer's config.json, a test that loads the
+    real config and reaches a desktop tool or the browser would start the
+    helper and add a display to the Mac. Tests of the desk itself mark
+    themselves `uses_desk`, and stub the helper.
+    """
+    if request.node.get_closest_marker("uses_desk"):
+        return
+    from symbio import desk
+
+    monkeypatch.setattr(desk, "enabled", lambda config=None: False)
+
+
+@pytest.fixture(autouse=True)
+def no_neural_engine_helper(request, monkeypatch):
+    """Keep the Swift helper out of the suite unless a test asks for it.
+
+    symbio/app/ane.py compiles and starts symbio_ane on first use; a test that
+    merely runs a turn would otherwise build a binary and spawn a process as a
+    side effect. Tests of the helper itself mark themselves `uses_ane`.
+    """
+    if request.node.get_closest_marker("uses_ane"):
+        return
+    from symbio.app import ane
+
+    monkeypatch.setattr(ane, "enabled", lambda config=None: False)
+
+
+# ---- hosts without the MLX engine ----
+#
+# MLX publishes macOS-arm64 wheels only, so on Linux (CI, a contributor's box)
+# every test that drives a ChatSession or a model dies with the install hint
+# from symbio.mlx_gate. That is ~200 red lines that say nothing about the code
+# under test and bury the handful that do. Report them as skips instead — but
+# ONLY when the engine is genuinely absent: on a Mac with mlx installed the
+# same exception is a real failure and must stay one.
+#
+# This was lost once in a merge (83e6534 rewrote this file from an older copy)
+# and CI on main went from green to 126 failures; test_engine_skip_hook in
+# tests/test_conftest_hooks.py now fails if it disappears again.
+_ENGINE_ABSENT = importlib.util.find_spec("mlx_lm") is None
+
+
+def _needs_engine(exc: BaseException | None) -> bool:
+    from symbio import mlx_gate
+
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, ModuleNotFoundError) and (
+                mlx_gate._is_engine_missing(exc) or mlx_gate.HINT in str(exc)):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    report = outcome.get_result()
+    if (_ENGINE_ABSENT and report.failed and call.excinfo is not None
+            and _needs_engine(call.excinfo.value)):
+        report.outcome = "skipped"
+        report.longrepr = (str(item.path), item.location[1] or 0,
+                           "Skipped: needs the MLX engine (Apple Silicon only)")

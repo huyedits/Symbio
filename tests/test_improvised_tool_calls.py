@@ -121,9 +121,11 @@ def test_stripping_leaves_ordinary_prose_alone():
 # The model read its context correctly; the context was wrong.
 
 def _few_shots():
-    import json
+    # load_config, not config.json: that file is per-install and gitignored,
+    # so reading it directly failed on every fresh clone and in CI.
+    from symbio.app.config import load_config
     from symbio.tools import tool_few_shots
-    return tool_few_shots(json.load(open("config.json")))
+    return tool_few_shots(load_config())
 
 
 def test_the_examples_are_closed_out_before_real_history():

@@ -4,6 +4,8 @@ browser has ever been opened must return a graceful error string, not raise
 etc. because they were called outside their own try/except) took down a
 live session; see the git history for the exact traceback."""
 
+import pytest
+
 from symbio.computer import BrowserSession
 
 
@@ -847,6 +849,16 @@ def test_browser_type_without_a_selector_still_types_into_the_focused_field():
 
 # ---- a look must not assert absence while holding proof of presence ----
 
+@pytest.fixture(autouse=True)
+def _vision_stack_present(monkeypatch):
+    """These tests fake the vision model itself (_run_vision), so whether
+    mlx-vlm is importable is beside the point. It is not in the [mlx] extra,
+    so without this they failed on any host that had not installed it
+    separately — every Linux box, and a Mac with only `symbio-cli[mlx]`."""
+    from symbio import vision
+    monkeypatch.setattr(vision, "available", lambda: True)
+
+
 def _look_session(controls, elements, description="a page"):
     from symbio.app import chat_tools
     from symbio.app.config import DEFAULT_CONFIG
@@ -1380,7 +1392,9 @@ def test_an_unseeded_domain_consults_the_confirm_fn():
     session = BrowserSession(confirm_fn=lambda p: confirmed.append(p) or True)
     ok, _ = session._check_url("https://example.org/x")
     assert ok is True
-    assert confirmed == ["Allow browser to access 'example.org'?"]
+    # One question, naming the site, in a sentence (a guardrails card).
+    assert len(confirmed) == 1 and "example.org" in confirmed[0]
+    assert "hasn't visited before" in confirmed[0]
     # A deny is final: the domain never enters _confirmed.
     said_no = BrowserSession(confirm_fn=lambda p: False)
     ok, msg = said_no._check_url("https://denied.example/x")

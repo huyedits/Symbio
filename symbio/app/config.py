@@ -58,6 +58,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Trade compute for activation memory. Worth turning on before
         # lowering max_seq_length, since activations are what scale with it.
         "grad_checkpoint": False,
+        # Score the loss over only the tokens the corpus uses, not the whole
+        # vocabulary (symbio/trim_lora.py). "auto" does it for vocabularies
+        # of 200k+ (Qwen3.5 / Bonsai, 248k), where the full logit array is
+        # what runs a 16 GB Mac out of memory; "on"/"off" force it. Models
+        # under that size, and without linear attention, train exactly as
+        # before, through `mlx_lm lora` itself.
+        "trim_vocab": "auto",
         "batch_size": 1,
         "learning_rate": 1e-4,
         # Floor for a full retrain, not the count itself: run_training scales
@@ -308,6 +315,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # (chat.py used think=round_num > 0), and it is the setting the 21-case
         # battery scored 19/21 on.
         "thinking_level": "low",
+        # "auto": think only when the turn is work (a task, code, a link, a
+        # tool round); plain conversation answers without a reasoning block.
+        # "always": every turn at thinking_level.
+        "think_when": "auto",
         # Speculative decoding: a small model drafts, the real one verifies.
         # Empty disables it. Keep num_draft_tokens low on hybrid
         # linear-attention models (Qwen3.5) — deeper drafts lose there.
@@ -367,6 +378,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # other value loads unquantized.
         "load_in_bits": 4,
     },
+    # The side models on the Apple Neural Engine (symbio/app/ane.py): the
+    # decision model that picks think/no-think, and OCR for see_screen. Off
+    # the GPU the headmaster generates on. macOS only.
+    "ane": {
+        "enabled": True,
+        "decide": True,
+    },
     "vision": {
         # A vision-language model that looks at screenshots and reports what is
         # on screen, with pixel coordinates you can click. On by default: the
@@ -417,6 +435,31 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # domain past the confirm gate. Add the sites it is authorised to act
         # on, e.g. news.ycombinator.com for the autonomous-submit flow.
         "allowed_domains": ["localhost", "127.0.0.1", "example.com"],
+    },
+    # Symbio's own screen (symbio/desk.py, `symb desk`): a virtual display
+    # macOS treats as a second monitor that nobody is looking at. On, every
+    # desktop tool works there -- apps open on it in the background, a look
+    # captures it and nothing else, clicks and typing go to its windows -- and
+    # the screen, pointer and keyboard in front of the user stay theirs. Off,
+    # the desktop tools act on the user's screen as they always have. macOS
+    # only; `symb desk on` turns it on and starts it.
+    "desk": {
+        "enabled": False,
+        # Its size in points, at 1x: a capture's pixels are then points.
+        "width": 1440,
+        "height": 900,
+        # "corner" touches the user's screens at one corner only, so a
+        # pointer pushed off an edge never vanishes onto it. "leave" keeps
+        # wherever macOS put it (beside the main screen).
+        "placement": "corner",
+        # A control the accessibility API cannot press or fill needs real
+        # mouse or keyboard events, which move THE USER'S pointer and type at
+        # their focus for a moment. Those are borrowed only after this many
+        # seconds without the user touching the Mac, then handed back; 0
+        # never borrows, and such an action is reported as not done.
+        "borrow_input_after_idle_s": 30,
+        # Open the automated browser's window on the desk too.
+        "browser": True,
     },
     "web": {
         "search_results": 5,
@@ -474,6 +517,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Wired (non-swappable) memory ceiling, in MB. -1 leaves the default.
         # Only raise this if you know the machine's headroom.
         "wired_limit_mb": -1,
+        # With no explicit ceiling above: wire the loaded weights plus room
+        # for the KV cache, so macOS cannot compress or swap the model out
+        # between turns (LM Studio's "keep model in memory", llama.cpp's
+        # --mlock). Measured 2026-09-26: an idle resident 14B had 6.6 GB of
+        # its 8.7 GB in the compressor, and every turn paid to bring it back.
+        "keep_model_wired": True,
+        "keep_model_wired_margin_mb": 1536,
         # Drop the in-process model before spawning the LoRA trainer, so only
         # one copy of the weights is resident at a time.
         "unload_model_during_training": True,
@@ -615,6 +665,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # default ~/.ssh identities. Shell access is never interactive; use
         # key-based auth or ssh-agent.
         "hosts": {},
+    },
+    # What Symbio may do without asking, by KIND of action — "Post publicly",
+    # "Run commands and code" — each one allow / risky / ask / block. Empty
+    # means the defaults in symbio/guardrails.py, which are the old
+    # behaviour. The window's Settings → Guardrails writes here, and so does
+    # "Always allow" on an approval card.
+    "guardrails": {
+        "modes": {},
+        # Ask the model to say, in one plain English sentence, what a gated
+        # action will do. The card shows the exact post or command under it
+        # either way; off, the harness's own wording is the headline.
+        "translate": True,
     },
     "safety": {
         # Prompt-injection defenses and risk-based escalation.
@@ -841,6 +903,38 @@ def apply_gpu_limits(config: dict[str, Any]) -> None:
         except Exception:
             # A ceiling we could not set is not worth failing a startup over.
             pass
+
+
+def keep_model_resident(model: Any, config: dict[str, Any]) -> int | None:
+    """Wire the loaded weights so they stay in RAM between turns.
+
+    mlx_lm wires memory only for the length of one generation (its
+    wired_limit context manager) and then puts the old limit back — 0 — so an
+    idle resident model is ordinary memory, and macOS compresses and swaps it
+    like any other. The next turn then waits on decompression and swap-in
+    before the first token. Setting the limit here makes it the "old" limit
+    that each generation restores. Returns the bytes wired, or None when it
+    is left alone (opted out, an explicit wired_limit_mb, or no Metal).
+    """
+    gpu = config.get("gpu", {})
+    if not gpu.get("keep_model_wired", True) or int(gpu.get("wired_limit_mb", -1)) >= 0:
+        return None
+    try:
+        from symbio.mlx_gate import attr as _mlx
+        mx = _mlx("mlx.core")
+        from mlx.utils import tree_flatten
+
+        if not mx.metal.is_available():
+            return None
+        weights = sum(v.nbytes for _, v in tree_flatten(model.parameters()))
+        margin = int(gpu.get("keep_model_wired_margin_mb", 1536)) * 1024 * 1024
+        ceiling = mx.device_info()["max_recommended_working_set_size"]
+        limit = min(weights + margin, int(ceiling))
+        mx.set_wired_limit(limit)
+        return limit
+    except Exception:
+        # Residency is a speed-up, never a reason a model fails to serve.
+        return None
 
 
 # Speed preset: applied after user config/env overrides so the user can still

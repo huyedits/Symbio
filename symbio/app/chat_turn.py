@@ -34,6 +34,24 @@ from symbio.app.chat_text import (
 )
 
 
+# User turns between re-reads of the standing context (memory, soul, env).
+STANDING_REFRESH_TURNS = 10
+
+# Page steps a single reply may chain, and how many. Only the browser's own
+# actions: a burst of searches or shell commands is still one per reply.
+_CHAINABLE_STEPS = frozenset({
+    "browser_open", "browser_close", "browser_type", "browser_click",
+    "browser_click_at", "browser_press", "browser_scroll", "fill_form",
+})
+_CHAIN_STEPS = 3
+
+
+def _step_summary(observation: str) -> str:
+    """An earlier step's result without the page dump that followed it: the
+    page as it stands is what the LAST step reports."""
+    head = observation.split("\n\nPage text now:")[0]
+    return head.split("[Begin untrusted page controls")[0].rstrip()
+
 class AgentTurnMixin:
     # How much of a tool's result is shown as it happens. The model gets the
     # whole thing; this is the line a person reads to know what the turn is
@@ -192,7 +210,7 @@ class AgentTurnMixin:
                     "new_tokens": timings.get("new_tokens"),
                 })
             else:
-                self.output_fn(f"  [Canary] OK — the model still follows the system prompt.")
+                self.output_fn("  [Canary] OK — the model still follows the system prompt.")
             return
 
         self.history.append({"role": "user", "content": user_input})
@@ -436,16 +454,35 @@ class AgentTurnMixin:
         user_refused_this_turn = False
         browser_retry_nudged = False
         blank_retry_nudged = False
+        # Its own flag: sharing blank_retry_nudged meant an empty first reply
+        # used up the one nudge that turns "I'll open the website and post
+        # your tweet." into the tool call it describes.
+        action_nudged = False
+        # An empty reply with thinking on is the thinking mode misfiring
+        # (seen: "<think>\n\n<end>"), not the model having nothing to say.
+        think_off_retried = False
         claim_nudged = False
         # True once submit_form returns its machine-verified CONFIRMED verdict
         # this turn; a submission claim is then backed by code, not the model.
         submit_confirmed = False
         last_observation = ""
+        # True while the last thing on screen was said BEFORE the last tool
+        # ran. Live 2026-09-27 the turn's visible answer was "I've opened X.
+        # Let's create your tweet." — written two rounds before the clicks
+        # that posted "Hi" — and nothing after it said what had happened.
+        answer_is_stale = False
         unparsed_tag_nudged = False
         echo_retry_nudged = False
         continuation_challenged = False
         incapacity_challenged = False
         thinking_cut_retried = False
+        turn_think = False           # what this round was actually served with
+        turn_decision = None         # (think, budget), decided on the first round
+        # Turns this session has run, counted here rather than read off the
+        # history: _trim_history pops from the front once the history is at
+        # its cap, so a count of user messages in it stops rising and the
+        # standing context below was never re-read again for the session.
+        self._turns_run = getattr(self, "_turns_run", 0) + 1
         # The round index used to select thinking (think=round_num > 0);
         # agent.thinking_level owns that now, so nothing reads the counter.
         for _round_num in range(max_rounds):
@@ -477,10 +514,27 @@ class AgentTurnMixin:
             # changes nothing (344 tokens reused either way), but when the RAG
             # hit also changes — the common case, since retrieval runs per
             # query — reuse goes from 141 tokens to 243.
+            # Split by how often it changes. Curated memory and the machine's
+            # env note are the same turn after turn — 842 of the ~880 tokens
+            # every turn re-prefilled on the 14B (measured 2026-09-26: 8.7 s to
+            # the first token for "what's 3+3?"). They now sit in a fixed pair
+            # after the few-shots, inside the prefix the cache keeps, and only
+            # what really changes rides on the newest message.
+            #
+            # Read once per session and every STANDING_REFRESH_TURNS after:
+            # the soul store is rewritten in the background mid-session
+            # (measured: soul.md changed between turns two and three), and
+            # re-reading it each turn broke the cached prefix just the same.
+            # What the model itself saves this session is in the history
+            # already, so a snapshot loses nothing it could not see.
+            snapshot = getattr(self, "_standing_context", None)
+            if snapshot is None or self._turns_run - snapshot[0] >= STANDING_REFRESH_TURNS:
+                snapshot = (self._turns_run, (memory.curated_memory_block(self.config)
+                                         + prompts.env_note()).strip())
+                self._standing_context = snapshot
+            stable_block = snapshot[1]
             context_block = (
-                memory.curated_memory_block(self.config) + prompts.env_note()
-                + rag_block + prompts.time_note() + nudge_block
-                + browser_note
+                rag_block + prompts.time_note() + nudge_block + browser_note
             ).lstrip()
             # Greeting guard: the small model sometimes invents random tool
             # calls for "hi" instead of just greeting back. Prepend a one-
@@ -502,7 +556,15 @@ class AgentTurnMixin:
             history_limit = self.config["agent"]["history_limit"]
             start = min(max(0, len(self.history) - history_limit),
                         user_turn_floor(self.history))
-            working_history = list(self.history[start:])
+            # Earlier user turns are rendered with the context they were SENT
+            # with (kept on the history entry as `_context`). Rendered bare,
+            # the first earlier turn differed from what the cache holds, and
+            # everything after it was prefilled again every turn.
+            working_history = [
+                {"role": m["role"], "content": m["_context"] + "\n\n" + m["content"]}
+                if m.get("_context") else m
+                for m in self.history[start:]
+            ]
             if context_block:
                 attached = False
                 for i in range(len(working_history) - 1, -1, -1):
@@ -510,10 +572,14 @@ class AgentTurnMixin:
                         working_history[i]["role"] == "user"
                         and not str(working_history[i]["content"]).startswith("[System observation:")
                     ):
+                        original = self.history[start + i]
                         working_history[i] = {
                             "role": "user",
-                            "content": context_block + "\n\n" + working_history[i]["content"],
+                            "content": context_block + "\n\n" + original["content"],
                         }
+                        # The last round's block is the one in the cache when
+                        # the turn ends, so it is the one the next turn replays.
+                        original["_context"] = context_block
                         attached = True
                         break
                 # First turn: no user message in history yet. Prepend the
@@ -534,7 +600,19 @@ class AgentTurnMixin:
             # resolved once at the top of the turn and held for the whole turn:
             # they sit in front of the history in the prompt, so changing them
             # mid-turn would re-prefill the block on every round for nothing.
+            # After the few-shots, not before: the session's warmed prefix is
+            # the system prompt plus the full few-shot set, and a first turn
+            # with the standing block ahead of the few-shots re-prefilled both
+            # (measured: 1,198 fresh tokens, 11.6 s, against 542 and 6.3 s).
+            # The cost is the turn after the model first uses a tool, when the
+            # few-shots rotate to that tool's family and everything after them
+            # is prefilled once more.
             messages.extend(tool_few_shots(self.config, family=turn_family))
+            if stable_block:
+                messages.extend([
+                    {"role": "user", "content": f"[Standing context: {stable_block}]"},
+                    {"role": "assistant", "content": "Noted."},
+                ])
             messages.extend(working_history)
 
             # The assistant's own line. Styled only when a person is watching
@@ -552,7 +630,14 @@ class AgentTurnMixin:
                 # or the handler below can never tell.
                 _had_prompt_cache = self._prompt_cache is not None
                 try:
-                    _think, _budget = self.thinking_setting()
+                    # Decided once per turn, not per round: a quick question the
+                    # model answered with one tool call used to flip to full
+                    # thinking on the follow-up round (measured: "what's 17
+                    # times 23?" ran a code tool, then reasoned 85 words, 19 s).
+                    if turn_decision is None:
+                        turn_decision = self.turn_thinking(user_input)
+                    _think, _budget = turn_decision
+                    turn_think = _think
                     raw_reply, streamed_live = self._generate_reply(
                         messages, chunk_prefix=chunk_prefix, timings=timings,
                         think=_think, reasoning_budget=_budget,
@@ -648,7 +733,7 @@ class AgentTurnMixin:
             # earlier version asked only whether a block was closed and fired
             # on every tagless answer, costing a second generation each time.
             cut_off = bool(timings.get("hit_token_cap"))
-            if self.thinking_setting()[0]:
+            if turn_think:
                 unclosed = tooling.count_think_closes(raw_reply) < 1
             else:
                 unclosed = not tooling.think_block_closed(raw_reply)
@@ -825,6 +910,7 @@ class AgentTurnMixin:
 
             if display.strip():
                 final_display = display
+                answer_is_stale = False
                 if not streamed_live:
                     # Streaming showed nothing (streaming off, or the whole
                     # reply was a tool tag) — surface the reasoning here so it
@@ -1028,6 +1114,15 @@ class AgentTurnMixin:
                 # below — a real question that blanks should search, not nudge.
 
                 action_req = _is_action_request(user_input)
+                if (not _is_substantive(display) and turn_think
+                        and not think_off_retried):
+                    # Before any nudge: the nudge is spent on a reply the
+                    # thinking mode ate, and the next one comes back the same.
+                    think_off_retried = True
+                    turn_decision = (False, 0)
+                    self.output_fn("  [Reasoning] Empty reply with thinking on; "
+                                   "answering again without it.")
+                    continue
                 # any_tool_ran, not executed_calls: the retry path discards a
                 # failed call from executed_calls so it can be attempted again,
                 # which empties the set precisely when a tool has just FAILED —
@@ -1154,8 +1249,13 @@ class AgentTurnMixin:
                     ("search", "news", "weather", "look up", "find online")
                 )
                 unsure = bool(display.strip()) and learn.sounds_unsure(display)
+                # A hedged figure a tool printed this turn is a rounding, not
+                # a guess: searching the web for "how much free disk space do
+                # I have" can only replace the right answer with a wrong one.
                 fabricated = (not unsure and bool(display.strip())
-                              and learn.sounds_fabricated(user_input, display))
+                              and learn.sounds_fabricated(user_input, display)
+                              and not learn.figures_grounded(
+                                  display, observations_this_turn))
                 # A confident-sounding non-answer to a price/figure question —
                 # "it depends on the device, check the official website" with no
                 # number — is the model papering over a gap without committing
@@ -1356,8 +1456,8 @@ class AgentTurnMixin:
                 # "emit <browse>" — live 2026-08-25 the model dutifully switched
                 # to browser_press and hit "Browser is not open". A nudge that
                 # names one toolset drags every unfinished turn towards it.
-                if action_req and not any_tool_ran and not blank_retry_nudged:
-                    blank_retry_nudged = True
+                if action_req and not any_tool_ran and not action_nudged:
+                    action_nudged = True
                     self.output_fn(
                         "  [Action] Model described the action but didn't "
                         "call a tool — prompting to retry...")
@@ -1370,6 +1470,10 @@ class AgentTurnMixin:
                         "<press>Enter</press>. To read one: "
                         "<read>https://...</read> for its text, "
                         "<fetch_html>https://...</fetch_html> for its markup. "
+                        "To post or send on a site: type the user's exact "
+                        "words into its box by the box's selector, click the "
+                        "button beside it that sends them, then read the page "
+                        "to see that they went. "
                         "To compute, fetch or write files: <py>...</py>. "
                         "To run a command: <cmd>...</cmd>. Pick the one that "
                         "fits what you were already doing — do not switch "
@@ -1477,6 +1581,7 @@ class AgentTurnMixin:
                 distinct_attempts.append((name, params))
                 attempted_names.add(name)
             any_tool_ran = True
+            answer_is_stale = True
             extra = fresh_tools[1:]
 
             # There are tools to execute
@@ -1545,6 +1650,42 @@ class AgentTurnMixin:
                 if learn.is_user_refusal(observation):
                     user_refused_this_turn = True
                 self._show_tool_result(name, observation)
+                # A reply that chains page steps — "type it, then click Post",
+                # "close the tab, then open x.com" — runs them in order, up to
+                # _CHAIN_STEPS, stopping at the first that fails or is declined.
+                # One step a reply cost a whole round per step (10-20 s on the
+                # 14B), and live 2026-09-27 the second half of "close, then
+                # open x.com" was dropped and the model reported the task as
+                # stuck. Each step still goes through _execute_tool, so every
+                # guardrail and card applies to it exactly as on its own.
+                if (extra and name in _CHAINABLE_STEPS and not over_family_budget
+                        and not user_refused_this_turn
+                        and not learn.sounds_like_tool_error(observation)):
+                    remaining = []
+                    for step_index, (next_name, next_params) in enumerate(extra):
+                        next_key = json.dumps([next_name, next_params], sort_keys=True)
+                        if (step_index >= _CHAIN_STEPS - 1 or remaining
+                                or next_name not in _CHAINABLE_STEPS
+                                or next_key in executed_calls):
+                            remaining.append((next_name, next_params))
+                            continue
+                        executed_calls.add(next_key)
+                        distinct_attempts.append((next_name, next_params))
+                        attempted_names.add(next_name)
+                        self.output_fn(f"  [Tool: {next_name}]")
+                        next_obs = self._execute_tool(next_name, next_params)
+                        self._show_tool_result(next_name, next_obs)
+                        # The earlier step keeps its result line; the page as
+                        # it stands comes from the last step alone.
+                        observation = (_step_summary(observation)
+                                       + f"\n\n[Then {next_name}:] {next_obs}")
+                        name, params = next_name, next_params
+                        if learn.is_user_refusal(next_obs):
+                            user_refused_this_turn = True
+                            remaining.append(("(the rest)", {}))
+                        elif learn.sounds_like_tool_error(next_obs):
+                            remaining.append(("(the rest)", {}))
+                    extra = [e for e in remaining if e[0] != "(the rest)"]
             local_telemetry.log_event(
                 "tool", name=name, ok=not learn.sounds_like_tool_error(observation),
                 result=observation,
@@ -1668,6 +1809,17 @@ class AgentTurnMixin:
                     "the answer, say plainly that you could not find it — do not "
                     "repeat your earlier claim or guess.]"
                 )
+            # A failed browser step, with what the user asked for beside it.
+            # Live 2026-09-27, one schema error into "reply “testing” on
+            # plants.example", the model went back to the turn before's task,
+            # reopened x.com and posted there. The history above an error is
+            # long, and the request is the one line that must not be lost.
+            if ((name.startswith("browser_") or name in ("fill_form", "submit_form"))
+                    and not learn.is_user_refusal(observation)
+                    and (learn.sounds_like_tool_error(observation)
+                         or "This is the call, not the task" in observation)):
+                observation += (f"\n\n[Still to do — the user's message this "
+                                f"turn: “{user_input.strip()[:240]}”]")
             if learn.is_user_refusal(observation):
                 # Without this the turn ends on the sentence the model wrote
                 # *before* the tool ran — "Opening apple.com for you." — which
@@ -1702,6 +1854,8 @@ class AgentTurnMixin:
             if (name == "browser_open"
                     and _is_navigation_only(user_input)
                     and not learn.sounds_like_tool_error(observation)):
+                # "Opening x.com." IS the answer to "open x.com".
+                answer_is_stale = False
                 break
 
         # A turn must never end with nothing on screen. The blank-reply nudge
@@ -1721,6 +1875,18 @@ class AgentTurnMixin:
                    "is the result.)" if any_tool_ran else
                    "(No reply — the model returned only internal reasoning.)"))
             self.logger.info("Turn ended with no visible reply.")
+        elif answer_is_stale and last_observation.strip():
+            # The answer on screen predates the last action. Say what that
+            # action did, in the harness's words — the model had its chance.
+            step = " ".join(last_observation.strip().split())
+            step = step.split(" Page text now:")[0][:220]
+            failed = learn.sounds_like_tool_error(last_observation)
+            self.output_fn(
+                f"{self.config['assistant_name']:8}: "
+                + (f"(I didn't finish — my last step failed: {step})" if failed else
+                   f"(I stopped after my last step without saying how it went: "
+                   f"{step} Check it before asking me to do it again.)"))
+            self.logger.info(f"Turn ended on a stale answer; last step: {step}")
 
         # What the model actually worked on this turn decides which worked
         # examples it is shown next turn (see tool_few_shots). The LAST tool it

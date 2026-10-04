@@ -79,19 +79,98 @@ function prettyCombo(combo) {
 // ── the panel ───────────────────────────────────────────────────────
 
 let settingsData = null;
+let guardData = null;          // /api/guardrails: kinds, modes, floors, recent
 let capturing = null;          // the action id currently listening for a key
 
 async function openSettings() {
   document.getElementById('settings').hidden = false;
   document.body.classList.add('modal-open');
   renderSettings();             // keybinds render immediately, offline
-  try {
-    const res = await fetch('/api/settings');
-    settingsData = await res.json();
-  } catch (e) {
-    settingsData = { error: 'Could not read the settings file.' };
-  }
+  const [settings, guards] = await Promise.all([
+    fetch('/api/settings').then(r => r.json()).catch(() => null),
+    fetch('/api/guardrails').then(r => r.json()).catch(() => null),
+  ]);
+  settingsData = settings || { error: 'Could not read the settings file.' };
+  guardData = guards || { error: 'Could not read the guardrails.' };
   renderSettings();
+}
+
+/* ── guardrails ──────────────────────────────────────────────────────
+ * What Symbio may do without asking, by kind of action, in the user's
+ * words. Written to config.json's `guardrails.modes`, which the resident
+ * model re-reads before its next action — no restart. The floors are shown
+ * and cannot be switched: they hold whatever this panel says. */
+
+const MODE_SHORT = { allow: 'Allow', risky: 'If risky', ask: 'Ask', block: 'Never' };
+
+function guardRows() {
+  const rows = ['<h3 class="settings-heading">What Symbio does without asking</h3>',
+    '<p class="settings-lead">Each kind of action can run freely, ask when it looks risky, '
+    + 'ask every time, or never happen. A change applies to the next action — no restart.</p>'];
+  if (!guardData) {
+    rows.push('<p class="settings-note">Reading guardrails…</p>');
+    return rows;
+  }
+  if (guardData.error) {
+    rows.push(`<p class="settings-note">${escHtml(guardData.error)}</p>`);
+    return rows;
+  }
+  const hints = Object.fromEntries((guardData.modes || []).map(m => [m.id, m]));
+  for (const kind of guardData.kinds || []) {
+    const buttons = (guardData.modes || []).map(m => `<button type="button"
+        class="${kind.mode === m.id ? 'on' : ''} ${m.id}" data-kind="${escHtml(kind.id)}"
+        data-mode="${escHtml(m.id)}" title="${escHtml(m.label)} — ${escHtml(m.hint)}"
+        aria-pressed="${kind.mode === m.id}">${escHtml(MODE_SHORT[m.id] || m.label)}</button>`).join('');
+    const current = hints[kind.mode];
+    rows.push(`<div class="settings-row guard-row">
+      <div class="settings-label">
+        <span>${escHtml(kind.label)}</span>
+        <span class="settings-hint">${escHtml(kind.hint)}${current
+          ? ` <em>${escHtml(current.hint)}</em>` : ''}</span>
+      </div>
+      <div class="seg" role="group" aria-label="${escHtml(kind.label)}">${buttons}</div>
+    </div>`);
+  }
+  rows.push('<h3 class="settings-heading">Never allowed, whatever the switches say</h3>');
+  for (const floor of guardData.floors || []) {
+    rows.push(`<div class="guard-floor">${escHtml(floor)}</div>`);
+  }
+  const recent = (guardData.recent || []).slice(0, 8);
+  if (recent.length) {
+    rows.push('<h3 class="settings-heading">What it asked lately</h3>');
+    for (const r of recent) {
+      const when = new Date((r.at || 0) * 1000);
+      const time = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      rows.push(`<div class="guard-recent">
+        <span class="guard-when">${escHtml(time)}</span>
+        <span class="guard-what">${escHtml(r.headline || r.kind_label || r.tool || '')}</span>
+        <span class="guard-answer ${escHtml(r.answer || '')}">${escHtml(r.answer || '')}</span>
+      </div>`);
+    }
+  }
+  return rows;
+}
+
+async function setGuard(kindId, mode) {
+  const kind = (guardData && guardData.kinds || []).find(k => k.id === kindId);
+  if (!kind || kind.mode === mode) return;
+  const before = kind.mode;
+  kind.mode = mode;             // optimistic: the segment moves under the finger
+  renderSettings();
+  try {
+    const res = await fetch('/api/guardrails', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: kindId, mode }),
+    });
+    const out = await res.json();
+    if (!out.ok) throw new Error(out.error || 'refused');
+  } catch (e) {
+    kind.mode = before;
+    guardData.error = `That change was not saved: ${e.message}`;
+    renderSettings();
+    guardData.error = null;
+  }
 }
 
 function closeSettings() {
@@ -102,9 +181,9 @@ function closeSettings() {
 
 function renderSettings() {
   const body = document.getElementById('settings-body');
-  const rows = [];
+  const rows = guardRows();
 
-  rows.push('<h3 class="settings-heading">What Symbio may do</h3>');
+  rows.push('<h3 class="settings-heading">Tools it can reach</h3>');
   if (!settingsData) {
     rows.push('<p class="settings-note">Reading settings…</p>');
   } else if (settingsData.error) {
@@ -140,6 +219,9 @@ function renderSettings() {
 
   body.querySelectorAll('[data-toggle]').forEach(el => {
     el.addEventListener('click', () => flip(el.dataset.section, el.dataset.toggle));
+  });
+  body.querySelectorAll('.seg [data-kind]').forEach(el => {
+    el.addEventListener('click', () => setGuard(el.dataset.kind, el.dataset.mode));
   });
   body.querySelectorAll('[data-bind]').forEach(el => {
     el.addEventListener('click', () => { capturing = el.dataset.bind; renderSettings(); });
@@ -248,7 +330,7 @@ document.getElementById('settings').addEventListener('click', (event) => {
 function refreshComposerHint() {
   const hint = document.querySelector('.composer-hint');
   if (!hint) return;
-  hint.textContent = `${prettyCombo(keybinds.send)} to send · `
-    + `${prettyCombo(keybinds.newline)} for a new line · runs entirely on this Mac`;
+  hint.textContent = `${prettyCombo(keybinds.send)} sends and `
+    + `${prettyCombo(keybinds.newline)} starts a new line. Everything runs on this Mac.`;
 }
 refreshComposerHint();

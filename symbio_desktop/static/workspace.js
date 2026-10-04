@@ -127,9 +127,13 @@ function renderMindMap() {
     edges.push({ source: `skill-${s.role}`, target: 'training', type: 'training-edge' });
   });
 
+  // The theme's own colours, read from the tokens, so the map changes with
+  // light and dark like everything else. These were Tailwind's stock violet,
+  // sky, emerald, amber and pink, in a window that uses none of them.
+  const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const typeColors = {
-    headmaster: '#7c5cfc', worker: '#38bdf8', skill: '#34d399',
-    rag: '#f59e0b', training: '#f472b6',
+    headmaster: token('--accent'), worker: token('--accent-2'), skill: token('--accent-3'),
+    rag: token('--accent-4'), training: token('--accent-5'),
   };
 
   simulation = d3.forceSimulation(nodes)
@@ -181,7 +185,7 @@ function renderMindMap() {
     .append('circle')
     .attr('r', d => d.radius + 5)
     .attr('fill', 'none')
-    .attr('stroke', '#7c5cfc')
+    .attr('stroke', token('--accent'))
     .attr('stroke-width', 2)
     .attr('opacity', 0.3)
     .attr('filter', 'url(#glow)');
@@ -190,7 +194,7 @@ function renderMindMap() {
     .attr('class', d => `node-circle ${d.type}`)
     .attr('r', d => d.radius)
     .attr('fill', d => typeColors[d.type])
-    .attr('stroke', d => d.type === 'headmaster' ? '#7c5cfc' : 'rgba(255,255,255,0.12)')
+    .attr('stroke', d => d.type === 'headmaster' ? token('--accent') : token('--border-medium'))
     .attr('stroke-width', d => d.type === 'headmaster' ? 2 : 1)
     .on('click', (event, d) => { event.stopPropagation(); showDetail(d); });
 
@@ -244,28 +248,28 @@ function showDetail(d) {
 
   if (d.type === 'headmaster') {
     html = `
-      <div class="detail-title">🧠 Headmaster</div>
-      <div class="detail-type">Main Model</div>
+      <div class="detail-title">Headmaster</div>
+      <div class="detail-type">The main model</div>
       <div class="detail-row"><span class="label">Model</span><span class="value">${escHtml(data.model_name || '—')}</span></div>
-      <div class="detail-row"><span class="label">Adapter</span><span class="value">${data.has_weights ? '✓ Trained' : '✗ None'}</span></div>
+      <div class="detail-row"><span class="label">Adapter</span><span class="value">${data.has_weights ? 'Trained' : 'None yet'}</span></div>
       <div class="detail-row"><span class="label">Rank</span><span class="value">${data.rank || '—'}</span></div>
       <div class="detail-row"><span class="label">Size</span><span class="value">${data.size_mb ? data.size_mb + ' MB' : '—'}</span></div>
     `;
   } else if (d.type === 'worker') {
     html = `
-      <div class="detail-title">⚡ ${escHtml(d.label)}</div>
+      <div class="detail-title">${escHtml(d.label)}</div>
       <div class="detail-type">Worker</div>
       <div class="detail-row"><span class="label">Model</span><span class="value">${escHtml(data.model_name || '—')}</span></div>
-      <div class="detail-row"><span class="label">Adapter</span><span class="value">${data.has_weights ? '✓ Trained' : '✗ None'}</span></div>
+      <div class="detail-row"><span class="label">Adapter</span><span class="value">${data.has_weights ? 'Trained' : 'None yet'}</span></div>
       <div class="detail-row"><span class="label">Size</span><span class="value">${data.size_mb ? data.size_mb + ' MB' : '—'}</span></div>
       ${data.description ? `<div class="detail-section"><h4>Description</h4><div class="detail-prompt">${escHtml(data.description)}</div></div>` : ''}
     `;
   } else if (d.type === 'skill') {
     html = `
-      <div class="detail-title">🔧 ${escHtml(data.skill_name || d.label)}</div>
-      <div class="detail-type">Skill Adapter</div>
+      <div class="detail-title">${escHtml(data.skill_name || d.label)}</div>
+      <div class="detail-type">Skill adapter</div>
       <div class="detail-row"><span class="label">Role</span><span class="value">${escHtml(data.role)}</span></div>
-      <div class="detail-row"><span class="label">Adapter</span><span class="value">${data.has_weights ? '✓ Trained' : '✗ None'}</span></div>
+      <div class="detail-row"><span class="label">Adapter</span><span class="value">${data.has_weights ? 'Trained' : 'None yet'}</span></div>
       <div class="detail-row"><span class="label">Errors</span><span class="value" style="color:${data.error_count > 0 ? 'var(--danger)' : 'var(--success)'}">${data.error_count}</span></div>
       <div class="detail-row"><span class="label">Corrections</span><span class="value">${data.correction_count}</span></div>
       ${data.routing_rationale ? `<div class="detail-section"><h4>Routing</h4><div class="detail-prompt">${escHtml(data.routing_rationale)}</div></div>` : ''}
@@ -273,8 +277,8 @@ function showDetail(d) {
     `;
   } else if (d.type === 'rag') {
     html = `
-      <div class="detail-title">📚 RAG Corpus</div>
-      <div class="detail-type">Retrieval System</div>
+      <div class="detail-title">RAG corpus</div>
+      <div class="detail-type">Retrieval</div>
       <div class="detail-row"><span class="label">Notes</span><span class="value">${data.notes_count}</span></div>
       <div class="detail-row"><span class="label">Training Samples</span><span class="value">${data.training_samples}</span></div>
       <div class="detail-row"><span class="label">Corpus Size</span><span class="value">${data.training_size_mb} MB</span></div>
@@ -282,8 +286,8 @@ function showDetail(d) {
     `;
   } else if (d.type === 'training') {
     html = `
-      <div class="detail-title">🏋️ Training</div>
-      <div class="detail-type">Fine-tuning Pipeline</div>
+      <div class="detail-title">Training</div>
+      <div class="detail-type">Fine-tuning</div>
       <div class="detail-row"><span class="label">Samples</span><span class="value">${data.samples}</span></div>
       <div class="detail-row"><span class="label">Corpus Size</span><span class="value">${data.size_mb} MB</span></div>
       <div class="detail-row"><span class="label">Auto-train</span><span class="value">${data.auto_train ? 'On' : 'Off'}</span></div>
@@ -369,27 +373,27 @@ function renderRag() {
   container.innerHTML = `
     <div class="stat-card">
       <div class="stat-value">${rag.notes_count}</div>
-      <div class="stat-label">Notes in Corpus</div>
+      <div class="stat-label">Notes in the corpus</div>
     </div>
     <div class="stat-card">
       <div class="stat-value">${rag.training_samples}</div>
-      <div class="stat-label">Training Samples</div>
+      <div class="stat-label">Training samples</div>
     </div>
     <div class="stat-card">
       <div class="stat-value">${rag.training_size_mb}<span style="font-size:14px"> MB</span></div>
-      <div class="stat-label">Corpus Size</div>
+      <div class="stat-label">Corpus size</div>
     </div>
     <div class="stat-card">
       <div class="stat-value">${rag.sessions_count}</div>
-      <div class="stat-label">Past Sessions</div>
+      <div class="stat-label">Past sessions</div>
     </div>
     <div class="stat-card">
       <div class="stat-value">${ecosystem.skills.length}</div>
-      <div class="stat-label">Skill Adapters</div>
+      <div class="stat-label">Skill adapters</div>
     </div>
     <div class="stat-card">
       <div class="stat-value">${ecosystem.workers.length}</div>
-      <div class="stat-label">Worker Models</div>
+      <div class="stat-label">Worker models</div>
     </div>
   `;
 }
@@ -412,7 +416,7 @@ function renderHealth() {
     <div class="health-summary">
       <div class="health-card">
         <div class="value ${totalErrors === 0 ? 'ok' : totalErrors < 5 ? 'warn' : 'bad'}">${totalErrors}</div>
-        <div class="label">Total Errors</div>
+        <div class="label">Errors</div>
       </div>
       <div class="health-card">
         <div class="value ${totalCorrections === 0 ? 'ok' : 'warn'}">${totalCorrections}</div>
@@ -420,16 +424,16 @@ function renderHealth() {
       </div>
       <div class="health-card">
         <div class="value ok">${trainedCount}/${skills.length}</div>
-        <div class="label">Trained Adapters</div>
+        <div class="label">Trained adapters</div>
       </div>
       <div class="health-card">
         <div class="value ok">${skills.length}</div>
-        <div class="label">Total Skills</div>
+        <div class="label">Skills</div>
       </div>
     </div>
     ${skillsWithErrors.length > 0 ? `
     <div class="health-issues">
-      <h3>⚠️ Skills with Errors (${skillsWithErrors.length})</h3>
+      <h3>Skills with errors (${skillsWithErrors.length})</h3>
       ${skillsWithErrors.map(s => `
         <div class="health-issue-row">
           <span class="health-issue-dot error"></span>
@@ -440,7 +444,7 @@ function renderHealth() {
     </div>
     ` : `
     <div class="health-issues">
-      <h3>✅ All Clear</h3>
+      <h3>All clear</h3>
       <div class="health-issue-row" style="color:var(--text-muted)">No skills have recorded errors.</div>
     </div>
     `}

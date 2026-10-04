@@ -12,6 +12,8 @@ not as whichever emotion happens to sort first.
 """
 from __future__ import annotations
 
+from symbio_tui.theme import MARK
+
 # The eleven tags chat_text._VALID_MOODS can produce, plus the two states the
 # UI knows about that the model does not emit: working, and not connected.
 FACES: dict[str, str] = {
@@ -45,9 +47,17 @@ def face(mood: str | None) -> str:
 
 
 def banner(mood: str | None, assistant: str = "Symbio", width: int = 80) -> str:
-    """The face and its label, or just the face when there is no room."""
+    """The mark, the face and its label — or less, as the room runs out.
+
+    The caduceus leads, because it is the Hermes-shaped identity this terminal
+    borrows; the mood face follows it so the header still moves when the
+    session does. At the narrowest widths only the face survives: a name cut
+    to "Sy…" says less than a face says whole.
+    """
     drawn = face(mood)
     label = (mood or "neutral").strip().lower()
-    if width < 28:
+    if width < 12:
         return drawn
-    return f"{drawn}   {assistant} — {label}"
+    if width < 28:
+        return f"{MARK}  {drawn}"
+    return f"{MARK}  {drawn}   {assistant} — {label}"

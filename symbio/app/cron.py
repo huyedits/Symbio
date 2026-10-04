@@ -1,5 +1,15 @@
-"""Scheduled jobs: 5-field cron expressions and one-shot reminders."""
+"""Scheduled jobs: 5-field cron expressions and one-shot reminders.
 
+A job is a REMINDER -- its text goes to whoever is chatting when it comes due
+-- unless the user gave it a standing permission when it was made. Then it is
+a TASK: `symb watch` runs it as an ordinary turn, with every tool, and the
+approval questions that turn raises are answered from that permission rather
+than refused for want of anyone to ask. Posting four times a day, a weekly
+read of how the posts did -- any recurring work is a task like this; nothing
+in here knows what the work is.
+"""
+
+import re
 import shlex
 from datetime import datetime, timedelta
 from typing import Any
@@ -8,6 +18,67 @@ import json
 
 from symbio import constants
 from symbio.app import sandbox, security
+
+# Kinds of action (symbio/guardrails.py) a task may be given in advance.
+# Changing settings, schedules, training or deleting memory are never among
+# them: an unattended run must not rewrite the rules it runs under.
+GRANTABLE = ("publish", "browser", "files", "commands", "desktop")
+
+
+def site_host(site: str) -> str:
+    """'https://www.x.com/home' -> 'x.com'."""
+    host = re.sub(r"^[a-z]+://", "", str(site or "").strip().lower()).split("/")[0]
+    return host.split(":")[0].removeprefix("www.")
+
+
+def normalize_grant(allow: Any, sites: Any) -> tuple[list[str], list[str]]:
+    """(kinds, hosts) a job may act on unattended; ValueError for anything else."""
+    if isinstance(allow, str):
+        allow = [a for a in re.split(r"[,\s]+", allow) if a]
+    if isinstance(sites, str):
+        sites = [s for s in re.split(r"[,\s]+", sites) if s]
+    kinds: list[str] = []
+    for kind in allow or []:
+        kind = str(kind).strip().lower()
+        if kind not in GRANTABLE:
+            raise ValueError(f"'{kind}' cannot be granted to a scheduled job. It may "
+                             f"be given: {', '.join(GRANTABLE)}.")
+        if kind not in kinds:
+            kinds.append(kind)
+    hosts = sorted({site_host(s) for s in sites or [] if site_host(s)})
+    if hosts and not kinds:
+        raise ValueError("'sites' only narrows what 'allow' grants; give 'allow' too.")
+    return kinds, hosts
+
+
+def is_task(job: dict[str, Any]) -> bool:
+    return bool(job.get("allow"))
+
+
+def describe_grant(kinds: list[str], hosts: list[str]) -> str:
+    """The grant in the words of the guardrail switches: 'Post or send, Browse the web, only on x.com'."""
+    from symbio import guardrails
+
+    if not kinds:
+        return "nothing"
+    where = f", only on {', '.join(hosts)}" if hosts else ", on any site" if (
+        {"publish", "browser"} & set(kinds)) else ""
+    return ", ".join(guardrails.label(k) for k in kinds) + where
+
+
+def _check_grant_fits(text: str, kinds: list[str]) -> None:
+    if kinds and text.startswith(("cmd:", "script:")):
+        raise ValueError("A cmd: or script: job runs in the sandbox and takes no grant; "
+                         "describe the work as a task instead.")
+
+
+def _check_script_job(text: str) -> None:
+    """A script: job names a script that exists, now rather than at 3am."""
+    if text.startswith("script:"):
+        from symbio.app import scripts
+
+        name, _args = scripts.split_job_text(text)
+        scripts.load_script(name)
 
 
 def load_cron_jobs() -> list[dict[str, Any]]:
@@ -60,19 +131,37 @@ def update_cron_job(
     text: str | None = None,
     blocked_commands: set[str] | None = None,
     owner: str | None = None,
+    allow: Any = None,
+    sites: Any = None,
 ) -> dict[str, Any]:
-    """Edit an existing job's schedule and/or text.
-    If `owner` is provided, only jobs owned by that owner can be updated."""
+    """Edit an existing job's schedule and/or text, and its grant.
+    If `owner` is provided, only jobs owned by that owner can be updated.
+    `allow` replaces the grant ([] takes it away); None leaves it as it was."""
     jobs = load_cron_jobs()
     job = next((j for j in jobs if j.get("id") == job_id), None)
     if job is None:
         raise ValueError(f"No job with id {job_id}.")
     _require_ownership(job, owner)
+    if allow is not None or sites is not None:
+        if allow is not None and not allow:
+            kinds, hosts = [], []  # the grant taken away, sites with it
+        else:
+            kinds, hosts = normalize_grant(
+                job.get("allow") if allow is None else allow,
+                job.get("sites") if sites is None else sites)
+        _check_grant_fits((text or job.get("text", "")).strip(), kinds)
+        job.pop("allow", None)
+        job.pop("sites", None)
+        if kinds:
+            job["allow"] = kinds
+        if hosts:
+            job["sites"] = hosts
 
     new_schedule = (schedule or job.get("schedule", "")).strip()
     new_text = (text or job.get("text", "")).strip()
     if not new_text:
         raise ValueError("Job text is empty.")
+    _check_script_job(new_text)
     if new_text.startswith("cmd:"):
         shell_cmd = new_text[4:].strip()
         try:
@@ -176,11 +265,16 @@ def add_cron_job(
     text: str,
     blocked_commands: set[str] | None = None,
     owner: str | None = None,
+    allow: Any = None,
+    sites: Any = None,
 ) -> dict[str, Any]:
     schedule = schedule.strip()
     text = text.strip()
     if not text:
         raise ValueError("Job text is empty.")
+    kinds, hosts = normalize_grant(allow, sites)
+    _check_grant_fits(text, kinds)
+    _check_script_job(text)
     if text.startswith("cmd:"):
         shell_cmd = text[4:].strip()
         try:
@@ -208,14 +302,50 @@ def add_cron_job(
         "last_fired": None,
         "owner": owner,
     }
+    if kinds:
+        job["allow"] = kinds
+    if hosts:
+        job["sites"] = hosts
     jobs.append(job)
     save_cron_jobs(jobs)
     return job
 
 
-def check_due_jobs(config: dict[str, Any], now: datetime | None = None) -> list[str]:
+class Fired(str):
+    """A fired job's event text, still a plain string, carrying the job itself.
+
+    The event is what every caller has always printed or handed on; the job
+    rides along for the one that needs more -- the supervisor, which runs a
+    task as a turn and answers its approval questions from its grant.
+    """
+
+    job: dict[str, Any] | None
+
+    def __new__(cls, text: str, job: dict[str, Any] | None = None):
+        fired = super().__new__(cls, text)
+        fired.job = job
+        return fired
+
+
+def task_turn(job: dict[str, Any]) -> str:
+    """What a due task says to the model: the work, and what it may do alone."""
+    grant = describe_grant(job.get("allow") or [], job.get("sites") or [])
+    return (f"Scheduled task {job.get('id')} is due ({job.get('schedule')}). Do it now, "
+            f"with your tools, the way you would if I had just asked you. I'm not here "
+            f"to answer questions. For this task you may do this without asking me: "
+            f"{grant}. Anything else that needs my approval will be declined.\n\n"
+            f"The task: {job.get('text', '')}")
+
+
+def check_due_jobs(config: dict[str, Any], now: datetime | None = None,
+                   include_tasks: bool = True) -> list[str]:
     """Fire all due jobs and return their event messages. One-shot jobs are
-    removed after firing; recurring jobs fire at most once per minute."""
+    removed after firing; recurring jobs fire at most once per minute.
+
+    `include_tasks=False` leaves tasks alone -- not fired, not marked -- for
+    the supervisor, which runs them. A chat session polls this too, and a task
+    it fired would only become a line of text at the user's next message, and
+    never run."""
     now = now or datetime.now()
     minute_key = now.strftime("%Y-%m-%d %H:%M")
     jobs = load_cron_jobs()
@@ -224,6 +354,9 @@ def check_due_jobs(config: dict[str, Any], now: datetime | None = None) -> list[
     changed = False
 
     for job in jobs:
+        if not include_tasks and is_task(job):
+            remaining.append(job)
+            continue
         schedule = job.get("schedule", "")
         fire = drop = False
         if schedule.startswith("at "):
@@ -266,8 +399,23 @@ def check_due_jobs(config: dict[str, Any], now: datetime | None = None) -> list[
                         f"Scheduled job {job.get('id')} ran '{shell_cmd}' "
                         f"({'ok' if ok else 'error'}):\n{out}"
                     )
+            elif text.startswith("script:"):
+                # A script the model saved, run in the sandbox like
+                # execute_code -- no model turn, nothing to approve.
+                from symbio.app import scripts
+
+                try:
+                    name, args = scripts.split_job_text(text)
+                    ok, out = scripts.run_script(name, args, config)
+                except ValueError as e:
+                    name, ok, out = text[len("script:"):].strip(), False, str(e)
+                events.append(Fired(
+                    f"Scheduled job {job.get('id')} ran script {name} "
+                    f"({'ok' if ok else 'error'}):\n{out}", dict(job)))
+            elif is_task(job):
+                events.append(Fired(task_turn(job), dict(job)))
             else:
-                events.append(f"Scheduled reminder: {text}")
+                events.append(Fired(f"Scheduled reminder: {text}", dict(job)))
 
         if fire or drop:
             changed = True
@@ -277,3 +425,57 @@ def check_due_jobs(config: dict[str, Any], now: datetime | None = None) -> list[
     if changed:
         save_cron_jobs(remaining)
     return events
+
+
+# ---------- answering a task's questions, with nobody there ----------
+
+_DOMAIN = re.compile(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", re.IGNORECASE)
+# The browser's own question before a site it has not visited: no kind of its
+# own (a site is asked about by name), but it is browsing all the same.
+_NEW_SITE = re.compile(r"^Open \S+ in Symbio's browser", re.IGNORECASE)
+
+
+class UnattendedApprover:
+    """The answer to each approval question a scheduled task's turn raises.
+
+    Yes when the question is of a kind the user granted this job, on a site
+    they named -- a post on x.com for a job allowed to post there. No to
+    everything else, and no to anything the harness flagged on the card (the
+    text in the box is not what the task said to send). A grant of `publish`
+    carries `browser` with it: nothing is posted without opening the page.
+    `approve_all` is cron.unattended_approve, the old blanket switch.
+    """
+
+    def __init__(self, job: dict[str, Any], approve_all: bool = False) -> None:
+        self.kinds = set(job.get("allow") or [])
+        if "publish" in self.kinds:
+            self.kinds.add("browser")
+        self.sites = set(job.get("sites") or [])
+        self.approve_all = approve_all
+        self.approved: list[str] = []
+        self.denied: list[str] = []
+
+    def __call__(self, frame: dict[str, Any]) -> bool:
+        card = (frame or {}).get("card") or {}
+        headline = str(card.get("headline") or (frame or {}).get("prompt") or "")
+        if self.approve_all:
+            self.approved.append(headline[:120])
+            return True
+        kind = card.get("kind")
+        named = {site_host(d) for d in _DOMAIN.findall(headline)}
+        if kind is None and _NEW_SITE.match(headline):
+            kind = "browser"
+        if kind not in self.kinds:
+            return self._no(f"not granted ({card.get('kind_label') or kind or 'unkeyed'}): "
+                            f"{headline[:120]}")
+        if card.get("warning"):
+            return self._no(f"the harness flagged it: {card['warning']}")
+        if self.sites and kind in ("publish", "browser") and named - self.sites:
+            return self._no(f"{', '.join(sorted(named - self.sites))} is not one of "
+                            f"{', '.join(sorted(self.sites))}")
+        self.approved.append(headline[:120])
+        return True
+
+    def _no(self, why: str) -> bool:
+        self.denied.append(why)
+        return False

@@ -247,6 +247,36 @@ _GREETING_FILLERS = {
 }
 
 
+# What makes a turn worth thinking about before answering. Chat — a greeting,
+# a quick question, thanks — answers directly. Measured 2026-09-26 on the 14B:
+# "hey, how's it going?" spent 105 words (about 11 s at 13 tok/s) reasoning
+# before "Hi! How can I help you today?", and "what's 17 times 23?" 152 words;
+# at thinking_level "max" the allowance is 4,096 tokens, five minutes.
+_WORK_WORDS = re.compile(
+    r"\b(write|code|coding|script|program|function|class|debug|fix|bug|error|"
+    r"traceback|exception|build|implement|refactor|design|architect|plan|"
+    r"step[- ]by[- ]step|prove|derive|solve|analy[sz]e|compare|evaluate|review|"
+    r"research|investigate|crack|decrypt|exploit|optimi[sz]e|think|reason|"
+    r"search|browse|open|click|post|tweet|download|install|configure|schedule|"
+    r"train|fine[- ]?tune)\b", re.IGNORECASE)
+_WORK_SHAPES = re.compile(r"```|https?://|\b[\w./-]+\.(py|js|ts|tsx|json|md|sh|txt|html|css|yaml|toml)\b")
+
+
+def needs_thinking(text: str) -> bool:
+    """Is this message work (think first) or chat (answer now)?
+
+    Errs toward thinking: a long message, code, a link or a file, or any
+    task verb gets the configured level. Only short, plain conversation —
+    the turns where a reasoning block is pure latency — skips it.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if len(t.split()) > 30:
+        return True
+    return bool(_WORK_SHAPES.search(t) or _WORK_WORDS.search(t))
+
+
 def _is_greeting(text: str) -> bool:
     t = text.strip().lower()
     if not t:
@@ -483,19 +513,36 @@ def _is_substantive(text: str) -> bool:
 
 
 # navigation
+_NAV_VERBS = re.compile(
+    r"^(?:(?:can|could|would|will) you |please |pls |just |now )*"
+    r"(?:open(?: up)?|go to|goto|visit|browse to|browse|navigate to|navigate|"
+    r"take me to|bring up|pull up|load|head to)\s+", re.IGNORECASE)
+# Words that can sit around a destination without asking for anything more.
+_NAV_FILLER = {
+    "please", "pls", "for", "me", "now", "the", "a", "an", "website", "site",
+    "page", "homepage", "home", "tab", "new", "in", "on", "browser", "chrome",
+    "safari", "firefox", "up", "just", "quickly", "thanks", "thank", "you", "ty",
+    "real", "quick", "again", "window",
+}
+
+
 def _is_navigation_only(text: str) -> bool:
+    """Is this ONLY "open X" — nothing to do once the page is up?
+
+    Only then does the loop stop right after browser_open. It used to answer
+    yes unless the message contained one of a dozen follow-on verbs, and
+    "tweet" was not one of them: live 2026-09-26, "Go to x.com and tweet
+    'hello.'" opened x.com and ended the turn, and the user had to type
+    "continue" twice. Now anything beyond the destination itself — a second
+    content word, whatever it is — means there is more to do.
+    """
     t = text.strip().lower()
-    if not t:
+    match = _NAV_VERBS.match(t)
+    if not match:
         return False
-    if not any(m in t for m in ("open ", "go to ", "visit ", "browse ", "navigate ")):
-        return False
-    if any(m in t for m in (
-        "click", "press", "type ", "scroll", "read", "tell", "what", "find",
-        "show", "price", "pricing", "cost", "how much", "list", "summary",
-        "summari", "extract", "who", "when", "where", "why", "and then", "then ",
-    )):
-        return False
-    return True
+    words = re.findall(r"[\w.:/'-]+", t[match.end():])
+    content = [w for w in words if w.strip(".'") not in _NAV_FILLER]
+    return len(content) <= 1
 
 
 def _last_exchange(history: list[dict[str, str]]) -> tuple[str | None, str | None]:
