@@ -302,19 +302,22 @@ def trainer_command(model_name: str, data_dir: str, adapter_dir: str,
     memory the OS reclaims completely when it exits.
     """
     if not is_cuda(config):
-        # A 248k vocabulary or gated-delta layers (Qwen3.5, Bonsai 27B) train
-        # through symbio.trim_lora — mlx_lm lora with the loss scored over the
-        # corpus's own tokens and the linear-attention backward checkpointed,
-        # which is what lets them fit 16 GB. It takes the same flags. Every
-        # other model keeps this exact command.
-        from symbio import trim_lora
+        # Bare `mlx_lm lora` stays the command for every model it can train.
+        # A 1-bit checkpoint (loads only with symbio's onebit patch) or a head
+        # past the 16 GB vocab wall goes through symbio.app.lora_runner, which
+        # takes the same flags plus the vocab skin's.
+        from symbio.app import vocab_skin
 
-        entry = ["-m", "mlx_lm", "lora"]
-        if trim_lora.wants_lean_trainer(model_name, lora):
-            entry = ["-m", "symbio.trim_lora",
-                     trim_lora.TRIM_FLAG, str(lora.get("trim_vocab", "auto"))]
+        skin = lora.get("vocab_skin", "auto")
+        if vocab_skin.needs_runner(model_name, skin):
+            entry = [sys.executable, "-m", "symbio.app.lora_runner",
+                     "--vocab-skin", str(skin).lower(),
+                     "--vocab-skin-base",
+                     str(lora.get("vocab_skin_base", vocab_skin.DEFAULT_BASE))]
+        else:
+            entry = [sys.executable, "-m", "mlx_lm", "lora"]
         return [
-            sys.executable, *entry,
+            *entry,
             "--model", model_name,
             "--train",
             "--data", data_dir,

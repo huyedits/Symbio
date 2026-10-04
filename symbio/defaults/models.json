@@ -65,11 +65,11 @@
     "adapter_compatible": false,
     "memory_note": "7.9 GB on disk, ~8.4 GB in GPU memory. Requires gpu.wired_limit_mb set (11264 works on 16 GB); unwired it pages to SSD and stalls."
   },
-  "bonsai2_27b": {
-    "model_name": "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
-    "description": "Qwen3.8-27B in ternary weights (Prism's Bonsai 2): 98.2% of the FP16 model's score across Prism's 14 thinking-mode benchmarks (84.78 vs 86.32), against the 1-bit Bonsai 27B's 89.5% of the older Qwen3.6-27B -- the closest this 16 GB machine gets to Qwen3.8-27B (the plain MLX 4-bit is ~15 GB). A Hadamard-rotated pack (model_type prism_hadamard_qwen35): stock mlx_lm refuses it, symbio/app/prism_pack.py loads it. Measured 2026-10-03 on the 16 GB M4, greedy: 6.2s load, ~9 tok/s decode, ~53 tok/s prefill at 460 tokens; 17*23, a word problem and native Qwen3.5 XML tool calls all right. Its own vision tower serves looks (symbio/app/eyes.py).",
+  "bonsai_27b_1bit": {
+    "model_name": "prism-ml/Bonsai-27B-mlx-1bit",
+    "description": "1-bit 27B (binary {-s,+s} weights, g128), Qwen3.6-27B hybrid attention, multimodal checkpoint loaded text-only. Stock MLX has no 1-bit kernels; symbio/app/onebit.py runs the packed weights unexpanded (Metal kernel for decode, exact 2-bit respread into quantized_matmul for prefill), so no Prism MLX fork is needed. Measured 2026-10-03 on the 16 GB M4, greedy, no draft: 3.5s load, 18.3 tok/s decode, 65 tok/s prefill at 1.5k tokens — faster than both the ternary 27B (11.5) and the 14B (12.7). Quality not yet benched here (Prism claims 89.5% of FP16 vs the ternary's 94.6%).",
     "adapter_compatible": false,
-    "memory_note": "8.6 GB on disk, 0.9 GB of it the vision tower, read only during a look. 7.68 GB resident; 8.3 GB peak at a short prompt, ~10 GB at 460 tokens -- above the ~6.5 GB this machine is comfortable with, so close the browser or expect swap. LoRA goes through symbio/trim_lora.py (248k vocab trimmed, linear-attention backward checkpointed), not yet run on this model."
+    "memory_note": "5.1 GB on disk (vision tower included, not loaded), 4.21 GB resident, 6.7 GB peak at 1.5k context. 248k vocab: base-only, LoRA is past the 16 GB vocab wall."
   },
   "nemo_12b": {
     "model_name": "mlx-community/Mistral-Nemo-Instruct-2407-4bit",

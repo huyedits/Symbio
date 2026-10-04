@@ -95,6 +95,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # all of them — dominates the gradient, and the run measures how well
         # the model memorised a constant it is handed at inference anyway.
         "mask_prompt": True,
+        # Cut the output head to the vocabulary the corpus uses for the length
+        # of a run (symbio/app/vocab_skin.py). The [batch x seq x vocab] logits
+        # are what OOM'd 248k-vocab models on 16 GB; the adapter never touches
+        # the head, so it loads against the full one. "auto" skins heads over
+        # 160k rows, "on"/"off" force it. `base` keeps the first N (most
+        # frequent, merge-ranked) ids as well, so the softmax still has real
+        # competitors to push down.
+        "vocab_skin": "auto",
+        "vocab_skin_base": 32768,
         # Must exceed a whole sample: system prompt (tool catalog stripped by
         # training.strip_tool_catalog) + user turn + assistant turn. Seed
         # samples run ~2,200 tokens, so anything under ~2,560 silently cuts the

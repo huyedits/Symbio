@@ -319,6 +319,17 @@ def _apply() -> None:
 
             _flash.install()
 
+        # --- 1-bit affine weights (mlx 0.32, mlx-lm 0.31.3) ------------------
+        #
+        # Prism ML's 1-bit Bonsai checkpoints declare bits: 1, which stock MLX
+        # rejects in mx.quantize while load() builds the layers. Their answer is
+        # a fork of MLX; symbio/app/onebit.py runs the packed weights on stock
+        # MLX instead (a Metal kernel for decode, an exact 2-bit respread into
+        # mx.quantized_matmul for prefill).
+        from symbio.app import onebit as _onebit
+
+        _onebit.install()
+
         _done = True
 
 

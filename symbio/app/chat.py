@@ -240,7 +240,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                  input_fn=None, output_fn=None, confirm_fn=None,
                  generate_fn=None, stream_fn=None, stream_chunk_fn=None,
                  stream_prefix: bool = True, owner: str | None = None,
-                 confirm_policy: str = "risk", banner_fn=None):
+                 confirm_policy: str = "risk", banner_fn=None,
+                 warmed_prefix: tuple[list, list[int]] | None = None):
         # Last URL successfully opened in the controllable browser; used to
         # auto-recover when a later click/type/scroll/press finds the browser
         # session was reset or never opened.
@@ -319,6 +320,16 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # joins it before any generation (so the model is never used by two
         # threads at once).
         self._prefill_thread: threading.Thread | None = None
+        # A cache warmed by another holder of these same weights — the daemon
+        # prefills the system prefix at boot, before any client connects, and
+        # hands it to the first session. (cache, ids) or None. Accepted only on
+        # the real MLX path and only when nothing is loaded yet from disk: a
+        # persisted file already covers this exact prefix, and its own load
+        # path weighs and logs it. _finish_model_setup skips the prefill when
+        # this lands, which is the whole point — the ~4.4k-token prefix used to
+        # be processed inside the FIRST session, so the person's first message
+        # paid for the boot the daemon had already finished.
+        self._warmed_prefix = warmed_prefix
         # A persisted prompt cache is over a gigabyte of safetensors, and
         # reading it used to start only once load() had finished — so the two
         # slowest parts of boot ran back to back when they have nothing to say
@@ -378,20 +389,22 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # read it, and must not be overwritten after _run_post_load_self_check().
         self._health_report: dict[str, Any] = {"healthy": True, "errors": [], "warnings": []}
         # If a caller already handed us a loaded model, do all the post-load
-        # setup immediately (same behavior as before lazy loading).
-        if self._model_loaded:
-            if adapter_loaded is None:
-                self.adapter_loaded = adapter_weights_present()
-            self._finish_model_setup()
-            self._run_post_load_self_check()
+        # setup — but only once the logger exists. _finish_model_setup logs its
+        # cache decisions (handed-over warm, persisted-file hit, refusals)
+        # through _log_info, and every one of those lines was dropped when the
+        # setup ran here, 60 lines ahead of the assignment: a working warm was
+        # indistinguishable from a silently refused one. The assignment below
+        # is why the daemon's first-turn cache path now says what it did.
 
         self.history: list[dict[str, str]] = []
         self.session_id = f"{datetime.now():%Y-%m-%d_%H-%M-%S-%f}"
 
-        # If a caller already handed us a loaded model, the self-check ran
-        # before session_id existed; re-persist now that we have one.
-        if self._model_loaded and self._health_report.get("_persisted") is None:
-            self._run_post_load_self_check()
+        # The self-check used to ALSO fire here, on the placeholder report
+        # whose _persisted is always unset, so every session printed
+        # "[Self-check] Feature verification complete." twice — once here
+        # before the logger existed and once at the end of __init__. Live
+        # 2026-09-26, the doubled banner read as the CLI glitching. It runs
+        # once, at the end of __init__, for both the lazy and hand-in paths.
 
         # Skill notes touched this session; used to append health errors and
         # user corrections to the matching sidecar files.
@@ -448,6 +461,11 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             before_worker_fn=self._sleep_headmaster,
             after_worker_fn=self._wake_headmaster,
         )
+        # Before the model setup below: _finish_model_setup runs from here when
+        # a model is handed in (the daemon's case), and its cache decisions —
+        # handed-over warm, persisted-file hit, prefill failures — log through
+        # this logger. Assigned after it, every one of those lines was dropped
+        # and a working warm was indistinguishable from a silently refused one.
         self.logger = _make_chat_logger()
         # Tidy the retrieval stores once the pieces it reports through exist
         # (session_id to skip the live log, retriever to drop its note cache,
@@ -488,6 +506,21 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # purpose: they are the two things that generate off the main thread,
         # and they must never do it at the same time.
         threading.Thread(target=self._soul_worker, daemon=True).start()
+
+        # The post-load setup, deferred to here — after the logger exists (see
+        # the note at the _model_loaded check) and after the background workers
+        # know _indexing_now exists. _prefill_system_prompt_cache sets it, and
+        # _accept_warmed_prefix runs inside _finish_model_setup; either order
+        # against the workers raced an unset attribute when a thread won.
+        if self._model_loaded:
+            if adapter_loaded is None:
+                self.adapter_loaded = adapter_weights_present()
+            self._finish_model_setup()
+            self._run_post_load_self_check()
+        # If a caller already handed us a loaded model, the self-check ran
+        # before session_id existed; re-persist now that we have one.
+        if self._model_loaded and self._health_report.get("_persisted") is None:
+            self._run_post_load_self_check()
 
     # ---- Infrastructure ----
 
@@ -832,7 +865,8 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         # re-processing it. This is guarded so fake-model tests skip it.
         # No inner spinner: when called from _ensure_model_loaded() the outer
         # 'Waking model...' spinner is already active.
-        self._prefill_system_prompt_cache(show_spinner=False)
+        if not self._accept_warmed_prefix():
+            self._prefill_system_prompt_cache(show_spinner=False)
 
     def _self_prune(self, dry_run: bool = False,
                     announce: bool = True) -> dict[str, Any]:
@@ -1318,6 +1352,56 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             pass
         return model_cache + draft_cache
 
+    def _accept_warmed_prefix(self) -> bool:
+        """Install a hand-over cache, or say why not. True when installed.
+
+        The daemon prefills the system prefix at boot and hands it to the
+        first session, so that session's first turn feeds only the user's
+        message. Three refusals, each on the record:
+
+        - not the real MLX path (tests, front-ends) — a foreign cache is
+          exactly what _mlx_generation() exists to keep away from generation;
+        - the weights on disk differ from those this session was handed —
+          the same rule _prompt_cache_signature applies to the persisted
+          file, checked here against the live adapter signature instead;
+        - a cache already arrived from disk — it is weighed and logged by
+          its own path, and two warmups would waste the RAM of one.
+        """
+        hand = getattr(self, "_warmed_prefix", None)
+        if not hand or not self._mlx_generation():
+            return False
+        cache, ids, have = hand
+        if self._prompt_cache is not None or self._cached_prompt_ids:
+            return False
+        # The hand-over assumed these weights. Adapter fingerprints move
+        # between the warm and the session; a stale hand-over is a silently
+        # wrong model, which is worse than a slow first turn. The signature
+        # the daemon computed travels WITH the cache — the session re-derives
+        # only what it can check from disk right now.
+        want = self._prompt_cache_signature(ids)
+        mismatch = [k for k in ("model_name", "adapter_sig", "kv_sig")
+                    if have.get(k) != want[k]]
+        if mismatch:
+            self._log_info(
+                "warmed prefix refused: " + ", ".join(
+                    f"{k} {have.get(k)!r} != {want[k]!r}" for k in mismatch))
+            self._warmed_prefix = None
+            return False
+        try:
+            _mx().eval([c.state for c in cache])
+        except Exception as e:
+            self._log_info(f"warmed prefix unusable, prefilling instead: {e}")
+            self._warmed_prefix = None
+            return False
+        self._prompt_cache = cache
+        self._cached_prompt_ids = list(ids)
+        # Weigh it here, so the very first turn sizes its cap against the
+        # live measurement rather than the fallback constant — the same
+        # reason both prefill paths weigh.
+        self._measure_kv_cost(len(ids))
+        self._log_info(f"Warmed prefix handed over: {len(ids)} tokens")
+        self._warmed_prefix = None
+        return True
     # A hybrid model (Qwen3.5's linear-attention layers, LFM2's convolutions)
     # carries recurrent state that cannot be rewound, so can_trim_prompt_cache
     # is False for it, and every prefix change used to rebuild the cache from

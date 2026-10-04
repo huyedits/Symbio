@@ -78,6 +78,7 @@ cron_jobs.json
 gateway.pid
 daemon.pid
 pet.pid
+daemon.start.lock
 /desk.json
 /desk.json.partial
 # The Merkle root over THIS install's adapters, and the per-adapter seals

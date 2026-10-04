@@ -715,10 +715,19 @@ def tool_few_shots(config: dict[str, Any],
     # hundred tokens against a ~6k prefix. Lead with a family instead and every
     # hinted turn re-prefills the whole few-shot region.
     universals = shell + web[:2]
+    # A screen-look leads every variant too. The desktop block only ever showed
+    # under family="desktop", and the family is the model's OWN last-used tool —
+    # None on any conversation's first turn. Live 2026-09-26: "look at my
+    # screen and tell me what's in front" on a first turn saw a catalog line
+    # for see_screen and NOT ONE example of it, and the 14B concluded it could
+    # not see the screen at all. For a small model a worked example is the
+    # capability proof; the catalog line alone is not. The pair is 4 messages
+    # (~120 tokens), constant across turns, so it folds into the cached prefix.
+    desktop_lead = desktop[:4]
     if family not in by_family:
         # No hint, or nothing matched: every example, the same eight the block
         # has always carried. An unclassified turn must never see less.
-        rotating = universals + browser + web[2:] + memory
+        rotating = universals + desktop_lead + browser + web[2:] + memory
     else:
         rotating = universals + [m for m in by_family[family]
                                  if m not in universals]

@@ -165,6 +165,92 @@ def _load_model(config: dict[str, Any]):
     return load(config["model_name"]), False
 
 
+def _warm_prefix(config: dict[str, Any], model: Any, tokenizer: Any,
+                 adapter_loaded: bool):
+    """Process the system prompt into the KV cache once, before any client.
+
+    This used to run inside the FIRST session: the person typed, hit enter,
+    and watched a ~5k-token prefix prefill through the 14B — measured at
+    60s cold, 10s even with the persisted file — while the daemon that had
+    been up for hours held a warm model and did nothing with it. The whole
+    wait is now paid at boot, before the socket opens, and the cache is
+    handed to the first session (see ChatSession._accept_warmed_prefix,
+    which re-checks the weight signature before trusting it).
+
+    The prompt is built exactly as chat_turn's live turn builds it — system
+    message, then the few-shot examples in the slot the live turn puts them.
+    A None return means the warm failed; the first session falls back to its
+    own prefill, which is the behaviour that already works.
+    """
+    from symbio import backend
+    from symbio.app.chat import tool_few_shots, make_prompt_cache, generate_step
+
+    def _mx():
+        from symbio.mlx_gate import attr as _mlx
+        return _mlx("mlx.core")
+
+    try:
+        if backend.is_cuda(config):
+            return None
+        if model is None or tokenizer is None:
+            return None
+        import mlx.nn as _nn
+
+        if not isinstance(model, _nn.Module):
+            return None
+        from symbio.app.prompts import build_system_prompt
+        system_prompt = build_system_prompt(
+            config.get("assistant_name", "Symbio"),
+            config.get("user_name", "you"), config)
+        templated = tokenizer.apply_chat_template(
+            [{"role": "system", "content": system_prompt},
+             *tool_few_shots(config),
+             {"role": "user", "content": ""}],
+            tokenize=False, add_generation_prompt=False, enable_thinking=False)
+        ids = tokenizer.encode(templated)
+        if not ids:
+            return None
+        # Same quantisation the generation path runs under, so the handed
+        # cache has the shape _generate_reply's first turn expects.
+        agent_cfg = config.get("agent", {})
+        bits = agent_cfg.get("kv_bits")
+        kv_kw = ({"kv_bits": int(bits),
+                  "kv_group_size": int(agent_cfg.get("kv_group_size", 64)),
+                  "quantized_kv_start": int(agent_cfg.get("quantized_kv_start", 0))}
+                 if bits and not backend.is_cuda(config) else {})
+        cache = make_prompt_cache(model)
+        for _ in generate_step(_mx().array(ids), model, max_tokens=0,
+                               sampler=None, prompt_cache=cache, **kv_kw):
+            pass
+        _mx().eval([c.state for c in cache])
+        # The signature the session will check its adapter fingerprint against.
+        # Built here rather than re-derived there so a session that starts
+        # while an adapter is being retrained can tell.
+        from symbio import constants as _constants
+        adapter_sig = "none"
+        if adapter_loaded:
+            try:
+                st = (_constants.ADAPTER_DIR / "adapters.safetensors").stat()
+                adapter_sig = f"{st.st_mtime_ns}:{st.st_size}"
+            except OSError:
+                adapter_sig = "missing"
+        sig = {
+            "model_name": str(config.get("model_name", "")),
+            "adapter_sig": adapter_sig,
+            "kv_sig": ("none" if not bits else
+                       f"{int(bits)}:{int(agent_cfg.get('kv_group_size', 64))}"
+                       f":{int(agent_cfg.get('quantized_kv_start', 0))}"),
+        }
+        print(f"Warmed the system prompt: {len(ids)} tokens "
+              f"({sum(getattr(c, 'nbytes', 0) for c in cache) / 1e6:.0f} MB).",
+              flush=True)
+        return (cache, ids, sig)
+    except Exception as e:
+        print(f"Prefix warm skipped ({type(e).__name__}: {e}); the first "
+              f"session prefills as before.", flush=True)
+        return None
+
+
 class _ClientGone(Exception):
     """Raised inside a turn whose client has disconnected, to end it early.
 
@@ -179,8 +265,14 @@ class _ClientGone(Exception):
 
 
 def _serve_connection(conn: socket.socket, config: dict[str, Any],
-                      model: Any, tokenizer: Any, adapter_loaded: bool) -> None:
-    """Run one ChatSession over a connected socket, then close it."""
+                      model: Any, tokenizer: Any, adapter_loaded: bool,
+                      warm: dict[str, Any] | None = None) -> None:
+    """Run one ChatSession over a connected socket, then close it.
+
+    `warm` is the boot prefill — (cache, ids, signature) — handed to the
+    FIRST session only, then dropped: the cache belongs to one conversation's
+    prefix diff from there on, and a second session inheriting the first's
+    prefix would corrupt it."""
     from symbio.app.chat import ChatSession
 
     rfile = conn.makefile("rb")
@@ -278,6 +370,11 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         send_msg({"type": "stream", "text": text})
 
     chat_ui.set_status_sink(status_fn)
+    chat_ui.set_status_sink(status_fn)
+    # One shot: the hand-over travels with the first session that arrives.
+    # The warm holds (cache, ids, signature) exactly as the session's
+    # _accept_warmed_prefix consumes it.
+    hand = warm.pop("prefix", None) if warm else None
     session = ChatSession(
         config,
         model=model, tokenizer=tokenizer, adapter_loaded=adapter_loaded,
@@ -286,6 +383,7 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         stream_prefix=True,
         owner="daemon",
         banner_fn=banner_fn,
+        warmed_prefix=hand,
     )
     # The window writes guardrail switches straight to config.json while this
     # session holds its config in memory; this is where it re-reads them.
@@ -335,6 +433,10 @@ def daemon_main(config: dict[str, Any]) -> int:
         print(f"Keeping {wired / 2**30:.1f} GB wired: the model stays in RAM "
               f"between turns.", flush=True)
     print("Model loaded. Listening for clients.", flush=True)
+    # The system prompt is processed now, once, rather than inside the first
+    # session — which is where the person's "first message takes a minute"
+    # came from. Before the socket exists: nothing can connect mid-warm.
+    warm = {"prefix": _warm_prefix(config, model, tokenizer, adapter_loaded)}
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     # Owner-only, and the umask is what makes it owner-only from the instant
@@ -369,11 +471,56 @@ def daemon_main(config: dict[str, Any]) -> int:
     # while the daemon was healthy and mid-turn. Queue them instead.
     sock.listen(16)
 
+    # The idle window between sessions is where the prefix re-warm belongs.
+    # It used to run on a background thread right after a session ended —
+    # which put a prefill on the model CONCURRENTLY with the next session's
+    # first turn: live 2026-09-26, the desktop's "hi" measured 45s TTFT with
+    # the re-warm running under it, two live KV caches on one model. Now the
+    # re-warm runs only when accept() has been idle for IDLE_REWARM_S — the
+    # model is provably not needed that second — and a connection arriving
+    # mid-wait aborts the wait and is served at once; one connecting DURING
+    # the ~35 s prefill just sits in the listen backlog until accept() takes
+    # it — one long wait instead of a corrupted model.
+    #
+    # Sessions that connect before the idle window closes take the persisted
+    # FILE path instead (a ~10s read at session boot, before the user types —
+    # verified 21:03: file hit at 21:03:51.165, first message 21:03:58.990).
+    # That path is strictly safe: it loads a snapshot, not shared live state.
+    IDLE_REWARM_S = 45.0
+
+    def _rewarm_if_idle() -> None:
+        """Rebuild a spent hand-over once the daemon has been idle a while.
+
+        Once. A session pops the hand-over, so there is something to rebuild
+        only after one has run; the old `while True` re-prefilled the whole
+        system prompt (401 MB, ~35 s of GPU) every 45 s for as long as nobody
+        connected — 27 times in one evening, the swap churn and the 45 s
+        stalls of a message that arrived mid-rebuild.
+        """
+        import select
+
+        if warm.get("prefix") is not None:
+            return                         # still intact: nothing to rebuild
+        ready, _, _ = select.select([sock], [], [], IDLE_REWARM_S)
+        if ready:
+            return                         # a client is waiting: serve it
+        try:
+            warmed = _warm_prefix(config, model, tokenizer, adapter_loaded)
+            if warmed is not None:
+                warm["prefix"] = warmed
+                print("Re-warmed for the next session.", flush=True)
+        except Exception as e:
+            print(f"Re-warm failed ({e!r}); next session uses the "
+                  f"persisted cache.", flush=True)
+
     try:
         while True:
+            if warm is not None:
+                _rewarm_if_idle()
             conn, _ = sock.accept()
             try:
-                _serve_connection(conn, config, model, tokenizer, adapter_loaded)
+                _serve_connection(conn, config, model, tokenizer,
+                                  adapter_loaded, warm)
             except KeyboardInterrupt:
                 raise
             except BaseException as e:

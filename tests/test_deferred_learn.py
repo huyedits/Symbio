@@ -4,8 +4,8 @@ import shutil
 from pathlib import Path
 
 import pytest
-pytest.importorskip("mlx_lm")  # MLX is Apple Silicon only; skip elsewhere
-from mlx_lm import load
+
+from transformers import AutoTokenizer
 
 from symbio import (
     ADAPTER_DIR,
@@ -52,7 +52,7 @@ def test_digest_mistakes_and_archive():
     assert _mistake_note_count() == 2
 
     config = load_config()
-    _, tokenizer = load(config["model_name"])
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-14B-MLX-4bit")
     system_prompt = f"You are {config['assistant_name']}. User is {config['user_name']}."
     digested = _digest_mistakes_to_training(tokenizer, system_prompt, boost=1)
     assert digested == 2
@@ -66,7 +66,7 @@ def test_threshold_training_does_not_run_under_threshold():
 
     config = load_config()
     config["learn"]["mistake_threshold"] = 5
-    _, tokenizer = load(config["model_name"])
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-14B-MLX-4bit")
     system_prompt = f"You are {config['assistant_name']}. User is {config['user_name']}."
 
     # Build a minimal agent-like object for maybe_train_on_mistakes.
@@ -83,6 +83,7 @@ def test_threshold_training_does_not_run_under_threshold():
     assert _mistake_note_count() == 1
 
 
+@pytest.mark.ram_heavy
 def test_learn_from_history_creates_note():
     reset_mistakes()
     config = load_config()
