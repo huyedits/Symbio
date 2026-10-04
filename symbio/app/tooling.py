@@ -1295,11 +1295,22 @@ _QWEN_THINK_CLOSE = "".join(chr(c) for c in [0x3c, 0x2f, 0x74, 0x68, 0x69, 0x6e,
 _MISTRAL_THINK_OPEN = "[THINK]"
 _MISTRAL_THINK_CLOSE = "[/THINK]"
 
+# Gemma 4's fine-tunes (gemma-4-12b-coder-fable5-composer2.5 et al.) reason in
+# a channel format: the reply opens with <|channel>thought, reasons, then
+# closes the channel and answers after <channel|>. Measured 2026-10-04, this
+# fine-tune, greedy: "…Result: 391.<channel|>391" — the answer lands after the
+# channel flip, and eos is only reached because the template keeps it in the
+# stop set. Neither marker can appear in ordinary prose (the <| … |> shape is
+# the template's own), so they strip like the other two pairs.
+_GEMMA_CHANNEL_OPEN = "<|channel>thought"
+_GEMMA_CHANNEL_CLOSE = "<channel|>"
+
 # (open, close) delimiter pairs, tried in order. A reply uses one format, so
 # the pair that matches the leading open is the one whose close ends the block.
 _THINK_PAIRS = (
     (_QWEN_THINK_OPEN, _QWEN_THINK_CLOSE),
     (_MISTRAL_THINK_OPEN, _MISTRAL_THINK_CLOSE),
+    (_GEMMA_CHANNEL_OPEN, _GEMMA_CHANNEL_CLOSE),
 )
 
 # Prefix used to surface a Qwen3 thinking block to the user (StreamingStripper
