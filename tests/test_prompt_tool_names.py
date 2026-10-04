@@ -95,6 +95,16 @@ def test_every_few_shot_example_resolves_in_both_stacks():
             assert name in agent, f"{family}: {name} is not an agent-stack tool"
 
 
+def test_tool_few_shots_can_be_switched_off():
+    """agent.tool_few_shots: false serves none — and the default still serves them."""
+    from symbio.app.config import load_config
+    config = load_config()
+    assert tool_few_shots(config)
+    off = {**config, "agent": {**config.get("agent", {}), "tool_few_shots": False}}
+    assert tool_few_shots(off) == []
+    assert tool_few_shots(off, family="files") == []
+
+
 def test_the_index_catalog_names_only_real_tools():
     """The index replaces schemas with names, so the names carry all the
     weight: a name in it that resolves to nothing is a tool the model will

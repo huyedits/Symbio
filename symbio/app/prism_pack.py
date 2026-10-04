@@ -225,6 +225,8 @@ def load_pack(model_path: str | Path, lazy: bool = False, strict: bool = True,
         _check_signs(model)
     # Where the pack lives, for eyes.open_eyes to build its vision half from.
     model.prism_pack_path = str(model_path)
+    # Read by mlx_compat's generate_step patch (see PREFILL_STEP).
+    model.symbio_prefill_step = PREFILL_STEP
     return model, config
 
 
@@ -394,13 +396,10 @@ PREFILL_STEP = 256
 
 
 def install() -> bool:
-    """Teach mlx_lm to load packs, and to prefill them in PREFILL_STEP chunks.
-    Idempotent."""
+    """Teach mlx_lm.utils.load_model to load packs. Idempotent."""
     global _installed
     if _installed:
         return False
-    import importlib
-
     from mlx_lm import utils
 
     original = utils.load_model
@@ -412,17 +411,5 @@ def install() -> bool:
 
     load_model.__wrapped__ = original
     utils.load_model = load_model
-
-    # mlx_lm.generate (the module) is shadowed by its function of that name.
-    gen = importlib.import_module("mlx_lm.generate")
-    original_step = gen.generate_step
-
-    def generate_step(prompt, model, *args, **kwargs):
-        if "prefill_step_size" not in kwargs and getattr(model, "prism_pack_path", None):
-            kwargs["prefill_step_size"] = PREFILL_STEP
-        return original_step(prompt, model, *args, **kwargs)
-
-    generate_step.__wrapped__ = original_step
-    gen.generate_step = generate_step
     _installed = True
     return True

@@ -244,28 +244,32 @@ def test_a_look_shares_the_resident_pack_and_reads_only_the_tower(tmp_path):
     assert vl.config.eos_token_id == [95, 94]
 
 
-def test_a_pack_prefills_in_small_chunks_and_nothing_else_changes(monkeypatch):
+def test_a_pack_prefills_in_small_chunks_and_nothing_else_changes(tmp_path):
     """mlx_lm's 2,048-token prefill chunk cost a pack +6.3 GB at 4k tokens
     (and boot hit 6% free memory); 256 cost +2.2 GB and was faster."""
-    import importlib
+    from symbio.app import mlx_compat
 
-    from mlx_lm import utils
-
-    gen = importlib.import_module("mlx_lm.generate")
+    _write_pack(tmp_path)
+    pack, _ = prism_pack.load_pack(tmp_path)
     seen = []
-    monkeypatch.setattr(gen, "generate_step", lambda prompt, model, *a, **k: seen.append(k))
-    monkeypatch.setattr(utils, "load_model", utils.load_model)
-    monkeypatch.setattr(prism_pack, "_installed", False)
-    prism_pack.install()
+    step = mlx_compat.model_prefill_step(lambda prompt, model, *a, **k: seen.append(k))
 
-    class Pack:
-        prism_pack_path = "/somewhere"
-
-    gen.generate_step(None, Pack())
-    gen.generate_step(None, object())
-    gen.generate_step(None, Pack(), prefill_step_size=1024)
+    step(None, pack)
+    step(None, object())
+    step(None, pack, prefill_step_size=1024)
     assert seen == [{"prefill_step_size": prism_pack.PREFILL_STEP}, {},
                     {"prefill_step_size": 1024}]
+
+
+def test_the_prefill_patch_is_what_mlx_lm_runs():
+    """The wrapper above only matters if it is the generate_step mlx_lm calls."""
+    import importlib
+
+    from symbio.app import mlx_compat
+
+    mlx_compat.ensure()
+    gen = importlib.import_module("mlx_lm.generate")
+    assert getattr(gen.generate_step, "__wrapped__", None) is not None
 
 
 # ---- fine-tuning one ---------------------------------------------------------

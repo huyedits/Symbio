@@ -296,6 +296,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # which is what every version before this did. The tool definitions
         # themselves live in tools/*.md either way.
         "tool_catalog": "index",
+        # Worked tool-call examples placed before the conversation every turn
+        # (symbio.tools.tool_few_shots). Small models need them; a model that
+        # calls tools from the system prompt alone can read them as history
+        # and lose the actual request — Ternary-Bonsai-2 27B did. false = none.
+        "tool_few_shots": True,
         # How hard the model is asked to think before answering: none, low,
         # medium or flurry (see chat.THINKING_LEVELS). Change it live with
         # /think. "none" ends the prompt with an empty closed think block, so

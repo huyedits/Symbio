@@ -597,7 +597,16 @@ def tool_few_shots(config: dict[str, Any],
 
     Greetings -> prose (no tool). The greeting is placed LAST so ambiguous input
     (e.g. "hi") defaults to the final example (small models copy the last few-shot).
+
+    `agent.tool_few_shots: false` serves none. A model that already calls tools
+    from the system prompt alone can be derailed by them: Ternary-Bonsai-2
+    (Qwen3.8-27B), asked to fix a bug in its own scripts.py on 2026-10-04,
+    read the right file, then spent its whole reply re-reading the examples as
+    things that had happened ("User asked about free disk space ... Wait, this
+    is confusing") and never made the edit.
     """
+    if not (config.get("agent") or {}).get("tool_few_shots", True):
+        return []
     uname = config["user_name"]
     def _tc(name, args):
         # One canonical Hermes tool_call. Built via dict() so no literal JSON

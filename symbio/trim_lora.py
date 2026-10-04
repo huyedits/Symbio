@@ -149,7 +149,20 @@ def output_head(model: Any) -> tuple[Any, bool]:
 def cut_head(head: Any, rows: Any) -> Any:
     """A copy of `head` with every per-row array cut down to `rows`, so its own
     forward runs on just those rows: plain, quantized, 1-bit and Prism-packed
-    layers alike, with whatever kernel the layer already uses."""
+    layers alike, with whatever kernel the layer already uses.
+
+    A layer whose storage is not row-major (ternel's tiled TQ1 packing) offers
+    dense_rows instead: those rows decoded, which for a corpus's few thousand
+    tokens is a few megabytes, and a plain matmul any backward can pass.
+    """
+    if hasattr(head, "dense_rows"):
+        import mlx.nn as nn
+
+        weight = head.dense_rows(rows)
+        dense = nn.Linear(weight.shape[1], weight.shape[0], bias=False)
+        dense.weight = weight
+        dense.freeze()
+        return dense
     sub = copy.copy(head)
     for name in ("weight", "scales", "biases", "bias"):
         if name in head:

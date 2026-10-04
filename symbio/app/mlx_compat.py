@@ -293,6 +293,28 @@ def _apply() -> None:
 
         _prism.install()
 
+        # --- Ternel-packed Bonsai 27B (mlx-lm 0.31.3) -------------------------
+        #
+        # inductiveML/Ternary-Bonsai-27B-mlx-lossless-1.75bpw brings its own
+        # model code (config.json model_file), which mlx_lm imports as is. Its
+        # packed layers run inference-only Metal kernels; once such a model
+        # loads, symbio/app/ternel_pack.py gives them LoRA and a backward so
+        # it can be fine-tuned like any other.
+        from symbio.app import ternel_pack as _ternel
+
+        _ternel.install()
+
+        # --- a model's own prefill chunk (mlx-lm 0.31.3) --------------------
+        #
+        # mlx_lm prefills 2,048 tokens at a time. The 27B Qwen3.5 packs (head
+        # dim 256: no fused attention kernel serves it) build a whole
+        # [heads, chunk, context] fp32 score matrix per chunk at that size: a
+        # 4,000-token prompt cost Ternary-Bonsai-2 +6.29 GB and 124 s, against
+        # +2.21 GB and 75 s at 256 (prism_pack.PREFILL_STEP). A loaded model
+        # that sets `symbio_prefill_step` gets that chunk; every other model,
+        # and any caller that names one, keeps what it had.
+        _gen.generate_step = model_prefill_step(_gen.generate_step)
+
         # --- the main model's own eyes (mlx-lm 0.31.3 + mlx-vlm 0.6.3) -----
         #
         # A Qwen3.5 checkpoint (1-bit Bonsai 27B included) is a vision-language
@@ -320,6 +342,20 @@ def _apply() -> None:
             _flash.install()
 
         _done = True
+
+
+def model_prefill_step(original):
+    """`original` (mlx_lm's generate_step), prefilling in the chunk a loaded
+    model asks for through `symbio_prefill_step` — see _apply."""
+
+    def generate_step(prompt, model, *args, **kwargs):
+        step = getattr(model, "symbio_prefill_step", None)
+        if "prefill_step_size" not in kwargs and isinstance(step, int) and step > 0:
+            kwargs["prefill_step_size"] = step
+        return original(prompt, model, *args, **kwargs)
+
+    generate_step.__wrapped__ = original
+    return generate_step
 
 
 def ensure() -> None:
