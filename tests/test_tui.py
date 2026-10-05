@@ -24,7 +24,7 @@ class FakeLink:
         self.connected = True
         self.closed = False
 
-    def connect(self) -> str:
+    def connect(self, width: int | None = None) -> str:
         return ""
 
     def send(self, message):

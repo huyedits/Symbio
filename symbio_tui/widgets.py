@@ -98,8 +98,19 @@ class History(RichLog):
             self.write(line)
 
     def say_inline(self, text: str) -> None:
-        """A streamed fragment: appended, not given a line of its own."""
-        if text:
+        """A streamed fragment: appended onto ONE growing line, not one
+        RichLog line per token.
+
+        RichLog.write() starts a new line every call, so feeding it token
+        fragments put the reply one-token-per-row — "12" rendered as two
+        rows, "1" and "2" (measured 2026-10-05, the 6+6 turn through the
+        TUI). Instead the app-level LiveLine widget paints the growing
+        reply; the app routes stream frames THERE, and flushes it into this
+        log as a finished turn when prose ends.
+        """
+        # Kept for raw passthrough (non-streaming clients); the app routes
+        # stream frames to the LiveLine widget instead of here.
+        if text and text.endswith("\n"):
             self.write(text.rstrip("\n"))
 
     def say_user(self, text: str) -> None:
@@ -125,6 +136,37 @@ class History(RichLog):
         self.write(Text(f"  {HOOK}  {lines[0]}", style="dim"))
         for line in lines[1:]:
             self.write(Text(f"     {line}", style="dim"))
+
+
+class LiveLine(Static):
+    """The reply being written right now, as one growing line.
+
+    Streamed replies used to be fed to the RichLog one fragment per write —
+    and every write starts a new line, so the answer "12" rendered as two
+    rows, "1" then "2" (measured through the TUI on the 6+6 turn,
+    2026-10-05). A Static.update() rewrites its own content in place, which
+    is the primitive a growing line needs. When the turn's prose is over,
+    the app flushes this into History as a finished line and clears it.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("", id="live")
+        self._parts: list[str] = []
+
+    def feed(self, text: str) -> None:
+        if not text:
+            return
+        self._parts.append(text)
+        self.update("".join(self._parts).rstrip("\n"))
+
+    def flush_into(self, history: "History") -> str:
+        """The whole streamed text, and the line cleared for the next turn."""
+        whole = "".join(self._parts).rstrip("\n")
+        self._parts = []
+        self.update("")
+        if whole.strip():
+            history.say_agent(whole)
+        return whole
 
 
 class StatusLine(Static):

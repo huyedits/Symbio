@@ -368,11 +368,23 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         send_msg({"type": "input_prompt", "prompt": prompt})
         while True:
             msg = recv_msg(timeout=_INPUT_IDLE_SECONDS)
+            if _apply_client_width(msg):
+                continue
             if msg.get("type") == "input":
                 return msg.get("text", "")
 
     def output_fn(text: str = "") -> None:
         send_msg({"type": "output", "text": text})
+
+    def _apply_client_width(msg: dict) -> bool:
+        """A front-end telling the daemon how wide its pane is, so every
+        two_column/wrapped_list daemon-side wraps for the pane the text is
+        read in — not for the log file the daemon's stdout is. True when the
+        message was one of these."""
+        if msg.get("type") == "set_width":
+            chat_ui.set_client_width(int(msg.get("columns") or 0))
+            return True
+        return False
 
     def banner_fn(config: dict, adapter_loaded: bool, dataset_size: int) -> None:
         lines = []
@@ -428,6 +440,26 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
     # The warm holds (cache, ids, signature) exactly as the session's
     # _accept_warmed_prefix consumes it.
     hand = warm.pop("prefix", None) if warm else None
+    # The front-end's first frame may be a width report (the TUI sends one
+    # on connect, before anything is formatted); consume it if so, so even
+    # the banner is wrapped for the pane it lands in.
+    try:
+        conn.settimeout(10)
+        _first = _decode_msg(rfile.readline())
+        if _first and not _apply_client_width(_first):
+            # Not a width report — park it where input_fn will find it. The
+            # rfile buffer is shared, so reading it here would otherwise
+            # lose the user's first message; nothing sane to do but treat
+            # it as a quit.
+            if _first.get("type") != "input":
+                raise EOFError("unsolicited first frame")
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            conn.settimeout(None)
+        except OSError:
+            pass
     session = ChatSession(
         config,
         model=model, tokenizer=tokenizer, adapter_loaded=adapter_loaded,

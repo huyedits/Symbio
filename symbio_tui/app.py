@@ -28,7 +28,8 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.par
 from symbio_tui.protocol import DaemonLink  # noqa: E402
 from symbio_tui.theme import DIM, GOLD  # noqa: E402
 from symbio_tui.widgets import (  # noqa: E402
-    HOOK, CommandStrip, Composer, Face, History, StatusLine, Suggestions)
+    HOOK, CommandStrip, Composer, Face, History, LiveLine, StatusLine,
+    Suggestions)
 
 # The tag chat_turn prints once a turn: "  [Mood: curious]".
 _MOOD_RE = re.compile(r"\[Mood:\s*([^\]]+)\]")
@@ -60,9 +61,10 @@ Screen {{ layout: vertical; background: $surface; }}
 #face {{ height: auto; color: {GOLD}; text-align: left; padding: 1 0 0 2; }}
 #history {{ height: 1fr; min-height: 3; border: none; padding: 0 2;
            scrollbar-size-vertical: 1; }}
-#commands {{ height: auto; width: 100%; color: {DIM}; padding: 0 2; }}
+#live {{ height: auto; padding: 2 2 0 2; color: {{GOLD}}; }}
+#commands {{ height: auto; width: 100%; color: {{DIM}}; padding: 0 2; }}
 #composer {{ dock: bottom; height: auto; width: 100%; padding: 0 1; }}
-#suggestions {{ max-height: 8; width: 100%; border: round {GOLD}; display: none; }}
+#suggestions {{ max-height: 8; width: 100%; border: round {{GOLD}}; display: none; }}
 #status {{ height: auto; width: 100%; padding: 0 1; }}
 /* The box: the border belongs to the ROW so the chevron sits inside it, the
    way a prompt does. An Input that draws its own border can hold nothing but
@@ -103,7 +105,9 @@ class SymbioTUI(App):
     # ---- layout ----------------------------------------------------------
     def compose(self) -> ComposeResult:
         yield Face()
-        yield History()
+        self.history = History()
+        yield self.history
+        yield LiveLine()
         yield CommandStrip(self._names)
         yield Composer(self._names)
 
@@ -120,7 +124,7 @@ class SymbioTUI(App):
                 rows, self._inline_lines)
         self.query_one("#prompt", Input).focus()
         self.link = self._link_factory(self._on_frame, self._on_close)
-        problem = self.link.connect()
+        problem = self.link.connect(width=self.size.width)
         history = self.query_one(History)
         if problem:
             history.say_tool(problem)
@@ -139,6 +143,9 @@ class SymbioTUI(App):
         history = self.query_one(History)
         kind = msg.get("type")
         if kind == "output":
+            # A tool observation mid-turn also closes the streamed prose
+            # that preceded it — flush before the hook lands under it.
+            self._flush_live()
             text = msg.get("text", "")
             # The welcome banner arrives as legacy plain text PLUS a
             # `presentation` dict. The dict is the banner; the text is the
@@ -171,11 +178,18 @@ class SymbioTUI(App):
             self._show_output(history, _MOOD_RE.sub("", text).rstrip())
             self._set_status("")
         elif kind == "stream":
-            history.say_inline(msg.get("text", ""))
+            # One growing line, not one row per token (RichLog.write starts
+            # a new line per call; a streamed "12" rendered as "1" over "2").
+            self.query_one(LiveLine).feed(msg.get("text", ""))
         elif kind == "status":
             # Status frames are the daemon working: spinner on.
             self._set_status(msg.get("text") or "", busy=True)
         elif kind == "input_prompt":
+            # A turn's prose is over the moment the daemon asks for the next
+            # input: flush the growing line into the transcript first, so
+            # the finished reply reads as one block instead of staying in
+            # the live line forever.
+            self._flush_live()
             self._awaiting_input = True
             self._set_status("waiting for you")
         elif kind == "confirm":
@@ -204,6 +218,15 @@ class SymbioTUI(App):
             history.say_tool(text.strip())
         else:
             history.say_agent(text)
+
+    def _flush_live(self) -> None:
+        """Move the growing streamed reply into the transcript, as a
+        finished turn. The live line is cleared so the next turn starts
+        empty. The Face's mood has already been set by the mood tag in the
+        output frame that usually follows."""
+        live = self.query_one(LiveLine)
+        if live._parts:
+            live.flush_into(self.query_one(History))
 
     def _set_status(self, text: str, busy: bool = False) -> None:
         self.query_one(StatusLine).show(text, busy=busy)
