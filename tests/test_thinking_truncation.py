@@ -42,11 +42,18 @@ def _session(monkeypatch, tmp_path, output):
     monkeypatch.setattr(constants, "DATA_DIR", tmp_path / "training_data")
     monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(chat, "load", lambda *a, **k: (object(), FakeTokenizer()))
-    return chat.ChatSession(
+    session = chat.ChatSession(
         app_config.load_config(), model=object(), tokenizer=FakeTokenizer(),
         adapter_loaded=False, output_fn=output.append,
         generate_fn=lambda *a, **k: "",
     )
+    # These tests exercise the THINKING-TRUNCATION machinery, whose premise is
+    # a session that thinks on the first sample. The live config carries
+    # thinking_level "none" (a dial the operator owns, not a property of the
+    # machinery), so it is pinned here — otherwise the dial's state decides
+    # whether the contract even runs.
+    session.config["agent"]["thinking_level"] = "low"
+    return session
 
 
 # The shape a cut-off reasoning block actually has: an opening tag, prose, and

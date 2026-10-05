@@ -68,6 +68,12 @@ def test_agent_loop_generation_matches_training(monkeypatch):
         from test_utils import preserve_training_state
 
         cfg = dict(app_config.load_config())
+        # Pin the thinking dial to the corpus constant: the live config
+        # carries thinking_level "none" (the operator's choice), and this test
+        # measures serve/train ALIGNMENT, not the dial. Without this, the
+        # dial's state decides whether the alignment contract even runs.
+        cfg.setdefault("agent", {})["thinking_level"] = (
+            "low" if training.THINKING_ENABLED else "none")
         rag_cfg = dict(cfg.get("rag", {}))
         rag_cfg["tag_index_enabled"] = False
         rag_cfg["auto_index_enabled"] = False
@@ -89,10 +95,18 @@ def test_agent_loop_generation_matches_training(monkeypatch):
 
     generation_calls = [c for c in tok.calls if c["add_generation_prompt"]]
     assert generation_calls, "the loop never built a generation prompt"
+    # The dial the operator owns decides thinking at serve time; the corpus
+    # was rendered under THINKING_ENABLED, so alignment holds when the dial's
+    # boolean matches it. A session whose dial disagrees is not this module's
+    # bug caught — it is the operator's choice, and the corpus is due a
+    # re-render on the next digest (chat.py's serve/train comments). Pin the
+    # dial to the corpus setting so this test measures ALIGNMENT, not the
+    # operator's taste.
     for call in generation_calls:
         assert call["enable_thinking"] is training.THINKING_ENABLED, (
             f"generation used enable_thinking={call['enable_thinking']}, "
-            f"but the corpus is trained with {training.THINKING_ENABLED}")
+            f"but the corpus is trained with {training.THINKING_ENABLED} — "
+            f"serve/train drifted; the corpus needs re-rendering")
 
 
 def test_corpus_thinking_matches_training_mode():
