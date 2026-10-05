@@ -84,6 +84,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "brain_solve": "frontier",
     "system_check": "system",
     "verify_features": "system",
+    "run_tests": "code",
     "run_remote": "terminal",
     "add_golden_case": "config",
     # The meta tool that hands out the other tools' schemas. "core" is not a
@@ -166,6 +167,7 @@ _TOOL_FAMILIES: dict[str, str] = {
     "system_check": "admin",
     "verify_features": "admin",
     "add_golden_case": "admin",
+    "run_tests": "code",
     "realign": "admin",
     "tool_docs": "core",
 }
@@ -278,6 +280,28 @@ _TOOLS: list[dict[str, Any]] = [
                 "description": {"type": "string", "description": "One line: what it is for."},
             },
             "required": ["name", "code"],
+        },
+    },
+    {
+        "name": "run_tests",
+        "description": (
+            "Run this project's own pytest suite and get a pass/fail report. "
+            "This is how you verify any change you make to symbio's source: edit "
+            "with edit_file, call run_tests, and let the output decide whether the "
+            "fix worked. Accepts targets 'tests' (the main suite, default) and "
+            "'bench' (the benchmark-harness tests); with several, they run in one "
+            "pytest invocation. A run takes minutes — call it after an edit, not "
+            "on a guess."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "targets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Which suite(s): 'tests', 'bench'. Default: all of tests/.",
+                },
+            },
         },
     },
     {
@@ -1271,11 +1295,22 @@ _QWEN_THINK_CLOSE = "".join(chr(c) for c in [0x3c, 0x2f, 0x74, 0x68, 0x69, 0x6e,
 _MISTRAL_THINK_OPEN = "[THINK]"
 _MISTRAL_THINK_CLOSE = "[/THINK]"
 
+# Gemma 4's fine-tunes (gemma-4-12b-coder-fable5-composer2.5 et al.) reason in
+# a channel format: the reply opens with <|channel>thought, reasons, then
+# closes the channel and answers after <channel|>. Measured 2026-10-04, this
+# fine-tune, greedy: "…Result: 391.<channel|>391" — the answer lands after the
+# channel flip, and eos is only reached because the template keeps it in the
+# stop set. Neither marker can appear in ordinary prose (the <| … |> shape is
+# the template's own), so they strip like the other two pairs.
+_GEMMA_CHANNEL_OPEN = "<|channel>thought"
+_GEMMA_CHANNEL_CLOSE = "<channel|>"
+
 # (open, close) delimiter pairs, tried in order. A reply uses one format, so
 # the pair that matches the leading open is the one whose close ends the block.
 _THINK_PAIRS = (
     (_QWEN_THINK_OPEN, _QWEN_THINK_CLOSE),
     (_MISTRAL_THINK_OPEN, _MISTRAL_THINK_CLOSE),
+    (_GEMMA_CHANNEL_OPEN, _GEMMA_CHANNEL_CLOSE),
 )
 
 # Prefix used to surface a Qwen3 thinking block to the user (StreamingStripper
@@ -1522,9 +1557,22 @@ def sync_tool_files(seed: bool = True) -> None:
     # new built-in would never get a file, and the directory would quietly
     # stop being the place tools are defined. ensure_seeded never overwrites,
     # so this cannot walk on an edit.
-    if seed and (len(state) < len(_TOOLS)
+    #
+    # Seeded from _BUILTIN_TOOLS — the code snapshot — and deliberately NOT
+    # from _TOOLS. sync_tool_files folds disk-discovered names INTO _TOOLS, so
+    # the live list grows with whatever the directory once held; seeding from
+    # it re-writes a file the user deleted for a tool that only ever existed
+    # because a file defined it. Observed 2026-10-04: the five scheduled-tasks
+    # tools (run_script, save_script, ...) are orphans on this branch, and a
+    # delete followed by any second sync in the same process brought all five
+    # back — the catalog advertising a tool whose every call answers "Unknown
+    # tool", regenerated faster than it could be removed. The README's
+    # contract is "seeded from code, never the other way round"; this is what
+    # makes that true. A new in-code tool is in the snapshot too — the copy is
+    # taken after the module body, so anything in the literal list is in it.
+    if seed and (len(state) < len(_BUILTIN_TOOLS)
                  or not (constants.TOOLS_DIR / "README").exists()):
-        tool_docs.ensure_seeded(_TOOLS, _TOOL_FAMILIES, _TOOL_GROUPS,
+        tool_docs.ensure_seeded(_BUILTIN_TOOLS, _TOOL_FAMILIES, _TOOL_GROUPS,
                                 _HERMES_NAME_MAP)
         state = _disk_state()
     if state == _disk_signature:

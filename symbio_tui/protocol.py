@@ -30,13 +30,21 @@ class DaemonLink:
         self._wfile: Any = None
         self._reader: threading.Thread | None = None
         self._stop = threading.Event()
+        # Remembered so a reconnect after idle-reaping reports the same pane
+        # width; set by connect().
+        self._width: int | None = None
 
     @property
     def connected(self) -> bool:
         return self._sock is not None
 
-    def connect(self) -> str:
-        """Returns "" on success, or why it could not connect."""
+    def connect(self, width: int | None = None) -> str:
+        """Returns "" on success, or why it could not connect.
+
+        `width` is the pane this client will render in. Sent as the first
+        frame so the daemon wraps everything it formats for the pane the
+        text is actually read in — the daemon's own stdout is a log file,
+        and would otherwise answer 80 while the pane runs 120+."""
         path = constants.DAEMON_SOCKET
         if not path.exists():
             return (f"No daemon socket at {path}. Start one with "
@@ -48,6 +56,10 @@ class DaemonLink:
             return f"Could not reach the daemon ({e})."
         self._sock = sock
         self._wfile = sock.makefile("wb")
+        if width:
+            self._wfile.write(_encode_msg(
+                {"type": "set_width", "columns": int(width)}))
+            self._wfile.flush()
         rfile = sock.makefile("rb")
 
         def read_forever():
@@ -64,11 +76,19 @@ class DaemonLink:
 
         self._reader = threading.Thread(target=read_forever, daemon=True)
         self._reader.start()
+        self._width = width
         return ""
 
     def send(self, message: dict) -> None:
         if self._wfile is None:
-            return
+            # The daemon may have ended this session while it idled
+            # (idle-session reaping keeps the queue moving). A typed line
+            # must not vanish: reconnect and deliver it. Failed sends after
+            # a reconnect are dropped loudly, not silently.
+            why = self.connect(width=self._width)
+            if why or self._wfile is None:
+                self._on_close(why or "reconnect failed")
+                return
         try:
             self._wfile.write(_encode_msg(message))
             self._wfile.flush()

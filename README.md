@@ -2175,6 +2175,31 @@ python main.py --train
 
 ---
 
+## Measured, not claimed
+
+Every number here is reproducible from the `bench/` directory — the grading
+harness validates itself (reference answers must score ~100%, degenerate
+answers must score ~0%) before it is allowed to grade a model:
+
+| Measured on real hardware | Result |
+|---|---|
+| Tool-calling (BFCL, n=120) | 94–96% across the candidate list — full notes in `models.json` |
+| Self-check floors | gold ≈ 100% · degenerate ≈ 0%; leaky checkers are caught by the suite, not shipped |
+| Test suite | 2,755 tests, CI-enforced |
+| Learning loop | correction → mistake note → digest → LoRA → golden-gate → **auto-rollback on regression** |
+
+## Sponsors
+
+Symbio is free, open source, and stays that way. Sponsorship funds
+**continuity** — the suite kept green as the model ecosystem churns under
+it, measured benchmarks published monthly, security fixes shipped in days.
+
+**[Sponsor on GitHub](https://github.com/sponsors/huyedits)** ·
+tiers: $5 name in release notes · $25 name here · $200 logo + quarterly
+measured report. See [SPONSORS.md](SPONSORS.md).
+
+---
+
 # Roadmap
 
 ## High priority

@@ -55,6 +55,25 @@ def _make_chat_logger() -> logging.Logger:
 _RAINBOW_COLORS: tuple[int, ...] = (196, 202, 220, 46, 51, 33, 129)
 
 
+# Set per connection by front-ends that know their width (the TUI sends
+# "set_width" on mount and on resize); term_width serves it to every
+# formatting call site daemon-side, so text is wrapped for the pane it
+# will actually be READ in — not for the log file the daemon writes.
+_CLIENT_TERM_WIDTH: int | None = None
+_CLIENT_TERM_LOCK = threading.Lock()
+
+
+def set_client_width(columns: int) -> None:
+    global _CLIENT_TERM_WIDTH
+    with _CLIENT_TERM_LOCK:
+        _CLIENT_TERM_WIDTH = max(20, int(columns or 0)) or None
+
+
+def _client_width() -> int | None:
+    with _CLIENT_TERM_LOCK:
+        return _CLIENT_TERM_WIDTH
+
+
 def term_width(default: int = 80) -> int:
     """How wide the terminal is right now, clamped to something readable.
 
@@ -63,7 +82,15 @@ def term_width(default: int = 80) -> int:
     very narrow window from producing one-word-per-line columns; the ceiling
     keeps a maximized window from producing lines too long to scan. A pipe or
     a front-end with no terminal reports nothing, and gets the default.
-    """
+
+    A connected front-end that reported its width wins over all of that: the
+    text is being wrapped for a pane the daemon cannot see, and the daemon's
+    own stdout — a log file, no tty — would otherwise answer 80 while the
+    TUI's pane runs 120, which is the dead right margin the text never
+    stretched into."""
+    client = _client_width()
+    if client is not None:
+        return max(40, min(client, 160))
     try:
         columns = shutil.get_terminal_size((default, 24)).columns
     except Exception:

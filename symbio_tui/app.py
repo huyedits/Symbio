@@ -28,7 +28,8 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.par
 from symbio_tui.protocol import DaemonLink  # noqa: E402
 from symbio_tui.theme import DIM, GOLD  # noqa: E402
 from symbio_tui.widgets import (  # noqa: E402
-    HOOK, CommandStrip, Composer, Face, History, StatusLine, Suggestions)
+    HOOK, CommandStrip, Composer, Face, History, LiveLine, StatusLine,
+    Suggestions)
 
 # The tag chat_turn prints once a turn: "  [Mood: curious]".
 _MOOD_RE = re.compile(r"\[Mood:\s*([^\]]+)\]")
@@ -38,24 +39,42 @@ _MOOD_RE = re.compile(r"\[Mood:\s*([^\]]+)\]")
 # exactly what is live (the turn bullet, the spinner, the box you type in) and
 # nothing else; the pond and ink are Symbio's own, so the window keeps its
 # identity while the shape is borrowed. See symbio_tui/theme.py.
+
+
+def inline_panel_height(terminal_rows: int, requested: int | None) -> int:
+    """How many terminal rows the inline panel claims.
+
+    A fixed 14 was the squashed UI — at 14 rows the face, the chrome and the
+    composer leave the transcript three lines. So the claim is everything
+    except the chrome and a small gap for the prompt line you are typing on:
+    the transcript is the reason the panel exists. An explicit --lines
+    overrides all of it: that is a decision about a real terminal, which a
+    default has no business overriding.
+    """
+    if requested is not None:
+        return requested
+    rows = terminal_rows or 24
+    return max(rows - 6, 10)
+
 CSS = f"""
 Screen {{ layout: vertical; background: $surface; }}
 #face {{ height: auto; color: {GOLD}; text-align: left; padding: 1 0 0 2; }}
 #history {{ height: 1fr; min-height: 3; border: none; padding: 0 2;
            scrollbar-size-vertical: 1; }}
-#commands {{ height: auto; color: {DIM}; padding: 0 2; }}
-#composer {{ dock: bottom; height: auto; padding: 0 1; }}
-#suggestions {{ max-height: 8; border: round {GOLD}; display: none; }}
-#status {{ height: auto; padding: 0 1; }}
+#live {{ height: auto; padding: 2 2 0 2; color: {{GOLD}}; }}
+#commands {{ height: auto; width: 100%; color: {{DIM}}; padding: 0 2; }}
+#composer {{ dock: bottom; height: auto; width: 100%; padding: 0 1; }}
+#suggestions {{ max-height: 8; width: 100%; border: round {{GOLD}}; display: none; }}
+#status {{ height: auto; width: 100%; padding: 0 1; }}
 /* The box: the border belongs to the ROW so the chevron sits inside it, the
    way a prompt does. An Input that draws its own border can hold nothing but
    text. */
-#promptrow {{ height: auto; border: round {GOLD}; padding: 0 1; }}
+#promptrow {{ height: auto; width: 100%; border: round {GOLD}; padding: 0 1; }}
 #chevron {{ width: 2; height: 1; color: {GOLD}; }}
 #prompt {{ border: none; background: transparent; padding: 0; height: 1;
           width: 1fr; }}
 #prompt:focus {{ border: none; background: transparent; }}
-#hints {{ height: auto; color: {DIM}; padding: 0 1; }}
+#hints {{ height: auto; width: 100%; color: {DIM}; padding: 0 1; }}
 """
 
 
@@ -70,7 +89,7 @@ class SymbioTUI(App):
     ]
 
     def __init__(self, command_names: list[str] | None = None,
-                 link_factory=DaemonLink, inline_lines: int = 14):
+                 link_factory=DaemonLink, inline_lines: int | None = None):
         super().__init__()
         self._inline_lines = inline_lines
         if command_names is None:
@@ -86,18 +105,26 @@ class SymbioTUI(App):
     # ---- layout ----------------------------------------------------------
     def compose(self) -> ComposeResult:
         yield Face()
-        yield History()
+        self.history = History()
+        yield self.history
+        yield LiveLine()
         yield CommandStrip(self._names)
         yield Composer(self._names)
 
     def on_mount(self) -> None:
         if self.is_inline:
-            # The panel is a fixed slice of the terminal; everything above it
-            # stays in the scrollback the terminal already owns.
-            self.screen.styles.height = self._inline_lines
+            # The panel is a slice of the terminal; everything above it stays
+            # in the scrollback the terminal already owns. Claimed from the
+            # terminal itself (see inline_panel_height), never a fixed slice.
+            try:
+                rows = self.size.height or 24
+            except Exception:
+                rows = 24
+            self.screen.styles.height = inline_panel_height(
+                rows, self._inline_lines)
         self.query_one("#prompt", Input).focus()
         self.link = self._link_factory(self._on_frame, self._on_close)
-        problem = self.link.connect()
+        problem = self.link.connect(width=self.size.width)
         history = self.query_one(History)
         if problem:
             history.say_tool(problem)
@@ -116,7 +143,28 @@ class SymbioTUI(App):
         history = self.query_one(History)
         kind = msg.get("type")
         if kind == "output":
+            # A tool observation mid-turn also closes the streamed prose
+            # that preceded it — flush before the hook lands under it.
+            self._flush_live()
             text = msg.get("text", "")
+            # The welcome banner arrives as legacy plain text PLUS a
+            # `presentation` dict. The dict is the banner; the text is the
+            # 1990s reference rendering for dumb clients — 26 lines of
+            # equals-rails and command menu that, dropped into the
+            # transcript, WAS the garbled first screen (measured: the
+            # panel's opening turns showed "CAINE — PERSONAL
+            # CHAT-FINETUNE CLI" as if the model had said it). When the
+            # presentation rides along, it replaces the text outright: the
+            # transcript shows one quiet line of who you are talking to.
+            presentation = msg.get("presentation")
+            if isinstance(presentation, dict) and presentation.get("kind") == "welcome":
+                self.query_one(Face).set_mood("neutral")
+                history.say_tool(
+                    f"{presentation.get('assistant_name', 'Symbio')} · "
+                    f"{presentation.get('model_name', '?')} · "
+                    f"{presentation.get('detail', '')}")
+                self._set_status("")
+                return
             mood = _MOOD_RE.search(text or "")
             if mood:
                 # The one line a turn emits about how it read the exchange.
@@ -130,11 +178,18 @@ class SymbioTUI(App):
             self._show_output(history, _MOOD_RE.sub("", text).rstrip())
             self._set_status("")
         elif kind == "stream":
-            history.say_inline(msg.get("text", ""))
+            # One growing line, not one row per token (RichLog.write starts
+            # a new line per call; a streamed "12" rendered as "1" over "2").
+            self.query_one(LiveLine).feed(msg.get("text", ""))
         elif kind == "status":
             # Status frames are the daemon working: spinner on.
             self._set_status(msg.get("text") or "", busy=True)
         elif kind == "input_prompt":
+            # A turn's prose is over the moment the daemon asks for the next
+            # input: flush the growing line into the transcript first, so
+            # the finished reply reads as one block instead of staying in
+            # the live line forever.
+            self._flush_live()
             self._awaiting_input = True
             self._set_status("waiting for you")
         elif kind == "confirm":
@@ -163,6 +218,15 @@ class SymbioTUI(App):
             history.say_tool(text.strip())
         else:
             history.say_agent(text)
+
+    def _flush_live(self) -> None:
+        """Move the growing streamed reply into the transcript, as a
+        finished turn. The live line is cleared so the next turn starts
+        empty. The Face's mood has already been set by the mood tag in the
+        output frame that usually follows."""
+        live = self.query_one(LiveLine)
+        if live._parts:
+            live.flush_into(self.query_one(History))
 
     def _set_status(self, text: str, busy: bool = False) -> None:
         self.query_one(StatusLine).show(text, busy=busy)
@@ -244,8 +308,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fullscreen", action="store_true",
                     help="take over the terminal instead of running inline")
-    ap.add_argument("--lines", type=int, default=14,
-                    help="how many lines the inline panel occupies")
+    ap.add_argument("--lines", type=int, default=None,
+                    help="how many lines the inline panel occupies "
+                         "(default: half the terminal, at least 20)")
     args = ap.parse_args()
     app = SymbioTUI(inline_lines=args.lines)
     app.run(inline=not args.fullscreen)

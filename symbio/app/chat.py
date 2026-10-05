@@ -1395,6 +1395,12 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             return False
         self._prompt_cache = cache
         self._cached_prompt_ids = list(ids)
+        # The hybrid-cache checkpoint copies key off this cache too. Boot did
+        # not walk it here (the daemon prefilled it), so the walk that decides
+        # trimmability happens on a THROWAWAY probe cache — and a loaded cache
+        # past the sliding window is untrimmable exactly like a walked one.
+        if not self._hybrid_probe_trimmable():
+            self._keep_checkpoint(ids, "boot")
         # Weigh it here, so the very first turn sizes its cap against the
         # live measurement rather than the fallback constant — the same
         # reason both prefill paths weigh.
@@ -1402,16 +1408,46 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
         self._log_info(f"Warmed prefix handed over: {len(ids)} tokens")
         self._warmed_prefix = None
         return True
-    # A hybrid model (Qwen3.5's linear-attention layers, LFM2's convolutions)
-    # carries recurrent state that cannot be rewound, so can_trim_prompt_cache
-    # is False for it, and every prefix change used to rebuild the cache from
-    # token 0. Measured 2026-09-27 on Qwen3.5-9B: ~32s to first token on every
-    # generation of a 6.5k-token prompt that was 94% unchanged, because the
-    # previous reply's tokens never render back identically. So a cache like
-    # that is copied where a later prompt is likely to pick up from, and a
-    # stale cache restarts from the longest copy instead of from zero — what
-    # llama.cpp does for recurrent models. A trimmable cache never takes this
-    # path.
+
+    def _hybrid_probe_trimmable(self, prompt_tokens: int | None = None) -> bool:
+        """Will a cache of this model still be trimmable at `prompt_tokens`?
+
+        RotatingKVCache.is_trimmable() is `offset < self.max_size` (mlx_lm
+        0.31.3): a sliding-window layer answers True only while nothing has
+        been written past the window. The question is therefore not "is a
+        fresh cache trimmable" — an empty probe always says yes — but "does
+        this prompt outgrow the smallest window in the stack". Every hybrid
+        here has finite windows (Gemma 4's sliding layers: 1024), so a real
+        system prefix (~4.9k tokens) always outgrows it, and the honest
+        answer comes from the cache geometry, not from walking tokens.
+        """
+        try:
+            probe = make_prompt_cache(self.model)
+            sizes = [c.max_size for c in probe
+                     if getattr(c, "max_size", None) is not None]
+            if not sizes:
+                return True
+            will_fill = prompt_tokens if prompt_tokens is not None else 10**9
+            will_fill = max(will_fill, 4096)  # real prompts here run 6-8k
+            return all(
+                getattr(c, "offset", 0) + will_fill < c.max_size
+                for c in probe if getattr(c, "max_size", None) is not None)
+        except Exception:
+            # A probe that cannot run must not make the boot refuse the warm;
+            # assume rewindable (the old behaviour) and let the live path
+            # rediscover it the expensive way.
+            return True
+
+    # A hybrid model (Qwen3.5's linear-attention layers, LFM2's convolutions,
+    # Gemma 4's rotating sliding-window caches) carries state that cannot be
+    # rewound, so can_trim_prompt_cache is False for it, and every prefix
+    # change used to rebuild the cache from token 0. Measured 2026-09-27 on
+    # Qwen3.5-9B: ~32s to first token on every generation of a 6.5k-token
+    # prompt that was 94% unchanged. Measured again 2026-10-05 on Gemma-4-12B:
+    # 49s TTFT on a 205-token turn. So a cache like that is copied where a
+    # later prompt is likely to pick up from, and a stale cache restarts from
+    # the longest copy instead of from zero — what llama.cpp does for
+    # recurrent models. A trimmable cache never takes this path.
 
     def _prefill_into(self, cache: list, ids: list[int]) -> None:
         """Walk `ids` into an existing cache — both models' halves of it."""
@@ -1558,7 +1594,21 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 # A cache that cannot be trimmed cannot shed the empty user
                 # turn's closing tokens either, so it stops where a real user
                 # message would start and keeps a copy there.
-                rewindable = can_trim_prompt_cache(make_prompt_cache(self.model))
+                #
+                # Trimmability is NOT static, and probing it on an EMPTY cache
+                # answers the wrong question. RotatingKVCache.is_trimmable()
+                # is `offset < self.max_size` (measured in mlx_lm 0.31.3): a
+                # sliding window can only shed tokens while nothing has been
+                # written past it. An empty probe (offset 0) says True; the
+                # boot then decides the cache is rewindable, keeps no
+                # checkpoints — and at 1024+ prompt tokens the live cache
+                # flips untrimmable, where every prefix change rebuilds the
+                # full cache from zero (measured 2026-10-05: 49s TTFT on a
+                # 205-token turn, on every turn of a Gemma-4-12B session).
+                # The probe therefore walks ONE token through a real cache of
+                # this model before asking — factored into
+                # _hybrid_probe_trimmable, shared with the hand-over path.
+                rewindable = self._hybrid_probe_trimmable()
                 if not rewindable:
                     probe = self.tokenizer.encode(self.tokenizer.apply_chat_template(
                         [{"role": "system", "content": self.system_prompt},
@@ -2146,6 +2196,9 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                 elif stale:
                     # Cannot be rewound: restart from the longest copy this
                     # prompt extends (see _prefill_into), not from token 0.
+                    # can_trim on a LIVE cache here is fine — this branch only
+                    # runs when the cache already holds tokens, so the answer
+                    # is the one is_trimmable actually means.
                     self._prompt_cache, reused = self._restore_checkpoint(ids)
             feed = ids[reused:]
             if not feed:

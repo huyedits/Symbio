@@ -24,7 +24,7 @@ class FakeLink:
         self.connected = True
         self.closed = False
 
-    def connect(self) -> str:
+    def connect(self, width: int | None = None) -> str:
         return ""
 
     def send(self, message):
@@ -44,6 +44,30 @@ async def test_the_input_box_has_focus_the_moment_it_opens():
     app = _app()
     async with app.run_test():
         assert app.focused is app.query_one("#prompt")
+
+
+def test_the_inline_panel_gets_room():
+    """Inline mode sized the panel to a hardcoded 14 lines — a slice too short
+    to show the face, three turns and the composer at once, i.e. the squashed
+    UI. The panel claims everything except the chrome and a typing gap — the
+    transcript is the reason the panel exists — while an explicit --lines
+    still wins. (Half the terminal was the first fix and still under-claimed:
+    at 48 rows it left twenty rows dead above the panel while the history
+    starved at twelve.)
+
+    Asserted on inline_panel_height directly: run_test is headless full-screen,
+    where is_inline is False and on_mount never takes the inline branch, so
+    the layout engine cannot witness the function the app actually calls.
+    """
+    from symbio_tui.app import inline_panel_height as h
+
+    assert h(48, None) == 42          # 48 rows minus face/chrome/gap
+    assert h(30, None) == 24          # 30 - 6: the claim tracks the terminal
+    assert h(24, None) == 18          # a small terminal still gets the room
+    assert h(16, None) == 10          # floor keeps a usable transcript
+    assert h(9, None) == 10           # tiny window: floor wins (10 < rows)
+    assert h(48, 14) == 14            # an explicit --lines still wins
+    assert h(0, None) == 18           # no real size: 24-ish default path
 
 
 @pytest.mark.asyncio
