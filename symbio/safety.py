@@ -757,6 +757,16 @@ def assess_tool_risk(name: str, params: dict[str, Any], config: dict[str, Any],
     if name == "see_screen":
         return {"risk_score": 1, "flags": ["screen_capture"]}
 
+    if name == "run_tests":
+        # Runs the project's own pytest: it imports and executes project code,
+        # but only code already on disk that the user themselves could run,
+        # bounded by a timeout and by the targets allowlist. Locally trusted —
+        # the repair loop re-runs it after every edit, and a prompt per run
+        # would turn one fix into a queue of approvals. Remote front-ends
+        # still ask by name (LOCAL_TRUSTED), which is where a person who
+        # cannot see what pytest was pointed at is the person approving it.
+        return {"risk_score": 1, "flags": ["runs_project_code"]}
+
     return {"risk_score": 0, "flags": flags}
 
 

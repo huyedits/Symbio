@@ -20,8 +20,8 @@ from typing import Any
 
 from symbio import computer, constants, guardrails, safety
 from symbio.app import (
-    cron, health, learn, local_telemetry, mcp_bridge, memory, sandbox,
-    security, tooling, training, web,
+    cron, devtools, health, learn, local_telemetry, mcp_bridge, memory,
+    sandbox, security, tooling, training, web,
 )
 from symbio.app.config import config_show, set_config_value
 from symbio.app.chat_text import (
@@ -2460,6 +2460,19 @@ class ToolsMixin:
                         "seen in this output.")
             return f"Python script exited {'ok' if ok else 'error'}.\nOutput:\n{out}"
 
+        if name == "run_tests":
+            # Not run_sandboxed: python is denylisted, the wrapper scan would
+            # stop or prompt on every invocation, and 30 s is a fraction of a
+            # suite run. The gates this call faces are the ones above — group
+            # filter, the always-ask set on remote front-ends, and the risk
+            # scorer — which is the right containment for running the
+            # project's own tests, the same code the user runs by hand.
+            targets = params.get("targets") or []
+            if isinstance(targets, str):
+                targets = [targets]
+            ok, report = devtools.run_tests(targets)
+            return f"Test suite {'PASSED' if ok else 'FAILED'}.\n{report}"
+
         if name == "save_script":
             from symbio.app import scripts
 
@@ -3042,6 +3055,41 @@ class ToolsMixin:
             "It will be included in the next pre/post-train golden check."
         )
 
+    @staticmethod
+    def _tool_confirm_prompt(name: str, params: dict[str, Any]) -> str:
+        """User-friendly prompt shown by non-terminal front-ends before
+        state-mutating tools."""
+        if name == "execute_code":
+            code = params.get("code", "").replace("\n", " ")[:200]
+            return f"Run the following Python code?\n{code}"
+        if name == "run_command":
+            cmd = params.get("cmd", "").replace("\n", " ")[:200]
+            return f"Run this shell command?\n{cmd}"
+        if name == "config_set":
+            return f"Change config '{params.get('key')}' to '{params.get('value')}'?"
+        if name == "schedule_job":
+            return f"Schedule job '{params.get('schedule')}' with text '{params.get('text')}'?"
+        if name == "delete_cron_job":
+            return f"Delete scheduled job {params.get('job_id')}?"
+        if name == "update_cron_job":
+            return (f"Update scheduled job {params.get('job_id')} to "
+                    f"'{params.get('schedule')}' with text '{params.get('text')}'?")
+        if name == "digest_notes":
+            return "Digest all notes into training data?"
+        if name == "train_adapter":
+            return "Start LoRA training? This may take a while."
+        if name == "retrain_adapter":
+            return (
+                "⚠️  Start a FULL adapter rebuild? This will DELETE the current LoRA "
+                "adapter and retrain from scratch. This cannot be undone."
+            )
+        if name == "run_tests":
+            targets = params.get("targets") or ["tests"]
+            return f"Run the project test suite ({', '.join(map(str, targets))})?"
+        if name == "submit_form":
+            return (f"Submit the form on the live page? target='{params.get('target')}' "
+                    f"expected to land on '{params.get('expected_url')}'.")
+        return f"Allow tool '{name}'?"
 
 def _argument_check_mode(config: Any) -> str:
     """"on" (default), "audit" or "off".

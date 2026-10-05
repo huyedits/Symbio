@@ -103,7 +103,7 @@ _ALWAYS_CONFIRM_TOOLS = frozenset({
 # risk scorer, which still asks for `rm -rf /` (3/3), a path escape (3/3) and a
 # sensitive file (3/3); it just stops asking for `ls`.
 _LOCAL_TRUSTED_TOOLS = frozenset({
-    "run_command", "execute_code",
+    "run_command", "execute_code", "run_tests",
     "edit_file", "write_file", "save_command",
     "desktop_click", "desktop_type", "desktop_press", "desktop_drag", "open_app",
 })
