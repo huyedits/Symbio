@@ -1,4 +1,4 @@
-"""LoRA fine-tuning on CUDA, with `mlx_lm lora`'s command line.
+"""LoRA fine-tuning on CUDA or ROCm, with `mlx_lm lora`'s command line.
 
 Run as `python -m symbio.cuda_lora --model ... --train --data ...`.
 
@@ -23,6 +23,28 @@ the hard way here and are not peft defaults:
     turn are set to -100.
   * Progress on stdout in mlx_lm's shape ("Iter N: train loss X"), because
     that is what the caller reads to decide whether to stop early.
+
+ROCm (AMD Instinct / Radeon): this file is hardware-agnostic by construction
+— it speaks torch's device-agnostic APIs (`torch.cuda.*` is HIP on ROCm
+builds, `is_bf16_supported()` answers honestly, `device_map="auto"` uses
+accelerate's dispatch) — and the ROCm-specific pitfalls live in three places,
+each handled below:
+
+  1. bitsandbytes on ROCm. The multi-backend BnB is Linux/ROCm-capable on
+     recent builds, but NF4 quality/perf on GPUs without full support is a
+     known gap (ROCm <6.3 in particular). `load_in_4bit` on a card without
+     BnB-ROCm raises inside transformers with an error that mentions neither
+     ROCm nor bitsandbytes; better is the explicit capability probe below —
+     and when 4-bit is unavailable, say so and what to do instead rather
+     than dying.
+  2. Memory. AMD cards of the class this project targets (MI355X aside) are
+     16–24 GB boards, same as the NVIDIA equivalents the quantization
+     defaults were tuned for. No change needed; the preflight already asks.
+  3. Attention kernels. The code never requests flash-attention-2 explicitly
+     (the one true CUDA-only kernel family in the transformers stack): the
+     HF default is SDPA (scaled_dot_product_attention), which is backend-
+     neutral and works on ROCm. Do NOT set attn_implementation="flash_attention_2":
+     that import is the port's only hard trap, and nothing here needs it.
 """
 
 from __future__ import annotations
@@ -166,11 +188,24 @@ def main(argv: list[str] | None = None) -> int:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    from symbio.backend import _dtype, _quantization_config
+    from symbio.backend import _dtype, _quantization_config, quantization_available
+
+    if not quantization_available({}):
+        # The trainer trains LoRA on top of quantized or full-precision
+        # weights. A card without 4-bit support (older ROCm stacks) can still
+        # train — at 8-bit or 16-bit, if memory allows. Refusing outright
+        # would turn a workable port into an error; silently loading NF4
+        # would crash mid-fit. Name the choice instead.
+        print("[cuda_lora] 4-bit NF4 not available on this device; loading "
+              "8-bit (set cuda.load_in_bits to 16 if memory allows).",
+              file=sys.stderr)
+        quant_cfg = _quantization_config({"cuda": {"load_in_bits": 8}})
+    else:
+        quant_cfg = _quantization_config({})
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model, device_map="auto", dtype=_dtype(torch),
-        quantization_config=_quantization_config({}))
+        quantization_config=quant_cfg)
     if args.grad_checkpoint.lower() in ("1", "true", "yes"):
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()

@@ -61,10 +61,10 @@ Screen {{ layout: vertical; background: $surface; }}
 #face {{ height: auto; color: {GOLD}; text-align: left; padding: 1 0 0 2; }}
 #history {{ height: 1fr; min-height: 3; border: none; padding: 0 2;
            scrollbar-size-vertical: 1; }}
-#live {{ height: auto; padding: 2 2 0 2; color: {{GOLD}}; }}
-#commands {{ height: auto; width: 100%; color: {{DIM}}; padding: 0 2; }}
+#live {{ height: auto; padding: 2 2 0 2; color: {GOLD}; }}
+#commands {{ height: auto; width: 100%; color: {DIM}; padding: 0 2; }}
 #composer {{ dock: bottom; height: auto; width: 100%; padding: 0 1; }}
-#suggestions {{ max-height: 8; width: 100%; border: round {{GOLD}}; display: none; }}
+#suggestions {{ max-height: 8; width: 100%; border: round {GOLD}; display: none; }}
 #status {{ height: auto; width: 100%; padding: 0 1; }}
 /* The box: the border belongs to the ROW so the chevron sits inside it, the
    way a prompt does. An Input that draws its own border can hold nothing but

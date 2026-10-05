@@ -144,6 +144,50 @@ def _quantization_config(config: dict[str, Any] | None):
     )
 
 
+def _rocm() -> bool:
+    """Is this torch a ROCm build on an AMD card?
+
+    torch.cuda.is_available() is True on ROCm builds (they expose HIP through
+    the torch.cuda namespace), so backend selection already works; what the
+    port needs to KNOW is that the card is AMD, because the one dependency
+    that differs — bitsandbytes — supports ROCm only on recent builds, and a
+    missing 4-bit capability reads as "CUDA failed" when it is really "this
+    card cannot run NF4".
+    """
+    torch = _require_torch()
+    try:
+        return bool(torch.cuda.is_available()) and "rocm" in (
+            str(getattr(torch, "__version__", "")).lower())
+    except Exception:
+        return False
+
+
+def quantization_available(config: dict[str, Any] | None) -> bool:
+    """Can THIS device run the quantized load the config asks for?
+
+    A probe, not an assumption: on ROCm, 4-bit NF4 needs a bitsandbytes build
+    with the multi-backend; on older ROCm stacks it raises only at load time,
+    with an error that names CUDA. Asking here means the caller can print the
+    one honest sentence — "4-bit is not available on this ROCm build; set
+    cuda.load_in_bits to 8 or 16" — instead of the model dying inside a
+    transformers import.
+
+    bitsandbytes is checked WITHOUT importing it: importing a fake torch
+    (tests) or a partial install makes transformers' import machinery read
+    torch.__spec__ and raise ValueError that has nothing to do with the
+    answer. importlib.util.find_spec tells the truth and touches nothing.
+    """
+    bits = int(((config or {}).get("cuda") or {}).get("load_in_bits", 4))
+    if bits not in (4, 8):
+        return True            # 16-bit load: no bitsandbytes involved
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec("bitsandbytes") is not None
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------- operations
 
 
@@ -162,6 +206,15 @@ def load(model_name: str, adapter_path: str | None = None,
         return _mlx_load(model_name, **kwargs)
 
     torch = _require_torch()
+    # The quantization probe runs before the transformers import, so the
+    # error an AMD operator sees names the fix (cuda.load_in_bits), not an
+    # import failure two dependencies away from the actual problem.
+    if not quantization_available(config):
+        raise BackendUnavailable(
+            "Quantized loading is not available on this device (bitsandbytes "
+            "is missing or this ROCm build lacks 4-bit support). Set "
+            "cuda.load_in_bits to 8, or to 16 for full precision if the card "
+            "has memory for it.")
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except ImportError as e:
@@ -177,6 +230,10 @@ def load(model_name: str, adapter_path: str | None = None,
         model_name,
         device_map="auto",
         dtype=_dtype(torch),
+        # The kernel behind attention stays HF's default (SDPA), which is
+        # backend-neutral — ROCm included. Never name flash_attention_2 here:
+        # that import is CUDA-only and is the one hard trap of this port,
+        # and nothing in this file needs what it provides.
         quantization_config=_quantization_config(config),
     )
     if adapter_path:
@@ -302,14 +359,22 @@ def trainer_command(model_name: str, data_dir: str, adapter_dir: str,
     memory the OS reclaims completely when it exits.
     """
     if not is_cuda(config):
-        # Bare `mlx_lm lora` stays the command for every model it can train.
-        # A 1-bit checkpoint (loads only with symbio's onebit patch) or a head
-        # past the 16 GB vocab wall goes through symbio.app.lora_runner, which
-        # takes the same flags plus the vocab skin's.
+        # Main's lean-trainer path supersedes the old vocab_skin routing: a
+        # model past the vocab wall or with gated-delta layers trains through
+        # symbio.trim_lora (its own memory-capped recipe), and everything else
+        # keeps the bare `mlx_lm lora` command. The vocab_skin runner survives
+        # as the explicit skin override.
         from symbio.app import vocab_skin
+        from symbio import trim_lora
 
         skin = lora.get("vocab_skin", "auto")
-        if vocab_skin.needs_runner(model_name, skin):
+        if str(lora.get("trim_vocab", "auto")).lower() == "on" or (
+                trim_lora.wants_lean_trainer(model_name, lora)
+                and skin == "auto"):
+            entry = [sys.executable, "-m", "symbio.trim_lora",
+                     trim_lora.TRIM_FLAG,
+                     str(lora.get("trim_vocab", "auto")).lower()]
+        elif vocab_skin.needs_runner(model_name, skin):
             entry = [sys.executable, "-m", "symbio.app.lora_runner",
                      "--vocab-skin", str(skin).lower(),
                      "--vocab-skin-base",
