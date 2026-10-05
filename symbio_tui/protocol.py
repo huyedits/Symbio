@@ -68,7 +68,14 @@ class DaemonLink:
 
     def send(self, message: dict) -> None:
         if self._wfile is None:
-            return
+            # The daemon may have ended this session while it idled
+            # (idle-session reaping keeps the queue moving). A typed line
+            # must not vanish: reconnect and deliver it. Failed sends after
+            # a reconnect are dropped loudly, not silently.
+            why = self.connect()
+            if why or self._wfile is None:
+                self._on_close(why or "reconnect failed")
+                return
         try:
             self._wfile.write(_encode_msg(message))
             self._wfile.flush()

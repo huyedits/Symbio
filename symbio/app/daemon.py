@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import signal
 import socket
 import subprocess
@@ -264,6 +265,18 @@ class _ClientGone(Exception):
     """
 
 
+class _IdleClient(Exception):
+    """A session idled out at the input prompt with nobody answering.
+
+    The daemon serves one session at a time and an open socket is not work:
+    a TUI the user left open, or a client whose process died with its socket
+    still held by the kernel, otherwise holds the only model hostage from
+    every connection behind it (measured 2026-10-05: a queued client showed
+    no banner and no frames for minutes — reading as 'the TUI is broken').
+    Ending an idle session is safe: history lives in the session store, and
+    the next connection starts its own session over the same daemon."""
+
+
 def _serve_connection(conn: socket.socket, config: dict[str, Any],
                       model: Any, tokenizer: Any, adapter_loaded: bool,
                       warm: dict[str, Any] | None = None) -> None:
@@ -272,9 +285,24 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
     `warm` is the boot prefill — (cache, ids, signature) — handed to the
     FIRST session only, then dropped: the cache belongs to one conversation's
     prefix diff from there on, and a second session inheriting the first's
-    prefix would corrupt it."""
+    prefix would corrupt it.
+
+    An open-but-idle client ends its session after _INPUT_IDLE_SECONDS at
+    the input prompt (see _IdleClient): the queue behind it is served
+    instead of staring at a ghost."""
     from symbio.app.chat import ChatSession
 
+    # Ninety seconds of nobody answering the prompt is nobody there. A real
+    # person reads, thinks, comes back — a minute and a half between turns in
+    # one open window is ordinary; three minutes is not. The session's
+    # history is in the store, so nothing is lost by ending it; the next
+    # message from the same user opens a fresh session over the same daemon
+    # at the cost of a prompt re-prefill (the persisted cache file covers
+    # most of it). This value is NOT the same knob as IDLE_REWARM_S — that
+    # one is about re-prefilling the SYSTEM prefix when NOBODY is connected;
+    # this one is about releasing the daemon from a connection that stopped
+    # answering.
+    _INPUT_IDLE_SECONDS = 90.0
     rfile = conn.makefile("rb")
     wfile = conn.makefile("wb")
     # Background threads (cron, note-indexer) call output_fn too, so writes to
@@ -298,9 +326,34 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         except OSError:
             client_gone.set()
 
-    def recv_msg() -> dict:
+    def recv_msg(timeout: float | None = None) -> dict:
         if client_gone.is_set():
             raise EOFError("client disconnected")
+        if timeout is not None:
+            # An idle client is not work. readline() blocks forever, which is
+            # how one session — a TUI left open, a crashed client whose
+            # socket the OS still holds — locked the single-model daemon
+            # against every connection behind it: the second TUI "connected"
+            # and waited in the accept backlog with no banner and no frames,
+            # reading as a broken app. The timeout is why the session is
+            # disposable from the daemon's side: nobody home → EOF → serve
+            # the queue.
+            remaining = timeout
+            while remaining > 0:
+                ready, _, _ = select.select([conn], [], [], min(remaining, 5))
+                if not ready:
+                    remaining -= 5
+                    continue
+                try:
+                    line = rfile.readline()
+                except OSError as e:
+                    client_gone.set()
+                    raise EOFError("client disconnected") from e
+                if not line:
+                    client_gone.set()
+                    raise EOFError("client disconnected")
+                return _decode_msg(line)
+            raise _IdleClient()
         try:
             line = rfile.readline()
         except OSError as e:
@@ -314,7 +367,7 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
     def input_fn(prompt: str = "") -> str:
         send_msg({"type": "input_prompt", "prompt": prompt})
         while True:
-            msg = recv_msg()
+            msg = recv_msg(timeout=_INPUT_IDLE_SECONDS)
             if msg.get("type") == "input":
                 return msg.get("text", "")
 
@@ -390,7 +443,7 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
     session._guardrails_file = constants.CONFIG_FILE
     try:
         session.run()
-    except (_ClientGone, EOFError):
+    except (_ClientGone, _IdleClient, EOFError):
         # An ordinary end: the window closed. Not an error, and not a reason
         # to keep the connection or the turn alive.
         pass
