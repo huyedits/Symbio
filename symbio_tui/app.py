@@ -38,24 +38,41 @@ _MOOD_RE = re.compile(r"\[Mood:\s*([^\]]+)\]")
 # exactly what is live (the turn bullet, the spinner, the box you type in) and
 # nothing else; the pond and ink are Symbio's own, so the window keeps its
 # identity while the shape is borrowed. See symbio_tui/theme.py.
+
+
+def inline_panel_height(terminal_rows: int, requested: int | None) -> int:
+    """How many terminal rows the inline panel claims.
+
+    A fixed 14 was the squashed UI — at 14 rows the face, the chrome and the
+    composer leave the transcript three lines. So the claim is everything
+    except the chrome and a small gap for the prompt line you are typing on:
+    the transcript is the reason the panel exists. An explicit --lines
+    overrides all of it: that is a decision about a real terminal, which a
+    default has no business overriding.
+    """
+    if requested is not None:
+        return requested
+    rows = terminal_rows or 24
+    return max(rows - 6, 10)
+
 CSS = f"""
 Screen {{ layout: vertical; background: $surface; }}
 #face {{ height: auto; color: {GOLD}; text-align: left; padding: 1 0 0 2; }}
 #history {{ height: 1fr; min-height: 3; border: none; padding: 0 2;
            scrollbar-size-vertical: 1; }}
-#commands {{ height: auto; color: {DIM}; padding: 0 2; }}
-#composer {{ dock: bottom; height: auto; padding: 0 1; }}
-#suggestions {{ max-height: 8; border: round {GOLD}; display: none; }}
-#status {{ height: auto; padding: 0 1; }}
+#commands {{ height: auto; width: 100%; color: {DIM}; padding: 0 2; }}
+#composer {{ dock: bottom; height: auto; width: 100%; padding: 0 1; }}
+#suggestions {{ max-height: 8; width: 100%; border: round {GOLD}; display: none; }}
+#status {{ height: auto; width: 100%; padding: 0 1; }}
 /* The box: the border belongs to the ROW so the chevron sits inside it, the
    way a prompt does. An Input that draws its own border can hold nothing but
    text. */
-#promptrow {{ height: auto; border: round {GOLD}; padding: 0 1; }}
+#promptrow {{ height: auto; width: 100%; border: round {GOLD}; padding: 0 1; }}
 #chevron {{ width: 2; height: 1; color: {GOLD}; }}
 #prompt {{ border: none; background: transparent; padding: 0; height: 1;
           width: 1fr; }}
 #prompt:focus {{ border: none; background: transparent; }}
-#hints {{ height: auto; color: {DIM}; padding: 0 1; }}
+#hints {{ height: auto; width: 100%; color: {DIM}; padding: 0 1; }}
 """
 
 
@@ -123,6 +140,24 @@ class SymbioTUI(App):
         kind = msg.get("type")
         if kind == "output":
             text = msg.get("text", "")
+            # The welcome banner arrives as legacy plain text PLUS a
+            # `presentation` dict. The dict is the banner; the text is the
+            # 1990s reference rendering for dumb clients — 26 lines of
+            # equals-rails and command menu that, dropped into the
+            # transcript, WAS the garbled first screen (measured: the
+            # panel's opening turns showed "CAINE — PERSONAL
+            # CHAT-FINETUNE CLI" as if the model had said it). When the
+            # presentation rides along, it replaces the text outright: the
+            # transcript shows one quiet line of who you are talking to.
+            presentation = msg.get("presentation")
+            if isinstance(presentation, dict) and presentation.get("kind") == "welcome":
+                self.query_one(Face).set_mood("neutral")
+                history.say_tool(
+                    f"{presentation.get('assistant_name', 'Symbio')} · "
+                    f"{presentation.get('model_name', '?')} · "
+                    f"{presentation.get('detail', '')}")
+                self._set_status("")
+                return
             mood = _MOOD_RE.search(text or "")
             if mood:
                 # The one line a turn emits about how it read the exchange.
