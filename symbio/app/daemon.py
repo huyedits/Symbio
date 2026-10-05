@@ -365,6 +365,13 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
         return _decode_msg(line)
 
     def input_fn(prompt: str = "") -> str:
+        # A message that arrived before the first prompt (the TUI's opening
+        # line while the daemon was still serving its banner) is answered
+        # here, not dropped — the connect-time read parked it.
+        if _PARKED_FIRST[0] is not None:
+            first, _PARKED_FIRST[0] = _PARKED_FIRST[0], None
+            if first.get("type") == "input":
+                return first.get("text", "")
         send_msg({"type": "input_prompt", "prompt": prompt})
         while True:
             msg = recv_msg(timeout=_INPUT_IDLE_SECONDS)
@@ -443,23 +450,30 @@ def _serve_connection(conn: socket.socket, config: dict[str, Any],
     # The front-end's first frame may be a width report (the TUI sends one
     # on connect, before anything is formatted); consume it if so, so even
     # the banner is wrapped for the pane it lands in.
+    _PARKED_FIRST = [None]
     try:
-        conn.settimeout(10)
-        _first = _decode_msg(rfile.readline())
-        if _first and not _apply_client_width(_first):
-            # Not a width report — park it where input_fn will find it. The
-            # rfile buffer is shared, so reading it here would otherwise
-            # lose the user's first message; nothing sane to do but treat
-            # it as a quit.
-            if _first.get("type") != "input":
-                raise EOFError("unsolicited first frame")
+        # Wait up to 10s for a width report — WITHOUT touching rfile. A
+        # socket timeout mid-read poisons the buffered file object (the
+        # timeout can land mid-line, after which every later readline on
+        # that makefile fails or returns empty — measured: the session
+        # died silently at first prompt, 2026-10-05). select() only
+        # answers "is there data"; rfile.readline() is then guaranteed to
+        # return a whole line, and the file object is never touched under
+        # a timeout at all.
+        ready, _, _ = select.select([conn], [], [], 10)
+        if ready:
+            _first = _decode_msg(rfile.readline())
+            if not _apply_client_width(_first):
+                # Not a width report. The real TUI (and every scripted
+                # client so far) sends nothing until input_prompt — so
+                # treat anything else as the user's first message by
+                # feeding it to input_fn's answer, not by dying.
+                _PARKED_FIRST[0] = _first
     except (OSError, ValueError):
+        # No frame within 10s is the ordinary case (the real TUI answers
+        # only after the prompt is drawn); a malformed one is not worth a
+        # session.
         pass
-    finally:
-        try:
-            conn.settimeout(None)
-        except OSError:
-            pass
     session = ChatSession(
         config,
         model=model, tokenizer=tokenizer, adapter_loaded=adapter_loaded,

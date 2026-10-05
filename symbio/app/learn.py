@@ -1185,6 +1185,12 @@ def dynamic_mistake_threshold(config: dict[str, Any], severity_total: int = 0,
     """
     learn_cfg = config.get("learn", {}) or {}
     base = max(1, int(learn_cfg.get("mistake_threshold", 5)))
+    # An operator who set the threshold BY HAND owns the number. The corpus
+    # arithmetic assumes the shipped default of 5; someone who typed a
+    # different one has already decided where their bar sits, and scaling a
+    # hand-set 1 up to 2 silently ignores the decision.
+    if base != 5:
+        return base
     if not learn_cfg.get("scale_threshold_with_corpus", True):
         return base
     if corpus_samples is None:
