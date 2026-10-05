@@ -163,13 +163,21 @@ def test_the_dispatcher_has_a_branch_for_run_tests():
 
 
 def test_orphaned_tool_docs_are_gone():
-    """save_script/run_script et al. came from the unmerged scheduled-tasks
-    branch, were advertised in the catalog on this one, and had no dispatch
-    branch — every call 'Unknown tool'. The catalog must not advertise a tool
-    that cannot run."""
-    from symbio.app import tool_docs
+    """The catalog must not advertise a tool the dispatcher refuses: the
+    run_tests failure mode was described-but-'Unknown tool'. Main merged the
+    scheduled-tasks scripts feature, so save_script/run_script et al. are
+    real now; the check survives as the general contract — every tool file
+    on disk maps to a name the dispatcher knows, from the catalog, from an
+    MCP prefix, or from a tool docs entry."""
+    from symbio.app import tool_docs, tooling
+    import inspect
 
     names = {p["name"] for p in tool_docs.load_tool_files()}
-    orphans = {"run_script", "save_script", "list_saved_scripts",
-               "delete_script", "obs_record"}
-    assert not orphans & names
+    assert names, "the tools directory is the catalog's source of truth"
+    dispatchable = {t["name"] for t in tooling._TOOLS}
+    src = inspect.getsource(chat_tools.ToolsMixin._dispatch_tool)
+    with_branch = {n for n in names if 'name == "%s"' % n in src}
+    from_catalog = {n for n in names if n in dispatchable}
+    unimplemented = names - with_branch - from_catalog
+    assert not unimplemented, (
+        f"advertised but not dispatchable: {sorted(unimplemented)}")
