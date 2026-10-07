@@ -184,3 +184,31 @@ def test_the_plain_banner_lists_every_command_and_stays_in_the_window(monkeypatc
         if "models" in line or "Model" in line:
             continue
         assert len(line) <= 58, (len(line), line)
+
+
+def test_the_suite_never_drives_a_real_browser():
+    """Regression fence for a promise made 2026-10-07: no test opens a real
+    browser, navigates to any site, or drives YouTube/x.com live. Browser
+    mentions in tests are FakeBrowser stubs or string fixtures, never
+    subprocesses/webdrivers. This pins the suite's rigidity: if someone
+    imports a real webdriver, spawns chrome, or adds a live-URL test, this
+    fails before their test can go near the internet."""
+    import pathlib
+
+    root = pathlib.Path(__file__).parent.parent
+    self_text = pathlib.Path(__file__).read_text(encoding="utf-8")
+    banned = ("webdriver", "playwright.sync_api", "selenium",
+              "\"/Applications/Google Chrome", "\"/Applications/Safari.app")
+    offenders = []
+    for path in sorted((root / "tests").glob("test_*.py")):
+        if path.name == pathlib.Path(__file__).name:
+            continue  # this fence's own banned-words list is not an offence
+        text = path.read_text(encoding="utf-8")
+        for i, line in enumerate(text.splitlines(), 1):
+            code = line.split("#")[0]  # comments are not behaviour
+            for b in banned:
+                if b.lower() in code.lower():
+                    offenders.append(f"{path.name}:{i}: {b}")
+        if "import selenium" in text or "from playwright" in text:
+            offenders.append(f"{path.name}: imports a browser driver")
+    assert not offenders, f"tests must stay browser-free: {offenders[:6]}"
