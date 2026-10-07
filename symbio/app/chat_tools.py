@@ -20,8 +20,8 @@ from typing import Any
 
 from symbio import computer, constants, guardrails, safety
 from symbio.app import (
-    cron, devtools, health, learn, local_telemetry, mcp_bridge, memory,
-    sandbox, security, tooling, training, web,
+    cron, devtools, fix_loop, health, learn, local_telemetry, mcp_bridge,
+    memory, sandbox, security, tooling, training, web,
 )
 from symbio.app.config import config_show, set_config_value
 from symbio.app.chat_text import (
@@ -167,6 +167,41 @@ def _nested_confirm(session):
 class ToolsMixin:
     """Tool dispatch and execution for ChatSession."""
 
+    def _note_source_edit(self, path) -> None:
+        """Turn-end hook input: this turn wrote to a file under symbio/ — the
+        fix-watcher probes the suite instead of waiting its turn count."""
+        try:
+            rel = str(path.resolve().relative_to(
+                constants.PROJECT_DIR.resolve()))
+        except (ValueError, OSError):
+            return
+        if rel.startswith("symbio") or rel.startswith("bench/") \
+                or rel.startswith("tests/"):
+            self._source_edited_this_turn = True
+
+    def _fix_generate(self, prompt: str) -> str:
+        """One small, no-think generation for the repair loop.
+
+        The loop's contract: the model answers a PATCH prompt, nothing else.
+        Uses the session's own generate path with thinking off — the repair
+        loop is the harness's job; the model's job is one edit, which is the
+        shape the measurements say a small no-think model is good at.
+        """
+        from symbio.mlx_gate import attr as _mlx
+        from symbio.app import tooling as _tooling
+
+        self._ensure_model_loaded()
+        prompt_text = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}],
+            tokenize=False, add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        sampler = self.sampler or _mlx("mlx_lm.sample_utils.make_sampler")(temp=0.0)
+        raw = _mlx("mlx_lm.generate.generate")(
+            self.model, self.tokenizer, prompt=prompt_text, sampler=sampler,
+            max_tokens=700, verbose=False)   # a patch needs its two fences: 400 cut models off mid-NEW (measured)
+        return _tooling.clean_response(_tooling.strip_reasoning_block(raw))
+
     def _resolve_project_path(self, raw_path: str) -> Path | None:
         """Normalize a user-supplied path so it stays inside the project dir."""
         raw_path = raw_path.strip()
@@ -243,6 +278,7 @@ class ToolsMixin:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(params.get("content", ""), encoding="utf-8")
                 self.retriever.invalidate_cache()
+                self._note_source_edit(path)
                 return f"{msg}Wrote {path.relative_to(constants.PROJECT_DIR)}."
             except Exception as e:
                 return f"Failed to write {path.name}: {e}"
@@ -268,6 +304,7 @@ class ToolsMixin:
                 msg = ""
             path.write_text(original.replace(old_string, new_string, 1), encoding="utf-8")
             self.retriever.invalidate_cache()
+            self._note_source_edit(path)
             return f"{msg}Edited {path.relative_to(constants.PROJECT_DIR)}."
 
     def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
@@ -2472,6 +2509,37 @@ class ToolsMixin:
                 targets = [targets]
             ok, report = devtools.run_tests(targets)
             return f"Test suite {'PASSED' if ok else 'FAILED'}.\n{report}"
+
+        if name == "fix_tool":
+            # The mechanical repair loop (see fix_loop's module docs): the
+            # harness drives the plan — run suite, slice the failure small,
+            # ask the model for exactly one patch, apply, re-run, revert on
+            # worse. The model never holds the plan; each of its calls is
+            # one patch on a small context, the shape a small model is
+            # measured to be good at.
+            import io as _io
+            from contextlib import redirect_stdout as _rso
+
+            src = str(params.get("source", "")).strip()
+            if not src:
+                return "fix_tool failed: missing 'source' (project-relative path)."
+            buf = _io.StringIO()
+            with _rso(buf):
+                rec = fix_loop.repair_failure(
+                    str(params.get("failure", "")),
+                    src,
+                    generate=self._fix_generate,
+                    verify=lambda _t: devtools.run_tests(None),
+                    log=lambda s: self._status(f"  [Fix] {s}"))
+            lines = [l for l in buf.getvalue().splitlines() if l.strip()]
+            summary = (
+                f"Repair {'SUCCEEDED' if rec['fixed'] else 'DID NOT SUCCEED'}"
+                f"{' (reverted)' if rec['reverted'] else ''} — "
+                f"{'fixed: ' + str(rec['fixed'])}, "
+                f"reverted: {str(rec['reverted'])}, "
+                f"result: {rec.get('result', 'ok')}.\n"
+                + (f"[Fix log]\n" + "\n".join(lines[:12]) if lines else ""))
+            return summary
 
         if name == "save_script":
             from symbio.app import scripts
