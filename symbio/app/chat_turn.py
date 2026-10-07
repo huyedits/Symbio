@@ -1931,3 +1931,21 @@ class AgentTurnMixin:
                 if note:
                     self.retriever.invalidate_cache()
                     self.output_fn(f"  [Learn] Remembered research: {note.name}")
+
+        # The harness self-check: a normal turn ended — has the suite gone
+        # red on its own, and can the loop repair it without being told?
+        # On a background thread: a suite probe takes minutes and must never
+        # sit between the user and their next prompt. edit_done (a turn that
+        # wrote to symbio's own source) probes immediately; ordinary turns
+        # probe every Nth turn (see fix_watch's constants).
+        import threading as _threading
+        edit_done = bool(getattr(self, "_source_edited_this_turn", False))
+
+        def _watch():
+            from symbio.app import fix_watch
+            fix_watch.watch_turn(edit_done=edit_done,
+                                 generate=self._fix_generate,
+                                 log=self.output_fn)
+
+        _threading.Thread(target=_watch, daemon=True).start()
+        self._source_edited_this_turn = False
