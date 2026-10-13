@@ -10,39 +10,7 @@
 
 **[Website](https://huyedits.github.io/Symbio/)** · **[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)** 
 
----
-
-## APGI — artificial personalised general intelligence
-
-A term coined for this project, because the thing being built is not on the
-road to AGI and is not trying to be.
-
-AGI is one mind that is general across everyone. **APGI is one mind that is
-general across everything YOU do** — the same breadth of capability, narrowed
-to a single person, a single machine, and the particular way they work. It is
-not a smaller AGI. It is a different target, and most of what makes it hard is
-different too.
-
-What it implies in practice, all of which this repository is an attempt at:
-
-- **The weights change for you, not for a population.** A correction becomes a
-  LoRA update on your machine, guarded by a battery that rolls it back if it
-  made anything worse. Nobody else's install gets it.
-- **It learns an environment by acting in it.** Given a world it has never seen
-  it earns its own corpus: it acts, the world grades it by changing or not
-  changing, and only what worked is kept. Measured here at 10/45 to 26/45, and
-  six-step chains from 0/19 to 7/19, with no human writing a sample.
-- **It is one installation, not a service.** No cloud inference, no shared
-  fine-tune, no telemetry on by default. What it learns about you cannot leak
-  into anyone else's copy, because there is no anyone else's copy.
-- **Personalisation is the general capability.** The skills, the soul store,
-  the constitution and the per-skill adapters exist to make it general across
-  YOUR work rather than average across everyone's.
-
-The honest limits are in this README too, measured rather than asserted: what
-it cannot bootstrap, where the harness was the thing in its way, and which
-numbers are one run rather than a result.
-
+-- 
 ## What is Symbio?
 
 Most AI agents have a problem:
