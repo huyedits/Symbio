@@ -1544,3 +1544,20 @@ body.busy .msg-actions { visibility: hidden; }
 .notice-text { flex: 1; line-height: 1.5; }
 .notice-text p { margin: 0; }
 .notice .icon-btn { width: 22px; height: 22px; font-size: 11px; }
+
+/* Not reachable: stated once, beside the composer, which stays usable. */
+.conn-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; margin-bottom: 10px;
+  border: 1px solid var(--danger); border-radius: var(--radius-md);
+  background: var(--danger-glow); font-size: 13px; color: var(--text-secondary);
+}
+.conn-banner-text { flex: 1; min-width: 0; line-height: 1.5; }
+
+/* Typed, kept, not yet with Symbio. */
+.msg.user.unsent .msg-body { opacity: 0.6; }
+.msg.user.unsent::after {
+  content: "Waiting to send";
+  display: block; text-align: right; margin-top: 4px;
+  font-size: 11.5px; color: var(--text-secondary);
+}

@@ -166,6 +166,11 @@ def test_foreign_template_samples_are_dropped(corpus):
 
     assert removed == {str(constants.TRAIN_FILE): [2]}
     assert [r["text"] for r in _records(constants.TRAIN_FILE)] == [native]
+    # Kept aside, not destroyed: a switch back to the old model can use them.
+    archived = list((constants.TRAIN_FILE.parent / "archive").glob(
+        "train.foreign-template.*.jsonl"))
+    assert len(archived) == 1
+    assert json.loads(archived[0].read_text(encoding="utf-8"))["text"] == FOREIGN
 
 
 def test_a_wholly_foreign_validation_file_is_cleared(corpus):

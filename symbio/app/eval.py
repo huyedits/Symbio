@@ -326,9 +326,20 @@ def _load_base_model(config: dict[str, Any]) -> tuple[Any, Any]:
 
 
 def _make_sampler(config: dict[str, Any]):
+    kw = {}
+    # min_p: the hybrid models' (Mamba2/DeltaNet paths) anti-loop —
+    # agent.repetition_penalty cannot run there (logits_processors are
+    # unsupported on the shimmed path, measured 2026-09-03 on the 9B and
+    # 2026-10-16 on Granite), and temp-0 greedy loops on Granite-4.0
+    # (measured: the "391" reply six times). A serving min_p does the same
+    # work as a sampler, which hybrids support.
+    min_p = (config.get("agent", {}) or {}).get("min_p")
+    if min_p is not None:
+        kw["min_p"] = float(min_p)
     return make_sampler(
         temp=config["agent"]["temperature"],
         top_p=config["agent"]["top_p"],
+        **kw,
     )
 
 

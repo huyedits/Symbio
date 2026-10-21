@@ -74,6 +74,10 @@ def test_agent_loop_generation_matches_training(monkeypatch):
         # dial's state decides whether the alignment contract even runs.
         cfg.setdefault("agent", {})["thinking_level"] = (
             "low" if training.THINKING_ENABLED else "none")
+        # And the per-turn decider: think_when "auto" answers small talk
+        # ("hi") without a reasoning block whatever the dial says. This test
+        # is about the dial's alignment, so every turn uses the dial.
+        cfg["agent"]["think_when"] = "always"
         rag_cfg = dict(cfg.get("rag", {}))
         rag_cfg["tag_index_enabled"] = False
         rag_cfg["auto_index_enabled"] = False

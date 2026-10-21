@@ -40,12 +40,26 @@ def _top_failure(report: str) -> str | None:
     return None
 
 
-def _slice_source_for(test_id: str) -> str:
-    """Which source file a failing test most plausibly repaired — the test
-    module's sibling-under-symbio mapping is not derivable in general, so
-    the watcher takes it from the FAILURE's import path in the report, or
-    falls back to the test's own module name."""
+def _slice_source_for(test_id: str, report: str = "",
+                      trace: str = "") -> str:
+    """Which source file the failing test needs repaired.
+
+    First choice: the deepest project frame in the failure's own traceback
+    (fix_loop.source_from_report). The test-name mapping below is only the
+    fallback — on its own it sent tests/test_custom_commands.py to chat.py,
+    because symbio/app/custom_commands.py does not exist (the code under
+    test is commands.py), and no patch to chat.py could have fixed it."""
     import re
+
+    for text in (report, trace):
+        located = fix_loop.source_from_report(text, test_id)
+        if located and located[0].startswith("symbio/"):
+            return located[0]
+    # No project frame (a wrong value fails in the test's own assert): what
+    # the test calls is the next best evidence.
+    located = fix_loop.source_from_test(test_id)
+    if located:
+        return located[0]
 
     # "FAILED tests/test_custom_commands.py::test_x" → the file the test
     # lives in maps to a same-named module under symbio/ when one exists.
@@ -54,8 +68,7 @@ def _slice_source_for(test_id: str) -> str:
         return "symbio/app/chat.py"   # the loop's home; a sane default target
     leaf = m.group(1).rsplit("/", 1)[-1]          # test_custom_commands.py
     stem = leaf.removeprefix("test_")             # custom_commands.py
-    for candidate in (f"symbio/app/{stem}", f"symbio/{stem}",
-                      f"symbio/app/{stem.replace('.py', '.py')}"):
+    for candidate in (f"symbio/app/{stem}", f"symbio/{stem}"):
         if (constants.PROJECT_DIR / candidate).exists():
             return candidate
     return "symbio/app/chat.py"
@@ -79,7 +92,9 @@ def watch_turn(edit_done: bool = False, generate=None,
                                  _state["turns_since"] + 1)
         if not edit_done and _state["turns_since"] < _TURNS_BETWEEN_PROBES:
             return
-        ok, report = devtools.run_tests(["tests", "bench"])
+        # Probe what the repair loop verifies against: a bench-only failure
+        # could never turn green under a `tests` verify.
+        ok, report = devtools.run_tests(["tests"])
         if ok:
             return
         failure = _top_failure(report)
@@ -87,11 +102,14 @@ def watch_turn(edit_done: bool = False, generate=None,
             return
         say(f"  [Watch] The suite is red ({failure}) — repairing without "
             f"being told.")
-        source = _slice_source_for(failure)
+        trace = devtools.trace_test(failure)
+        suspects = devtools.locate_fault(failure)
+        source = fix_loop.pick_source(suspects, _slice_source_for(failure, report, trace))
         _state["last_repaired"] = failure
         rec = fix_loop.repair_failure(
             failure, source, generate=generate,
-            verify=lambda _t: devtools.run_tests(["tests"]), log=say)
+            verify=lambda _t: devtools.run_tests(["tests"]), log=say,
+            trace=trace, suspects=suspects)
         verdict = "fixed" if rec["fixed"] else (
             "reverted" if rec["reverted"] else "could not fix — the "
             "failure needs a designer, not a patch")

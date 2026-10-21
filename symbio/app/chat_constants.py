@@ -509,6 +509,7 @@ BUILTIN_COMMANDS: tuple[tuple[str, str, str], ...] = (
     ("prune", "", "Drop stale notes"),
     ("tidy", "", "Tidy the stores"),
     ("standing", "[instruction]", "Instructions that outlive the session"),
+    ("goal", "[text|done N|clear]", "Goals worked toward across turns"),
     ("security", "", "The security policy and recent events"),
     ("telemetry", "on|off", "Anonymous local telemetry"),
     ("feedback", "<text>", "Send feedback"),

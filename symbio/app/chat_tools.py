@@ -14,6 +14,7 @@ import math
 import os
 import re
 import shlex
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,9 @@ from symbio.app.chat_text import (
     _annotate_sandbox_cwd, _gui_app_for, _looks_like_shell_command,
     _queries_overlap, _repair_project_path_command,
 )
+
+# Guards the lazy creation of each session's generation lock.
+_GENERATION_LOCK_INIT = threading.Lock()
 
 
 def _image_size(path) -> tuple[int, int]:
@@ -179,6 +183,15 @@ class ToolsMixin:
                 or rel.startswith("tests/"):
             self._source_edited_this_turn = True
 
+    def _generation_lock(self) -> threading.RLock:
+        """The session's model-generation lock, made on first use (tests
+        build sessions without __init__)."""
+        with _GENERATION_LOCK_INIT:
+            lock = getattr(self, "_gen_lock", None)
+            if lock is None:
+                lock = self._gen_lock = threading.RLock()
+            return lock
+
     def _fix_generate(self, prompt: str) -> str:
         """One small, no-think generation for the repair loop.
 
@@ -190,16 +203,22 @@ class ToolsMixin:
         from symbio.mlx_gate import attr as _mlx
         from symbio.app import tooling as _tooling
 
-        self._ensure_model_loaded()
-        prompt_text = self.tokenizer.apply_chat_template(
-            [{"role": "user", "content": prompt}],
-            tokenize=False, add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        sampler = self.sampler or _mlx("mlx_lm.sample_utils.make_sampler")(temp=0.0)
-        raw = _mlx("mlx_lm.generate.generate")(
-            self.model, self.tokenizer, prompt=prompt_text, sampler=sampler,
-            max_tokens=700, verbose=False)   # a patch needs its two fences: 400 cut models off mid-NEW (measured)
+        with self._generation_lock():
+            self._ensure_model_loaded()
+            prompt_text = self.tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False, add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            # Greedy for the first try: the chat sampler runs at temperature
+            # 0.6, and a patch must quote the file character for character.
+            # A retry samples: greedy answers the same prompt with the same
+            # failed patch (measured 2026-10-08, three identical cycles).
+            temp = 0.6 if fix_loop.RETRY_MARKER in prompt else 0.0
+            sampler = _mlx("mlx_lm.sample_utils.make_sampler")(temp=temp)
+            raw = _mlx("mlx_lm.generate.generate")(
+                self.model, self.tokenizer, prompt=prompt_text, sampler=sampler,
+                max_tokens=700, verbose=False)   # a patch needs its two fences: 400 cut models off mid-NEW (measured)
         return _tooling.clean_response(_tooling.strip_reasoning_block(raw))
 
     def _resolve_project_path(self, raw_path: str) -> Path | None:
@@ -2523,22 +2542,29 @@ class ToolsMixin:
             src = str(params.get("source", "")).strip()
             if not src:
                 return "fix_tool failed: missing 'source' (project-relative path)."
+            failure = str(params.get("failure", "")).strip()
+            suspects = devtools.locate_fault(failure)
+            src = fix_loop.pick_source(suspects, src)
             buf = _io.StringIO()
             with _rso(buf):
                 rec = fix_loop.repair_failure(
-                    str(params.get("failure", "")),
+                    failure,
                     src,
                     generate=self._fix_generate,
                     verify=lambda _t: devtools.run_tests(None),
-                    log=lambda s: self._status(f"  [Fix] {s}"))
+                    log=lambda s: self._status(f"  [Fix] {s}"),
+                    trace=devtools.trace_test(failure),
+                    suspects=suspects)
             lines = [l for l in buf.getvalue().splitlines() if l.strip()]
             summary = (
                 f"Repair {'SUCCEEDED' if rec['fixed'] else 'DID NOT SUCCEED'}"
                 f"{' (reverted)' if rec['reverted'] else ''} — "
                 f"{'fixed: ' + str(rec['fixed'])}, "
                 f"reverted: {str(rec['reverted'])}, "
-                f"result: {rec.get('result', 'ok')}.\n"
-                + (f"[Fix log]\n" + "\n".join(lines[:12]) if lines else ""))
+                f"result: {rec.get('result', 'ok')}."
+                + (f" Pre-repair copy kept at {rec['backup']}." if rec.get("backup") else "")
+                + "\n"
+                + ("[Fix log]\n" + "\n".join(lines[:12]) if lines else ""))
             return summary
 
         if name == "save_script":

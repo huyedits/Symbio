@@ -1,0 +1,310 @@
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Symbio Desktop Redesign</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Quicksand:wght@500;600;700&display=swap">
+  <style>
+    :root {
+      --ground: #ffffff;
+      --surface: #ffffff;
+      --ink: #0a0a0a;
+      --muted: #595959;
+      --line: #e0e0e0;
+      --signal: #000000;
+      --pond: #000000;
+      --danger: #333333;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 16px;
+      --radius-xl: 22px;
+      --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 20px; --s6: 24px; --s8: 32px; --s10: 40px; --s12: 48px;
+      --font-display: 'Quicksand', ui-rounded, system-ui, sans-serif;
+      --font-body: -apple-system, system-ui, 'SF Pro Text', sans-serif;
+      --font-data: ui-monospace, 'SF Mono', Menlo, monospace;
+      color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --ground: #0a0a0a;
+        --surface: #121212;
+        --ink: #f5f5f5;
+        --muted: #a6a6a6;
+        --line: #2a2a2a;
+        --signal: #ffffff;
+        --pond: #ffffff;
+        --danger: #c0c0c0;
+        color-scheme: dark;
+      }
+    }
+    :root[data-theme="dark"] {
+      --ground: #0a0a0a;
+      --surface: #121212;
+      --ink: #f5f5f5;
+      --muted: #a6a6a6;
+      --line: #2a2a2a;
+      --signal: #ffffff;
+      --pond: #ffffff;
+      --danger: #c0c0c0;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: var(--font-body);
+      font-size: 15.5px;
+      line-height: 1.65;
+      color: var(--ink);
+      background: var(--ground);
+      -webkit-font-smoothing: antialiased;
+    }
+    button { font: inherit; color: inherit; cursor: pointer; border: none; background: transparent; }
+    .app { display: grid; grid-template-columns: 220px 1fr; height: 100%; }
+    .side {
+      background: var(--surface); border-right: 1px solid var(--line);
+      padding: var(--s6) var(--s4);
+      display: flex; flex-direction: column; gap: var(--s4);
+    }
+    .brand { display: flex; align-items: center; gap: var(--s3); font-family: var(--font-display); font-weight: 600; font-size: 18px; }
+    .brand .bead { width: 14px; height: 14px; border-radius: 50%; background: var(--signal); }
+    .nav { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s1); }
+    .nav button {
+      width: 100%; display: flex; align-items: center; gap: var(--s3);
+      padding: var(--s3) var(--s4); border-radius: var(--radius-md);
+      font-size: 14px; text-align: left;
+    }
+    .nav button:hover { background: color-mix(in srgb, var(--pond) 10%, transparent); }
+    .nav button.active { background: var(--ground); color: var(--pond); font-weight: 600; }
+    .nav svg { width: 18px; height: 18px; flex: none; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--pond); }
+    .status-dot.working { background: var(--signal); animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.5 } }
+    @media (prefers-reduced-motion: reduce) { .status-dot.working { animation: none; } }
+    .main { display: flex; flex-direction: column; min-width: 0; height: 100%; }
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: var(--s4) var(--s6); border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+    .topbar .title { font-family: var(--font-display); font-weight: 600; font-size: 16.5px; }
+    .topbar .meta { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: var(--s3); }
+    .content {
+      flex: 1; overflow: auto; padding: var(--s6);
+      display: grid; gap: var(--s6);
+      grid-template-columns: 1fr 360px;
+    }
+    .card {
+      background: var(--surface); border: 1px solid var(--line);
+      border-radius: var(--radius-lg); padding: var(--s5);
+    }
+    .card h2 {
+      margin: 0 0 var(--s3); font-family: var(--font-display); font-weight: 600;
+      font-size: 15px; text-wrap: balance;
+    }
+    .stack { display: flex; flex-direction: column; gap: var(--s4); }
+    .approval .head { display: flex; align-items: flex-start; gap: var(--s3); margin-bottom: var(--s3); }
+    .approval .head h2 { margin: 0; font-size: 16.5px; }
+    .approval .bead { width: 12px; height: 12px; border-radius: 50%; background: var(--signal); margin-top: 6px; flex: none; }
+    .reason { color: var(--muted); font-size: 13.5px; margin-bottom: var(--s3); }
+    .warning {
+      border: 1px solid var(--danger); color: var(--danger);
+      border-radius: var(--radius-md); padding: var(--s3) var(--s4); margin-bottom: var(--s3); font-size: 13.5px;
+    }
+    .payload {
+      font-family: var(--font-data); font-size: 12.5px; line-height: 1.5;
+      background: var(--ground); border-radius: var(--radius-md); padding: var(--s4);
+      white-space: pre-wrap; word-break: break-word; margin-bottom: var(--s4);
+    }
+    .actions { display: flex; gap: var(--s2); flex-wrap: wrap; }
+    .btn { padding: 7px 14px; border-radius: var(--radius-sm); font-weight: 600; font-size: 13.5px; }
+    .btn-primary { background: var(--signal); color: var(--ink); }
+    .btn-danger { border: 1px solid var(--danger); color: var(--danger); }
+    .btn-ghost { border: 1px solid var(--line); color: var(--muted); }
+    .btn-primary:hover { filter: brightness(.95); }
+    .gr { display: grid; grid-template-columns: 1fr auto; gap: var(--s3); align-items: center; }
+    .modes { display: flex; gap: var(--s1); }
+    .seg { padding: 4px 8px; border-radius: var(--radius-sm); font-size: 12px; color: var(--muted); border: 1px solid var(--line); }
+    .seg.on { background: var(--ground); color: var(--ink); border-color: var(--ink); }
+    .composer {
+      margin: var(--s6); background: var(--surface);
+      border: 1px solid var(--line); border-radius: var(--radius-xl);
+      padding: var(--s4); box-shadow: 0 1px 0 color-mix(in srgb, var(--ink) 5%, transparent);
+    }
+    .composer textarea {
+      width: 100%; border: none; background: transparent; resize: none;
+      font: inherit; color: var(--ink); min-height: 64px; outline: none;
+    }
+    .composer-foot { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); margin-top: var(--s3); }
+    .composer-actions { display: flex; gap: var(--s2); }
+    .status { display: flex; align-items: center; gap: var(--s3); font-size: 13px; color: var(--muted); }
+    .toggle { display: flex; gap: var(--s1); }
+    .toggle button { padding: 4px 8px; border-radius: var(--radius-sm); font-size: 12px; color: var(--muted); }
+    .toggle button.active { background: var(--ground); color: var(--ink); }
+    @media (max-width: 900px) {
+      .app { grid-template-columns: 64px 1fr; }
+      .side { padding: var(--s4) var(--s2); }
+      .brand span { display: none; }
+      .nav button span { display: none; }
+      .nav button { justify-content: center; }
+      .content { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 600px) {
+      .content { padding: var(--s4); gap: var(--s4); }
+      .composer { margin: var(--s4); }
+      .topbar { padding: var(--s3) var(--s4); }
+    }
+    .view-panel { display:none; }
+    .view-panel.active { display:block; }
+    .nav button:focus-visible, .btn:focus-visible, .seg:focus-visible { outline: 2px solid var(--pond); outline-offset: 2px; }
+    /* Liquid glass functional layer (Apple HIG): side/topbar/composer only */
+    .side, .topbar, .composer {
+      -webkit-backdrop-filter: blur(24px) saturate(1.4);
+      backdrop-filter: blur(24px) saturate(1.4);
+      background: color-mix(in srgb, var(--surface) 72%, transparent);
+      border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+    }
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); }
+  </style>
+<div class="app">
+  <aside class="side">
+    <div class="brand"><span class="bead"></span><span>Symbio</span></div>
+    <ul class="nav" id="nav">
+      <li><button data-tab="chat" class="active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 6h16v10H8l-4 4V6z"/></svg><span>Chat</span></button></li>
+      <li><button data-tab="workspace"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 3v18"/></svg><span>Workspace</span></button></li>
+      <li><button data-tab="approvals"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M9 12l2 2 4-4"/></svg><span>Approvals</span></button></li>
+      <li><button data-tab="guardrails"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l8 4v5c0 5-3.5 8.5-8 9-4.5-.5-8-4-8-9V7l8-4z"/></svg><span>Guardrails</span></button></li>
+      <li><button data-tab="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg><span>Settings</span></button></li>
+    </ul>
+    <div class="stack" style="margin-top:auto">
+      <div class="status"><span class="status-dot working"></span><span>working · 14B</span></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <div class="title">Chat</div>
+        <div class="meta">Huy · Mac · pond session 12</div>
+      </div>
+      <div class="toggle" id="theme">
+        <button data-theme="light">Light</button>
+        <button data-theme="dark">Dark</button>
+        <button data-theme="auto" class="active">Auto</button>
+      </div>
+    </header>
+
+      <div id="view-chat" class="view-panel active">
+    <section class="content">
+      <div class="stack">
+        <div class="card">
+          <h2>Status</h2>
+          <div class="status"><span class="status-dot"></span><span>Resting · adapter v3 · 6 skills sealed</span></div>
+          <p style="margin:8px 0 0; color:var(--muted); font-size:13.5px;">Last sync 2 min ago. Capsule on disk, kv budget 2.3 MB.</p>
+        </div>
+
+        <div class="approval card">
+          <div class="head">
+            <span class="bead"></span>
+            <h2>Post "Hi" to x.com</h2>
+          </div>
+          <p class="reason">Reason: public.action · guardrail asks for approval on outgoing posts.</p>
+          <div class="warning">The wording about to go out does not match what was asked.</div>
+          <pre class="payload">POST https://x.com/i/api/...
+{"text":"Hi"}</pre>
+          <div class="actions">
+            <button class="btn btn-danger">Deny</button>
+            <button class="btn btn-ghost">Always allow</button>
+            <button class="btn btn-primary">Allow</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Recent replies</h2>
+          <p style="margin:0; color:var(--muted); font-size:13.5px;">Two turns completed. Fix loop repaired 1 bug in 1 pass.</p>
+        </div>
+      </div>
+
+      <div class="stack">
+        <div class="card">
+          <h2>Guardrails</h2>
+          <div class="stack" style="gap:var(--s3)">
+            <div class="gr"><div>Outgoing posts</div><div class="modes"><span class="seg">Allow</span><span class="seg">If risky</span><span class="seg on">Ask</span><span class="seg">Never</span></div></div>
+            <div class="gr"><div>File writes outside repo</div><div class="modes"><span class="seg">Allow</span><span class="seg on">If risky</span><span class="seg">Ask</span><span class="seg">Never</span></div></div>
+            <div class="gr"><div>Shell commands</div><div class="modes"><span class="seg on">Allow</span><span class="seg">If risky</span><span class="seg">Ask</span><span class="seg">Never</span></div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Settings</h2>
+          <div class="stack" style="gap:var(--s3)">
+            <div class="gr"><div>Adapter (current)</div><div style="font-family:var(--font-data); font-size:12px; color:var(--muted)">v3 · 14B</div></div>
+            <div class="gr"><div>KV budget</div><div style="font-family:var(--font-data); font-size:12px; color:var(--muted)">2.3 MB</div></div>
+            <div class="gr"><div>Thinking</div><div style="font-family:var(--font-data); font-size:12px; color:var(--muted)">on</div></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Adapter map</h2>
+          <p style="margin:0; color:var(--muted); font-size:13.5px;">5 sealed · 1 training · 0 pending</p>
+        </div>
+      </div>
+    </section>
+      </div>
+
+    <div class="composer">
+      <textarea placeholder="Message Symbio…"></textarea>
+      <div class="composer-foot">
+        <div class="composer-actions">
+          <button class="btn btn-ghost">Attach</button>
+          <button class="btn btn-ghost">Tools</button>
+        </div>
+        <button class="btn btn-primary">Send</button>
+      </div>
+    </div>
+
+    <div id="view-workspace" class="view-panel">
+      <section class="content">
+        <div class="card"><h2>Workspace</h2><p style="margin:0;color:var(--muted)">Adapter map: 5 sealed · 1 training · 0 pending. No glowing graph; cards + status dots.</p></div>
+        <div class="card"><h2>Skills</h2><p style="margin:0;color:var(--muted)">6 skills sealed; last bake 2m ago.</p></div>
+      </section>
+    </div>
+    <div id="view-approvals" class="view-panel">
+      <section class="content">
+        <div class="card"><h2>Approvals inbox</h2><p style="margin:0;color:var(--muted)">One pending outgoing post; deny/ask/allow as above.</p></div>
+      </section>
+    </div>
+    <div id="view-guardrails" class="view-panel">
+      <section class="content">
+        <div class="card"><h2>Guardrails</h2><p style="margin:0;color:var(--muted)">Outgoing posts: Ask · File writes outside repo: If risky · Shell: Allow.</p></div>
+      </section>
+    </div>
+    <div id="view-settings" class="view-panel">
+      <section class="content">
+        <div class="card"><h2>Settings</h2><p style="margin:0;color:var(--muted)">LFM2.5 24B A2B · KV 2.3MB · Thinking on.</p></div>
+      </section>
+    </div>
+
+  </main>
+</div>
+
+<script>
+  const root = document.documentElement;
+  const themeButtons = document.querySelectorAll('#theme button');
+  themeButtons.forEach(b => b.addEventListener('click', () => {
+    themeButtons.forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    const t = b.dataset.theme;
+    if (t === 'auto') root.removeAttribute('data-theme');
+    else root.setAttribute('data-theme', t);
+  }));
+  document.querySelectorAll('#nav button').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('#nav button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    const name = b.querySelector('span').textContent;
+    document.querySelector('.topbar .title').textContent = name;
+    const tab = b.dataset.tab;
+    document.querySelectorAll('.view-panel').forEach(v => v.classList.remove('active'));
+    const panel = document.getElementById('view-' + tab);
+    if (panel) panel.classList.add('active');
+  }));
+</script>
+</html>

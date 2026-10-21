@@ -171,6 +171,10 @@ def test_boot_prefill_stops_where_a_user_message_starts(monkeypatch):
 
     monkeypatch.setattr(chat, "make_prompt_cache", lambda model: [])
     monkeypatch.setattr(chat, "can_trim_prompt_cache", lambda cache: False)
+    # Trimmability is decided from the cache's geometry now (a sliding window
+    # the prompt outgrows), not from can_trim_prompt_cache on an empty cache.
+    monkeypatch.setattr(chat.ChatSession, "_hybrid_probe_trimmable",
+                        lambda self, prompt_tokens=None: False)
     monkeypatch.setattr(chat, "generate_step", generate_step)
     agent = {**CONFIG["agent"], "persist_prompt_cache": False}
     session = chat.ChatSession(

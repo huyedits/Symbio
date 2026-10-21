@@ -85,6 +85,7 @@ _TOOL_GROUPS: dict[str, str] = {
     "system_check": "system",
     "verify_features": "system",
     "run_tests": "code",
+    "fix_tool": "code",
     "run_remote": "terminal",
     "add_golden_case": "config",
     # The meta tool that hands out the other tools' schemas. "core" is not a
@@ -168,6 +169,7 @@ _TOOL_FAMILIES: dict[str, str] = {
     "verify_features": "admin",
     "add_golden_case": "admin",
     "run_tests": "code",
+    "fix_tool": "code",
     "realign": "admin",
     "tool_docs": "core",
 }
@@ -302,6 +304,32 @@ _TOOLS: list[dict[str, Any]] = [
                     "description": "Which suite(s): 'tests', 'bench'. Default: all of tests/.",
                 },
             },
+        },
+    },
+    {
+        "name": "fix_tool",
+        "description": (
+            "Repair ONE test failure in this project's own source, under "
+            "harness control: the loop runs the suite, hands you only the "
+            "failing test and the file to fix (sliced small), applies your "
+            "patch, re-runs, and reverts automatically if the fix makes "
+            "things worse. Pass the failing test id from run_tests' report. "
+            "You do not plan this loop — the harness does; you write the "
+            "patch it asks for."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "failure": {
+                    "type": "string",
+                    "description": "One failing test id, e.g. tests/test_x.py::test_greet.",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Project-relative path of the file to repair.",
+                },
+            },
+            "required": ["failure", "source"],
         },
     },
     {

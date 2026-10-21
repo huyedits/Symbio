@@ -324,7 +324,12 @@ def corpus_append_transaction(role: str | None = None):
 # <think></think> blocks and real reasoning, a half-finished migration by
 # _regenerate_corpus.py. Serving with True against a corpus that half-teaches
 # "skip thinking" is why simple prompts still come back with an empty block.
-THINKING_ENABLED = True
+# 2026-10-16: switched False for the Granite headmaster. The served config
+# is agent.thinking_level "none", and the thinking-on corpus trained an
+# adapter that spoke mismatched turn markers — measured in the real CLI:
+# every served reply opened a <search> tag and never closed it (the daemon's
+# repair loop caught it and retried, live). Match the corpus to the serving.
+THINKING_ENABLED = False
 
 def strip_tool_catalog(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     """Drop the <tools> JSON catalog from a system turn destined for training.
@@ -587,6 +592,20 @@ def drop_foreign_template_samples(tokenizer, role: str | None = None) -> dict[st
         # entirely of junk, so leave it be and let the caller notice.
         if not kept and path == train_file:
             continue
+        # Kept, not deleted: "seeding regenerates them" holds for seeds, not
+        # for samples earned from corrections — and this sweep runs before
+        # the memory pre-flight, so a run that then refuses to start had
+        # already discarded them (measured 2026-10-07: 107 Qwen-template
+        # samples gone on a Gemma switch, the run skipped for 0.4 GB). A
+        # switch back to the old model can restore them from here.
+        lines = path.read_text(encoding="utf-8").splitlines()
+        archive = path.parent / "archive"
+        archive.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        with open(archive / f"{path.stem}.foreign-template.{stamp}.jsonl", "a",
+                  encoding="utf-8") as f:
+            for n in dropped:
+                f.write(lines[n - 1] + "\n")
         path.write_text(("\n".join(kept) + "\n") if kept else "",
                         encoding="utf-8")
         removed[str(path)] = dropped

@@ -20,9 +20,26 @@
 const CONVERSATIONS_KEY = 'symbio.conversations.v1';
 const LIVE_KEY = 'symbio.live.v1';
 const THEME_KEY = 'symbio.theme';
+// Messages typed but not yet acknowledged by the server, oldest first.
+const OUTBOX_KEY = 'symbio.outbox.v1';
 
 let ws = null;
-let reconnectDelay = 500;
+// The reconnect ladder (after Hermes Desktop's use-gateway-boot): full-jitter
+// backoff from 300ms to a 15s cap, so a restarting server is not redialled in
+// lockstep; a wake, an `online` or the window coming back nudges it at once.
+let reconnectAttempt = 0;
+let reconnectTimer = null;
+let offlineSince = null;       // when the current disconnect started
+let escalateTimer = null;      // shows the banner once the disconnect has lasted
+let probeTimer = null;         // a liveness ping waiting for any frame back
+let turnInterrupted = false;   // a turn was in flight when the socket dropped
+let outbox = loadOutbox();
+const RECONNECT_BASE_MS = 300;
+const RECONNECT_CAP_MS = 15000;
+const PROBE_TIMEOUT_MS = 4000;
+// A local server that has not answered for this long has most likely stopped;
+// say so, without taking the transcript or the composer away.
+const ESCALATE_AFTER_MS = 20000;
 let live = { id: null, title: 'New chat', messages: [] };
 let viewingId = null;          // null = the live conversation
 let streamEl = null;           // the assistant bubble currently being written
@@ -31,6 +48,9 @@ let activityCard = null;
 let pendingConfirm = false;
 
 const thread = document.getElementById('thread');
+
+// Keep the live thread from growing without bound in long sessions.
+const MAX_THREAD_MESSAGES = 60;
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('btn-send');
 
@@ -48,6 +68,25 @@ function saveConversations(list) {
   try {
     localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(list.slice(0, 50)));
   } catch (e) { /* private window, full disk: the chat still works */ }
+}
+
+function loadOutbox() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(OUTBOX_KEY));
+    return Array.isArray(saved) ? saved.filter(m => m && m.id && m.text) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveOutbox() {
+  try {
+    localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox));
+  } catch (e) { /* the message still sends while this page stays open */ }
+}
+
+function newMessageId() {
+  return `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function archiveLive() {
@@ -165,6 +204,16 @@ function clearWelcome() {
   document.getElementById('main').classList.remove('empty');
 }
 
+function trimThread() {
+  // Keep at most MAX_THREAD_MESSAGES direct child message nodes; drop the
+  // oldest. Welcome and anything outside #thread (the composer) are left alone.
+  const messages = Array.from(thread.children).filter(el =>
+    el && el.classList && el.classList.contains('msg'));
+  if (messages.length <= MAX_THREAD_MESSAGES) return;
+  const drop = messages.length - MAX_THREAD_MESSAGES;
+  for (let i = 0; i < drop; i++) messages[i].remove();
+}
+
 function renderThread(messages) {
   thread.innerHTML = '';
   if (!messages.length) {
@@ -172,15 +221,21 @@ function renderThread(messages) {
     return;
   }
   document.getElementById('main').classList.remove('empty');
-  for (const m of messages) addBubble(m.role, m.text, false, m.thought);
+  for (const m of messages) addBubble(m.role, m.text, false, m.thought, m.id);
   markLastAssistant();
   scrollToEnd();
 }
 
-function addBubble(role, text, store = true, thought = '') {
+function addBubble(role, text, store = true, thought = '', id = '') {
   clearWelcome();
   const el = document.createElement('div');
   el.className = `msg ${role}`;
+  if (id) {
+    el.dataset.mid = id;
+    // Still in the outbox: it has not reached Symbio yet, and the reader
+    // should not have to guess whether it did.
+    if (outbox.some(m => m.id === id)) el.classList.add('unsent');
+  }
   // The reasoning is KEPT, not dropped: it is the most interesting thing a
   // local model produces and the reason to trust or distrust the answer. It
   // is folded shut because it is not what was said — the answer is.
@@ -214,8 +269,11 @@ function addBubble(role, text, store = true, thought = '') {
     el.appendChild(actions);
   }
   thread.appendChild(el);
+  trimThread();
   if (store && viewingId === null) {
-    live.messages.push(thought ? { role, text, thought } : { role, text });
+    const stored = thought ? { role, text, thought } : { role, text };
+    if (id) stored.id = id;
+    live.messages.push(stored);
     if (live.messages.length === 1) {
       live.title = text.slice(0, 48);
       setTitle(live.title);
@@ -255,6 +313,7 @@ function startWaiting() {
       + '<span></span><span></span><span></span></span>'
       + '<span class="wait-label"></span></div>';
     thread.appendChild(pending);
+    trimThread();
   }
   scrollToEnd();
   clearInterval(waitTimer);
@@ -304,6 +363,7 @@ function ensureStream() {
   streamEl.className = 'msg assistant streaming';
   streamEl.innerHTML = '<div class="msg-body"></div>';
   thread.appendChild(streamEl);
+  trimThread();
   scrollToEnd();
   return streamEl;
 }
@@ -420,6 +480,7 @@ function addActivity(text) {
     // Before the streaming bubble, so the answer always sits last.
     if (streamEl) thread.insertBefore(activityCard, streamEl);
     else thread.appendChild(activityCard);
+    trimThread();
   }
   const log = activityCard.querySelector('.activity-log');
   log.textContent += (log.textContent ? '\n' : '') + clean;
@@ -483,6 +544,7 @@ function showConfirm(prompt, card) {
   }
   if (card && card.warning) el.classList.add('warned');
   thread.appendChild(el);
+  trimThread();
   scrollToEnd(true);
   const answer = (approved, always = false) => {
     if (!pendingConfirm) return;
@@ -574,20 +636,32 @@ function renderMarkdown(src) {
 // ── socket ──────────────────────────────────────────────────────────
 
 function connect() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${scheme}://${location.host}/ws/chat`);
 
-  ws.onopen = () => {
-    reconnectDelay = 500;
+  const sock = ws;
+
+  sock.onopen = () => {
+    if (sock !== ws) return;
     setStatus('ok', 'Connected');
   };
 
-  ws.onmessage = (event) => {
+  sock.onmessage = (event) => {
+    // A late frame from a socket this page already replaced must not paint
+    // over the live one.
+    if (sock !== ws) return;
     let data;
     try { data = JSON.parse(event.data); } catch (e) { return; }
     lastFrameAt = Date.now();
+    clearProbe();                // any frame at all proves the socket alive
     switch (data.type) {
       case 'connected':
+        reconnectAttempt = 0;
+        offlineSince = null;
+        clearTimeout(escalateTimer); escalateTimer = null;
+        hideConnectionBanner();
         window.__assistantName = data.assistant_name || 'Symbio';
         window.__userName = data.user_name || '';
         input.placeholder = `Message ${window.__assistantName}…`;
@@ -625,6 +699,7 @@ function connect() {
       case 'confirm': showConfirm(data.prompt, data.card); break;
       case 'done':
         wakingText = '';
+        turnInterrupted = false;
         stopWaiting();
         finishStream(data.text);
         setStatus('ok', `Ready. Last reply took ${Math.round((Date.now() - waitStarted) / 1000)} s`);
@@ -640,24 +715,181 @@ function connect() {
       case 'quit':
         setStatus('off', 'Session ended');
         break;
+      case 'ack':    markSent(data.id); break;
+      case 'resume': resumeTurn(data); break;
+      case 'synced': reconcile(data); break;
     }
   };
 
-  ws.onclose = () => {
-    stopWaiting();
+  sock.onclose = () => {
+    if (sock !== ws) return;
+    ws = null;
+    clearProbe();
+    // The reply may still be running on the server: keep what has streamed
+    // so far on screen, and let `resume` bring it level on reconnect.
+    turnInterrupted = turnInterrupted || document.body.classList.contains('busy')
+      || streamEl !== null;
+    clearInterval(waitTimer);
+    waitTimer = null;
+    setBusy(false);              // the composer stays usable; sends wait in the outbox
+    if (offlineSince === null) offlineSince = Date.now();
     setStatus('off', 'Reconnecting…');
-    setBusy(false);
-    // Backs off rather than hammering: the server is a local process that
-    // may be restarting, and a tight loop would just fill its log.
-    setTimeout(connect, reconnectDelay);
-    reconnectDelay = Math.min(reconnectDelay * 2, 8000);
+    scheduleReconnect();
   };
 
-  ws.onerror = () => setStatus('off', 'Connection problem');
+  sock.onerror = () => { if (sock === ws) setStatus('off', 'Connection problem'); };
 }
 
 function send(payload) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(payload));
+    return true;
+  }
+  return false;
+}
+
+// ── the reconnect ladder ────────────────────────────────────────────
+
+function scheduleReconnect() {
+  if (reconnectTimer !== null || (ws && ws.readyState !== WebSocket.CLOSED)) return;
+  // The banner comes up at ESCALATE_AFTER_MS on the dot, not at whichever
+  // jittered retry happens to fire after it (that can be 15 s later).
+  if (offlineSince !== null && escalateTimer === null) {
+    escalateTimer = setTimeout(() => {
+      escalateTimer = null;
+      if (offlineSince !== null) showConnectionBanner();
+    }, Math.max(0, offlineSince + ESCALATE_AFTER_MS - Date.now()));
+  }
+  const cap = Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempt);
+  reconnectAttempt += 1;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, Math.random() * cap);
+}
+
+/* A wake, a network change, or the reader coming back to the window. A socket
+ * that says CLOSED is redialled now. One that says OPEN may be half-open after
+ * sleep (no close event ever fires, and every send vanishes), so it is asked
+ * to prove itself: a ping, and if no frame of any kind comes back in time the
+ * socket is closed and the ladder takes over. */
+function reconnectNow() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    if (probeTimer !== null) return;
+    send({ type: 'ping' });
+    const probed = ws;
+    probeTimer = setTimeout(() => {
+      probeTimer = null;
+      if (probed === ws) probed.close();
+    }, PROBE_TIMEOUT_MS);
+    return;
+  }
+  if (ws && ws.readyState === WebSocket.CONNECTING) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  reconnectAttempt = 0;
+  connect();
+}
+
+function clearProbe() {
+  if (probeTimer !== null) {
+    clearTimeout(probeTimer);
+    probeTimer = null;
+  }
+}
+
+function showConnectionBanner() {
+  const banner = document.getElementById('conn-banner');
+  if (!banner || !banner.hidden) return;
+  const since = new Date(offlineSince || Date.now())
+    .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  document.getElementById('conn-banner-text').textContent =
+    `Can't reach Symbio's window server since ${since}. It may have stopped: `
+    + 'start it again with symbio-desktop (or symbio_desktop/launch.sh). Your messages are kept '
+    + 'and send when it is back.';
+  banner.hidden = false;
+}
+
+function hideConnectionBanner() {
+  const banner = document.getElementById('conn-banner');
+  if (banner) banner.hidden = true;
+}
+
+// ── catching up after a reconnect ───────────────────────────────────
+
+/* The server's account of the turn this page may have missed part of. It
+ * REPLACES what the page streamed rather than adding to it, so it is right
+ * whether the page reloaded (and has nothing) or only lost its socket (and
+ * has half). */
+function resumeTurn(data) {
+  turnInterrupted = false;
+  const text = data.text || '';
+  if (data.busy) {
+    if (text) {
+      ensureStream();
+      streamText = '';
+      appendToken(text);
+    } else if (!streamEl) {
+      startWaiting();
+    }
+    setBusy(true);
+    setStatus('busy', 'Back. The reply is still being written…');
+    return;
+  }
+  if (!text && !streamEl) return;
+  // A reply this page already stored (its `done` did arrive) is not added twice.
+  const last = live.messages[live.messages.length - 1];
+  if (!streamEl && last && last.role === 'assistant'
+      && last.text === splitReasoning(text, true).answer.trim()) return;
+  stopWaiting();
+  ensureStream();
+  streamText = text || streamText;
+  finishStream();
+  setBusy(false);
+  setStatus('ok', 'Caught up on the reply that finished while the window was away');
+}
+
+/* Last word after a reconnect: is a turn running on the server or not? A
+ * turn this page was waiting on that the server no longer has (the window
+ * server itself restarted) is closed with what arrived, and said so, instead
+ * of leaving the page waiting on a reply that will never come. Then whatever
+ * is in the outbox goes. */
+function reconcile(data) {
+  if (data.busy) {
+    turnInterrupted = false;
+    setBusy(true);
+    if (!streamEl && !waitTimer) startWaiting();
+  } else if (turnInterrupted) {
+    turnInterrupted = false;
+    stopWaiting();
+    if (streamEl || streamText) finishStream();
+    setBusy(false);
+    showNotice('The reply was cut off: the window server restarted while it '
+               + 'was being written. Ask again to get the rest.');
+  }
+  flushOutbox();
+}
+
+// ── the outbox: a message is kept from the moment it is sent ─────────
+
+function flushOutbox() {
+  let sent = false;
+  for (const item of outbox) {
+    // Resent blindly: the server ignores an id it already holds and acks it.
+    if (send({ type: 'chat', id: item.id, message: item.text })) sent = true;
+  }
+  if (sent && !document.body.classList.contains('busy')) {
+    setBusy(true);
+    startWaiting();
+  }
+}
+
+function markSent(id) {
+  const before = outbox.length;
+  outbox = outbox.filter(m => m.id !== id);
+  if (outbox.length !== before) saveOutbox();
+  const el = thread.querySelector(`.msg[data-mid="${CSS.escape(String(id))}"]`);
+  if (el) el.classList.remove('unsent');
 }
 
 function setBusy(busy) {
@@ -673,18 +905,24 @@ function submit() {
   // the window looked broken. Send it to the live conversation instead —
   // that is plainly what was meant.
   if (viewingId !== null) backToLive();
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    addActivity('Not connected to the window server yet — nothing was sent. '
-                + 'Retrying the connection.');
-    return;
-  }
-  addBubble('user', text);
+  // Durable at send: the message is in the transcript and the outbox before
+  // anything is written to the socket, so a dropped connection, a reload or a
+  // closed window between here and the server's `ack` cannot lose it. Typing
+  // while disconnected used to say "nothing was sent" and drop it.
+  const id = newMessageId();
+  outbox.push({ id, text, at: Date.now() });
+  saveOutbox();
+  addBubble('user', text, true, '', id);
   scrollToEnd(true);             // sending is looking at the conversation again
   input.value = '';
   input.style.height = 'auto';
-  setBusy(true);
-  startWaiting();
-  send({ type: 'chat', message: text });
+  if (send({ type: 'chat', id, message: text })) {
+    setBusy(true);
+    startWaiting();
+  } else {
+    setStatus('off', 'Not connected. Your message will send as soon as it reconnects');
+    reconnectNow();
+  }
 }
 
 // ── wiring ──────────────────────────────────────────────────────────
@@ -795,6 +1033,13 @@ function rememberLive() {
     localStorage.setItem(LIVE_KEY, JSON.stringify(live));
   } catch (e) { /* the conversation still works, it just will not survive */ }
 }
+
+window.addEventListener('online', reconnectNow);
+window.addEventListener('pageshow', (e) => { if (e.persisted) reconnectNow(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') reconnectNow();
+});
+document.getElementById('btn-reconnect').addEventListener('click', reconnectNow);
 
 restoreLive();
 renderChatList();

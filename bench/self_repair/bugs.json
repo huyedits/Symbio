@@ -1,0 +1,222 @@
+[
+ {
+  "src": "symbio/app/commands.py",
+  "test": "tests/test_custom_commands.py",
+  "line": 213,
+  "old": "    if not typed:\n",
+  "new": "    if typed:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_custom_commands.py::test_suggestions_catch_the_half_typed_and_the_mistyped"
+  ]
+ },
+ {
+  "src": "symbio/app/commands.py",
+  "test": "tests/test_custom_commands.py",
+  "line": 59,
+  "old": "    return bool(_NAME_RE.fullmatch((name or \"\").strip().lower()))\n",
+  "new": "    return bool(_NAME_RE.fullmatch((name and \"\").strip().lower()))\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_custom_commands.py::test_a_saved_command_comes_back_with_its_body"
+  ]
+ },
+ {
+  "src": "symbio/app/belief.py",
+  "test": "tests/test_belief.py",
+  "line": 469,
+  "old": "            if len(outcomes) < max(1, min_observations):\n",
+  "new": "            if len(outcomes) < max(2, min_observations):\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_belief.py::test_a_well_timed_prediction_becomes_a_training_sample"
+  ]
+ },
+ {
+  "src": "symbio/app/belief.py",
+  "test": "tests/test_belief.py",
+  "line": 321,
+  "old": "                   if (d := _parse(row[\"valid_until\"])) is not None and d <= moment]\n",
+  "new": "                   if (d := _parse(row[\"valid_until\"])) is not None or d <= moment]\n",
+  "kind": "and->or",
+  "fails": [
+   "tests/test_belief.py::test_a_permanent_belief_never_expires"
+  ]
+ },
+ {
+  "src": "symbio/app/curriculum.py",
+  "test": "tests/test_curriculum.py",
+  "line": 338,
+  "old": "    if not planned:\n",
+  "new": "    if planned:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_curriculum.py::test_the_summary_says_where_the_budget_went"
+  ]
+ },
+ {
+  "src": "symbio/app/curriculum.py",
+  "test": "tests/test_curriculum.py",
+  "line": 136,
+  "old": "        if overlap <= 0:\n",
+  "new": "        if overlap <= 1:\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_curriculum.py::test_a_sample_about_a_failing_case_is_boosted"
+  ]
+ },
+ {
+  "src": "symbio/app/note_history.py",
+  "test": "tests/test_note_history.py",
+  "line": 78,
+  "old": "    if not q_terms:\n",
+  "new": "    if q_terms:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_note_history.py::test_matching_history_dirs_finds_by_title_fragment"
+  ]
+ },
+ {
+  "src": "symbio/app/note_history.py",
+  "test": "tests/test_note_history.py",
+  "line": 47,
+  "old": "    if not dest_dir.exists():\n",
+  "new": "    if dest_dir.exists():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_note_history.py::test_delete_snapshots_the_note"
+  ]
+ },
+ {
+  "src": "symbio/app/prune.py",
+  "test": "tests/test_prune.py",
+  "line": 237,
+  "old": "            if not line.strip():\n",
+  "new": "            if line.strip():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_prune.py::test_prune_sessions_rewrites_only_dirty_files"
+  ]
+ },
+ {
+  "src": "symbio/app/prune.py",
+  "test": "tests/test_prune.py",
+  "line": 204,
+  "old": "        if role == \"assistant\" and content != tooling.strip_tool_tags(content):\n",
+  "new": "        if role != \"assistant\" and content != tooling.strip_tool_tags(content):\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_prune.py::test_tagged_twin_is_dropped_and_visible_text_kept"
+  ]
+ },
+ {
+  "src": "symbio/app/wildcards.py",
+  "test": "tests/test_wildcards.py",
+  "line": 65,
+  "old": "    if not sane_reply(display):\n",
+  "new": "    if sane_reply(display):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_wildcards.py::test_browse_case_requires_the_address_from_the_request"
+  ]
+ },
+ {
+  "src": "symbio/app/wildcards.py",
+  "test": "tests/test_wildcards.py",
+  "line": 67,
+  "old": "    if not _has_tool(tools, \"browser_open\"):\n",
+  "new": "    if _has_tool(tools, \"browser_open\"):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_wildcards.py::test_browse_case_requires_the_address_from_the_request"
+  ]
+ },
+ {
+  "src": "symbio/app/soul.py",
+  "test": "tests/test_soul.py",
+  "line": 140,
+  "old": "        if fresh in known or known in fresh:\n",
+  "new": "        if fresh in known and known in fresh:\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_soul.py::test_the_same_read_is_not_written_twice"
+  ]
+ },
+ {
+  "src": "symbio/app/soul.py",
+  "test": "tests/test_soul.py",
+  "line": 152,
+  "old": "    if kind == VALUE and _JUDGEMENT_RE.search(line):\n",
+  "new": "    if kind != VALUE and _JUDGEMENT_RE.search(line):\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_soul.py::test_a_character_judgement_is_refused"
+  ]
+ },
+ {
+  "src": "symbio/app/chat_style.py",
+  "test": "tests/test_chat_style.py",
+  "line": 119,
+  "old": "    if \"\\n\" in message and not _OBSERVATION_RE.match(message):\n",
+  "new": "    if \"\\n\" in message and _OBSERVATION_RE.match(message):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_chat_style.py::test_multiline_output_stays_aligned"
+  ]
+ },
+ {
+  "src": "symbio/app/chat_style.py",
+  "test": "tests/test_chat_style.py",
+  "line": 140,
+  "old": "        label = (m.group(1) + (m.group(2) or \"\")).strip()\n",
+  "new": "        label = (m.group(1) + (m.group(2) and \"\")).strip()\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_chat_style.py::test_a_security_label_keeps_its_punctuation"
+  ]
+ },
+ {
+  "src": "symbio/app/vocab_skin.py",
+  "test": "tests/test_vocab_skin.py",
+  "line": 213,
+  "old": "        steps = mx.arange(1, targets.shape[1] + 1)\n",
+  "new": "        steps = mx.arange(2, targets.shape[1] + 1)\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_vocab_skin.py::test_the_skinned_loss_is_the_cross_entropy_over_the_kept_rows[False-False]"
+  ]
+ },
+ {
+  "src": "symbio/app/vocab_skin.py",
+  "test": "tests/test_vocab_skin.py",
+  "line": 93,
+  "old": "    return bits == 1 or resolve(mode, model_name)\n",
+  "new": "    return bits == 2 or resolve(mode, model_name)\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_vocab_skin.py::test_one_bit_weights_go_through_the_runner"
+  ]
+ },
+ {
+  "src": "symbio/app/fix_loop.py",
+  "test": "tests/test_fix_loop.py",
+  "line": 391,
+  "old": "    record[\"initial_verdict\"] = (report or \"(none)\").splitlines()[0][:200]\n",
+  "new": "    record[\"initial_verdict\"] = (report or \"(none)\").splitlines()[1][:200]\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_fix_loop.py::test_a_correct_patch_on_the_first_cycle_ends_the_loop_green"
+  ]
+ },
+ {
+  "src": "symbio/app/fix_loop.py",
+  "test": "tests/test_fix_loop.py",
+  "line": 506,
+  "old": "        cyclerec[\"verdict\"] = (report or \"(none)\").splitlines()[0][:200]\n",
+  "new": "        cyclerec[\"verdict\"] = (report and \"(none)\").splitlines()[0][:200]\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_fix_loop.py::test_a_worse_patch_reverts_immediately"
+  ]
+ }
+]

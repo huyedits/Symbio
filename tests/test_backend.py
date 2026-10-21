@@ -315,3 +315,18 @@ def test_an_injected_fake_is_not_mistaken_for_a_real_generator():
     session.config = {"backend": "mlx", "agent": {}}
 
     assert session._mlx_generation() is False
+
+
+def test_cuda_lora_masks_granite_and_gemma_prompts():
+    from symbio import cuda_lora
+    g = "<|start_of_role|>user<|end_of_role|>hi<|end_of_text|>\n<|start_of_role|>assistant<|end_of_role|>yo"
+    assert g[cuda_lora.split_index(g):] == "yo"
+    m = "<start_of_turn>user\nhi<end_of_turn>\n<start_of_turn>model\nyo"
+    assert m[cuda_lora.split_index(m):] == "yo"
+
+
+def test_cuda_lora_loads_at_four_bits_unless_told():
+    from symbio import cuda_lora
+    base = ["--model", "m", "--data", "d", "--adapter-path", "a"]
+    assert cuda_lora.parse_args(base).load_in_bits == 4
+    assert cuda_lora.parse_args(base + ["--load-in-bits", "16"]).load_in_bits == 16

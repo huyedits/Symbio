@@ -427,6 +427,9 @@ def build_system_prompt(assistant_name: str, user_name: str,
     # Everything else the assistant persists stays untrusted.
     if include_standing:
         assembled += memory_standing_block(assistant_name, user_name, config)
+        # Goals are the user's too, written only by /goal; see symbio.app.goals.
+        from symbio.app import goals
+        assembled += goals.goals_block(user_name)
     return assembled + "\n"
 
 

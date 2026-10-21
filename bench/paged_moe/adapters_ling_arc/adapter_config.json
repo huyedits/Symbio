@@ -1,0 +1,1 @@
+{"model": "/Users/huygpt/.local/share/mlx-models/Ling-mini-2.0-4bit", "rank": 8, "scale": 16.0, "grad_layer": 19, "arch": "bailing_moe", "paged": true}

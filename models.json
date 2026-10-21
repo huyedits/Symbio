@@ -1,75 +1,82 @@
 {
   "qwythos_9b_6bit": {
     "model_name": "usermma/Qwythos-9B-Claude-Mythos-5-1M-mlx-6Bit",
-    "description": "Qwen3.5-9B (Qwythos Claude-Mythos fine-tune), 6-bit MLX — the headmaster from 2026-09-03. Hybrid attention (linear_attention x3 then full_attention, full_attention_interval 4), 32 layers, hidden 4096, head_dim 256, 1M context. Supported by stock mlx_lm 0.31.3 via models/qwen3_5.py — no fork needed. Vocab 248,044, which is NOT the Qwen3 tokenizer, so the old Qwen3-0.6B-4bit draft does not match it. Drafting with models/Qwen3.5-0.8B-4bit (same vocab) is DEPTH-CRITICAL, measured greedy over 3 prompts 2026-09-03: no draft 13.5 tok/s, k=1 16.3 (+21%, very tight: 16.3/16.2/16.3), k=2 14.8, k=3 11.8. Its hybrid cache is not trimmable (ArraysCache) so mlx_compat's snapshot path runs, and linear attention makes deep drafts cost more to verify — k=1 is the only depth that wins. BUT that +21% is unreachable while agent.repetition_penalty is set: logits_processors are unsupported on the hybrid path, so the shim silently falls back to plain decoding and drafted/undrafted both land at ~13.4. agent.draft_model is therefore \"\" (num_draft_tokens 1). To claim the +21%, drop repetition_penalty and re-verify the model does not loop — 3 prompts showed no degeneration either way, which is not yet enough.",
+    "description": "Qwen3.5-9B (Qwythos Claude-Mythos fine-tune), 6-bit MLX \u2014 the headmaster from 2026-09-03. Hybrid attention (linear_attention x3 then full_attention, full_attention_interval 4), 32 layers, hidden 4096, head_dim 256, 1M context. Supported by stock mlx_lm 0.31.3 via models/qwen3_5.py \u2014 no fork needed. Vocab 248,044, which is NOT the Qwen3 tokenizer, so the old Qwen3-0.6B-4bit draft does not match it. Drafting with models/Qwen3.5-0.8B-4bit (same vocab) is DEPTH-CRITICAL, measured greedy over 3 prompts 2026-09-03: no draft 13.5 tok/s, k=1 16.3 (+21%, very tight: 16.3/16.2/16.3), k=2 14.8, k=3 11.8. Its hybrid cache is not trimmable (ArraysCache) so mlx_compat's snapshot path runs, and linear attention makes deep drafts cost more to verify \u2014 k=1 is the only depth that wins. BUT that +21% is unreachable while agent.repetition_penalty is set: logits_processors are unsupported on the hybrid path, so the shim silently falls back to plain decoding and drafted/undrafted both land at ~13.4. agent.draft_model is therefore \"\" (num_draft_tokens 1). To claim the +21%, drop repetition_penalty and re-verify the model does not loop \u2014 3 prompts showed no degeneration either way, which is not yet enough.",
     "adapter_compatible": true,
-    "memory_note": "7.3 GB on disk. Hidden 4096 vs the 14B's 5120, so no Qwen3 LoRA loads onto it — the headmaster runs base-only until an adapter is trained against this base. Fine-tuning is unproven here: at 248k vocab the output-logit memory is what OOM'd the 9B runs on this 16 GB machine, not the parameter count."
+    "memory_note": "7.3 GB on disk. Hidden 4096 vs the 14B's 5120, so no Qwen3 LoRA loads onto it \u2014 the headmaster runs base-only until an adapter is trained against this base. Fine-tuning is unproven here: at 248k vocab the output-logit memory is what OOM'd the 9B runs on this 16 GB machine, not the parameter count."
   },
   "dense_14b": {
     "model_name": "Qwen/Qwen3-14B-MLX-4bit",
-    "description": "Dense 14B, 4-bit — the headmaster since 2026-08-26. Measured on this 16 GB M4 at 1.5k context, greedy: 12.72 tok/s alone, 26.04 tok/s with the Qwen3-0.6B-4bit draft at k=3 (peak k; 25.14 at k=4, 24.86 at k=5). That is within 11% of the 8B's own speculative speed (29.38), so the size costs almost nothing on decode. Shares the Qwen3 tokenizer (151,669, hash c079f0df0a2405ef) with the 8B and the 0.6B draft, and keeps a trimmable KV cache — no mlx_compat fork needed.",
+    "description": "Dense 14B, 4-bit \u2014 the headmaster since 2026-08-26. Measured on this 16 GB M4 at 1.5k context, greedy: 12.72 tok/s alone, 26.04 tok/s with the Qwen3-0.6B-4bit draft at k=3 (peak k; 25.14 at k=4, 24.86 at k=5). That is within 11% of the 8B's own speculative speed (29.38), so the size costs almost nothing on decode. Shares the Qwen3 tokenizer (151,669, hash c079f0df0a2405ef) with the 8B and the 0.6B draft, and keeps a trimmable KV cache \u2014 no mlx_compat fork needed.",
     "adapter_compatible": true,
-    "memory_note": "~7.3 GB on disk; 9.05 GB peak at 1.5k context, 10.77 GB at 8k. One model resident at a time on 16 GB — keep dispatch.headmaster_deep_sleep_while_workers on."
+    "memory_note": "~7.3 GB on disk; 9.05 GB peak at 1.5k context, 10.77 GB at 8k. One model resident at a time on 16 GB \u2014 keep dispatch.headmaster_deep_sleep_while_workers on."
   },
   "dense_7b": {
     "model_name": "mlx-community/Qwen3-8B-4bit",
-    "description": "Dense 8B — best balance of quality, speed, and LoRA compatibility",
+    "description": "Dense 8B \u2014 best balance of quality, speed, and LoRA compatibility",
     "adapter_compatible": true,
     "memory_note": "~4.6 GB on disk, ~6-8 GB RAM at runtime"
   },
   "dense_7b_3bit": {
     "model_name": "mlx-community/Qwen3-8B-3bit",
-    "description": "Dense 8B, 3-bit — lighter/faster than 4-bit, more headroom on 16 GB",
+    "description": "Dense 8B, 3-bit \u2014 lighter/faster than 4-bit, more headroom on 16 GB",
     "adapter_compatible": true,
     "memory_note": "~3.6 GB on disk, ~5-7 GB RAM at runtime"
   },
   "dense_3b": {
     "model_name": "mlx-community/Qwen2.5-3B-Instruct-4bit",
-    "description": "Dense 3B — smaller fallback, does not match the current LoRA adapter",
+    "description": "Dense 3B \u2014 smaller fallback, does not match the current LoRA adapter",
     "adapter_compatible": false,
     "memory_note": "~2 GB on disk, ~4-6 GB RAM at runtime"
   },
   "moe_a27b": {
     "model_name": "mlx-community/Qwen1.5-MoE-A2.7B-Chat-4bit",
-    "description": "MoE 14.3B total / 2.7B active — experimental, weaker tool following",
+    "description": "MoE 14.3B total / 2.7B active \u2014 experimental, weaker tool following",
     "adapter_compatible": false,
     "memory_note": "~8 GB on disk, ~8-10 GB RAM at runtime"
   },
   "dense_1.5b": {
     "model_name": "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
-    "description": "Dense 1.5B — smallest/fastest dense option, no matching LoRA adapter",
+    "description": "Dense 1.5B \u2014 smallest/fastest dense option, no matching LoRA adapter",
     "adapter_compatible": false,
     "memory_note": "~1 GB on disk, ~2-3 GB RAM at runtime"
   },
   "phi4_mini_4bit": {
     "model_name": "mlx-community/Phi-4-mini-instruct-4bit",
-    "description": "Dense 3.8B Phi-4-mini instruct, 4-bit — strong tool/tag following, LoRA-compatible footprint",
+    "description": "Dense 3.8B Phi-4-mini instruct, 4-bit \u2014 strong tool/tag following, LoRA-compatible footprint",
     "adapter_compatible": false,
     "memory_note": "~2.2 GB on disk, ~3-4 GB RAM at runtime; LoRA headroom on 16 GB"
   },
   "phi4_14b_4bit": {
     "model_name": "mlx-community/phi-4-4bit",
-    "description": "Dense 14B Phi-4, 4-bit — measured 2026-08-23 as a worker base: 4/8 on a deterministic battery vs Qwen3-8B's 6/8 (lost arithmetic, spelling, fraction comparison). Not used as the default worker base for that reason",
+    "description": "Dense 14B Phi-4, 4-bit \u2014 measured 2026-08-23 as a worker base: 4/8 on a deterministic battery vs Qwen3-8B's 6/8 (lost arithmetic, spelling, fraction comparison). Not used as the default worker base for that reason",
     "adapter_compatible": false,
     "memory_note": "~8.3 GB on disk, ~9-10 GB RAM at runtime; one model resident at a time on 16 GB"
   },
+  "phi4_reasoning_plus": {
+    "model_name": "mlx-community/Phi-4-reasoning-plus-4bit",
+    "description": "Phi-4-reasoning-plus (RL-tuned from Phi-4; the 'plus' = most accurate, longest chains). MEASURED 2026-10-16 as a CANDIDATE-INTERRUPTED run: bfcl_simple first-120 at --max-tokens 2048 \u2014 5.9% running accuracy through 18 tasks at ~200s/task, KILLED at 52 minutes. The failure mode is the truncation lesson again, at its extreme: the model ALWAYS thinks (its template cannot turn thinking off), and its chains on tool tasks run longer than 2048 tokens \u2014 an unclosed think block parses to no call at all, so the battery grades the truncation, not the model. The registries honest verdict: chains this long disqualify it for tool SERVING on this machine regardless of its accuracy (the Ministral-3-8B-Reasoning served the same role at 23s/task with short chains \u2014 the reasoner-for-tools question is answered by chain LENGTH, and this one's is an order too long). The untired angle: Phi-4-mini-reasoning-4bit (3.8B, short-chain reasoner, ~2.5 GB) \u2014 a different shape, worth one bench; and a 20-task probe at 8192 tokens would put a real accuracy number beside the disqualification, for the record only.",
+    "adapter_compatible": false,
+    "memory_note": "8.5 GB repo on disk, ~9-10 GB resident (the browser-closed tier), vocab ~100k so LoRA-trainable. Cached."
+  },
   "ternary_8b": {
     "model_name": "prism-ml/Ternary-Bonsai-8B-mlx-2bit",
-    "description": "Ternary 2-bit 8B — the best tool-calling result measured here, 2026-08-30. BFCL bfcl_simple n=120: 94.17%, against Qwen3-8B-4bit 80.83% and Qwen3-14B-3bit 78.33% — and it beat both WITHOUT the 0.6B draft model they each had. 285s for the suite against their ~1100s. Loads in 1.6s. The win is reliability of FORM, not smarter arguments: it emitted a call on 120/120 tasks where Qwen3-8B produced none on 19, and on calls actually emitted Qwen3-8B is slightly better on argument values (96.0% vs 94.2%). Its chat template hard-closes <think></think> unconditionally, so it never reasons and never burns the token budget; forcing the block open makes it strictly worse (never terminates, 3.6-9x slower, wrong answers). Serve it no-think, which is the only mode it has.",
+    "description": "Ternary 2-bit 8B \u2014 the best tool-calling result measured here, 2026-08-30. BFCL bfcl_simple n=120: 94.17%, against Qwen3-8B-4bit 80.83% and Qwen3-14B-3bit 78.33% \u2014 and it beat both WITHOUT the 0.6B draft model they each had. 285s for the suite against their ~1100s. Loads in 1.6s. The win is reliability of FORM, not smarter arguments: it emitted a call on 120/120 tasks where Qwen3-8B produced none on 19, and on calls actually emitted Qwen3-8B is slightly better on argument values (96.0% vs 94.2%). Its chat template hard-closes <think></think> unconditionally, so it never reasons and never burns the token budget; forcing the block open makes it strictly worse (never terminates, 3.6-9x slower, wrong answers). Serve it no-think, which is the only mode it has.",
     "adapter_compatible": true,
-    "memory_note": "2.15 GB on disk, 2.4 GB peak — a third of the 14B. Fits wired memory with room to spare; set gpu.wired_limit_mb or it pages to SSD."
+    "memory_note": "2.15 GB on disk, 2.4 GB peak \u2014 a third of the 14B. Fits wired memory with room to spare; set gpu.wired_limit_mb or it pages to SSD."
   },
   "ternary_27b": {
     "model_name": "prism-ml/Ternary-Bonsai-27B-mlx-2bit",
-    "description": "Ternary 2-bit 27B, multimodal (Qwen3_5ForConditionalGeneration, vision tower included). Runs fine on 16 GB with wired memory: 3.9s load, 11.5 tok/s, GPU 100%. An earlier 'non-functional' verdict was wrong — it was measured with pageable memory on a machine already 5.5 GB into swap. BFCL bfcl_simple n=30: 86.67%, which at that sample is statistically indistinguishable from the 8B's 94.17% (95% CI roughly 74-99%). It costs 6.5s/task against the 8B's 2.7s for no measured gain. Needs a tokenizer patch: tokenizer_config.json declares TokenizersBackend, change tokenizer_class to PreTrainedTokenizerFast or it will not load.",
+    "description": "Ternary 2-bit 27B, multimodal (Qwen3_5ForConditionalGeneration, vision tower included). Runs fine on 16 GB with wired memory: 3.9s load, 11.5 tok/s, GPU 100%. An earlier 'non-functional' verdict was wrong \u2014 it was measured with pageable memory on a machine already 5.5 GB into swap. BFCL bfcl_simple n=30: 86.67%, which at that sample is statistically indistinguishable from the 8B's 94.17% (95% CI roughly 74-99%). It costs 6.5s/task against the 8B's 2.7s for no measured gain. Needs a tokenizer patch: tokenizer_config.json declares TokenizersBackend, change tokenizer_class to PreTrainedTokenizerFast or it will not load.",
     "adapter_compatible": true,
     "memory_note": "7.9 GB on disk, ~8.4 GB in GPU memory. Requires gpu.wired_limit_mb set (11264 works on 16 GB); unwired it pages to SSD and stalls."
   },
   "bonsai_27b_1bit": {
     "model_name": "prism-ml/Bonsai-27B-mlx-1bit",
-    "description": "1-bit 27B (binary {-s,+s} weights, g128), Qwen3.6-27B hybrid attention, multimodal checkpoint loaded text-only. Stock MLX has no 1-bit kernels; symbio/app/onebit.py runs the packed weights unexpanded (Metal kernel for decode, exact 2-bit respread into quantized_matmul for prefill), so no Prism MLX fork is needed. Measured 2026-10-03 on the 16 GB M4, greedy, no draft: 3.5s load, 18.3 tok/s decode, 65 tok/s prefill at 1.5k tokens — faster than both the ternary 27B (11.5) and the 14B (12.7). Quality not yet benched here (Prism claims 89.5% of FP16 vs the ternary's 94.6%).",
+    "description": "1-bit 27B (binary {-s,+s} weights, g128), Qwen3.6-27B hybrid attention, multimodal checkpoint loaded text-only. Stock MLX has no 1-bit kernels; symbio/app/onebit.py runs the packed weights unexpanded (Metal kernel for decode, exact 2-bit respread into quantized_matmul for prefill), so no Prism MLX fork is needed. Measured 2026-10-03 on the 16 GB M4, greedy, no draft: 3.5s load, 18.3 tok/s decode, 65 tok/s prefill at 1.5k tokens \u2014 faster than both the ternary 27B (11.5) and the 14B (12.7). Quality not yet benched here (Prism claims 89.5% of FP16 vs the ternary's 94.6%).",
     "adapter_compatible": false,
     "memory_note": "5.1 GB on disk (vision tower included, not loaded), 4.21 GB resident, 6.7 GB peak at 1.5k context. 248k vocab: base-only, LoRA is past the 16 GB vocab wall."
+  },
   "bonsai2_27b": {
     "model_name": "prism-ml/Ternary-Bonsai-2-27B-mlx-2bit",
     "description": "Qwen3.8-27B in ternary weights (Prism's Bonsai 2): 98.2% of the FP16 model's score across Prism's 14 thinking-mode benchmarks (84.78 vs 86.32), against the 1-bit Bonsai 27B's 89.5% of the older Qwen3.6-27B -- the closest this 16 GB machine gets to Qwen3.8-27B (the plain MLX 4-bit is ~15 GB). A Hadamard-rotated pack (model_type prism_hadamard_qwen35): stock mlx_lm refuses it, symbio/app/prism_pack.py loads it. Measured 2026-10-03 on the 16 GB M4, greedy: 6.2s load, ~9 tok/s decode, ~53 tok/s prefill at 460 tokens; 17*23, a word problem and native Qwen3.5 XML tool calls all right. Its own vision tower serves looks (symbio/app/eyes.py).",
@@ -99,5 +106,35 @@
     "description": "Dense 8B Ministral-3 Reasoning (Dec 2025), 4-bit MLX -- the headmaster since 2026-09-06. Real [THINK]...[/THINK] reasoning with dedicated vocab tokens, unlike the Instruct sibling that never reasons. bfcl_simple n=120: 94.17% (113/120), statistically tied with Falcon3-10B's 95.83% and above Qwen3-8B-4bit's 80.83%. The score only holds when the [THINK] block is stripped before grading -- bench/harness.py does this, and the CLI must too, or the chain-of-thought is graded as the answer (the harness measured 6.9% before it stripped). Reasoning makes it slower per task than the Instruct sibling (2766s vs ~544s for the suite) because it thinks before answering. Vocab 131,072, shared with Ministral-3-3B/-14B, so the 3B is a matched draft model (not yet downloaded -- agent.draft_model must stay empty until it is). LoRA-trainable: vocab below the 14B's 151,936, so the output-logit memory that sets the LoRA ceiling on this 16 GB machine is cheaper here than on the model it replaces.",
     "adapter_compatible": false,
     "memory_note": "~5.6 GB weights + ~0.9 GB KV = ~6.5 GB (same 34-layer / hidden-4096 geometry as the Instruct sibling), leaving real room for a browser alongside it. Loads in ~2.4s against the 14B's ~30s."
+  },
+  "qwen3.6_35b_a3b_paged": {
+    "model_name": "mlx-community/Qwen3.6-35B-A3B-4bit",
+    "description": "Qwen3.6's 35B MoE (512-expert-class fine-grained router, 10-of-?) SERVED FROM THE SSD by symbio/app/paged_moe.py \u2014 the first non-resident model this 16 GB machine has run. MEASURED 2026-10-15 through the byte-level row reader (safetensors header data_offsets -> seek + read per expert, 'array_equal' against mlx's own load): 100-token generation CORRECT AND COHERENT ('17 x 23' broke down as 17 x (20 + 3) and answered right) at 2.8 tok/s plain / 1.7 tok/s with the 0.8B draft, active 4.76 GB / peak 4.84 GB \u2014 the warm-byte budget held the RAM line exactly as configured. The router SCATTERS: ~50% of each layer's experts re-read EVERY token (1.19 TB streamed for 100 tokens); the page cache absorbed most of it (33-36 GB/s effective, above NVMe physical), so the SSD's physical traffic is a fraction of the headline number. The 0.8B decision model as draft did NOT amortize reads here \u2014 the accept-rate never beat the extra ids per verify batch on a router this scattered (the decision model helps concentrated routers; the MTP-4bit checkpoint with the decision head BUILT IN is the untested follow-up). This model CANNOT be served resident at any speed on 16 GB: 39 GB repo on disk, 35.9 GB by mlx's accounting. A 2.8 tok/s headmaster is a demonstration, not a daily ride.",
+    "adapter_compatible": false,
+    "memory_note": "39 GB repo on disk (the hub card's '20.4 GB' counts packed weights only) \u2014 with the 8B and the drafts the machine sits at 10 GB free; deleting this cache is the next disk move if the machine matters more than the demonstration. The quantized scales read back as BF16 (numpy has none; the reader carries a uint16->mlx-bf16 bit-view). The pager's speed is bounded by ~500 python-level byte reads per token (~513 reads/token measured at 1.19-2.12 TB / 100 tokens); a C/Metal rewrite (flash-moe's shape) or concentrated-routing models are where the speed lives \u2014 not in more MLX-side tuning."
+  },
+  "lfm2.5_8b_a1b": {
+    "model_name": "LiquidAI/LFM2.5-8B-A1B-MLX-4bit",
+    "description": "Liquid's 8B MoE, 1B active (64 experts, 4-of-64, 'Personal Assistant On Your Laptop') \u2014 the first MoE that fits this machine's comfort line. MEASURED 2026-10-14/15 on the 16 GB M4: \"What is 2+2?\" answered with clean think-first reasoning at 45.6 tok/s, 4.50 GB active, lazy+primed load in ~1 s. bfcl_simple first-120 (the registry protocol) 2026-10-15: 91.67% (110/120) in 401s \u2014 3.3s/task, ~4 points under the dense quartet (Falcon3-10B 95.83, Ministral-3-8B 95.00/94.17, Bonsai 94.17) and ~5-7x faster than them per task; ALL TEN misses are symbolic-math VALUES (derivative/integrate/area-under-curve) in the exact category falcon3_10b's note calls 'the same cases every model here misses' \u2014 and every miss is well-formed JSON with the right function name: the MoE failure mode is the hard math, not the FORM the old Qwen1.5-MoE sank on. The 65,536-token vocab means the output-logit memory that walls Qwen/gemma LoRA off this machine barely exists here: among today's measured candidates this is the ONLY base the correction->LoRA->rollback loop can actually train on, which for an APGI machine may be worth more than the 4 accuracy points. bfcl_live and the golden battery are not yet run. LFM2.5's tool-call syntax is a third wire format (<|tool_call_start|>[name(args)]<|tool_call_end|>); chat_tools needs it before a native-call bench counts.",
+    "adapter_compatible": false,
+    "memory_note": "4.83 GB weights in the hub card's accounting; the repo on disk is 8.9 GB (bf16 embeds/vision included), ~4.5 GB active at run. Repo was downloaded 2026-10-15; the 24B sibling that shares it was benched to a word-salad verdict \u2014 the 24B's download was SIGKILLed mid-write (disk full), so part of that verdict is a corrupt-shard suspect until re-downloaded. The 8B's own download completed cleanly and its text is clean; treat the 24B as unproven, not as the family failing."
+  },
+  "gpt_oss_20b": {
+    "model_name": "mlx-community/gpt-oss-20b-MXFP4-Q8",
+    "description": "OpenAI's gpt-oss-20b (MoE, ~3.6B active, harmony-channel format, Apache-2.0). MEASURED 2026-10-16, bfcl_simple first-120: 95.83% (115/120) in 483s (4.0s/task) \u2014 AFTER a parser fix that the model itself forced: its harmony channels (<|channel|>analysis<|message|>... final) put reasoning BRACES ahead of the answer, and the greedy JSON regex matched a span of thought \u2014 the first pass read 39.2% with calls visibly correct inside the analysis text; parse_call now cuts a channelled reply to the last <|message|> (bench/bfcl.py, pinned by tests/test_bfcl_parse.py). The CORRECTED score: 95.83 = EXACTLY Falcon3-10B's score \u2014 a 3.6B-active MoE ties the best dense 10B on tool form, and a 1B-active MoE (granite, 97.5) BEATS both: the active-mass axis predicts nothing on this battery, the post-training predicts everything. All 5 misses: calculate_area_under_curve / calculate_derivative / integrate \u2014 the symbolic-math family the whole board shares. Serves at ~4.0s/task with mx's own large-model path (11.5 GB by its accounting, ~12.6 GB resident \u2014 the browser-closed headmaster tier). Its harmony format = a channel convention their chat_tools does not yet speak; the benchmark graded TEXT answers, so a SERVED gpt-oss needs the channel parser added to chat_tools BEFORE native tool-calling works in chat.",
+    "adapter_compatible": false,
+    "memory_note": "12.6 GB resident (the repo ~13 GB on disk; mlx warns 'requires 11516 MB, close to the recommended 12124') \u2014 fits, but it and the browser do not. No matched draft model at its tokenizer (the o200k harmony tokenizer is its own); runs un-drafted at 4.0s/task."
+  },
+  "granite_4.0_h_tiny": {
+    "model_name": "mlx-community/granite-4.0-h-tiny-4bit",
+    "description": "IBM Granite 4.0-H-Tiny: hybrid Mamba2 + attention with a sparse-MoE FFN, ~7B total / ~1B active, Apache-2.0, converted with stock mlx_lm (0.28.2; runs clean on 0.31.3). MEASURED 2026-10-15, bfcl_simple first-120 protocol: 97.50% (117/120) in 98s \u2014 0.8s/task, the REGISTRY RECORD on both axes, beating Falcon3-10B (95.83 at 4.5s/task), the Ministral-3-8B pair (95.00/94.17) and the LFM2.5-8B-A1B (91.67) \u2014 the second 1B-active MoE of the same size class scored 5.8 points HIGHER, so an MoE's tool accuracy is set by its post-training recipe, not by its architecture word. FOLLOW-UP WORKUP 2026-10-16, all four checks run: (1) bfcl_live first-120: 76.7% (92/120) in 154s \u2014 down 20.8 from simple, but the field-best on BOTH suites (the LFM dropped 25 to 66.7; no other model was ever benched on live). (2) golden battery: 3/17, the EXPECTED fresh-base level (the LFM 4/17; the battery grades the trained state \u2014 identity, user-facts, tool-tag protocol, refusal FORMAT are adapter-dependent by design; notable: a natural-language refusal ('I'm sorry, but I must adhere...') still graded MISS \u2014 the battery wants the trained refusal shape). Vocab 100,352 is trainable, so the gate's real score comes after an adapter. (3) RAW DECODE: 71.7 tok/s (+57% over the LFM's 45.6), 3.64 GB active, peak 3.73. (4) The 5-bit variant scored 96.7% \u2014 the 4-bit's misses are NOT quant noise; the 4-bit stays the pick. SERVING BUG FOUND AND FIXED 2026-10-16: greedy decode LOOPS (the '391' reply repeated six times); agent.repetition_penalty is unsupported on the hybrid path, so the hybrid-safe fix is mild sampling \u2014 temp 0.8 + min_p 0.05 ran clean (no loop, correct arithmetic \u2014 '(10+7) x 23 = 230 + 161 = 391' \u2014 49.6 tok/s); temp-0+min_p reads empty (greedy skips the filter) \u2014 so hybrids get min_p, never penalties. The one miss in both bfcl suites: calculate_derivative, the symbolic-math family the whole board shares. The one behavioral quirk at base: identity sycophancy ('Are you Huy?' -> 'Yes, I am Huy.') \u2014 the exact failure the identity adapter exists to fix. LOOP PROOF 2026-10-16: retrain ran the full flow on this base (re-seed -> LoRA -> bake); the mamba.in_proj/out_proj + self_attn.q/v targets gave 0.711% trainable (0.746M/6939M \u2014 NOTE: the model is 6.9B params, not 7B, by mlx's count), val loss stalled fast (best 1.636 at step ~15, 2.117 by iter 120; early-stop kept the iter-15 checkpoint, 2.9 MB adapter baked) and the ADAPTER CHANGES BEHAVIOR: every reply opens with the tool-tag protocol (<search>...</search>) where the base answered in plain prose \u2014 the correction->adapter->behavior chain is mechanically CONFIRMED on the 100k vocab, on this machine. The remaining gap is FUEL, not machinery: the seed corpus is <search>-heavy, so tool MAPPING (which tag for which intent) takes real corrections \u2014 the tag protocol was learned in 15 iters; the mapping is the loop's daily job. Also recorded: the adapter's first web_search pass graded PASS on a '<search> Searching now.' repeated ten times \u2014 the golden's contains-check has a repetition blind spot; graders should demand meaning, not presence.",
+    "adapter_compatible": true,
+    "memory_note": "~5 GB on disk at 4-bit, ~2.9 GB active in the hub's accounting \u2014 the most memory-frugal model measured here. Mamba2 layers carry a fixed-size SSM state (ArraysCache-like), so the context cost is near-flat \u2014 which is what 0.8s/task on a busy 16 GB machine is made of."
+  },
+  "ministral3_14b_instruct": {
+    "model_name": "mlx-community/Ministral-3-14B-Instruct-2512-4bit",
+    "description": "Dense 14B Ministral-3 Instruct (Dec 2025), 4-bit MLX \u2014 the family ceiling, benched here 2026-10-14. bfcl_simple first 120 in the registry protocol: 94.17% (113/120), statistically tied with the family's 8B (95.00) and no claim on falcon3_10b's 95.83; the full n=400 scored 93.50% \u2014 the extra layers bought no accuracy on this battery. Cost: ~33s/task with no draft model, ~6x falcon3_10b's suite pace, so the tools crown stays at 8B/10B. The Reasoning variant (mlx-community/Ministral-3-14B-Reasoning-2512-4bit) was not benched: the 8B-Reasoning shape (2766s for the suite, thinking-first) gives no reason to spend the download on it yet. mistral3 arch, stock mlx_lm; vocab 131,072, so LoRA-trainable by the 16 GB ceiling once an adapter is trained against this base.",
+    "adapter_compatible": false,
+    "memory_note": "8.2 GB on disk; at ~7k-context prompts the weights + KV land in the ~9 GB zone where this machine freezes with a browser open \u2014 Qwen3-14B territory. Bench evidence, not a resident."
   }
 }

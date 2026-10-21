@@ -181,7 +181,12 @@ def test_a_load_with_no_adapter_is_untouched(project, monkeypatch):
         return object(), object()
 
     import mlx_lm
+    # Both depths, because eyes.install wraps the loader it finds and reads
+    # utils.load at call time: a patch on the re-export alone leaves the
+    # wrapper's call-time lookup reaching the real load — which phoned home
+    # to huggingface_hub for "some/model" and 404'd (found 2026-10-14).
     monkeypatch.setattr(mlx_lm, "load", _fake_mlx_load)
+    monkeypatch.setattr(mlx_lm.utils, "load", _fake_mlx_load)
     monkeypatch.setattr(modelload, "trust_tokenizer_eos", lambda _t: None)
 
     modelload.load("some/model")

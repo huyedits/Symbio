@@ -45,7 +45,13 @@ def _local_model_config(model_name: str) -> dict[str, Any] | None:
             from huggingface_hub import try_to_load_from_cache
         except ImportError:
             return None
-        hit = try_to_load_from_cache(model_name, "config.json")
+        # A path that does not exist (yet) is not a repo id; the hub's
+        # validator raises HFValidationError on it, which ended run_training
+        # before the trainer started.
+        try:
+            hit = try_to_load_from_cache(model_name, "config.json")
+        except Exception:
+            return None
         if not isinstance(hit, str):
             return None
         f = Path(hit)

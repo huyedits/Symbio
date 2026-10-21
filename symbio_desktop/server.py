@@ -27,11 +27,23 @@ The wire protocol is the FastAPI version's plus one frame: {type: connected|
 token|system|progress|confirm|done|error|waking} out, {type: chat|
 confirm_response|ping} in. `waking` is the model loading; a page that does not
 know it ignores it.
+
+**A dropped socket loses nothing.** The page can vanish mid-turn: a reload, a
+Mac waking from sleep, the window server's own restart. A chat message carries
+an `id`; the server answers `ack` once it holds it and ignores a resend of an
+id it already has, so the page can keep unsent messages and retry them blindly.
+The reply keeps generating while no page is attached, and on reattach the page
+is sent `resume` (the whole reply so far, or a finished one it missed) and then
+`synced`, which says whether a turn is still running. Pattern taken from Hermes
+Desktop (apps/desktop, ENGINEERING.md): the message is durable at send, the
+page's copy is a cache of the server's truth, and a reconnect reconciles rather
+than assumes.
 """
 
 from __future__ import annotations
 
 import base64
+import collections
 import hashlib
 import json
 import mimetypes
@@ -656,6 +668,26 @@ def wake_daemon(report=None, timeout: float = DAEMON_START_S) -> tuple[bool, str
 # the user was still looking at. The daemon serves one session at a time
 # anyway, so the bridge belongs to the server, not to a socket.
 _BRIDGE: "DaemonBridge | None" = None
+
+# Chat ids this server already holds. A page that lost its socket before the
+# `ack` arrived sends the message again; this is what makes that resend
+# harmless. Module-level, because a reconnect can land on a fresh bridge.
+_SEEN_IDS: "collections.OrderedDict[str, None]" = collections.OrderedDict()
+_SEEN_LOCK = threading.Lock()
+_SEEN_MAX = 256
+
+
+def first_sighting(message_id: str) -> bool:
+    """True the first time an id is seen; False for a resend of it."""
+    if not message_id:
+        return True
+    with _SEEN_LOCK:
+        if message_id in _SEEN_IDS:
+            return False
+        _SEEN_IDS[message_id] = None
+        while len(_SEEN_IDS) > _SEEN_MAX:
+            _SEEN_IDS.popitem(last=False)
+        return True
 _BRIDGE_LOCK = threading.Lock()
 # The first window of this server has asked for the model to be loaded.
 _PREWARMED = False
@@ -732,6 +764,14 @@ class DaemonBridge:
         # vanished with the old page left the turn hanging with no way to
         # answer it.
         self.pending_confirm: dict | None = None
+        # What the page would have shown, kept so a page that reattaches can
+        # be brought level: the reply of the turn in flight, and finished
+        # replies that went out while no page was there to see them.
+        self._sink_lock = threading.RLock()
+        self.reply = ""
+        self.missed: list[str] = []
+
+    _MISSED_MAX = 5
 
     @property
     def turn_open(self) -> bool:
@@ -888,22 +928,44 @@ class DaemonBridge:
 
         Between a reload and the new socket's arrival there is no sink. A turn
         in flight keeps running -- the daemon is mid-generation and stopping it
-        would waste the work -- and its frames are dropped rather than queued:
-        the reconnecting page restores its own transcript, and replaying half a
-        turn into it would double the text.
+        would waste the work. Its frames are not queued one by one (replaying
+        half a turn token by token into a page that kept the other half would
+        double the text); instead the reply is journalled as it goes, and a
+        reattaching page is sent the whole of it once, to replace what it has.
+        A sink that reports a failed write counts as no sink.
         """
-        sink = self.sink
-        if sink is None:
-            return
-        try:
-            sink(payload)
-        except Exception:
-            pass
+        with self._sink_lock:
+            kind = payload.get("type")
+            if kind == "token":
+                self.reply += payload.get("text", "")
+            sink = self.sink
+            delivered = False
+            if sink is not None:
+                try:
+                    delivered = sink(payload) is not False
+                except Exception:
+                    delivered = False
+            if kind == "done":
+                if not delivered and self.reply:
+                    self.missed = (self.missed + [self.reply])[-self._MISSED_MAX:]
+                self.reply = ""
 
     def attach(self, send_json) -> None:
-        self.sink = send_json
-        if self.pending_confirm is not None:
-            self.send_json(self.pending_confirm)
+        """A page is back: bring it level, then let frames through again.
+
+        Under the sink lock, so no token can slip out between the catch-up and
+        the live stream it continues.
+        """
+        with self._sink_lock:
+            self.sink = send_json
+            for text in self.missed:
+                self.send_json({"type": "resume", "text": text, "busy": False})
+            self.missed = []
+            if self.open_turns:
+                self.send_json({"type": "resume", "text": self.reply, "busy": True})
+            if self.pending_confirm is not None:
+                self.send_json(self.pending_confirm)
+            self.send_json({"type": "synced", "busy": bool(self.open_turns)})
 
     def detach(self) -> None:
         self.sink = None
@@ -1321,13 +1383,14 @@ class Handler(BaseHTTPRequestHandler):
         sock = self.connection
         write_lock = threading.Lock()
 
-        def send_json(payload: dict) -> None:
+        def send_json(payload: dict) -> bool:
             data = json.dumps(payload).encode("utf-8")
             try:
                 with write_lock:
                     sock.sendall(ws_frame(data))
+                return True
             except OSError:
-                pass
+                return False
 
         config = _config_summary()
         state = daemon_state()
@@ -1339,12 +1402,14 @@ class Handler(BaseHTTPRequestHandler):
             if _BRIDGE is not None and (_BRIDGE.alive() or _BRIDGE.connecting()
                                         or _BRIDGE.waking):
                 bridge = _BRIDGE
-                bridge.attach(send_json)
-                send_json({"type": "system", "text":
-                           "[Reattached to the conversation already running.]"})
             else:
-                bridge = DaemonBridge(send_json, config.get("assistant_name", ""))
+                bridge = DaemonBridge(None, config.get("assistant_name", ""))
+                if _BRIDGE is not None:
+                    # The daemon hung up on the old one; a reply it finished
+                    # for nobody is still this page's to see.
+                    bridge.missed = _BRIDGE.missed
                 _BRIDGE = bridge
+            bridge.attach(send_json)
             # Opening the window is the intent to chat, so the model starts
             # loading now, not when the first message is sent: half a minute
             # of the wait happens while the reader is still typing. Once per
@@ -1389,8 +1454,15 @@ class Handler(BaseHTTPRequestHandler):
                 kind = msg.get("type")
                 if kind == "chat":
                     text = (msg.get("message") or "").strip()
+                    message_id = str(msg.get("id") or "")[:64]
                     if not text:
                         continue
+                    fresh = first_sighting(message_id)
+                    if message_id:
+                        # Held from here on: the page may forget its copy.
+                        send_json({"type": "ack", "id": message_id})
+                    if not fresh:
+                        continue          # a resend after a lost ack
                     ready, why = ensure_bridge()
                     if not ready:
                         send_json({"type": "system", "text": why})

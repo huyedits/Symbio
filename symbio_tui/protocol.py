@@ -79,6 +79,20 @@ class DaemonLink:
         self._width = width
         return ""
 
+    def set_width(self, width: int) -> None:
+        """The pane was resized: the daemon wraps for the new width from here
+        on, and a reconnect after idle-reaping reports it too."""
+        width = int(width or 0)
+        if not width or width == self._width:
+            return
+        self._width = width
+        if self._wfile is not None:
+            try:
+                self._wfile.write(_encode_msg({"type": "set_width", "columns": width}))
+                self._wfile.flush()
+            except OSError:
+                pass
+
     def send(self, message: dict) -> None:
         if self._wfile is None:
             # The daemon may have ended this session while it idled

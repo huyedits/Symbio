@@ -194,7 +194,7 @@ def test_see_screen_reads_the_screen_without_the_vlm(real_helper, tmp_path, monk
     shot = _text_image(tmp_path / "desk.png", "Invoice overdue: pay now")
     session = _session(monkeypatch, tmp_path, [])
     monkeypatch.setattr(session, "_desktop_enabled", lambda: True)
-    monkeypatch.setattr(session, "_ax_look", lambda question="": "")
+    monkeypatch.setattr(session, "_ax_look", lambda question="", on_desk=None: "")
     monkeypatch.setattr(computer, "desktop_screenshot_path", lambda: shot)
     monkeypatch.setattr(computer, "screenshot_is_blank", lambda path: False)
     monkeypatch.setattr(vision, "available", lambda: False)     # no VLM at all

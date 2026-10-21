@@ -17,9 +17,17 @@ from symbio.app import training
 def _lora():
     # The config the app actually runs with: config.json merged over the
     # defaults, or the defaults alone on a fresh clone (config.json is
-    # per-install and gitignored).
-    from symbio.app.config import load_config
-    return load_config()["lora"]
+    # per-install and gitignored). Read from the project directly, read-only:
+    # these checks pair the install's settings with the install's own
+    # training_data/, and the suite serves load_config() an example config.
+    import json
+
+    from symbio.app.config import DEFAULT_CONFIG
+    lora = dict(DEFAULT_CONFIG["lora"])
+    real = pathlib.Path(__file__).resolve().parent.parent / "config.json"
+    if real.exists():
+        lora.update(json.loads(real.read_text(encoding="utf-8")).get("lora", {}))
+    return lora
 
 
 def test_validation_uses_the_whole_validation_set():

@@ -481,8 +481,15 @@ def test_a_refusal_blocks_a_different_tool_reaching_the_same_end(
     _isolate_dirs(monkeypatch, tmp_path)
     monkeypatch.setattr(constants, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(chat, "load", lambda *a, **k: (object(), FakeTokenizer()))
+    config = app_config.load_config()
+    # The premise is a browser_open the user DECLINED; with the browser group
+    # off (a fresh install) the <browse> never dispatches at all.
+    config["browser"]["enabled"] = True
+    groups = config.setdefault("tools", {}).setdefault("enabled_groups", [])
+    if "browser" not in groups:
+        groups.append("browser")
     session = chat.ChatSession(
-        app_config.load_config(), model=object(), tokenizer=FakeTokenizer(),
+        config, model=object(), tokenizer=FakeTokenizer(),
         adapter_loaded=False, output_fn=lambda *a: None,
         generate_fn=lambda *a, **k: "",
     )

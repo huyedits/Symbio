@@ -61,7 +61,7 @@ Screen {{ layout: vertical; background: $surface; }}
 #face {{ height: auto; color: {GOLD}; text-align: left; padding: 1 0 0 2; }}
 #history {{ height: 1fr; min-height: 3; border: none; padding: 0 2;
            scrollbar-size-vertical: 1; }}
-#live {{ height: auto; padding: 2 2 0 2; color: {GOLD}; }}
+#live {{ height: auto; padding: 2 2 0 2; }}
 #commands {{ height: auto; width: 100%; color: {DIM}; padding: 0 2; }}
 #composer {{ dock: bottom; height: auto; width: 100%; padding: 0 1; }}
 #suggestions {{ max-height: 8; width: 100%; border: round {GOLD}; display: none; }}
@@ -131,6 +131,16 @@ class SymbioTUI(App):
             self._set_status("not connected")
         else:
             self._set_status("connected to the resident model")
+
+    def on_resize(self, event) -> None:
+        # The daemon wraps tool output and banners for the pane they are read
+        # in; it was told the width once, at connect, and never again, so a
+        # resized window kept getting text wrapped for the old one.
+        if self.link is not None:
+            try:
+                self.link.set_width(event.size.width)
+            except Exception:
+                pass
 
     # ---- frames from the daemon ------------------------------------------
     def _on_frame(self, msg: dict) -> None:
@@ -220,12 +230,11 @@ class SymbioTUI(App):
             history.say_agent(text)
 
     def _flush_live(self) -> None:
-        """Move the growing streamed reply into the transcript, as a
-        finished turn. The live line is cleared so the next turn starts
-        empty. The Face's mood has already been set by the mood tag in the
-        output frame that usually follows."""
+        """Move what the streamed reply left on the line into the transcript,
+        as finished blocks — thinking, then answer. The live line is cleared
+        so the next turn starts empty."""
         live = self.query_one(LiveLine)
-        if live._parts:
+        if live.pending:
             live.flush_into(self.query_one(History))
 
     def _set_status(self, text: str, busy: bool = False) -> None:

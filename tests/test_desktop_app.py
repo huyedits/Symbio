@@ -599,7 +599,9 @@ def test_a_turn_whose_client_left_is_cut_short(monkeypatch):
     assert "client_gone.is_set()" in stream
     assert "raise _ClientGone()" in stream
     # And the session ends on it quietly — a closed window is not an error.
-    assert "except (_ClientGone, EOFError)" in source
+    import re
+    assert re.search(r"except \([^)]*\b_ClientGone\b[^)]*\bEOFError\b[^)]*\)",
+                     source)
 
 
 def test_a_confirmation_for_a_client_that_left_is_a_no(monkeypatch):
@@ -829,3 +831,109 @@ def test_the_window_is_an_app_with_the_menus_a_mac_app_has():
                for i in range(menus["Edit"].numberOfItems())}
     assert {"copy:", "paste:", "cut:", "selectAll:", "undo:"} <= actions
     assert window.ICON.is_file() and window.ICON.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+# --- a dropped socket loses nothing (pattern from Hermes Desktop) ----------
+
+
+class _Lines:
+    def __init__(self, frames): self.lines = [json.dumps(f).encode() + b"\n" for f in frames]
+    def readline(self): return self.lines.pop(0) if self.lines else b""
+
+
+def test_a_reply_finished_while_no_page_was_attached_is_handed_over_on_return():
+    """The daemon keeps generating after a reload or a sleep. Its tokens used
+    to be dropped with no page attached, and the finished reply was simply
+    gone: the reloaded window showed the question with no answer."""
+    bridge = server.DaemonBridge(None, "Caine")
+    bridge.ready = True
+    bridge.say("hi")
+    bridge.rfile = _Lines([{"type": "stream", "text": "Caine   : Hello there, Huy"},
+                           {"type": "input_prompt", "prompt": "> "}])
+    bridge._pump()
+
+    sent = []
+    bridge.attach(sent.append)
+    assert {"type": "resume", "text": "Hello there, Huy", "busy": False} in sent
+    assert sent[-1] == {"type": "synced", "busy": False}
+    # Handed over once: the next page is not sent it again.
+    again = []
+    bridge.attach(again.append)
+    assert [m["type"] for m in again] == ["synced"]
+
+
+def test_a_page_back_mid_turn_gets_the_whole_reply_so_far_then_the_rest():
+    """`resume` replaces what the page has rather than adding to it, so a page
+    that kept half the reply and a page that reloaded with none both end up
+    with exactly the reply."""
+    first = []
+    bridge = server.DaemonBridge(first.append)
+    bridge.ready = True
+    bridge.prefix_done = True
+    bridge.say("count")
+    bridge.send_json({"type": "token", "text": "one, "})
+    bridge.detach()
+    bridge.send_json({"type": "token", "text": "two, "})
+
+    back = []
+    bridge.attach(back.append)
+    bridge.send_json({"type": "token", "text": "three"})
+    assert back[0] == {"type": "resume", "text": "one, two, ", "busy": True}
+    assert back[1] == {"type": "synced", "busy": True}
+    assert back[2] == {"type": "token", "text": "three"}
+
+
+def test_a_write_that_fails_counts_as_missed():
+    """The socket handler swallows OSError. A `done` written into a socket that
+    had just died looked delivered, and that reply was lost too."""
+    bridge = server.DaemonBridge(lambda _m: False)
+    bridge.say("x")
+    bridge.send_json({"type": "token", "text": "answer"})
+    bridge.send_json({"type": "done", "text": ""})
+    assert bridge.missed == ["answer"]
+
+
+def test_missed_replies_are_bounded():
+    bridge = server.DaemonBridge(None)
+    for i in range(9):
+        bridge.send_json({"type": "token", "text": f"r{i}"})
+        bridge.send_json({"type": "done", "text": ""})
+    assert bridge.missed == [f"r{i}" for i in range(4, 9)]
+
+
+def test_a_resent_message_id_is_acknowledged_but_said_once(monkeypatch):
+    """The page resends everything still in its outbox on reconnect, because
+    it cannot tell a message whose ack was lost from one that never arrived."""
+    monkeypatch.setattr(server, "_SEEN_IDS", server.collections.OrderedDict())
+    assert server.first_sighting("m1") is True
+    assert server.first_sighting("m1") is False
+    assert server.first_sighting("") is True and server.first_sighting("") is True
+    for i in range(server._SEEN_MAX + 5):
+        server.first_sighting(f"x{i}")
+    assert len(server._SEEN_IDS) == server._SEEN_MAX
+
+
+def test_the_socket_handler_acks_before_it_dedupes():
+    import inspect
+
+    source = inspect.getsource(server.Handler._websocket)
+    chat = source.split('if kind == "chat":')[1].split("elif kind")[0]
+    assert chat.index('"ack"') < chat.index("if not fresh")
+    assert chat.index("if not fresh") < chat.index("ensure_bridge()")
+
+
+def test_the_page_keeps_a_message_from_the_moment_it_is_sent():
+    """Static checks on chat.js for what only a browser can run: the outbox is
+    written before the socket, resent on `synced`, cleared on `ack`, and the
+    reconnect ladder answers wake signals."""
+    js = (REPO / "symbio_desktop" / "static" / "chat.js").read_text()
+    submit = js.split("function submit()")[1].split("\nfunction ")[0]
+    assert submit.index("saveOutbox()") < submit.index("send({ type: 'chat'")
+    assert "addActivity('Not connected" not in submit
+    assert "flushOutbox()" in js.split("function reconcile(")[1].split("\nfunction ")[0]
+    assert "case 'ack':    markSent(data.id)" in js
+    for signal in ("'online'", "'visibilitychange'", "'pageshow'"):
+        assert signal in js
+    assert "Math.random() * cap" in js            # full jitter, not lockstep
+    html = (REPO / "symbio_desktop" / "static" / "index.html").read_text()
+    assert 'id="conn-banner"' in html and 'id="btn-reconnect"' in html

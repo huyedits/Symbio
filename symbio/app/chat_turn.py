@@ -119,7 +119,44 @@ class AgentTurnMixin:
             return len(persistence.LADDER)
         return max(0, value)
 
+    def _judges_unfinished(self, user_input: str, reply: str,
+                           last_observation: str | None) -> bool:
+        """True when the resident model, asked, says part of the request is
+        still undone and needs no input from the user. Off unless the MLX
+        model is loaded here, and off by config (agent.self_continue)."""
+        if not self.config.get("agent", {}).get("self_continue", True):
+            return False
+        if self.model is None or self.tokenizer is None or not self._mlx_generation():
+            return False
+        from symbio.app import goals, semif
+        open_goals = goals.list_goals()
+        context = (("Open goals the user set:\n" + "\n".join(
+                        f"- {g.split(' (set ')[0]}" for g in open_goals) + "\n\n")
+                   if open_goals else "")
+        context += (f"The user asked:\n{user_input.strip()[:1500]}\n\n"
+                   f"The last tool result:\n{(last_observation or '').strip()[:800]}\n\n"
+                   f"Your reply so far:\n{reply.strip()[-800:]}")
+        try:
+            res = semif.choose(self.model, self.tokenizer,
+                               "Is the user's request fully done?",
+                               [("done", "Yes: everything asked for is done and reported."),
+                                ("more", "No: a step is still left, and it needs nothing from the user."),
+                                ("ask", "No: the next step needs an answer or approval from the user.")],
+                               context=context, min_margin=0.3)
+        except Exception:
+            return False
+        return res.get("choice") == "more"
+
     def _agent_turn(self, user_input: str):
+        # One generator of the model at a time: the fix-watcher's patch
+        # writer runs on a background thread after a turn, and MLX on one
+        # model from two threads is not safe. The turn holds the session's
+        # generation lock; _fix_generate takes the same (reentrant) lock, so
+        # a fix_tool call inside this turn proceeds and the watcher waits.
+        with self._generation_lock():
+            return self._agent_turn_body(user_input)
+
+    def _agent_turn_body(self, user_input: str):
         # The boot system-prompt prefill may still be running on its background
         # thread. Join it before any model use this turn (canary, memory flush,
         # tool summarizers, _generate_reply) so the model is never used by two
@@ -474,6 +511,7 @@ class AgentTurnMixin:
         unparsed_tag_nudged = False
         echo_retry_nudged = False
         continuation_challenged = False
+        self_judged_continue = False
         incapacity_challenged = False
         thinking_cut_retried = False
         turn_think = False           # what this round was actually served with
@@ -1529,6 +1567,32 @@ class AgentTurnMixin:
                         )})
                         self._trim_history()
                         continue
+                # The model's own call on whether it is finished. The check
+                # above can only see targets the user typed; "set it up,
+                # test it, then tell me" names none, and a small model hands
+                # the turn back after step one. So ask it — one forward pass,
+                # three lettered options, read off the logits (semif) — and
+                # take a second lap only on a clear "more to do". A close
+                # call ends the turn as before.
+                if (not self_judged_continue
+                        and any_tool_ran
+                        and not user_refused_this_turn
+                        and challenges_used < self._challenge_budget()
+                        and _is_substantive(display)
+                        and self._judges_unfinished(user_input, display,
+                                                    last_observation)):
+                    self_judged_continue = True
+                    challenges_used += 1
+                    self.output_fn("  [Continue] judged its own request "
+                                   "unfinished; taking the next step.")
+                    self.history.append({"role": "user", "content": (
+                        "[System observation: by your own assessment part of "
+                        "the request is not done yet. Take the next step now "
+                        "with the tool that fits and report what it returns. "
+                        "When everything is done, say so plainly.]"
+                    )})
+                    self._trim_history()
+                    continue
                 break
 
             # Only execute the first fresh tool per response. Multiple tools in
@@ -1947,5 +2011,12 @@ class AgentTurnMixin:
                                  generate=self._fix_generate,
                                  log=self.output_fn)
 
-        _threading.Thread(target=_watch, daemon=True).start()
+        # SYMBIO_FIX_WATCH=0 switches it off. The suite sets it: there every
+        # scripted turn started a watcher, every Nth one ran the WHOLE suite
+        # from inside the suite (with a scripted model as the patch-writer),
+        # and while it held the watcher's lock the watcher's own test found
+        # the lock taken and failed — 1 red in 3,099, depending on timing.
+        import os as _os
+        if _os.environ.get("SYMBIO_FIX_WATCH", "1") != "0":
+            _threading.Thread(target=_watch, daemon=True).start()
         self._source_edited_this_turn = False

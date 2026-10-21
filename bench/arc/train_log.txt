@@ -1,0 +1,137 @@
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+model: LFM2.5-24B-A2B-MLX-4bit layers=40 experts=64x4 bits=4 attn@[2, 6, 10, 14, 18, 22, 26, 30, 34, 38] dense=2
+pinned dense: res=602MB hot=509 pin=509 h=0 m=509 e=0
+trainable: 0.05M params (rank 8, layer [38])
+spawned 4 delta-experts on layers [38] (router rows seeded near gate mean)
+trainable: 0.19M params total
+Iter 1: Train loss 13.4088 | peak 3048MB | res=2426MB hot=557 pin=510 h=513 m=870 e=313 |   35.0s
+Iter 2: Train loss 12.6443 | peak 4311MB | res=2426MB hot=557 pin=510 h=1026 m=1230 e=673 |   82.2s
+Iter 3: Train loss 11.1612 | peak 5408MB | res=2426MB hot=557 pin=510 h=1539 m=1590 e=1033 |  134.0s
+Iter 4: Train loss 10.9890 | peak 5416MB | res=2426MB hot=557 pin=510 h=2052 m=1950 e=1393 |  185.1s
+Iter 5: Train loss 11.1776 | peak 5424MB | res=2426MB hot=557 pin=510 h=2565 m=2310 e=1753 |  237.2s
+Iter 6: Train loss 10.9801 | peak 5428MB | res=2426MB hot=557 pin=510 h=3078 m=2670 e=2113 |  284.5s
+Iter 7: Train loss 11.2118 | peak 4372MB | res=2426MB hot=557 pin=510 h=3591 m=3030 e=2473 |  336.0s
+Iter 8: Train loss 10.8536 | peak 5444MB | res=2426MB hot=557 pin=510 h=4104 m=3390 e=2833 |  388.4s
+Iter 9: Train loss 10.6868 | peak 5452MB | res=2426MB hot=557 pin=510 h=4617 m=3750 e=3193 |  444.9s
+Iter 10: Train loss 10.8659 | peak 5454MB | res=2426MB hot=557 pin=510 h=5130 m=4110 e=3553 |  492.9s
+Iter 11: Train loss 11.5606 | peak 4139MB | res=2426MB hot=557 pin=510 h=5643 m=4470 e=3913 |  546.5s
+Iter 12: Train loss 12.5307 | peak 5244MB | res=2426MB hot=557 pin=510 h=6156 m=4830 e=4273 |  604.7s
+Iter 13: Train loss 10.7164 | peak 5477MB | res=2426MB hot=557 pin=510 h=6669 m=5190 e=4633 |  657.2s
+Iter 14: Train loss 12.0524 | peak 5485MB | res=2426MB hot=557 pin=510 h=7182 m=5550 e=4993 |  708.6s
+Iter 15: Train loss 10.9039 | peak 5492MB | res=2426MB hot=557 pin=510 h=7695 m=5910 e=5353 |  758.7s
+Iter 16: Train loss 12.3905 | peak 5190MB | res=2426MB hot=557 pin=510 h=8208 m=6270 e=5713 |  816.0s
+Iter 17: Train loss 10.8254 | peak 5508MB | res=2426MB hot=557 pin=510 h=8721 m=6630 e=6073 |  869.0s
+Iter 18: Train loss 11.0610 | peak 5516MB | res=2426MB hot=557 pin=510 h=9234 m=6990 e=6433 |  923.6s
+Iter 19: Train loss 12.4227 | peak 5524MB | res=2426MB hot=557 pin=510 h=9747 m=7350 e=6793 |  978.7s
+Iter 20: Train loss 11.0921 | peak 5532MB | res=2426MB hot=557 pin=510 h=10260 m=7710 e=7153 | 1034.4s
+Iter 21: Train loss 11.3852 | peak 5540MB | res=2426MB hot=557 pin=510 h=10773 m=8070 e=7513 | 1088.3s
+Iter 22: Train loss 12.4825 | peak 5548MB | res=2426MB hot=557 pin=510 h=11286 m=8430 e=7873 | 1143.5s
+Iter 23: Train loss 11.1421 | peak 5556MB | res=2426MB hot=557 pin=510 h=11799 m=8790 e=8233 | 1198.1s
+Iter 24: Train loss 10.9138 | peak 5564MB | res=2426MB hot=557 pin=510 h=12312 m=9150 e=8593 | 1250.7s
+Iter 25: Train loss 10.4385 | peak 5572MB | res=2426MB hot=557 pin=510 h=12825 m=9510 e=8953 | 1305.9s
+Iter 26: Train loss 10.3121 | peak 5580MB | res=2426MB hot=557 pin=510 h=13338 m=9870 e=9313 | 1359.6s
+Iter 27: Train loss 11.8038 | peak 5588MB | res=2426MB hot=557 pin=510 h=13851 m=10230 e=9673 | 1417.4s
+Iter 28: Train loss 11.4791 | peak 5596MB | res=2426MB hot=557 pin=510 h=14364 m=10590 e=10033 | 1484.3s
+Iter 29: Train loss 14.7079 | peak 5601MB | res=2426MB hot=557 pin=510 h=14877 m=10950 e=10393 | 1535.4s
+Iter 30: Train loss 12.0595 | peak 4862MB | res=2426MB hot=557 pin=510 h=15390 m=11310 e=10753 | 1594.5s
+  saved -> adapters_lfm_arc
+Iter 31: Train loss 11.3476 | peak 4636MB | res=2426MB hot=557 pin=510 h=15903 m=11670 e=11113 | 1662.6s
+Iter 32: Train loss 14.0646 | peak 5618MB | res=2426MB hot=557 pin=510 h=16416 m=12030 e=11473 | 1707.9s
+Iter 33: Train loss 10.5083 | peak 4536MB | res=2426MB hot=557 pin=510 h=16929 m=12390 e=11833 | 1757.2s
+Iter 34: Train loss 10.5223 | peak 5634MB | res=2426MB hot=557 pin=510 h=17442 m=12750 e=12193 | 1812.0s
+Iter 35: Train loss 11.1189 | peak 5642MB | res=2426MB hot=557 pin=510 h=17955 m=13110 e=12553 | 1868.2s
+Iter 36: Train loss 11.4846 | peak 5650MB | res=2426MB hot=557 pin=510 h=18468 m=13470 e=12913 | 1921.7s
+Iter 37: Train loss 10.8239 | peak 5658MB | res=2426MB hot=557 pin=510 h=18981 m=13830 e=13273 | 1974.3s
+Iter 38: Train loss 12.1888 | peak 5665MB | res=2426MB hot=557 pin=510 h=19494 m=14190 e=13633 | 2027.3s
+Iter 39: Train loss 10.7381 | peak 5533MB | res=2426MB hot=557 pin=510 h=20007 m=14550 e=13993 | 2086.2s
+Iter 40: Train loss 13.8719 | peak 5681MB | res=2426MB hot=557 pin=510 h=20520 m=14910 e=14353 | 2142.0s
+Iter 41: Train loss 10.7790 | peak 5689MB | res=2426MB hot=557 pin=510 h=21033 m=15270 e=14713 | 2265.5s
+Iter 42: Train loss 15.2511 | peak 5697MB | res=2426MB hot=557 pin=510 h=21546 m=15630 e=15073 | 2423.1s
+Iter 43: Train loss 10.5455 | peak 5705MB | res=2426MB hot=557 pin=510 h=22059 m=15990 e=15433 | 2571.7s
+Iter 44: Train loss 11.5243 | peak 5713MB | res=2426MB hot=557 pin=510 h=22572 m=16350 e=15793 | 2628.6s
+Iter 45: Train loss 12.0859 | peak 5721MB | res=2426MB hot=557 pin=510 h=23085 m=16710 e=16153 | 2680.9s
+Iter 46: Train loss 11.4939 | peak 5729MB | res=2426MB hot=557 pin=510 h=23598 m=17070 e=16513 | 2732.8s
+Iter 47: Train loss 11.6024 | peak 5737MB | res=2426MB hot=557 pin=510 h=24111 m=17430 e=16873 | 2783.9s
+Iter 48: Train loss 13.6240 | peak 5745MB | res=2426MB hot=557 pin=510 h=24624 m=17790 e=17233 | 2835.8s
+Iter 49: Train loss 11.9341 | peak 5753MB | res=2426MB hot=557 pin=510 h=25137 m=18150 e=17593 | 2887.6s
+Iter 50: Train loss 13.3244 | peak 5761MB | res=2426MB hot=557 pin=510 h=25650 m=18510 e=17953 | 2940.1s
+Iter 51: Train loss 12.6299 | peak 5769MB | res=2426MB hot=557 pin=510 h=26163 m=18870 e=18313 | 2993.9s
+Iter 52: Train loss 12.5554 | peak 5777MB | res=2426MB hot=557 pin=510 h=26676 m=19230 e=18673 | 3047.1s
+Iter 53: Train loss 15.1355 | peak 5785MB | res=2426MB hot=557 pin=510 h=27189 m=19590 e=19033 | 3099.6s
+Iter 54: Train loss 12.5284 | peak 5793MB | res=2426MB hot=557 pin=510 h=27702 m=19950 e=19393 | 3152.3s
+Iter 55: Train loss 11.4315 | peak 5801MB | res=2426MB hot=557 pin=510 h=28215 m=20310 e=19753 | 3206.8s
+Iter 56: Train loss 12.1116 | peak 5809MB | res=2426MB hot=557 pin=510 h=28728 m=20670 e=20113 | 3260.1s
+Iter 57: Train loss 14.0696 | peak 5817MB | res=2426MB hot=557 pin=510 h=29241 m=21030 e=20473 | 3313.1s
+Iter 58: Train loss 11.0740 | peak 5825MB | res=2426MB hot=557 pin=510 h=29754 m=21390 e=20833 | 3365.0s
+Iter 59: Train loss 11.3668 | peak 5833MB | res=2426MB hot=557 pin=510 h=30267 m=21750 e=21193 | 3416.8s
+Iter 60: Train loss 14.6988 | peak 5827MB | res=2426MB hot=557 pin=510 h=30780 m=22110 e=21553 | 3469.2s
+  saved -> adapters_lfm_arc
+Iter 61: Train loss 10.7076 | peak 5129MB | res=2426MB hot=557 pin=510 h=31293 m=22470 e=21913 | 3520.1s
+Iter 62: Train loss 11.5340 | peak 5857MB | res=2426MB hot=557 pin=510 h=31806 m=22830 e=22273 | 3572.6s
+Iter 63: Train loss 14.4913 | peak 5865MB | res=2426MB hot=557 pin=510 h=32319 m=23190 e=22633 | 3626.1s
+Iter 64: Train loss 13.0788 | peak 5870MB | res=2426MB hot=557 pin=510 h=32832 m=23550 e=22993 | 3675.1s
+Iter 65: Train loss 14.4515 | peak 5200MB | res=2426MB hot=557 pin=510 h=33345 m=23910 e=23353 | 3727.3s
+Iter 66: Train loss 15.1295 | peak 5886MB | res=2426MB hot=557 pin=510 h=33858 m=24270 e=23713 | 3781.2s
+Iter 67: Train loss 11.2260 | peak 5894MB | res=2426MB hot=557 pin=510 h=34371 m=24630 e=24073 | 3851.6s
+Iter 68: Train loss 14.8537 | peak 5902MB | res=2426MB hot=557 pin=510 h=34884 m=24990 e=24433 | 3908.1s
+Iter 69: Train loss 11.6064 | peak 5910MB | res=2426MB hot=557 pin=510 h=35397 m=25350 e=24793 | 3977.4s
+Iter 70: Train loss 10.3446 | peak 5918MB | res=2426MB hot=557 pin=510 h=35910 m=25710 e=25153 | 4160.8s
+[transformers] PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+model: LFM2.5-24B-A2B-MLX-4bit layers=40 experts=64x4 bits=4 attn@[2, 6, 10, 14, 18, 22, 26, 30, 34, 38] dense=2
+pinned dense: res=602MB hot=509 pin=509 h=0 m=509 e=0
+trainable: 0.05M params (rank 8, layer [38])
+spawned 4 delta-experts on layers [38] (router rows seeded near gate mean)
+trainable: 0.19M params total
+resumed adapter state from adapters.safetensors (from iter 70)
+Iter 71: Train loss 10.5851 | peak 4316MB | res=2426MB hot=557 pin=510 h=513 m=870 e=313 |   46.5s
+Iter 72: Train loss 11.6563 | peak 5405MB | res=2426MB hot=557 pin=510 h=1026 m=1230 e=673 |   97.5s
+Iter 73: Train loss 10.6270 | peak 5413MB | res=2426MB hot=557 pin=510 h=1539 m=1590 e=1033 |  149.3s
+Iter 74: Train loss 15.1697 | peak 5421MB | res=2426MB hot=557 pin=510 h=2052 m=1950 e=1393 |  201.1s
+Iter 75: Train loss 14.5701 | peak 5429MB | res=2426MB hot=557 pin=510 h=2565 m=2310 e=1753 |  252.3s
+Iter 76: Train loss 11.3955 | peak 5437MB | res=2426MB hot=557 pin=510 h=3078 m=2670 e=2113 |  304.1s
+Iter 77: Train loss 10.7443 | peak 5445MB | res=2426MB hot=557 pin=510 h=3591 m=3030 e=2473 |  356.5s
+Iter 78: Train loss 11.7774 | peak 5451MB | res=2426MB hot=557 pin=510 h=4104 m=3390 e=2833 |  405.4s
+Iter 79: Train loss 13.2023 | peak 4953MB | res=2426MB hot=557 pin=510 h=4617 m=3750 e=3193 |  457.5s
+Iter 80: Train loss 10.4551 | peak 5467MB | res=2426MB hot=557 pin=510 h=5130 m=4110 e=3553 |  510.8s
+Iter 81: Train loss 11.0912 | peak 5475MB | res=2426MB hot=557 pin=510 h=5643 m=4470 e=3913 |  564.8s
+Iter 82: Train loss 13.7192 | peak 5483MB | res=2426MB hot=557 pin=510 h=6156 m=4830 e=4273 |  620.2s
+Iter 83: Train loss 11.6592 | peak 5491MB | res=2426MB hot=557 pin=510 h=6669 m=5190 e=4633 |  673.8s
+Iter 84: Train loss 12.8082 | peak 5499MB | res=2426MB hot=557 pin=510 h=7182 m=5550 e=4993 |  730.1s
+Iter 85: Train loss 10.5952 | peak 5507MB | res=2426MB hot=557 pin=510 h=7695 m=5910 e=5353 |  784.2s
+Iter 86: Train loss 11.5637 | peak 5515MB | res=2426MB hot=557 pin=510 h=8208 m=6270 e=5713 |  837.7s
+Iter 87: Train loss 12.2859 | peak 5523MB | res=2426MB hot=557 pin=510 h=8721 m=6630 e=6073 |  892.7s
+Iter 88: Train loss 10.6166 | peak 5531MB | res=2426MB hot=557 pin=510 h=9234 m=6990 e=6433 |  946.9s
+Iter 89: Train loss 11.5846 | peak 5539MB | res=2426MB hot=557 pin=510 h=9747 m=7350 e=6793 |  999.8s
+Iter 90: Train loss 11.5272 | peak 5547MB | res=2426MB hot=557 pin=510 h=10260 m=7710 e=7153 | 1052.3s
+  saved -> adapters_lfm_arc
+Iter 91: Train loss 10.8331 | peak 4835MB | res=2426MB hot=557 pin=510 h=10773 m=8070 e=7513 | 1104.9s
+Iter 92: Train loss 15.4175 | peak 5563MB | res=2426MB hot=557 pin=510 h=11286 m=8430 e=7873 | 1159.0s
+Iter 93: Train loss 11.3512 | peak 5571MB | res=2426MB hot=557 pin=510 h=11799 m=8790 e=8233 | 1212.8s
+Iter 94: Train loss 11.2504 | peak 5575MB | res=2426MB hot=557 pin=510 h=12312 m=9150 e=8593 | 1259.2s
+Iter 95: Train loss 12.6554 | peak 4646MB | res=2426MB hot=557 pin=510 h=12825 m=9510 e=8953 | 1311.5s
+Iter 96: Train loss 14.0906 | peak 5591MB | res=2426MB hot=557 pin=510 h=13338 m=9870 e=9313 | 1364.4s
+Iter 97: Train loss 11.0405 | peak 5599MB | res=2426MB hot=557 pin=510 h=13851 m=10230 e=9673 | 1417.4s
+Iter 98: Train loss 11.0556 | peak 5607MB | res=2426MB hot=557 pin=510 h=14364 m=10590 e=10033 | 1470.2s
+Iter 99: Train loss 11.9005 | peak 5615MB | res=2426MB hot=557 pin=510 h=14877 m=10950 e=10393 | 1523.5s
+Iter 100: Train loss 11.3335 | peak 5623MB | res=2426MB hot=557 pin=510 h=15390 m=11310 e=10753 | 1576.4s
+Iter 101: Train loss 10.9464 | peak 5631MB | res=2426MB hot=557 pin=510 h=15903 m=11670 e=11113 | 1628.8s
+Iter 102: Train loss 11.3966 | peak 5639MB | res=2426MB hot=557 pin=510 h=16416 m=12030 e=11473 | 1681.2s
+Iter 103: Train loss 10.3246 | peak 5645MB | res=2426MB hot=557 pin=510 h=16929 m=12390 e=11833 | 1731.5s
+Iter 104: Train loss 12.4998 | peak 5263MB | res=2426MB hot=557 pin=510 h=17442 m=12750 e=12193 | 1779.6s
+Iter 105: Train loss 12.6435 | peak 5165MB | res=2426MB hot=557 pin=510 h=17955 m=13110 e=12553 | 1831.3s
+Iter 106: Train loss 10.5010 | peak 5663MB | res=2426MB hot=557 pin=510 h=18468 m=13470 e=12913 | 1880.6s
+Iter 107: Train loss 11.3071 | peak 4608MB | res=2426MB hot=557 pin=510 h=18981 m=13830 e=13273 | 1931.0s
+Iter 108: Train loss 10.2838 | peak 5679MB | res=2426MB hot=557 pin=510 h=19494 m=14190 e=13633 | 1984.3s
+Iter 109: Train loss 13.5491 | peak 5687MB | res=2426MB hot=557 pin=510 h=20007 m=14550 e=13993 | 2039.2s
+Iter 110: Train loss 11.3188 | peak 5695MB | res=2426MB hot=557 pin=510 h=20520 m=14910 e=14353 | 2092.3s
+Iter 111: Train loss 10.4240 | peak 5703MB | res=2426MB hot=557 pin=510 h=21033 m=15270 e=14713 | 2145.0s
+Iter 112: Train loss 11.3692 | peak 5711MB | res=2426MB hot=557 pin=510 h=21546 m=15630 e=15073 | 2197.6s
+Iter 113: Train loss 11.6990 | peak 5719MB | res=2426MB hot=557 pin=510 h=22059 m=15990 e=15433 | 2250.0s
+Iter 114: Train loss 15.3197 | peak 5727MB | res=2426MB hot=557 pin=510 h=22572 m=16350 e=15793 | 2303.1s
+Iter 115: Train loss 10.8972 | peak 5735MB | res=2426MB hot=557 pin=510 h=23085 m=16710 e=16153 | 2355.4s
+Iter 116: Train loss 12.3729 | peak 5743MB | res=2426MB hot=557 pin=510 h=23598 m=17070 e=16513 | 2409.2s
+Iter 117: Train loss 15.2374 | peak 5751MB | res=2426MB hot=557 pin=510 h=24111 m=17430 e=16873 | 2462.2s
+Iter 118: Train loss 10.8980 | peak 5759MB | res=2426MB hot=557 pin=510 h=24624 m=17790 e=17233 | 2514.8s
+Iter 119: Train loss 12.3660 | peak 5767MB | res=2426MB hot=557 pin=510 h=25137 m=18150 e=17593 | 2568.6s
+Iter 120: Train loss 11.7794 | peak 5775MB | res=2426MB hot=557 pin=510 h=25650 m=18510 e=17953 | 2620.9s
+  saved -> adapters_lfm_arc

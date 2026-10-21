@@ -381,9 +381,12 @@ def trainer_command(model_name: str, data_dir: str, adapter_dir: str,
                      str(lora.get("vocab_skin_base", vocab_skin.DEFAULT_BASE))]
         else:
             entry = [sys.executable, "-m", "mlx_lm", "lora"]
+        from symbio.app import weights
         return [
             *entry,
-            "--model", model_name,
+            # The bound version, so the new adapter trains on top of what was
+            # folded in rather than on the bytes underneath it.
+            "--model", weights.resolve(model_name),
             "--train",
             "--data", data_dir,
             "--batch-size", str(lora["batch_size"]),

@@ -1,0 +1,35 @@
+{
+ "state": {
+  "learner": "LFM2.5-24B-A2B (24B MoE, 2.45B active, streaming on 16GB)",
+  "trained_task_count": 0,
+  "loss_first": null,
+  "loss_last": null,
+  "recent_losses": [],
+  "last_paired_eval": null,
+  "frontier_reference": {
+   "model": "kimi-k3:cloud",
+   "n": 40,
+   "cell_acc": 0.0,
+   "exact_count": 0
+  },
+  "adapters_on_disk": [
+   "/Users/huygpt/.local/share/mlx-models/GLM-4.7-Flash-4bit",
+   "/Users/huygpt/.local/share/mlx-models/LFM2.5-24B-A2B-MLX-4bit"
+  ],
+  "data_inventory": {
+   "arc_train_rows_ready": 120,
+   "arc_eval_rows": 120
+  },
+  "training_running_now": true,
+  "disk_free_gb": 3.0,
+  "published_reference": "TRM trained-on-ARC scores 6.2% exact on ARC-AGI-2 public eval; human avg 66%"
+ },
+ "plan": {
+  "action": "wait",
+  "tasks": 0,
+  "spawn": 0,
+  "iters": 0,
+  "reasoning": "Training is already running, so my job right now is not to launch anything but to watch and prepare the next decision point. I have zero completed runs, no loss_first/loss_last, and no paired eval, so honestly I have no signal yet about whether this run is learning anything about ARC-AGI-2 structure; anything I claimed now would be fabrication. When the run finishes I need to check three things in order: first, that loss actually decreased from loss_first to loss_last rather than plateauing or diverging; second, run a paired eval on the 120 held-out ARC eval rows comparing base LFM2.5-24B against the adapted weights, since only a paired comparison tells me whether training caused any gain; third, verify disk headroom, because 3GB free is tight for saving delta-expert checkpoints and I should prune or offload before the next run if checkpoints are large. Context for interpreting results: the frontier reference kimi-k3:cloud scored 0% cell accuracy and 0 exact on n=40, so even a small nonzero exact-match count would be meaningful progress, while the published TRM reference of 6.2% exact on ARC-AGI-2 is the real bar to chase. If the paired eval shows gain, I compound with more tasks and possibly more spawn slots; if it shows no gain, I say so plainly and change the recipe rather than repeating it.",
+  "_decider": "kimi-k3:cloud"
+ }
+}
