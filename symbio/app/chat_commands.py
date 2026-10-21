@@ -588,6 +588,21 @@ class CommandsMixin:
                 trained, msg = dispatch.guarded_train_worker(role, self.config)
                 self.output_fn(f"  [Worker] {msg}")
 
+        elif cmd.startswith("/arc"):
+            # The ARC-AGI-2 fluid-learning experiment: spawn + train + eval,
+            # narrated through this session's own output, telemetry through
+            # training_live so the pet and the TUI watch it happen.
+            from symbio.app import arc_lab
+            parts = user_input.split(None, 1)
+            arc_lab.handle(self, parts[1] if len(parts) == 2 else "")
+
+        elif cmd.startswith("/selflearn"):
+            # One round of the self-directed loop: the brain reads its own
+            # telemetry and dictates how and when it learns.
+            from symbio.app import selflearn
+            parts = user_input.split(None, 1)
+            selflearn.handle(self, parts[1] if len(parts) == 2 else "")
+
         elif cmd == "/security":
             path = constants.SECURITY_FILE
             self.output_fn(f"  [Security] Policy: {path}")
@@ -1280,6 +1295,32 @@ class CommandsMixin:
                     for entry in entries:
                         self.output_fn(f"    - {entry}")
                     self.output_fn("  /standing clear removes them all.")
+
+        elif cmd in ("/goal", "/goals") or cmd.startswith("/goal "):
+            # The user's goals: the only writer is this command, which is
+            # what lets the prompt serve them as the user's own words.
+            from symbio.app import goals
+
+            rest = user_input.split(None, 1)
+            arg = rest[1].strip() if len(rest) > 1 else ""
+            low = arg.lower()
+            if low == "clear":
+                self.output_fn(f"  {goals.clear_goals()}")
+            elif low.startswith("done"):
+                num = low[4:].strip()
+                self.output_fn(f"  {goals.done_goal(int(num))}" if num.isdigit()
+                               else "  Which one? /goal done N (see /goal).")
+            elif arg:
+                self.output_fn(f"  {goals.add_goal(arg)}")
+            else:
+                current = goals.list_goals()
+                if not current:
+                    self.output_fn("  No open goals. /goal <what you want done> sets one.")
+                else:
+                    self.output_fn("  Open goals:")
+                    for i, g in enumerate(current, 1):
+                        self.output_fn(f"    {i}. {g}")
+                    self.output_fn("  /goal done N ticks one off; /goal clear drops all.")
 
         elif cmd in ("/help", "/h", "/?"):
             data_size = constants.TRAIN_FILE.stat().st_size if constants.TRAIN_FILE.exists() else 0

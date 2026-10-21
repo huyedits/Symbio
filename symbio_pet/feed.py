@@ -16,6 +16,7 @@ Three sources, none of them an import of the agent:
 from __future__ import annotations
 
 import json
+import re
 import os
 import subprocess
 import time
@@ -224,6 +225,40 @@ def local_chat_pid(ps_output: str) -> int | None:
     return None
 
 
+
+
+def _arc_state() -> dict:
+    """The ARC experiment organ: trainer curve, held-out scoreboard, and the
+    brain's own dictated plans — read off disk, nothing imported."""
+    base = Path(__file__).resolve().parent.parent / "bench" / "arc"
+    out: dict[str, Any] = {"train_tail": [], "running": False,
+                           "eval": None, "plan": None}
+    try:
+        import subprocess
+        out["running"] = bool(subprocess.run(
+            ["pgrep", "-f", "train_lfm.py"], capture_output=True,
+            timeout=8).stdout.strip())
+        for ln in (base / "train_log.txt").read_text(errors="replace").splitlines():
+            m = re.search(r"Iter (\d+): Train loss ([-+\d.eE]+)", ln)
+            if m:
+                out["train_tail"].append([int(m.group(1)), float(m.group(2))])
+    except OSError:
+        pass
+    out["train_tail"] = out["train_tail"][-240:]
+    try:
+        out["eval"] = json.loads((base / "eval_results.json").read_text())["summary"]
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        lp = json.loads((base / "last_plan.json").read_text())
+        out["plan"] = {"action": lp.get("plan", {}).get("action"),
+                       "reasoning": (lp.get("plan", {}).get("reasoning") or "")[:160]}
+    except (OSError, ValueError, KeyError):
+        pass
+    return out
+
+
+
 class Feed:
     """Polls Symbio's state and hands the slime a Snapshot."""
 
@@ -238,6 +273,9 @@ class Feed:
         self._local_checked = -1e9
         self._adapter_checked = -1e9
         self._adapter = (False, 0)
+        self._arc_eval_mtime: float | None = None
+        self._arc_plan_mtime: float | None = None
+        self._arc = _arc_state()
 
     @property
     def live_path(self) -> Path:
@@ -291,6 +329,48 @@ class Feed:
         live = _read_json(self.live_path)
         if live:
             self._read_run(live, snap, now)
+
+        # ── the ARC organ: streamed apprenticeship + held-out scoreboard +
+        #    the brain's dictated plans, mapped onto the pet's own vocabulary
+        if self._arc["running"] and snap.activity == "idle":
+            tail = self._arc["train_tail"]
+            if tail:
+                snap.activity = "training"
+                snap.run = "arc apprenticeship"
+                snap.iter = tail[-1][0]
+                snap.iters = 120
+                snap.train = tail
+                self.seen_note = None
+        self._arc = _arc_state()
+        ev = self._arc.get("eval")
+        if ev and ev.get("n"):
+            try:
+                mtime = (base := Path(__file__).resolve().parent.parent
+                         / "bench" / "arc" / "eval_results.json").stat().st_mtime
+            except OSError:
+                mtime = None
+            if mtime and mtime != self._arc_eval_mtime:
+                self._arc_eval_mtime = mtime
+                if not snap.verdict and ev.get("wins", 0) >= ev.get("n"):
+                    snap.verdict = "kept"          # celebration anim
+            if not snap.status:
+                snap.status = (f"ARC held-out: {ev.get('wins')}/{ev.get('n')} "
+                               f"tasks better than base")
+        if self._arc.get("plan"):
+            pl = self._arc["plan"]
+            note = f"dictated: {pl.get('action')} — {(pl.get('reasoning') or '')[:120]}"
+            snap.status = f"{note} | {snap.status}" if snap.status else note
+
+        # the active character announces herself
+        try:
+            who = json.loads((Path(__file__).resolve().parent.parent
+                              / "bench" / "arc" / "pet_character.json"
+                              ).read_text()).get("character", "")
+        except Exception:
+            who = ""
+        if who and not snap.status.startswith(who):
+            snap.status = f"{who} · {snap.status}"
+
         snap.has_adapter, snap.adapter_iters = self._adapter_state(force=bool(snap.verdict))
         snap.status = status_line(snap)
         return snap
