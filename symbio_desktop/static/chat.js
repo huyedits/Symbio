@@ -330,7 +330,12 @@ function tickWaiting() {
     if (waking) waking.textContent = `${wakingText} — your message goes as soon as it is up`;
     return;
   }
-  setStatus('busy', `Thinking… ${seconds}s`);
+  // Words, not a ticking second counter: a bare "60s" reads like a stall.
+  // The resident model is usually just thinking; only speak up if it has gone
+  // quiet long enough that something else is the likelier explanation.
+  const phases = ['Pondering…', 'Synchronising…', 'Mulling it over…',
+    'Reading the room…', 'Weighing it up…', 'Still with you…'];
+  setStatus('busy', phases[Math.min(phases.length - 1, Math.floor(seconds / 6))]);
   const label = document.querySelector('#pending .wait-label');
   if (!label) return;
   // What it is actually waiting on, rather than a spinner that means nothing.
@@ -338,10 +343,10 @@ function tickWaiting() {
   // silence past half a minute more likely means the resident model is busy
   // with another window, since it serves one at a time.
   if (quiet > 30) {
-    label.textContent = `still nothing after ${quiet}s — the resident model `
+    label.textContent = `nothing back after ${quiet}s — the resident model `
       + 'serves one window at a time, so it may be busy with another';
   } else if (seconds > 3) {
-    label.textContent = `reading the prompt… ${seconds}s`;
+    label.textContent = 'reading the prompt…';
   } else {
     label.textContent = '';
   }

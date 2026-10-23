@@ -16,6 +16,7 @@ which is docked to the bottom.
 """
 from __future__ import annotations
 
+import random
 import re
 import sys
 
@@ -26,7 +27,7 @@ from textual.widgets import Input, Static
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
 from symbio_tui.protocol import DaemonLink  # noqa: E402
-from symbio_tui.theme import DIM, GOLD  # noqa: E402
+from symbio_tui.theme import DIM, GOLD, WAIT_WORDS  # noqa: E402
 from symbio_tui.widgets import (  # noqa: E402
     HOOK, CommandStrip, Composer, Face, History, LiveLine, StatusLine,
     Suggestions)
@@ -259,7 +260,7 @@ class SymbioTUI(App):
         self.query_one(History).say_user(text)
         self._send({"type": "input", "text": text})
         self._awaiting_input = False
-        self._set_status("Thinking…", busy=True)
+        self._set_status(random.choice(WAIT_WORDS), busy=True)
         self.query_one(Face).set_mood("working")
 
     def _send(self, message: dict) -> None:

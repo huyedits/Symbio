@@ -148,7 +148,7 @@ html, body {
   color: var(--text-primary);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
-  font-size: 15px;
+  font-size: 15.5px;
 }
 
 button { font: inherit; color: inherit; cursor: pointer; background: none; border: none; }
@@ -708,7 +708,8 @@ body.workspace-open #workspace { transform: none; }
 .ws-tab:hover { background: var(--bg-overlay); color: var(--text-primary); }
 .ws-tab.active { background: var(--bg-elevated); color: var(--text-primary); font-weight: 550; }
 
-.ws-actions { display: flex; gap: 2px; }
+.ws-actions { display: flex; gap: 2px; margin-left: auto; opacity: 0.42; transition: opacity 180ms ease; }
+.ws-actions:hover, .ws-actions:focus-within { opacity: 1; }
 
 @media (max-width: 900px) {
   #sidebar { box-shadow: 0 0 40px rgba(0, 0, 0, 0.18); }
@@ -1278,7 +1279,7 @@ body.workspace-open #workspace { transform: none; }
 }
 
 .switch.on { background: var(--accent); border-color: var(--accent); }
-.switch.on span { transform: translateX(17px); background: #fff; }
+.switch.on span { transform: translateX(17px); background: var(--bg-surface); }
 
 .key-chip {
   flex-shrink: 0;
@@ -1314,7 +1315,7 @@ body.workspace-open #workspace { transform: none; }
 }
 .seg button:last-child { border-right: none; }
 .seg button:hover { color: var(--accent); }
-.seg button.on { background: var(--accent); color: #fff; }
+.seg button.on { background: var(--accent); color: var(--accent-ink); }
 .seg button.on.block { background: var(--danger); }
 .guard-floor { display: flex; gap: 8px; padding: 6px 0; font-size: 13px; color: var(--text-muted); }
 .guard-recent {
@@ -1560,4 +1561,18 @@ body.busy .msg-actions { visibility: hidden; }
   content: "Waiting to send";
   display: block; text-align: right; margin-top: 4px;
   font-size: 11.5px; color: var(--text-secondary);
+}
+
+/* Spacing scale, derived from the 4/8 grid. */
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
 }
