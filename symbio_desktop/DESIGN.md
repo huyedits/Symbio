@@ -71,6 +71,7 @@ replies, "Good afternoon, Huy"), which made it a copy of another product.
 Chat first: sidebar, one reading column (720px), the composer card at the
 bottom; the workspace is a drawer. The empty window is the icon and the
 assistant's name over the composer.
+Replies cap at 85% of the column, with the assistant's text inset 4px.
 
 ## Elevation & Depth
 
@@ -82,6 +83,7 @@ modal scrim is solid, never blurred.
 
 6px controls, 10px blocks (code, activity, notices), 16px cards that hold a
 decision (approvals, settings), 22px composer.
+Controls sit on one 32px line (`--control-h`): icon buttons, chips, actions.
 
 ## Components
 

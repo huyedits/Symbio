@@ -22,6 +22,10 @@ const LIVE_KEY = 'symbio.live.v1';
 const THEME_KEY = 'symbio.theme';
 // Messages typed but not yet acknowledged by the server, oldest first.
 const OUTBOX_KEY = 'symbio.outbox.v1';
+// Messages typed while a reply is in flight. The daemon can accept them
+// mid-turn, but the window used to drop them straight into the thread as if
+// they had already been said. They wait here, in view, until the turn ends.
+const QUEUE_KEY = 'symbio.queue.v1';
 
 let ws = null;
 // The reconnect ladder (after Hermes Desktop's use-gateway-boot): full-jitter
@@ -34,6 +38,7 @@ let escalateTimer = null;      // shows the banner once the disconnect has laste
 let probeTimer = null;         // a liveness ping waiting for any frame back
 let turnInterrupted = false;   // a turn was in flight when the socket dropped
 let outbox = loadOutbox();
+let queued = loadQueue();
 const RECONNECT_BASE_MS = 300;
 const RECONNECT_CAP_MS = 15000;
 const PROBE_TIMEOUT_MS = 4000;
@@ -83,6 +88,75 @@ function saveOutbox() {
   try {
     localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox));
   } catch (e) { /* the message still sends while this page stays open */ }
+}
+
+function loadQueue() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(QUEUE_KEY));
+    return Array.isArray(saved) ? saved.filter(m => m && m.text) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveQueue() {
+  try {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(queued));
+  } catch (e) { /* the strip still works while this page stays open */ }
+}
+
+/* Above the composer, because that is where the next turn's messages belong:
+ * the thread is what was said, the strip is what is waiting to be said. */
+function renderQueue() {
+  const box = document.getElementById('queue');
+  const rows = document.getElementById('queue-rows');
+  if (!box || !rows) return;
+  box.hidden = queued.length === 0;
+  if (!queued.length) {
+    rows.innerHTML = '';
+    return;
+  }
+  document.getElementById('queue-label').textContent = queued.length === 1
+    ? 'Queued — sends when this reply finishes'
+    : `Queued (${queued.length}) — sends when this reply finishes`;
+  rows.innerHTML = '';
+  for (const item of queued) {
+    const row = document.createElement('div');
+    row.className = 'queue-row';
+    const text = document.createElement('span');
+    text.className = 'queue-text';
+    text.textContent = item.text;
+    text.title = item.text;
+    const remove = document.createElement('button');
+    remove.className = 'queue-remove';
+    remove.type = 'button';
+    remove.title = 'Remove from the queue';
+    remove.setAttribute('aria-label', 'Remove queued message');
+    remove.textContent = '✕';
+    remove.addEventListener('click', () => {
+      queued = queued.filter(m => m !== item);
+      saveQueue();
+      renderQueue();
+    });
+    row.append(text, remove);
+    rows.appendChild(row);
+  }
+}
+
+function enqueue(text) {
+  queued.push({ text, at: Date.now() });
+  saveQueue();
+  renderQueue();
+  input.focus();
+}
+
+function sendQueued() {
+  if (!queued.length || document.body.classList.contains('busy')) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const item = queued.shift();
+  saveQueue();
+  renderQueue();
+  deliver(item.text);
 }
 
 function newMessageId() {
@@ -139,6 +213,9 @@ function newChat() {
   viewingId = null;
   streamEl = null;
   activityCard = null;
+  queued = [];
+  saveQueue();
+  renderQueue();
   renderThread([]);
   setTitle('New chat');
   document.getElementById('read-only-banner').hidden = true;
@@ -417,7 +494,13 @@ function appendToken(text) {
     thoughtEl.innerHTML = '<summary>Thinking…</summary><div class="thought-body"></div>';
     el.insertBefore(thoughtEl, el.firstChild);
   }
-  if (thoughtEl) thoughtEl.querySelector('.thought-body').textContent = thought;
+  if (thoughtEl) {
+    thoughtEl.querySelector('.thought-body').textContent = thought;
+    // The count is the honest measure of how much the model thought, and it
+    // updates while the block is still arriving.
+    const words = thought.trim().split(/\s+/).filter(Boolean).length;
+    thoughtEl.querySelector('summary').textContent = `Reasoning (${words} words)`;
+  }
   el.querySelector('.msg-body').innerHTML = renderMarkdown(answer);
   scrollToEnd();
 }
@@ -449,10 +532,7 @@ function finishStream(finalText) {
     streamEl = null;
   }
   streamText = '';
-  if (activityCard) {
-    activityCard.classList.add('done');
-    activityCard = null;
-  }
+  settleActivity('done');
   if (text || split.thought) addBubble('assistant', text, true, split.thought);
   markLastAssistant();
 }
@@ -478,7 +558,8 @@ function addActivity(text) {
         <span class="activity-label">Working…</span>
         <span class="activity-chevron">▾</span>
       </button>
-      <pre class="activity-log"></pre>`;
+      <ol class="activity-steps"></ol>
+      <details class="activity-raw"><summary>Raw log</summary><pre class="activity-log"></pre></details>`;
     activityCard.querySelector('.activity-head').addEventListener('click', () => {
       activityCard.classList.toggle('open');
     });
@@ -496,7 +577,34 @@ function addActivity(text) {
     .replace(/\s+/g, ' ');
   activityCard.querySelector('.activity-label').textContent =
     label.length > 80 ? label.slice(0, 80) + '…' : label;
+  // Each line is one step of the turn. The one being reported is running;
+  // the previous one finished when the next arrived. The collapsed card still
+  // says one line — open it to read the steps.
+  const steps = activityCard.querySelector('.activity-steps');
+  steps.querySelectorAll('.activity-step.running').forEach(step => {
+    step.classList.remove('running');
+    step.classList.add('done');
+  });
+  const step = document.createElement('li');
+  step.className = 'activity-step running';
+  step.innerHTML = '<span class="step-dot" aria-hidden="true"></span><span class="step-label"></span>';
+  step.querySelector('.step-label').textContent = label;
+  steps.appendChild(step);
+  while (steps.children.length > 60) steps.firstElementChild.remove();
   scrollToEnd();
+}
+
+/* The turn is over: whatever was still running has either finished or died.
+ * Called from both the normal end and the error path, so the card cannot be
+ * left spinning after the reply has landed. */
+function settleActivity(state = 'done') {
+  if (!activityCard) return;
+  activityCard.classList.add('done');
+  activityCard.querySelectorAll('.activity-step.running').forEach(step => {
+    step.classList.remove('running');
+    step.classList.add(state);
+  });
+  activityCard = null;
 }
 
 function showNotice(text) {
@@ -558,7 +666,7 @@ function showConfirm(prompt, card) {
     el.classList.add('answered');
     const verdict = !approved ? 'Denied'
       : always ? `Allowed — won't ask about “${card.kind_label}” again (Settings → Guardrails)`
-      : 'Allowed';
+      : (card.kind ? 'Allowed once' : 'Allowed');
     el.querySelector('.confirm-actions').innerHTML =
       `<span class="confirm-verdict">${escHtml(verdict)}</span>`;
   };
@@ -709,13 +817,18 @@ function connect() {
         finishStream(data.text);
         setStatus('ok', `Ready. Last reply took ${Math.round((Date.now() - waitStarted) / 1000)} s`);
         setBusy(false);
+        sendQueued();
         break;
       case 'error':
         stopWaiting();
         finishStream('');
         addActivity(data.text);
+        settleActivity('failed');
         addBubble('assistant', `**Something failed.** ${String(data.text).split('\n')[0]}`);
         setBusy(false);
+        // A failed turn is still a finished turn: the next queued message
+        // goes, or it would sit in the strip until the user typed again.
+        sendQueued();
         break;
       case 'quit':
         setStatus('off', 'Session ended');
@@ -873,6 +986,7 @@ function reconcile(data) {
                + 'was being written. Ask again to get the rest.');
   }
   flushOutbox();
+  sendQueued();
 }
 
 // ── the outbox: a message is kept from the moment it is sent ─────────
@@ -899,7 +1013,10 @@ function markSent(id) {
 
 function setBusy(busy) {
   document.body.classList.toggle('busy', busy);
-  sendBtn.disabled = busy || !input.value.trim();
+  // Sending mid-turn is a queue, not a refusal: the button stays live so the
+  // next message can be written while the model is still talking.
+  sendBtn.disabled = !input.value.trim();
+  sendBtn.title = busy ? 'Queue this message' : 'Send';
 }
 
 function submit() {
@@ -910,6 +1027,18 @@ function submit() {
   // the window looked broken. Send it to the live conversation instead —
   // that is plainly what was meant.
   if (viewingId !== null) backToLive();
+  input.value = '';
+  input.style.height = 'auto';
+  // A message typed mid-turn is queued, not interleaved: the resident model
+  // finishes the reply it is writing, then this one goes.
+  if (document.body.classList.contains('busy')) {
+    enqueue(text);
+    return;
+  }
+  deliver(text);
+}
+
+function deliver(text) {
   // Durable at send: the message is in the transcript and the outbox before
   // anything is written to the socket, so a dropped connection, a reload or a
   // closed window between here and the server's `ack` cannot lose it. Typing
@@ -919,8 +1048,6 @@ function submit() {
   saveOutbox();
   addBubble('user', text, true, '', id);
   scrollToEnd(true);             // sending is looking at the conversation again
-  input.value = '';
-  input.style.height = 'auto';
   if (send({ type: 'chat', id, message: text })) {
     setBusy(true);
     startWaiting();
@@ -947,7 +1074,7 @@ input.addEventListener('keydown', (e) => {
 input.addEventListener('input', () => {
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 200) + 'px';
-  sendBtn.disabled = !input.value.trim() || document.body.classList.contains('busy');
+  sendBtn.disabled = !input.value.trim();
 });
 
 document.getElementById('btn-new-chat').addEventListener('click', newChat);
@@ -1048,4 +1175,5 @@ document.getElementById('btn-reconnect').addEventListener('click', reconnectNow)
 
 restoreLive();
 renderChatList();
+renderQueue();
 connect();

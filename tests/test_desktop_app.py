@@ -359,6 +359,10 @@ def test_the_daemon_queues_waiting_clients():
 
 def test_a_message_with_no_model_is_held_and_the_model_is_woken(monkeypatch):
     sent, connected = [], []
+    # This Mac may already have a resident daemon up; the bridge then counts
+    # the load as someone else's and records no cold start. The test is about
+    # the cold path, so it must not read the machine's real state.
+    monkeypatch.setattr(server, "daemon_state", lambda: "asleep")
     monkeypatch.setattr(server, "wake_daemon",
                         lambda report: (report("Waking Symbio — loading the model… 2s") or (True, "")))
     bridge = server.DaemonBridge(sent.append)
@@ -925,11 +929,21 @@ def test_the_socket_handler_acks_before_it_dedupes():
 def test_the_page_keeps_a_message_from_the_moment_it_is_sent():
     """Static checks on chat.js for what only a browser can run: the outbox is
     written before the socket, resent on `synced`, cleared on `ack`, and the
-    reconnect ladder answers wake signals."""
+    reconnect ladder answers wake signals. Sending was split into deliver()
+    when the queued-message strip was added; the outbox contract moved with it
+    and this test follows the function that actually writes the socket."""
     js = (REPO / "symbio_desktop" / "static" / "chat.js").read_text()
+    deliver = js.split("function deliver(")[1].split("\nfunction ")[0]
+    assert deliver.index("saveOutbox()") < deliver.index("send({ type: 'chat'")
+    assert "addActivity('Not connected" not in deliver
     submit = js.split("function submit()")[1].split("\nfunction ")[0]
-    assert submit.index("saveOutbox()") < submit.index("send({ type: 'chat'")
-    assert "addActivity('Not connected" not in submit
+    assert "enqueue(text)" in submit and "deliver(text)" in submit
+    done = js.split("case 'done':")[1].split("break;")[0]
+    assert "sendQueued()" in done
+    # A failed turn is a finished turn: the queue must not wait for a `done`
+    # that is never coming.
+    errored = js.split("case 'error':")[1].split("break;")[0]
+    assert "sendQueued()" in errored
     assert "flushOutbox()" in js.split("function reconcile(")[1].split("\nfunction ")[0]
     assert "case 'ack':    markSent(data.id)" in js
     for signal in ("'online'", "'visibilitychange'", "'pageshow'"):
@@ -937,3 +951,4 @@ def test_the_page_keeps_a_message_from_the_moment_it_is_sent():
     assert "Math.random() * cap" in js            # full jitter, not lockstep
     html = (REPO / "symbio_desktop" / "static" / "index.html").read_text()
     assert 'id="conn-banner"' in html and 'id="btn-reconnect"' in html
+    assert 'id="queue"' in html and 'id="queue-rows"' in html
