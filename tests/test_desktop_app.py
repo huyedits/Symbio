@@ -983,3 +983,137 @@ def test_the_turns_steps_stay_readable_after_the_reply():
     assert "Reasoning (${lines} words)" not in js and "words === 1 ? 'word'" in js
     html = (static / "index.html").read_text()
     assert 'id="sr-status" role="status" aria-live="polite"' in html
+
+
+def test_a_page_closing_its_socket_gets_an_answer_and_the_end_of_it(monkeypatch, tmp_path):
+    """Live socket: a WebSocket close is answered with a close frame carrying
+    the page's code, and the connection ends. Unanswered — the HTTP/1.1
+    handler went back to reading for a next request — the page's ws.close()
+    never finished, so it never reconnected, and New chat during a reply left
+    the window busy for good. Found by driving the real page, not by this
+    suite."""
+    import socket as socket_mod
+    import threading
+    from http.server import ThreadingHTTPServer
+
+    monkeypatch.setattr(server, "daemon_state", lambda: "ready")   # no pre-warm, no model
+    monkeypatch.setattr(server, "_BRIDGE", None)
+    monkeypatch.setattr(server.constants, "CONFIG_FILE", tmp_path / "config.json")
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+    try:
+        sock = socket_mod.create_connection(("127.0.0.1", port), timeout=5)
+        sock.sendall((f"GET /ws/chat HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+                      f"Origin: http://127.0.0.1:{port}\r\nUpgrade: websocket\r\n"
+                      "Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                      "Sec-WebSocket-Version: 13\r\n\r\n").encode())
+        data = b""
+        while b"\r\n\r\n" not in data:       # a browser waits for the 101 too
+            data += sock.recv(4096)
+        sock.sendall(_client_frame(struct.pack(">H", 4000), opcode=0x8))
+        while chunk := sock.recv(4096):      # a timeout here is the old hang
+            data += chunk
+        assert b" 101 " in data.split(b"\r\n", 1)[0]
+        assert bytes([0x88, 2]) + struct.pack(">H", 4000) in data
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+class _Hangable:
+    def __init__(self):
+        self.shut = self.closed = False
+
+    def shutdown(self, _how):
+        self.shut = True
+
+    def close(self):
+        self.closed = True
+
+
+def test_a_new_chat_ends_the_models_session_when_idle():
+    """The bridge outlives browser sockets on purpose, so closing one stopped
+    ending the daemon's session: New chat showed an empty thread over a model
+    that still remembered the old one. Idle, it now hangs up at once (shutdown
+    as well as close — makefile readers keep the descriptor alive past close),
+    and the next message opens a fresh session."""
+    bridge = server.DaemonBridge(lambda _m: None)
+    sock = _Hangable()
+    bridge.sock, bridge.ready = sock, True
+    bridge.missed = ["a reply from the old chat"]
+    assert bridge.new_conversation() is False
+    assert sock.shut and sock.closed
+    assert bridge.sock is None and not bridge.alive() and bridge.missed == []
+
+
+def test_a_new_chat_mid_reply_lets_the_turn_finish_unseen_and_denied():
+    """Mid-turn the daemon is not cut off; the turn finishes there. Nothing of
+    it reaches the new chat, an approval it asks for is denied, the page gets
+    the turn's `done` (or its composer stays in queue mode for good), and the
+    session ends before that `done` goes out, so whatever the page sends next
+    opens the fresh session instead of landing in the old one."""
+    sent, written = [], []
+
+    class _Out:
+        def write(self, data): written.append(data)
+        def flush(self): pass
+
+    class _Pipe:
+        def __init__(self, lines): self.lines = list(lines)
+        def readline(self): return self.lines.pop(0) if self.lines else b""
+
+    bridge = server.DaemonBridge(sent.append, "Caine")
+    sock = _Hangable()
+    bridge.sock, bridge.ready, bridge.wfile = sock, True, _Out()
+    bridge.say("tidy my notes")
+    assert bridge.new_conversation() is True
+    order = []
+    sock.shutdown = lambda _how: order.append("hung up")
+    bridge.sink = lambda m: order.append(m["type"]) or sent.append(m)
+    bridge.rfile = _Pipe([json.dumps(m).encode() + b"\n" for m in (
+        {"type": "stream", "text": "Caine   : Deleting your notes"},
+        {"type": "output", "text": "  [Tool: delete_file]"},
+        {"type": "confirm", "prompt": "Delete notes/?"},
+        {"type": "input_prompt", "prompt": "> "},
+    )])
+    bridge._pump()
+
+    assert sent == [{"type": "done", "text": ""}]
+    assert order == ["hung up", "done"]
+    answers = [json.loads(line) for line in b"".join(written).splitlines()]
+    assert answers == [{"type": "input", "text": "tidy my notes"},
+                       {"type": "confirm", "answer": False}]
+    assert bridge.sock is None and bridge.open_turns == 0 and not bridge.abandoned
+
+
+def test_new_chat_asks_the_server_for_a_fresh_session():
+    js = (REPO / "symbio_desktop" / "static" / "chat.js").read_text()
+    new_chat = js.split("function newChat()")[1].split("\nfunction ")[0]
+    assert "send({ type: 'new_chat' })" in new_chat and "ws.close(" not in new_chat
+    assert "streamText = ''" in new_chat       # a half-streamed old reply is not finished here
+    assert "newChatOwed" in js.split("function reconcile(")[1].split("\nfunction ")[0]
+    # Frames already in flight when the thread was cleared are the old chat's.
+    assert "if (newChatOwed && ['token', 'system', 'progress', 'confirm', 'resume']" in js
+    assert "case 'new_chat':" in js
+
+
+def test_a_new_chat_denies_the_question_the_old_turn_is_waiting_on():
+    """An approval card already up when New chat cleared the thread: the
+    daemon's confirm_fn is a real thread blocked on it, so unanswered the old
+    turn never ends and the page never leaves queue mode."""
+    written = []
+
+    class _Out:
+        def write(self, data): written.append(data)
+        def flush(self): pass
+
+    bridge = server.DaemonBridge(lambda _m: None)
+    bridge.sock, bridge.ready, bridge.wfile = _Hangable(), True, _Out()
+    bridge.open_turns = 1
+    bridge.pending_confirm = {"type": "confirm", "prompt": "Delete notes/?"}
+    assert bridge.new_conversation() is True
+    assert [json.loads(line) for line in b"".join(written).splitlines()] == [
+        {"type": "confirm", "answer": False}]
+    assert bridge.pending_confirm is None and bridge.abandoned

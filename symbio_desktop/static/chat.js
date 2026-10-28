@@ -37,6 +37,9 @@ let offlineSince = null;       // when the current disconnect started
 let escalateTimer = null;      // shows the banner once the disconnect has lasted
 let probeTimer = null;         // a liveness ping waiting for any frame back
 let turnInterrupted = false;   // a turn was in flight when the socket dropped
+// New chat was asked for and the server has not answered yet: frames still
+// arriving belong to the conversation that was left.
+let newChatOwed = false;
 let outbox = loadOutbox();
 let queued = loadQueue();
 const RECONNECT_BASE_MS = 300;
@@ -256,6 +259,7 @@ function newChat() {
   rememberLive();
   viewingId = null;
   streamEl = null;
+  streamText = '';
   activityCard = null;
   // Queued messages were never said, and only exist here. A new chat is not
   // a reason to lose them: they go back into the composer to send or delete.
@@ -271,10 +275,13 @@ function newChat() {
   setTitle('New chat');
   document.getElementById('read-only-banner').hidden = true;
   input.disabled = false;
-  // A new conversation is a new server-side session: the socket owns the
-  // history, so reconnecting is what actually clears it. Pretending
-  // otherwise would show an empty thread over a model that still remembers.
-  if (ws && ws.readyState === WebSocket.OPEN) ws.close(4000, 'new chat');
+  // A new conversation is a new server-side session, or the empty thread
+  // would sit over a model that still remembers. Closing the socket used to
+  // end it; the server now keeps its session across sockets (a reload must
+  // not forget), so it is asked. A reply still being written finishes there
+  // unseen, and the composer queues until it has.
+  newChatOwed = true;
+  send({ type: 'new_chat' });
   renderChatList();
   input.focus();
 }
@@ -324,6 +331,10 @@ function showWelcome() {
     <h1 class="greeting"><span class="mark" aria-hidden="true"></span><span class="greeting-name">${escHtml(greetingText())}</span></h1>
   </div>`;
   document.getElementById('main').classList.add('empty');
+  // Nothing to scroll back to: the old thread's "back to latest" arrow
+  // otherwise floats over the empty window.
+  autoFollow = true;
+  updateToBottom();
 }
 
 function clearWelcome() {
@@ -839,6 +850,10 @@ function connect() {
     try { data = JSON.parse(event.data); } catch (e) { return; }
     lastFrameAt = Date.now();
     clearProbe();                // any frame at all proves the socket alive
+    // The old conversation's reply, steps and questions, sent before the
+    // server heard New chat, are not drawn into the new one. Its `done`
+    // still counts: that is what frees the composer.
+    if (newChatOwed && ['token', 'system', 'progress', 'confirm', 'resume'].includes(data.type)) return;
     switch (data.type) {
       case 'connected':
         reconnectAttempt = 0;
@@ -902,6 +917,18 @@ function connect() {
         break;
       case 'quit':
         setStatus('off', 'Session ended');
+        break;
+      case 'new_chat':
+        newChatOwed = false;
+        // The old session is over. Busy means its last reply is still being
+        // finished, unseen; its `done` clears the composer for this chat.
+        stopWaiting();
+        if (data.busy) {
+          setStatus('busy', 'Finishing the last reply first…');
+        } else {
+          setBusy(false);
+          setStatus('ok', `${window.__assistantName || 'Symbio'} is ready`);
+        }
         break;
       case 'ack':    markSent(data.id); break;
       case 'resume': resumeTurn(data); break;
@@ -1043,6 +1070,10 @@ function resumeTurn(data) {
  * of leaving the page waiting on a reply that will never come. Then whatever
  * is in the outbox goes. */
 function reconcile(data) {
+  // A New chat the server never answered (made offline, or the socket fell
+  // between) is asked again first, so nothing in the outbox lands in the
+  // old session.
+  if (newChatOwed) send({ type: 'new_chat' });
   if (data.busy) {
     turnInterrupted = false;
     setBusy(true);
