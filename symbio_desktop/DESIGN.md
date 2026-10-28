@@ -91,6 +91,12 @@ Controls sit on one 32px line (`--control-h`): icon buttons, chips, actions.
   the headline (display face); a red warning when the words about to go out
   aren't the ones asked for; the exact payload in mono; Deny / Always allow /
   Allow. A warned card has no Always allow and a red-outlined Allow.
+- **Activity card:** one line while collapsed; open, one row per step. A
+  step's state is a shape before it is a colour: ring running, dot done,
+  diamond failed. Every fold uses the same turning chevron.
+- **Queue strip:** messages typed mid-reply wait above the composer, each
+  on the 32px line, editable (click, or Up in an empty composer) and
+  removable. Nothing typed is dropped: a new chat hands them back.
 - **Guardrails panel:** one row per kind of action, four segments
   (Allow / If risky / Ask / Never), the floors as plain sentences, recent
   decisions with their answers.

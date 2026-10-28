@@ -952,3 +952,34 @@ def test_the_page_keeps_a_message_from_the_moment_it_is_sent():
     html = (REPO / "symbio_desktop" / "static" / "index.html").read_text()
     assert 'id="conn-banner"' in html and 'id="btn-reconnect"' in html
     assert 'id="queue"' in html and 'id="queue-rows"' in html
+
+
+def test_the_turns_steps_stay_readable_after_the_reply():
+    """The Apple-HIG pass over the activity card and the queue, pinned. A
+    settled card still opens (its click handler once read the global, which is
+    null after the turn); a step's state is a shape and a word, not only a
+    colour; the queue's remove target meets the Mac's 28px default; and a new
+    chat hands queued messages back instead of dropping them."""
+    static = REPO / "symbio_desktop" / "static"
+    js = (static / "chat.js").read_text()
+    css = (static / "style.css").read_text()
+    add = js.split("function addActivity(")[1].split("\nfunction ")[0]
+    assert "const card = activityCard" in add
+    assert "card.classList.toggle('open')" in add
+    assert "activityCard.classList.toggle('open')" not in js
+    assert 'aria-expanded="false"' in add and "aria-expanded" in add.split("const card")[1]
+    assert "setStepState(step, 'running')" in add
+    assert "setStepState(step, state)" in js.split("function settleActivity(")[1].split("\nfunction ")[0]
+    assert "step-state" in js and ".sr-only" in css
+    failed = css.split(".activity-step.failed .step-dot")[1].split("}")[0]
+    assert "rotate(45deg)" in failed              # a diamond, not a recoloured dot
+    running = css.split(".activity-step.running .step-dot")[1].split("}")[0]
+    assert "border:" in running                   # a ring
+    remove = css.split(".queue-remove {")[1].split("}")[0]
+    assert "width: 28px; height: 28px;" in remove
+    new_chat = js.split("function newChat()")[1].split("\nfunction ")[0]
+    assert "const waiting = queued.map" in new_chat
+    assert new_chat.index("const waiting") < new_chat.index("queued = [];")
+    assert "Reasoning (${lines} words)" not in js and "words === 1 ? 'word'" in js
+    html = (static / "index.html").read_text()
+    assert 'id="sr-status" role="status" aria-live="polite"' in html

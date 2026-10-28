@@ -116,17 +116,27 @@ function renderQueue() {
     rows.innerHTML = '';
     return;
   }
+  // Says what it is actually waiting for: a reply, or (offline, or a page
+  // reopened with a saved queue) the connection.
+  const until = document.body.classList.contains('busy')
+    ? 'this reply finishes'
+    : `${window.__assistantName || 'Symbio'} is back`;
   document.getElementById('queue-label').textContent = queued.length === 1
-    ? 'Queued — sends when this reply finishes'
-    : `Queued (${queued.length}) — sends when this reply finishes`;
+    ? `Queued — sends when ${until}`
+    : `Queued (${queued.length}) — sends when ${until}`;
   rows.innerHTML = '';
   for (const item of queued) {
     const row = document.createElement('div');
     row.className = 'queue-row';
-    const text = document.createElement('span');
+    // The text is a button: a queued message can be taken back and changed,
+    // not only thrown away.
+    const text = document.createElement('button');
     text.className = 'queue-text';
+    text.type = 'button';
     text.textContent = item.text;
-    text.title = item.text;
+    text.title = 'Edit this message';
+    text.setAttribute('aria-label', `Edit queued message: ${item.text}`);
+    text.addEventListener('click', () => editQueued(item));
     const remove = document.createElement('button');
     remove.className = 'queue-remove';
     remove.type = 'button';
@@ -147,7 +157,21 @@ function enqueue(text) {
   queued.push({ text, at: Date.now() });
   saveQueue();
   renderQueue();
+  announce('Queued. It sends when this reply finishes.');
   input.focus();
+}
+
+/* Back out of the strip and into the composer, after anything already being
+ * typed there, so taking a message back never costs a draft. */
+function editQueued(item) {
+  queued = queued.filter(m => m !== item);
+  saveQueue();
+  renderQueue();
+  const draft = input.value.trim();
+  input.value = draft ? `${draft}\n${item.text}` : item.text;
+  input.dispatchEvent(new Event('input'));
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
 }
 
 function sendQueued() {
@@ -156,7 +180,27 @@ function sendQueued() {
   const item = queued.shift();
   saveQueue();
   renderQueue();
+  announce('Sending the queued message.');
   deliver(item.text);
+}
+
+/* Said to VoiceOver and shown nowhere: a change that happens away from where
+ * the person is typing. Cleared first so the same sentence is said again. */
+function announce(text) {
+  const el = document.getElementById('sr-status');
+  if (!el) return;
+  el.textContent = '';
+  requestAnimationFrame(() => { el.textContent = text; });
+}
+
+/* What Enter will do, said where the person is about to type. It carries the
+ * name the user chose, so it is built in one place rather than four. */
+function updatePlaceholder() {
+  const name = window.__assistantName || 'Symbio';
+  input.placeholder = document.body.classList.contains('busy')
+    ? 'Queue a message for when this reply finishes…'
+    : viewingId !== null ? `Message ${name} (sends to the live chat)…`
+    : `Message ${name}…`;
 }
 
 function newMessageId() {
@@ -213,9 +257,16 @@ function newChat() {
   viewingId = null;
   streamEl = null;
   activityCard = null;
+  // Queued messages were never said, and only exist here. A new chat is not
+  // a reason to lose them: they go back into the composer to send or delete.
+  const waiting = queued.map(m => m.text);
   queued = [];
   saveQueue();
   renderQueue();
+  if (waiting.length) {
+    input.value = [input.value.trim(), ...waiting].filter(Boolean).join('\n\n');
+    input.dispatchEvent(new Event('input'));
+  }
   renderThread([]);
   setTitle('New chat');
   document.getElementById('read-only-banner').hidden = true;
@@ -239,7 +290,7 @@ function openConversation(id) {
   // Not disabled: typing here sends to the live conversation, which is what
   // someone reading an old thread and starting to type actually wants.
   input.disabled = false;
-  input.placeholder = 'Message Symbio (sends to the live chat)…';
+  updatePlaceholder();
   renderChatList();
 }
 
@@ -249,7 +300,7 @@ function backToLive() {
   setTitle(live.title);
   document.getElementById('read-only-banner').hidden = true;
   input.disabled = false;
-  input.placeholder = 'Message Symbio…';
+  updatePlaceholder();
   renderChatList();
   input.focus();
 }
@@ -316,10 +367,9 @@ function addBubble(role, text, store = true, thought = '', id = '') {
   // The reasoning is KEPT, not dropped: it is the most interesting thing a
   // local model produces and the reason to trust or distrust the answer. It
   // is folded shut because it is not what was said — the answer is.
-  const lines = thought ? thought.trim().split(/\s+/).length : 0;
   el.innerHTML =
     (thought
-      ? `<details class="thought"><summary>Reasoning (${lines} words)</summary>`
+      ? `<details class="thought"><summary>${reasoningLabel(thought)}</summary>`
         + `<div class="thought-body">${escHtml(thought.trim())}</div></details>`
       : '')
     + `<div class="msg-body">${renderMarkdown(text)}</div>`;
@@ -491,18 +541,23 @@ function appendToken(text) {
   if (thought && !thoughtEl) {
     thoughtEl = document.createElement('details');
     thoughtEl.className = 'thought';
-    thoughtEl.innerHTML = '<summary>Thinking…</summary><div class="thought-body"></div>';
+    thoughtEl.innerHTML = '<summary></summary><div class="thought-body"></div>';
     el.insertBefore(thoughtEl, el.firstChild);
   }
   if (thoughtEl) {
     thoughtEl.querySelector('.thought-body').textContent = thought;
-    // The count is the honest measure of how much the model thought, and it
-    // updates while the block is still arriving.
-    const words = thought.trim().split(/\s+/).filter(Boolean).length;
-    thoughtEl.querySelector('summary').textContent = `Reasoning (${words} words)`;
+    // The count updates while the block is still arriving; the ellipsis goes
+    // when the answer starts, because the thinking has stopped.
+    thoughtEl.querySelector('summary').textContent = reasoningLabel(thought, !answer);
   }
   el.querySelector('.msg-body').innerHTML = renderMarkdown(answer);
   scrollToEnd();
+}
+
+/* The count is the honest measure of how much the model thought. */
+function reasoningLabel(thought, thinking = false) {
+  const words = thought.trim().split(/\s+/).filter(Boolean).length;
+  return `Reasoning${thinking ? '…' : ''} (${words} ${words === 1 ? 'word' : 'words'})`;
 }
 
 function markLastAssistant() {
@@ -553,15 +608,20 @@ function addActivity(text) {
     activityCard = document.createElement('div');
     activityCard.className = 'activity';
     activityCard.innerHTML = `
-      <button class="activity-head" type="button">
-        <span class="spinner"></span>
+      <button class="activity-head" type="button" aria-expanded="false">
+        <span class="spinner" aria-hidden="true"></span>
         <span class="activity-label">Working…</span>
-        <span class="activity-chevron">▾</span>
+        <span class="activity-chevron" aria-hidden="true"></span>
       </button>
       <ol class="activity-steps"></ol>
       <details class="activity-raw"><summary>Raw log</summary><pre class="activity-log"></pre></details>`;
-    activityCard.querySelector('.activity-head').addEventListener('click', () => {
-      activityCard.classList.toggle('open');
+    // This card, not whichever one is current: once the turn settles,
+    // activityCard is null (or the next turn's), and the steps are read after
+    // the reply far more often than during it.
+    const card = activityCard;
+    card.querySelector('.activity-head').addEventListener('click', (e) => {
+      const open = card.classList.toggle('open');
+      e.currentTarget.setAttribute('aria-expanded', String(open));
     });
     // Before the streaming bubble, so the answer always sits last.
     if (streamEl) thread.insertBefore(activityCard, streamEl);
@@ -581,14 +641,13 @@ function addActivity(text) {
   // the previous one finished when the next arrived. The collapsed card still
   // says one line — open it to read the steps.
   const steps = activityCard.querySelector('.activity-steps');
-  steps.querySelectorAll('.activity-step.running').forEach(step => {
-    step.classList.remove('running');
-    step.classList.add('done');
-  });
+  steps.querySelectorAll('.activity-step.running').forEach(step => setStepState(step, 'done'));
   const step = document.createElement('li');
-  step.className = 'activity-step running';
-  step.innerHTML = '<span class="step-dot" aria-hidden="true"></span><span class="step-label"></span>';
+  step.className = 'activity-step';
+  step.innerHTML = '<span class="step-dot" aria-hidden="true"></span>'
+    + '<span class="sr-only step-state"></span><span class="step-label"></span>';
   step.querySelector('.step-label').textContent = label;
+  setStepState(step, 'running');
   steps.appendChild(step);
   while (steps.children.length > 60) steps.firstElementChild.remove();
   scrollToEnd();
@@ -600,11 +659,22 @@ function addActivity(text) {
 function settleActivity(state = 'done') {
   if (!activityCard) return;
   activityCard.classList.add('done');
-  activityCard.querySelectorAll('.activity-step.running').forEach(step => {
-    step.classList.remove('running');
-    step.classList.add(state);
-  });
+  // A failed turn must not end on the success ring.
+  activityCard.classList.toggle('failed', state === 'failed');
+  activityCard.querySelectorAll('.activity-step.running').forEach(step => setStepState(step, state));
   activityCard = null;
+}
+
+/* A step's state is a shape (ring, dot, diamond) and a word for VoiceOver as
+ * well as a colour: in the dark theme teal and red are the same lightness
+ * (1.02:1), and amber against teal is the blue-orange pair colour-blind
+ * readers lose. */
+const STEP_STATE_WORDS = { running: 'Running', done: 'Done', failed: 'Failed' };
+
+function setStepState(step, state) {
+  step.classList.remove('running', 'done', 'failed');
+  step.classList.add(state);
+  step.querySelector('.step-state').textContent = `${STEP_STATE_WORDS[state]}: `;
 }
 
 function showNotice(text) {
@@ -777,7 +847,7 @@ function connect() {
         hideConnectionBanner();
         window.__assistantName = data.assistant_name || 'Symbio';
         window.__userName = data.user_name || '';
-        input.placeholder = `Message ${window.__assistantName}…`;
+        updatePlaceholder();
         document.getElementById('model-chip').textContent =
           (data.model_name || '').split('/').pop() || '—';
         // Asleep is not an error: the first message wakes it.
@@ -1016,7 +1086,11 @@ function setBusy(busy) {
   // Sending mid-turn is a queue, not a refusal: the button stays live so the
   // next message can be written while the model is still talking.
   sendBtn.disabled = !input.value.trim();
-  sendBtn.title = busy ? 'Queue this message' : 'Send';
+  // The label is what VoiceOver says, so it changes with the action.
+  sendBtn.title = busy ? 'Queue message' : 'Send';
+  sendBtn.setAttribute('aria-label', sendBtn.title);
+  updatePlaceholder();
+  renderQueue();
 }
 
 function submit() {
@@ -1068,6 +1142,12 @@ input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     submit();
+  }
+  // Up in an empty composer takes the newest queued message back to edit,
+  // the way chat apps reopen the last thing sent.
+  if (e.key === 'ArrowUp' && !input.value && queued.length && !e.isComposing) {
+    e.preventDefault();
+    editQueued(queued[queued.length - 1]);
   }
 });
 
