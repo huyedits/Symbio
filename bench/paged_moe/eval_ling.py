@@ -100,7 +100,7 @@ def main():
             out[f"{tag}_cell"] = float(
                 ((amax == tgt).astype(mx.float32) * valid).sum()) / nt
             out[f"{tag}_exact"] = bool(float(
-                (amax == tgt).astype(mx.float32) * valid.sum()) >= nt - 0.5)
+                ((amax == tgt).astype(mx.float32) * valid).sum()) >= nt - 0.5)
         out["loss_delta"] = out["adapted_loss"] - out["base_loss"]
         out["cell_delta"] = out["adapted_cell"] - out["base_cell"]
         results.append(out)
@@ -136,7 +136,6 @@ def _embed_head(bank, cfg, x):
                                transpose=True)
 
 
-if __name__ == "__main__":
     sys.exit(main())
 
 def _embed(bank, cfg, ids):
@@ -153,5 +152,8 @@ def _embed(bank, cfg, ids):
 
 
 def pin_dense_ling(bank, cfg):
-    from train_ling import pin_dense_ling as _p
-    return _p(bank, cfg)
+    from train_ling import pin_dense
+    return pin_dense(bank, cfg)
+
+if __name__ == "__main__":
+    sys.exit(main())
