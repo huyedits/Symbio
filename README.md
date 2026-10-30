@@ -10,6 +10,12 @@
 
 **[Website](https://huyedits.github.io/Symbio/)** · **[Try the interactive demo](https://huggingface.co/spaces/HuyEdits/symbio-demo)** · **[Quick Start](#quick-start)** · **[How it learns](#how-it-learns)** · **[Roadmap](#roadmap)** 
 
+"I wanna install right now"
+okok
+```bash
+curl -fsSL https://raw.githubusercontent.com/huyedits/Symbio/main/setup.sh | bash
+```
+
 
 -- 
 ## What is Symbio?
