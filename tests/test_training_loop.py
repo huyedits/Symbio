@@ -462,6 +462,96 @@ def test_a_load_with_no_room_is_refused(monkeypatch):
     assert "5.0 GB" in message and "3.0 GB" in message
 
 
+# ---- device-aware training plan ----
+
+def _plan_config(seq=3072, checkpoint=False, **gpu):
+    return {"model_name": "some/model", "gpu": gpu,
+            "lora": {"max_seq_length": seq, "grad_checkpoint": checkpoint}}
+
+
+def _snap(free: float) -> dict:
+    return {"total_ram": 16_000_000_000, "free_ram": free,
+            "swap_used": 0, "on_battery": False}
+
+
+def test_plan_keeps_a_recipe_that_fits(monkeypatch):
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: 4_000_000_000)
+    monkeypatch.setattr(training, "device_snapshot", lambda: _snap(16_000_000_000))
+
+    plan = training.plan_training(_plan_config())
+
+    assert plan is not None and not plan["refuse"]
+    assert plan["changes"] == []
+    assert plan["lora"]["max_seq_length"] == 3072
+    assert plan["lora"]["grad_checkpoint"] is False
+
+
+def test_plan_shrinks_the_window_before_it_slower_anything(monkeypatch):
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: 4_000_000_000)
+    monkeypatch.setattr(training, "device_snapshot", lambda: _snap(8_000_000_000))
+
+    plan = training.plan_training(_plan_config(), corpus_longest=950)
+
+    assert plan is not None and not plan["refuse"]
+    assert plan["lora"]["max_seq_length"] == 1024
+    assert plan["lora"]["grad_checkpoint"] is False
+    assert any("window" in c for c in plan["changes"])
+
+
+def test_plan_reaches_for_checkpointing_when_the_window_is_not_enough(monkeypatch):
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: 4_000_000_000)
+    monkeypatch.setattr(training, "device_snapshot", lambda: _snap(6_000_000_000))
+
+    plan = training.plan_training(_plan_config(), corpus_longest=950)
+
+    assert plan is not None and not plan["refuse"]
+    assert plan["lora"]["grad_checkpoint"] is True
+    assert plan["lora"]["max_seq_length"] == 1024
+
+
+def test_plan_refuses_with_the_cheapest_recipe_named(monkeypatch):
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: 4_000_000_000)
+    monkeypatch.setattr(training, "device_snapshot", lambda: _snap(4_000_000_000))
+
+    plan = training.plan_training(_plan_config(), corpus_longest=950)
+
+    assert plan is not None and plan["refuse"]
+    assert "4.0 GB is free" in plan["refuse"]
+    assert plan["changes"] == []
+
+
+def test_plan_never_plans_a_window_below_the_floor(monkeypatch):
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: 4_000_000_000)
+    monkeypatch.setattr(training, "device_snapshot", lambda: _snap(6_000_000_000))
+
+    plan = training.plan_training(_plan_config(), corpus_longest=200)
+
+    assert plan is not None and not plan["refuse"]
+    assert plan["lora"]["max_seq_length"] == training._PLAN_MIN_SEQ
+
+
+def test_plan_stays_out_when_device_aware_is_off(monkeypatch):
+    cfg = _plan_config()
+    cfg["lora"]["device_aware"] = False
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: 4_000_000_000)
+    monkeypatch.setattr(training, "device_snapshot", lambda: _snap(1))
+
+    assert training.plan_training(cfg) is None
+
+
+def test_plan_stays_out_when_the_device_cannot_be_measured(monkeypatch):
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: None)
+    monkeypatch.setattr(training, "device_snapshot", lambda: _snap(1))
+    assert training.plan_training(_plan_config()) is None
+
+    monkeypatch.setattr(training, "_model_weight_bytes", lambda name: 4_000_000_000)
+    monkeypatch.setattr(
+        training, "device_snapshot",
+        lambda: {"total_ram": None, "free_ram": None,
+                 "swap_used": None, "on_battery": None})
+    assert training.plan_training(_plan_config()) is None
+
+
 def test_the_load_preflight_honours_the_same_switches(monkeypatch):
     monkeypatch.setattr(training, "free_ram_bytes", lambda: 1)
     monkeypatch.setattr(training, "_model_weight_bytes", lambda name: 4_000_000_000)
@@ -522,6 +612,7 @@ def _run_and_capture_trainer_args(corpus, monkeypatch, lora_overrides,
     """Run run_training against a stub trainer; return (argv, parsed yaml)."""
     training.append_chat_pair("Q?", "A.", ChatMLTokenizer(), "SYS")
     monkeypatch.setattr(training, "_memory_shortfall", lambda *a, **k: None)
+    monkeypatch.setattr(training, "plan_training", lambda *a, **k: None)
     monkeypatch.setattr(training, "drop_foreign_template_samples", lambda *a, **k: {})
     monkeypatch.setattr(training, "upgrade_corpus_to_messages",
                         lambda *a, **k: {"upgraded": 0, "left": 0})
@@ -581,6 +672,7 @@ def test_only_one_trainer_runs_at_a_time(corpus, monkeypatch):
     """
     training.append_chat_pair("Q?", "A.", ChatMLTokenizer(), "SYS")
     monkeypatch.setattr(training, "_memory_shortfall", lambda *a, **k: None)
+    monkeypatch.setattr(training, "plan_training", lambda *a, **k: None)
     monkeypatch.setattr(training, "drop_foreign_template_samples",
                         lambda *a, **k: {})
     monkeypatch.setattr(training, "upgrade_corpus_to_messages",

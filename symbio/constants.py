@@ -262,6 +262,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Every sample carries the full system prompt (~800 tokens); 1024
         # truncated long samples mid-reply, which trains truncated outputs.
         "max_seq_length": 2048,
+        # Relieve memory pressure before refusing a run: shrink the window to
+        # the corpus, then enable grad_checkpoint. See training.plan_training.
+        "device_aware": True,
         "steps_per_eval": 25,
         "save_every": 50,
     },

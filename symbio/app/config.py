@@ -58,6 +58,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Trade compute for activation memory. Worth turning on before
         # lowering max_seq_length, since activations are what scale with it.
         "grad_checkpoint": False,
+        # When the recipe does not fit free RAM, try cheap reliefs — shrink
+        # the window to the corpus, then grad_checkpoint — before refusing.
+        "device_aware": True,
         # Score the loss over only the tokens the corpus uses, not the whole
         # vocabulary (symbio/trim_lora.py). "auto" does it for vocabularies
         # of 200k+ (Qwen3.5 / Bonsai, 248k), where the full logit array is
