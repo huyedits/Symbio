@@ -46,30 +46,80 @@ def _list_presets() -> list[tuple[str, dict[str, Any]]]:
     return [(key, info) for key, info in presets.items()]
 
 
+# Picked by unified memory, because on Apple silicon the model, its KV cache
+# and everything else on the Mac share one pool. 16 GB gets the 8B, not the
+# 14B: the 14B is ~9 GB resident and freezes a 16 GB Mac once a browser is
+# open alongside it (memory: symbio-browser-session-freeze). Each entry is a
+# models.json key, with the repo as a fallback if that key is ever renamed.
+_RECOMMENDED_BY_RAM = (
+    (24, "dense_14b", "Qwen/Qwen3-14B-MLX-4bit"),
+    (12, "dense_7b", "mlx-community/Qwen3-8B-4bit"),
+    (0, "dense_3b", "mlx-community/Qwen2.5-3B-Instruct-4bit"),
+)
+
+
+def _total_ram_gb() -> int | None:
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // (1024 ** 3)
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
+def recommended_model(ram_gb: int | None = None) -> str:
+    """The model a new install should start on, sized to this machine's RAM."""
+    if ram_gb is None:
+        ram_gb = _total_ram_gb()
+    if ram_gb is None:
+        ram_gb = 16
+    presets = _load_model_presets()
+    for floor, key, fallback in _RECOMMENDED_BY_RAM:
+        if ram_gb >= floor:
+            return presets.get(key, {}).get("model_name") or fallback
+    return _RECOMMENDED_BY_RAM[-1][2]
+
+
+def _short(text: str, limit: int = 70) -> str:
+    """First clause of a preset description. The full descriptions are
+    bench notes, often a paragraph each; a menu of seventeen of them buried
+    the actual choice."""
+    text = (text or "").strip()
+    for sep in (" — ", " -- ", ". "):
+        if sep in text:
+            text = text.split(sep, 1)[0]
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
 def _select_model(config: dict[str, Any], input_fn: Callable[[str], str], output_fn: Callable[[str], Any]) -> str:
-    default_model = config.get("model_name") or app_config.DEFAULT_CONFIG.get("model_name", "")
+    current = config.get("model_name") or ""
+    # The built-in model_name is a placeholder (a 0.6B), not a choice anyone
+    # made. Enter keeps a model the user picked before; on a fresh config it
+    # takes the one sized to this Mac.
+    placeholder = app_config.DEFAULT_CONFIG.get("model_name", "")
+    if current and current != placeholder:
+        default_model, default_label = current, "keep current"
+    else:
+        default_model, default_label = recommended_model(), "recommended for this Mac"
     presets = _list_presets()
 
-    output_fn("\n  Model selection")
-    output_fn(f"  Current default: {default_model}")
+    output_fn("\n  2. Model")
+    ram = _total_ram_gb()
+    if ram:
+        output_fn(f"  This Mac has {ram} GB of unified memory.")
+    output_fn(f"  Press Enter for {default_model} ({default_label}).")
     if presets:
-        output_fn("  Presets:")
+        output_fn("  Or pick one:")
         for i, (key, info) in enumerate(presets, start=1):
-            line = f"    {i}. {info.get('model_name')} — {info.get('description', '')}"
-            note = info.get("memory_note")
-            if note:
-                line += f" ({note})"
-            output_fn(line)
-        output_fn(f"    {len(presets) + 1}. Keep default ({default_model})")
-        output_fn("    0. Enter a custom HuggingFace/MLX repo name")
-    else:
-        output_fn("  No presets found. Enter a model name manually.")
-        output_fn(f"  Default: {default_model}")
+            mark = "  <- default" if info.get("model_name") == default_model else ""
+            desc = _short(info.get("description", ""))
+            output_fn(f"    {i:>2}. {info.get('model_name')}  {desc}{mark}")
+        output_fn(f"    {len(presets) + 1:>2}. Keep default ({default_model})")
+        output_fn("     0. Enter a custom HuggingFace/MLX repo name")
+        output_fn("  Full notes per model: models.json")
 
     while True:
-        choice = _ask("  Pick a model (number or repo name): ", input_fn).strip()
+        choice = _ask("  Model [Enter = default]: ", input_fn).strip()
         if not choice:
-            output_fn(f"  Keeping default: {default_model}")
+            output_fn(f"  Using {default_model}")
             return default_model
         if choice == "0":
             custom = _ask("  Enter model repo/path: ", input_fn).strip()
@@ -271,6 +321,8 @@ def run_setup_wizard(
         # banner/prompt and (previously) re-triggered the wizard every launch.
         # Apply sane defaults so the session is usable as-is.
         ensure_identity_defaults(config)
+        if config.get("model_name", "") in ("", app_config.DEFAULT_CONFIG.get("model_name")):
+            config["model_name"] = recommended_model()
         config["first_run"] = False
         _write_config(config)
         return config

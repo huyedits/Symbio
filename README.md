@@ -496,6 +496,15 @@ Silicon only and deliberately optional, because `mlx` publishes no sdist and a
 hard dependency would make `pip install` fail during resolution on Linux
 before anyone saw an explanation.
 
+### One line
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/huyedits/Symbio/main/setup.sh | bash
+```
+
+Clones into `~/Symbio` (`INSTALL_DIR=...` to change it) and runs `./install.sh`
+below. Re-running it updates the checkout.
+
 ### Work on it
 
 ```bash
@@ -538,7 +547,7 @@ Or use the shorter command:
 symb
 ```
 
-On first launch, an interactive setup wizard asks for your name, Symbio's name, model preset and enabled features.
+On first launch, an interactive setup wizard asks for your name, Symbio's name, model and enabled features. Pressing Enter at the model step takes one sized to your Mac's memory: Qwen3-14B at 24 GB and up, Qwen3-8B from 12 GB, a 3B below that.
 
 Re-run the setup wizard at any time:
 
@@ -554,6 +563,7 @@ symb setup
 ```bash
 ./install.sh --prefetch-model   # Download the model during installation
 ./install.sh --no-browser       # Skip the Chromium download
+./install.sh --with-vision      # Let the assistant see screenshots (mlx-vlm)
 ./install.sh --with-native      # Include experimental native extras
 ./install.sh --dev              # Install development/test dependencies
 ./install.sh --no-shell         # Install without entering the environment

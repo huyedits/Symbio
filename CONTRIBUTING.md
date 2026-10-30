@@ -17,12 +17,8 @@ Thanks for helping make Symbio better. This guide covers how to set up a develop
 git clone <your-fork-url>
 cd agi
 
-# Create a virtual environment
-python -m venv venv
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
+# Virtualenv + package + test dependencies, in one step
+./install.sh --dev
 ```
 
 The project uses MLX for inference and LoRA fine-tuning, so the default path works best on Apple Silicon. See the roadmap in `README.md` for ports to CUDA or llama.cpp.
