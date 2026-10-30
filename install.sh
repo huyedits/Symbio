@@ -24,6 +24,7 @@ VENV="${SYMBIO_VENV:-$REPO_ROOT/venv}"
 # muscle memory. It is now implied: the engine is always installed (see EXTRAS).
 WITH_NATIVE="${WITH_NATIVE:-0}"
 WITH_BROWSER="${WITH_BROWSER:-1}"
+WITH_VISION="${WITH_VISION:-0}"
 PREFETCH_MODEL="${PREFETCH_MODEL:-0}"
 DEV="${DEV:-0}"
 ENTER_SHELL="${ENTER_SHELL:-1}"
@@ -38,15 +39,16 @@ usage() {
     cat <<'EOF'
 Usage: ./install.sh [options]
 
+  --with-vision      Also install mlx-vlm, so the assistant can see screenshots
   --with-native      Also install the experimental symbio_native extras
   --no-browser       Skip the Playwright browser download (~150 MB)
-  --prefetch-model   Download the 4.1 GB model now instead of on first run
+  --prefetch-model   Download the recommended model now instead of on first run
   --dev              Include dev/test dependencies
   --no-shell         Do not drop into the environment when finished
   --venv PATH        Use a different virtualenv path (default: ./venv)
   -h, --help         This message
 
-Environment equivalents: WITH_NATIVE=1 WITH_BROWSER=0 PREFETCH_MODEL=1 DEV=1
+Environment equivalents: WITH_VISION=1 WITH_BROWSER=0 PREFETCH_MODEL=1 DEV=1
                          ENTER_SHELL=0
 EOF
     exit 0
@@ -55,6 +57,7 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         --with-native) WITH_NATIVE=1 ;;
+        --with-vision) WITH_VISION=1 ;;
         --no-browser) WITH_BROWSER=0 ;;
         --prefetch-model) PREFETCH_MODEL=1 ;;
         --dev) DEV=1 ;;
@@ -97,19 +100,20 @@ PY_OK="$("$PY" -c 'import sys; print(1 if sys.version_info >= (3,10) else 0)' 2>
        Try: brew install python@3.12   (or set PYTHON=/path/to/python3)"
 ok "$("$PY" -V 2>&1)"
 
-# The model alone is 4.1 GB, plus ~1.5 GB of wheels. Fail now, not at 90%.
+# The recommended model is 2-9 GB by RAM, plus ~1.5 GB of wheels. Fail now,
+# not at 90%.
 NEED_GB=8
 FREE_GB="$(df -g . | awk 'NR==2 {print $4}')"
 if [ "${FREE_GB:-0}" -lt "$NEED_GB" ]; then
     die "need ~${NEED_GB} GB free, found ${FREE_GB} GB.
-       The model is 4.1 GB and the Python packages are ~1.5 GB."
+       The model is 2-9 GB and the Python packages are ~1.5 GB."
 fi
 ok "${FREE_GB} GB free"
 
 TOTAL_RAM_GB="$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))"
 if [ "$TOTAL_RAM_GB" -lt 16 ]; then
-    warn "${TOTAL_RAM_GB} GB of RAM. The default 8B model wants 16 GB;
-       pick a smaller model in the setup wizard or it will swap badly."
+    warn "${TOTAL_RAM_GB} GB of RAM. The setup wizard will suggest a small model;
+       an 8B wants 16 GB and will swap badly here."
 else
     ok "${TOTAL_RAM_GB} GB RAM"
 fi
@@ -141,8 +145,10 @@ say "  upgrading pip"
 # anything but macOS on Apple silicon (above), so there is nowhere here that
 # the extra could fail to resolve — and without it the install would succeed
 # and then have no way to run a model.
-EXTRAS="[mlx]"
-if [ "$DEV" = "1" ]; then EXTRAS="[mlx,dev]"; fi
+EXTRAS="mlx"
+if [ "$WITH_VISION" = "1" ]; then EXTRAS="$EXTRAS,vision"; fi
+if [ "$DEV" = "1" ]; then EXTRAS="$EXTRAS,dev"; fi
+EXTRAS="[$EXTRAS]"
 
 say "  installing symbio${EXTRAS} ${DIM}(a few minutes; torch alone is ~535 MB)${OFF}"
 "$VPY" -m pip install --quiet -e ".${EXTRAS}" || die "pip install failed. Full output:
@@ -169,13 +175,15 @@ else
 fi
 
 # ------------------------------------------------------------------ model
-if [ "$PREFETCH_MODEL" = "1" ]; then
-    say "  downloading the model now (4.1 GB)"
-    "$VPY" - <<'PY' || warn "model prefetch failed; it will download on first run instead"
-from huggingface_hub import snapshot_download
-snapshot_download("Qwen/Qwen3-8B-MLX-4bit")
-PY
-    ok "model cached"
+# The same pick the setup wizard offers as its default, sized to this Mac.
+MODEL="$("$VPY" -c 'from symbio.app.setup import recommended_model; print(recommended_model())' 2>/dev/null || true)"
+if [ "$PREFETCH_MODEL" = "1" ] && [ -n "$MODEL" ]; then
+    say "  downloading $MODEL now"
+    if "$VPY" -c 'import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1])' "$MODEL"; then
+        ok "model cached"
+    else
+        warn "model prefetch failed; it will download on first run instead"
+    fi
 fi
 
 # ------------------------------------------------------------------- done
@@ -197,9 +205,9 @@ say ""
 if [ "$ENTER_SHELL" = "1" ] && [ -t 0 ] && [ -t 1 ]; then
     say "Entering the Symbio environment. ${DIM}Type 'exit' to leave.${OFF}"
     say ""
-    say "    ${GRN}symbio${OFF}    start it ${DIM}(first run: setup wizard, then a 4.1 GB"
-    say "              model download and ~25s of cache warming; later"
-    say "              starts are about a second)${OFF}"
+    say "    ${GRN}symbio${OFF}    start it ${DIM}(first run: setup wizard, then the model"
+    say "              download${MODEL:+ ($MODEL)} and ~25s of cache warming;"
+    say "              later starts are about a second)${OFF}"
     say ""
 
     # What bin/activate does, minus the prompt rewriting, which differs per
@@ -216,7 +224,7 @@ say "Start it with:"
 say ""
 say "    $VENV/bin/symbio"
 say ""
-say "  ${DIM}First launch runs the setup wizard, then downloads the model (4.1 GB)"
+say "  ${DIM}First launch runs the setup wizard, then downloads the model${MODEL:+ ($MODEL)}"
 say "  and spends ~25s warming its cache. Later starts are about a second.${OFF}"
 say ""
 say "  ${DIM}Or activate the environment yourself:"

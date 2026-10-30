@@ -1,69 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Symbio quick setup script (Hermes-style one-liner installer)
-# Usage: curl -fsSL https://raw.githubusercontent.com/huyedits/Symbio/main/setup.sh | bash
+# Symbio one-line installer:
 #
-# Adjustable via environment variables:
-#   INSTALL_DIR            where to install (default: ~/Symbio)
-#   PYTHON                 python interpreter to use (default: python3)
-#   SYMBIO_USER_NAME       your name (default: prompted, else "User")
-#   SYMBIO_ASSISTANT_NAME  the assistant's name (default: prompted, else "Symbio")
+#     curl -fsSL https://raw.githubusercontent.com/huyedits/Symbio/main/setup.sh | bash
+#
+# Clones (or updates) the repository, then hands over to ./install.sh, which
+# does the real work: platform checks, its own virtualenv, the package with
+# the MLX engine, and the browser engine.
+#
+# This used to install from requirements.txt by itself, which had drifted from
+# pyproject.toml: no fastmcp, fastapi or anthropic, so the app failed on import,
+# and no `symb` command either. One installer now, and this only fetches it.
+#
+#   INSTALL_DIR   where to put the checkout (default: ~/Symbio)
+#   PYTHON        interpreter for the virtualenv (default: python3)
+#   Any other arguments are passed to install.sh, e.g.  | bash -s -- --no-browser
 
-REPO_URL="https://github.com/huyedits/Symbio.git"
+REPO_URL="${SYMBIO_REPO:-https://github.com/huyedits/Symbio.git}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/Symbio}"
-PYTHON="${PYTHON:-python3}"
 
-echo "==> Installing Symbio into $INSTALL_DIR"
+die() { printf ' fail %s\n' "$*" >&2; exit 1; }
 
-if [ -d "$INSTALL_DIR" ]; then
-    echo "Directory $INSTALL_DIR already exists. Updating..."
-    cd "$INSTALL_DIR"
-    git pull --ff-only || true
+[ "$(uname -s)" = "Darwin" ] || die "Symbio runs on macOS with Apple silicon only (found $(uname -s))."
+command -v git >/dev/null 2>&1 || die "git is missing. Install the command line tools: xcode-select --install"
+
+if [ -d "$INSTALL_DIR/.git" ]; then
+    echo "==> Updating $INSTALL_DIR"
+    git -C "$INSTALL_DIR" pull --ff-only \
+        || echo "    (could not fast-forward; keeping your local checkout as it is)"
+elif [ -e "$INSTALL_DIR" ]; then
+    die "$INSTALL_DIR exists and is not a Symbio checkout. Set INSTALL_DIR=/another/path"
 else
-    git clone "$REPO_URL" "$INSTALL_DIR"
-    cd "$INSTALL_DIR"
+    echo "==> Cloning into $INSTALL_DIR"
+    git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
 fi
 
-echo "==> Creating virtual environment"
-$PYTHON -m venv venv
-source venv/bin/activate
-
-echo "==> Installing dependencies"
-pip install --upgrade pip
-pip install -r requirements.txt
-
-echo "==> Setting identity"
-# Prompt on the terminal even when this script is piped from curl.
-# Env vars win; empty answers keep an existing config value or the default.
-if [ -z "${SYMBIO_USER_NAME:-}" ] && [ -r /dev/tty ]; then
-    read -r -p "Your name [User]: " SYMBIO_USER_NAME < /dev/tty || SYMBIO_USER_NAME=""
+cd "$INSTALL_DIR"
+# Piped from curl, this script's stdin is the script itself. Give install.sh
+# the terminal back so it can drop the user into the ready environment.
+if [ -r /dev/tty ] && [ -t 1 ]; then
+    exec ./install.sh "$@" < /dev/tty
 fi
-if [ -z "${SYMBIO_ASSISTANT_NAME:-}" ] && [ -r /dev/tty ]; then
-    read -r -p "Assistant name [Symbio]: " SYMBIO_ASSISTANT_NAME < /dev/tty || SYMBIO_ASSISTANT_NAME=""
-fi
-export SYMBIO_USER_NAME="${SYMBIO_USER_NAME:-}"
-export SYMBIO_ASSISTANT_NAME="${SYMBIO_ASSISTANT_NAME:-}"
-
-# Write config and seed identity notes with the chosen names (venv python).
-python - <<'PY'
-import os
-from symbio import load_config, save_config, ensure_seed_notes
-from symbio.config import _write_identity_notes
-
-config = load_config()
-config["user_name"] = os.environ.get("SYMBIO_USER_NAME") or config.get("user_name") or "User"
-config["assistant_name"] = os.environ.get("SYMBIO_ASSISTANT_NAME") or config.get("assistant_name") or "Symbio"
-config["first_run"] = False
-save_config(config)
-_write_identity_notes(config["assistant_name"], config["user_name"])
-ensure_seed_notes(config)
-print(f"Assistant: {config['assistant_name']}")
-print(f"User:      {config['user_name']}")
-PY
-
-echo ""
-echo "==> Setup complete. Start Symbio with:"
-echo "    cd $INSTALL_DIR"
-echo "    source venv/bin/activate"
-echo "    python main.py"
+exec ./install.sh "$@"

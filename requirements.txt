@@ -1,15 +1,10 @@
-mlx-lm>=0.21.0
-# Vision: lets the assistant see screenshots instead of guessing from page text.
-mlx-vlm>=0.6.0
-transformers>=4.40.0
-jinja2>=3.1.0
-torch
-safetensors>=0.4.0
-pyyaml>=6.0
-playwright>=1.45.0
-PyAutoGUI>=0.9.54
-Pillow>=10.0.0
-python-telegram-bot>=20.0
+# Dependencies live in pyproject.toml. This file only points there, so the two
+# cannot drift apart again (it was missing fastmcp, fastapi, anthropic and
+# others, and an install from it failed on import).
+#
+# Prefer ./install.sh. Otherwise, inside a virtualenv:
+#   pip install -r requirements.txt
+-e .[mlx,vision,dev]
 
 # CUDA backend (symbio/backend.py, symbio/cuda_lora.py). Not installed by
 # default and NEVER EXECUTED — written on a Mac with no NVIDIA device.
