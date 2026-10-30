@@ -1,5 +1,5 @@
 {
-  "model_name": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+  "model_name": "mlx-community/Qwen3-8B-4bit",
   "assistant_name": "",
   "user_name": "",
   "lora": {
@@ -34,13 +34,19 @@
   "model": {
     "allow_lora": true,
     "allow_moe_lora": false,
-    "moe_fine_tuning_mode": "rag_only"
+    "moe_fine_tuning_mode": "rag_only",
+    "paged_experts_per_layer": 0,
+    "paged_experts_max_per_layer": 0,
+    "paged_warm_gb": 0.0
   },
   "rag": {
     "enabled": true,
     "top_k": 5,
     "max_context_tokens": 1500,
-    "sources": ["notes", "sessions"]
+    "sources": [
+      "notes",
+      "sessions"
+    ]
   },
   "browser": {
     "enabled": false,
@@ -75,7 +81,7 @@
     "mistake_pretrain_check": true,
     "batch_train_iters": 25,
     "boost_factor": 3,
-    "short_train_iters": 10,
+    "short_train_iters": 10
   },
   "tools": {
     "enabled_groups": [

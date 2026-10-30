@@ -80,6 +80,12 @@ def load(*args: Any, **kwargs: Any):
     from symbio import adapter_crypto, adapter_integrity, backend
 
     config = kwargs.pop("config", None)
+    # A base with learned updates folded in loads as its bound version (see
+    # symbio/app/weights.py). resolve=False is the folder itself asking for
+    # the original bytes it folds into.
+    if kwargs.pop("resolve", True) and args and isinstance(args[0], str):
+        from symbio.app import weights
+        args = (weights.resolve(args[0]), *args[1:])
     # Before the weights are handed to the model, not after. Every caller that
     # loads an adapter comes through here, so this is the one place that can
     # say "these are not the bytes that were sealed" while it still means
@@ -143,10 +149,30 @@ def _load_with_backend(args: tuple, kwargs: dict, config: dict | None):
     tokenizer_config.setdefault("fix_mistral_regex", True)
     kwargs["tokenizer_config"] = tokenizer_config
 
+    # Expert paging happens here — after the gate's patches and before the
+    # model can be handed to a generation loop. When paging is on, the load
+    # must be LAZY: stock mlx_lm.load evals every parameter at the end of
+    # load_model (measured 2026-10-15: the 20.4 GB Qwen3.5-35B-A3B came back
+    # with 18.16 GB already materialized, pager or no pager — the whole
+    # point of cold rows on the SSD was being paid for on every load). Lazy
+    # leaves the arrays as file-backed mmap; the pager then wraps the banks,
+    # and priming evals ONLY the always-resident part (everything but the
+    # stacked expert sources, which stay on the SSD until routed to).
+    from symbio.app import paged_moe
+    model_cfg = (config or {}).get("model", {}) or {}
+    if int(model_cfg.get("paged_experts_per_layer", 0) or 0) > 0:
+        kwargs.setdefault("lazy", True)
+        paged = True
+    else:
+        paged = False
+
     model, tokenizer = _mlx_load(*args, **kwargs)
     added = trust_tokenizer_eos(tokenizer)
     if added is not None:
         print(f"  [Model] repo's generation_config omits eos {added}; added it "
               f"so generation stops (without it every reply runs to the token "
               f"limit).")
+    if paged:
+        model = paged_moe.apply_paging(model, config,
+                                       model_source=(args[0] if args else None))
     return model, tokenizer

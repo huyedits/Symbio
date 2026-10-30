@@ -56,6 +56,7 @@ adapters.9b-scrape/*
 # training corpus, and LoRA adapter on first run — never ship them.
 # prompt.md is seeded from DEFAULT_SYSTEM_PROMPT in main.py on first run.
 config.json
+openai_api.key
 config.json.*.bak
 config.json.bak.*
 # Anchored to the workspace root. Unanchored, `prompt.md` and `security.md`
@@ -196,6 +197,7 @@ skill_eval_*.json
 # Crash mirror written by preserve_training_state so an interrupted run
 # can be repaired by the next one.
 .pytest-training-backup/
+.pytest-suite.lock
 eval_*.json
 
 # Scratch scripts: kept locally, not published. The pytest suite (root
@@ -312,3 +314,10 @@ build/
 # the rigs do not ship.
 /selfbench/
 /swebench/
+*.repairbak
+
+# The user's own goals (/goal): per-user, like standing_instructions.md.
+goals.md
+
+# Per-user model versions and archived learned deltas (symbio.app.weights).
+/weights/

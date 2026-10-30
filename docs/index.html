@@ -15,9 +15,10 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
 <style>
 :root{
-  --paper:#EEF1E9; --paper-2:#E3E8DD; --ink:#18241F; --ink-2:#44524B; --muted:#6B786F;
-  --rule:#C9D1C3; --accent:#8F6A00; --accent-ink:#FFF8E1; --accent-soft:#E9D9A6;
-  --sage:#4F7A5C; --term:#16201B; --term-ink:#DCE5DB; --term-dim:#8FA195; --term-hi:#E8BE45; --term-ok:#8CC79A;
+  /* Brand tokens — see design/BRAND.md */
+  --paper:#f2f5f3; --paper-2:#e6ecea; --ink:#2a211b; --ink-2:#51453b; --muted:#675b50;
+  --rule:#d9e3e0; --accent:#bf7c16; --accent-ink:#2a211b; --accent-soft:rgba(191,124,22,0.16);
+  --sage:#1f7a6f; --term:#0f1e20; --term-ink:#efe7da; --term-dim:#a39684; --term-hi:#f0b44c; --term-ok:#58b8aa;
   --display:"Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
   --body:"IBM Plex Sans", "Helvetica Neue", Arial, system-ui, sans-serif;
   --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -25,16 +26,16 @@
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
     color-scheme:dark;
-    --paper:#111815; --paper-2:#18211D; --ink:#E3EAE1; --ink-2:#B7C3BA; --muted:#8C9A91;
-    --rule:#2C3832; --accent:#E3B83F; --accent-ink:#1A1405; --accent-soft:#4A3C12;
-    --sage:#8DB99A; --term:#0B100E; --term-ink:#DCE5DB; --term-dim:#7F9186; --term-hi:#E8BE45; --term-ok:#8CC79A;
+    --paper:#0f1e20; --paper-2:#0b1618; --ink:#efe7da; --ink-2:#cbbfae; --muted:#a39684;
+    --rule:#20383b; --accent:#f0b44c; --accent-ink:#241b14; --accent-soft:rgba(240,180,76,0.20);
+    --sage:#58b8aa; --term:#0b1618; --term-ink:#efe7da; --term-dim:#a39684; --term-hi:#f0b44c; --term-ok:#58b8aa;
   }
 }
 :root[data-theme="dark"]{
   color-scheme:dark;
-  --paper:#111815; --paper-2:#18211D; --ink:#E3EAE1; --ink-2:#B7C3BA; --muted:#8C9A91;
-  --rule:#2C3832; --accent:#E3B83F; --accent-ink:#1A1405; --accent-soft:#4A3C12;
-  --sage:#8DB99A; --term:#0B100E; --term-ink:#DCE5DB; --term-dim:#7F9186; --term-hi:#E8BE45; --term-ok:#8CC79A;
+  --paper:#0f1e20; --paper-2:#0b1618; --ink:#efe7da; --ink-2:#cbbfae; --muted:#a39684;
+  --rule:#20383b; --accent:#f0b44c; --accent-ink:#241b14; --accent-soft:rgba(240,180,76,0.20);
+  --sage:#58b8aa; --term:#0b1618; --term-ink:#efe7da; --term-dim:#a39684; --term-hi:#f0b44c; --term-ok:#58b8aa;
 }
 *{box-sizing:border-box}
 body{background:var(--paper);color:var(--ink);font:400 17px/1.6 var(--body);margin:0;-webkit-font-smoothing:antialiased}

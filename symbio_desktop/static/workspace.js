@@ -91,11 +91,6 @@ function renderMindMap() {
 
   svg.attr('viewBox', [0, 0, width, height]);
 
-  // Defs for glow filter
-  const defs = svg.append('defs');
-  const filter = defs.append('filter').attr('id', 'glow').attr('x', '-50%').attr('y', '-50%').attr('width', '200%').attr('height', '200%');
-  filter.append('feGaussianBlur').attr('stdDeviation', '3').attr('result', 'blur');
-  filter.append('feMerge').selectAll('feMergeNode').data(['blur', 'SourceGraphic']).enter().append('feMergeNode').attr('in', d => d);
 
   // Build graph
   const nodes = [];
@@ -188,7 +183,6 @@ function renderMindMap() {
     .attr('stroke', token('--accent'))
     .attr('stroke-width', 2)
     .attr('opacity', 0.3)
-    .attr('filter', 'url(#glow)');
 
   node.append('circle')
     .attr('class', d => `node-circle ${d.type}`)
@@ -513,7 +507,7 @@ window.addEventListener('keydown', (e) => {
 });
 
 fetchEcosystem();
-setInterval(() => { if (document.body.classList.contains('workspace-open')) fetchEcosystem(); }, 30000);
+setInterval(() => { if (document.body.classList.contains('workspace-open')) fetchEcosystem(); }, 90000);
 
 
 /* Where the panel sits, and which side the conversation is on. Taken from

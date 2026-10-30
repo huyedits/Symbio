@@ -536,6 +536,10 @@ def _assess_file_risk(name: str, params: dict[str, Any]) -> dict[str, Any]:
     sensitive_files = {
         "config.json", "prompt.md", "prompt.md.default", "cron_jobs.json",
         "golden_cases.json", "agent_memory.md", "user_profile.md",
+        # The two stores served to the model as the user's own words. A
+        # write_file to either would be the model writing its own trusted
+        # instructions; only /standing and /goal may.
+        "standing_instructions.md", "goals.md",
     }
     # Check if the path or any parent matches a sensitive filename.
     parts = set(rel.parts)

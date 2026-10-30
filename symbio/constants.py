@@ -145,6 +145,11 @@ BROWSER_PROFILE_DIR = PROJECT_DIR / "browser_profile"
 # own words; see symbio.app.memory.save_standing_instruction for the narrow
 # rules that keep it safe.
 STANDING_FILE = PROJECT_DIR / "standing_instructions.md"
+# Open goals the user set with /goal; see symbio.app.goals.
+GOALS_FILE = PROJECT_DIR / "goals.md"
+# Versions of the base model with learned updates folded in, their ledger and
+# the archived deltas; see symbio.app.weights.
+WEIGHTS_DIR = PROJECT_DIR / "weights"
 SESSIONS_DIR = PROJECT_DIR / "sessions"
 # Snapshot of the last shipped default prompt; used to auto-update prompt.md
 # when the user has not customized it.
@@ -257,6 +262,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         # Every sample carries the full system prompt (~800 tokens); 1024
         # truncated long samples mid-reply, which trains truncated outputs.
         "max_seq_length": 2048,
+        # Relieve memory pressure before refusing a run: shrink the window to
+        # the corpus, then enable grad_checkpoint. See training.plan_training.
+        "device_aware": True,
         "steps_per_eval": 25,
         "save_every": 50,
     },

@@ -58,7 +58,11 @@ from pathlib import Path
 # The marker that opens the model's own turn in the corpus this project
 # writes. Everything from here to the end is what the model should learn to
 # produce; everything before it is context it should learn to read.
-_ASSISTANT_MARKERS = ("<|im_start|>assistant", "[/INST]", "<|assistant|>")
+_ASSISTANT_MARKERS = ("<|im_start|>assistant", "[/INST]", "<|assistant|>",
+                      # Granite and Gemma: without these their prompts were
+                      # never masked and the loss was mostly the prompt.
+                      "<|start_of_role|>assistant<|end_of_role|>",
+                      "<start_of_turn>model\n")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -79,6 +83,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--dropout", type=float, default=0.0)
     p.add_argument("--scale", type=float, default=20.0)
     p.add_argument("--keys", default="")
+    # 4 (NF4) is the 16 GB-card default; a 192 GB MI300X trains at 16.
+    p.add_argument("--load-in-bits", type=int, default=4, choices=(4, 8, 16))
     p.add_argument("--grad-checkpoint", default="true")
     p.add_argument("--resume-adapter-file", default="")
     # Accepted for command-line parity with mlx_lm; the YAML it points at
@@ -190,7 +196,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from symbio.backend import _dtype, _quantization_config, quantization_available
 
-    if not quantization_available({}):
+    if args.load_in_bits == 16:
+        quant_cfg = None            # full precision: no bitsandbytes involved
+    elif not quantization_available({"cuda": {"load_in_bits": args.load_in_bits}}):
         # The trainer trains LoRA on top of quantized or full-precision
         # weights. A card without 4-bit support (older ROCm stacks) can still
         # train — at 8-bit or 16-bit, if memory allows. Refusing outright
@@ -201,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         quant_cfg = _quantization_config({"cuda": {"load_in_bits": 8}})
     else:
-        quant_cfg = _quantization_config({})
+        quant_cfg = _quantization_config({"cuda": {"load_in_bits": args.load_in_bits}})
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model, device_map="auto", dtype=_dtype(torch),

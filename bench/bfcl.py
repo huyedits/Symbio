@@ -86,8 +86,20 @@ def parse_call(text):
     a Python call whose argument is a dict literal contains a `{`, so the JSON
     branch matches it, fails on the single quotes, and would otherwise report
     "no call" for a perfectly good answer.
-    """
+
+    Models may also answer across NAMED CHANNELS rather than one plain turn —
+    gpt-oss's harmony wraps reasoning in `<|channel|>analysis<|message|>...`
+    and the answer in a later `<|message|>`; the reasoning's own braces would
+    make the greedy JSON regex match a span of thought instead of the call
+    (measured 2026-10-16: gpt-oss-20b read 39.2% with those channels left
+    in). So a channelled reply is cut to the LAST `<|message|>` segment
+    first - the final channel is the one the model is answering in. (The
+    same principle as stripping a closed think block before grading: the
+    reasoning is not the answer.)"""
     t = re.sub(r"^\s*```(?:json|python)?|```\s*$", "", text.strip(), flags=re.MULTILINE)
+    if "<|message|>" in t:
+        t = t.rsplit("<|message|>", 1)[1]
+        t = re.sub(r"^\s*```(?:json|python)?|```\s*$", "", t.strip(), flags=re.MULTILINE)
 
     m = _JSON.search(t)
     if m:

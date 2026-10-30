@@ -1,0 +1,210 @@
+{
+ "summary": {
+  "model": "kimi-k3:cloud",
+  "n": 40,
+  "cell_acc": 0.0,
+  "exact_count": 0
+ },
+ "per_task": [
+  {
+   "task_id": "0934a4d8",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "135a2760",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "136b0064",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "13e47133",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "142ca369",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "16b78196",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "16de56c4",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "1818057f",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "195c6913",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "1ae2feb7",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "20270e3b",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "20a9e565",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "21897d95",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "221dfab4",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "247ef758",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "269e22fb",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "271d71e2",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "28a6681f",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "291dc1e1",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "2b83f449",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "2ba387bc",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "2c181942",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "2d0172a1",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "31f7f899",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "332f06d7",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "35ab12c3",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "36a08778",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "38007db0",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "3a25b0d8",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "3dc255db",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "3e6067c3",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "409aa875",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "446ef5d2",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "45a5af55",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "4a21e3da",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "4c3d4a41",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "4c416de3",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "4c7dc4dd",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "4e34c42c",
+   "cell_acc": 0.0,
+   "exact": false
+  },
+  {
+   "task_id": "53fb4810",
+   "cell_acc": 0.0,
+   "exact": false
+  }
+ ]
+}

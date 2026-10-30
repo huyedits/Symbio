@@ -546,3 +546,32 @@ def test_foreign_rendering_is_left_to_the_template_guard(tmp_path, monkeypatch):
                    '\n user: hi\n assistant: Hello!'])
 
     assert training.drop_broken_tool_call_samples() == {}
+
+
+def test_adapter_restore_lands_every_file_even_when_junk_survives(tmp_path, monkeypatch):
+    """A leftover thread's file surviving the delete used to make copytree
+    raise, leaving adapters/ half-deleted and the snapshot orphaned."""
+    import shutil
+    import test_utils
+
+    real = tmp_path / "adapters"
+    snap = tmp_path / "adapters.testbak.x"
+    (snap / "workers" / "skill").mkdir(parents=True)
+    (snap / "adapters.safetensors").write_text("headmaster")
+    (snap / "workers" / "skill" / "adapters.safetensors").write_text("skill")
+    (real / "workers" / "skill").mkdir(parents=True)
+    (real / "workers" / "skill" / "last_used.json").write_text("junk")
+    monkeypatch.setattr(test_utils, "ADAPTER_DIR", real)
+    real_rmtree = shutil.rmtree
+
+    def stubborn_rmtree(path, ignore_errors=False):
+        if path == real:          # the delete never quite finishes
+            return
+        return real_rmtree(path, ignore_errors=ignore_errors)
+
+    monkeypatch.setattr(test_utils.shutil, "rmtree", stubborn_rmtree)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    test_utils._restore_adapter_dir(snap)
+    assert (real / "adapters.safetensors").read_text() == "headmaster"
+    assert (real / "workers" / "skill" / "adapters.safetensors").read_text() == "skill"
+    assert not snap.exists()

@@ -15,6 +15,28 @@ CRASH_BACKUP_DIR = PROJECT_DIR / ".pytest-training-backup"
 _MANIFEST = CRASH_BACKUP_DIR / "manifest.json"
 
 
+def _restore_adapter_dir(adapter_bak: Path) -> None:
+    """Put the snapshot back over ADAPTER_DIR, and only then drop it.
+
+    The old restore was rmtree(ignore_errors=True) then copytree: a file a
+    test's leftover thread was still writing (last_used.json, a worker's
+    training_progress.json) survived the delete, copytree raised
+    FileExistsError, and adapters/ stayed half-deleted with the snapshot
+    orphaned — repeated across a run, that removed the HEADMASTER adapter and
+    four skill adapters (measured 2026-10-07). Retry the delete, then copy
+    with dirs_exist_ok so every snapshot file lands even if junk survived.
+    """
+    import time
+
+    for _ in range(5):
+        shutil.rmtree(ADAPTER_DIR, ignore_errors=True)
+        if not ADAPTER_DIR.exists():
+            break
+        time.sleep(0.2)
+    shutil.copytree(adapter_bak, ADAPTER_DIR, dirs_exist_ok=True)
+    shutil.rmtree(adapter_bak)
+
+
 def _write_crash_backup(backups: dict[Path, bytes | None]) -> None:
     """Mirror the snapshot to disk and fsync it before any test runs.
 
@@ -138,8 +160,6 @@ def preserve_training_state(adapters: bool = False):
             else:
                 f.write_bytes(data)
         if adapter_bak is not None:
-            shutil.rmtree(ADAPTER_DIR, ignore_errors=True)
-            shutil.copytree(adapter_bak, ADAPTER_DIR)
-            shutil.rmtree(adapter_bak)
+            _restore_adapter_dir(adapter_bak)
         if owns_crash_backup:
             _clear_crash_backup()

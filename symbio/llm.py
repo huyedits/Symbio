@@ -366,9 +366,12 @@ def run_training(config: dict[str, Any], model_type: str = "dense", iters: int |
     with os.fdopen(config_fd, "w") as f:
         yaml.dump(lora_config, f)
 
+    from symbio.app import weights
+
     base_cmd = [
         sys.executable, "-m", "mlx_lm", "lora",
-        "--model", config["model_name"],
+        # The bound version (symbio/app/weights.py), not the bytes beneath it.
+        "--model", weights.resolve(config["model_name"]),
         "--train",
         "--data", str(DATA_DIR),
         "--batch-size", str(lora["batch_size"]),

@@ -28,10 +28,7 @@
 
   <div class="sidebar-section">
     <div class="sidebar-label">Look inside</div>
-    <button class="side-item" data-open-view="mindmap">Adapter map</button>
-    <button class="side-item" data-open-view="skills">Skills</button>
-    <button class="side-item" data-open-view="rag">RAG corpus</button>
-    <button class="side-item" data-open-view="health">Health</button>
+    <button class="side-item" data-open-view="mindmap">Open dashboard</button>
   </div>
 
   <div class="sidebar-foot">
@@ -69,9 +66,18 @@
       <span class="notice-text" id="notice-text"></span>
       <button class="icon-btn" id="btn-notice-close" type="button" aria-label="Dismiss">✕</button>
     </div>
+    <div class="conn-banner" id="conn-banner" role="status" hidden>
+      <span class="conn-banner-text" id="conn-banner-text"></span>
+      <button class="link-btn" id="btn-reconnect" type="button">Reconnect now</button>
+    </div>
     <div class="read-only-banner" id="read-only-banner" hidden>
       Reading a saved transcript. <button class="link-btn" id="btn-back-live">Back to the live chat</button>
     </div>
+    <div class="queue" id="queue" hidden>
+      <div class="queue-head" id="queue-label"></div>
+      <div class="queue-rows" id="queue-rows"></div>
+    </div>
+    <div class="sr-only" id="sr-status" role="status" aria-live="polite"></div>
     <form class="composer" id="composer">
       <textarea id="input" rows="1" placeholder="Message Symbio…" autofocus></textarea>
       <div class="composer-bar">

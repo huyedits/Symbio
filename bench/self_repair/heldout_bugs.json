@@ -1,0 +1,442 @@
+[
+ {
+  "src": "symbio/app/dispatch.py",
+  "test": "tests/test_dispatch.py",
+  "line": 1128,
+  "old": "        if baseline is None and baseline_perform is None:\n",
+  "new": "        if baseline is None or baseline_perform is None:\n",
+  "kind": "and->or",
+  "fails": [
+   "tests/test_dispatch.py::test_guarded_train_worker_regression_rolls_back"
+  ]
+ },
+ {
+  "src": "symbio/app/dispatch.py",
+  "test": "tests/test_dispatch.py",
+  "line": 207,
+  "old": "        if not weights:\n",
+  "new": "        if weights:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_dispatch.py::test_shape_check_rejects_an_adapter_whose_tensors_do_not_fit"
+  ]
+ },
+ {
+  "src": "symbio/app/dispatch.py",
+  "test": "tests/test_dispatch.py",
+  "line": 70,
+  "old": "        return _CATALOG_CACHE[1]\n",
+  "new": "        return _CATALOG_CACHE[2]\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_dispatch.py::test_catalog_entry_for_role"
+  ]
+ },
+ {
+  "src": "symbio/app/dispatch.py",
+  "test": "tests/test_dispatch.py",
+  "line": 1152,
+  "old": "            if not consistent:\n",
+  "new": "            if consistent:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_dispatch.py::test_guarded_train_worker_regression_remedies_then_succeeds"
+  ]
+ },
+ {
+  "src": "symbio/app/health.py",
+  "test": "tests/test_health.py",
+  "line": 298,
+  "old": "    if not constants.VALID_FILE.exists():\n",
+  "new": "    if constants.VALID_FILE.exists():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_health.py::test_training_data_auto_creates_empty_jsonl"
+  ]
+ },
+ {
+  "src": "symbio/app/health.py",
+  "test": "tests/test_health.py",
+  "line": 536,
+  "old": "    if not constants.CRON_FILE.exists():\n",
+  "new": "    if constants.CRON_FILE.exists():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_health.py::test_cron_creates_missing_jobs_file"
+  ]
+ },
+ {
+  "src": "symbio/app/health.py",
+  "test": "tests/test_health.py",
+  "line": 503,
+  "old": "    if not roles:\n",
+  "new": "    if roles:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_health.py::test_dispatch_ready_when_every_role_resolves"
+  ]
+ },
+ {
+  "src": "symbio/app/health.py",
+  "test": "tests/test_health.py",
+  "line": 278,
+  "old": "        if not d.exists():\n",
+  "new": "        if d.exists():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_health.py::test_required_dirs_auto_created"
+  ]
+ },
+ {
+  "src": "symbio/app/onebit.py",
+  "test": "tests/test_onebit.py",
+  "line": 251,
+  "old": "        if bits == 1 and mode == \"affine\" and not kw.get(\"quantize_input\"):\n",
+  "new": "        if bits == 1 and mode == \"affine\" and kw.get(\"quantize_input\"):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_onebit.py::test_nn_quantize_builds_one_bit_layers_that_load_and_run"
+  ]
+ },
+ {
+  "src": "symbio/app/onebit.py",
+  "test": "tests/test_onebit.py",
+  "line": 142,
+  "old": "        output_shapes=[(*w.shape[:-1], w.shape[-1] * 2)],\n",
+  "new": "        output_shapes=[(*w.shape[:-2], w.shape[-1] * 2)],\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_onebit.py::test_the_two_bit_respread_is_bit_exact"
+  ]
+ },
+ {
+  "src": "symbio/app/onebit.py",
+  "test": "tests/test_onebit.py",
+  "line": 257,
+  "old": "        if bits == 1 and mode == \"affine\":\n",
+  "new": "        if bits == 1 and mode != \"affine\":\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_onebit.py::test_nn_quantize_builds_one_bit_layers_that_load_and_run"
+  ]
+ },
+ {
+  "src": "symbio/app/onebit.py",
+  "test": "tests/test_onebit.py",
+  "line": 160,
+  "old": "    N = w.shape[0]\n",
+  "new": "    N = w.shape[1]\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_onebit.py::test_the_packed_bit_kernel_matches_the_float_matmul[1]"
+  ]
+ },
+ {
+  "src": "symbio/app/pressure_eval.py",
+  "test": "tests/test_pressure_eval.py",
+  "line": 174,
+  "old": "    if case.measures == \"hallucination\":\n",
+  "new": "    if case.measures != \"hallucination\":\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_pressure_eval.py::test_a_confident_answer_with_no_lookup_is_the_failure"
+  ]
+ },
+ {
+  "src": "symbio/app/pressure_eval.py",
+  "test": "tests/test_pressure_eval.py",
+  "line": 163,
+  "old": "    return [match.group(1).lower() for match in _TOOL_CALL.finditer(transcript)]\n",
+  "new": "    return [match.group(2).lower() for match in _TOOL_CALL.finditer(transcript)]\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_pressure_eval.py::test_an_admission_buried_under_a_status_block_still_counts"
+  ]
+ },
+ {
+  "src": "symbio/app/pressure_eval.py",
+  "test": "tests/test_pressure_eval.py",
+  "line": 294,
+  "old": "    saver = save or learn.save_mistake_note\n",
+  "new": "    saver = save and learn.save_mistake_note\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_pressure_eval.py::test_a_failure_is_filed_as_a_mistake_note"
+  ]
+ },
+ {
+  "src": "symbio/app/pressure_eval.py",
+  "test": "tests/test_pressure_eval.py",
+  "line": 81,
+  "old": "        if skipping and (not stripped or stripped.startswith((\"\u2022\", \"-\", \"*\"))\n",
+  "new": "        if skipping and (stripped or stripped.startswith((\"\u2022\", \"-\", \"*\"))\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_pressure_eval.py::test_the_harness_own_status_lines_are_not_the_model_answer"
+  ]
+ },
+ {
+  "src": "symbio/app/soul.py",
+  "test": "tests/test_soul.py",
+  "line": 114,
+  "old": "            entry = stripped[2:].strip()\n",
+  "new": "            entry = stripped[3:].strip()\n",
+  "kind": "2->3",
+  "fails": [
+   "tests/test_soul.py::test_an_observation_is_recorded_under_its_section"
+  ]
+ },
+ {
+  "src": "symbio/app/soul.py",
+  "test": "tests/test_soul.py",
+  "line": 320,
+  "old": "        if who == \"tool\" and not learn.is_user_refusal(body):\n",
+  "new": "        if who != \"tool\" and not learn.is_user_refusal(body):\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_soul.py::test_the_prompt_carries_the_recent_conversation"
+  ]
+ },
+ {
+  "src": "symbio/app/soul.py",
+  "test": "tests/test_soul.py",
+  "line": 220,
+  "old": "    if not config.get(\"memory\", {}).get(\"soul_enabled\", True):\n",
+  "new": "    if config.get(\"memory\", {}).get(\"soul_enabled\", True):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_soul.py::test_what_it_has_observed_is_wrapped_as_untrusted"
+  ]
+ },
+ {
+  "src": "symbio/app/soul.py",
+  "test": "tests/test_soul.py",
+  "line": 197,
+  "old": "        current[longest].pop(0)\n",
+  "new": "        current[longest].pop(1)\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_soul.py::test_the_store_stays_small_enough_to_sit_in_a_prompt"
+  ]
+ },
+ {
+  "src": "symbio/app/supervisor.py",
+  "test": "tests/test_supervisor.py",
+  "line": 234,
+  "old": "    state[\"jobs_run\"] = int(state.get(\"jobs_run\", 0)) + len(fired)\n",
+  "new": "    state[\"jobs_run\"] = int(state.get(\"jobs_run\", 1)) + len(fired)\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_supervisor.py::test_a_due_job_is_handed_to_the_model"
+  ]
+ },
+ {
+  "src": "symbio/app/supervisor.py",
+  "test": "tests/test_supervisor.py",
+  "line": 194,
+  "old": "    if not ready():\n",
+  "new": "    if ready():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_supervisor.py::test_a_dead_model_is_restarted"
+  ]
+ },
+ {
+  "src": "symbio/app/supervisor.py",
+  "test": "tests/test_supervisor.py",
+  "line": 215,
+  "old": "    if not fired:\n",
+  "new": "    if fired:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_supervisor.py::test_a_due_job_is_handed_to_the_model"
+  ]
+ },
+ {
+  "src": "symbio/app/supervisor.py",
+  "test": "tests/test_supervisor.py",
+  "line": 222,
+  "old": "        if record is not None and cron.is_task(record):\n",
+  "new": "        if record is not None or cron.is_task(record):\n",
+  "kind": "and->or",
+  "fails": [
+   "tests/test_supervisor.py::test_a_due_job_is_handed_to_the_model"
+  ]
+ },
+ {
+  "src": "symbio/app/telegram.py",
+  "test": "tests/test_telegram.py",
+  "line": 567,
+  "old": "        if group == \"close\":\n",
+  "new": "        if group != \"close\":\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_telegram.py::test_handle_tools_callback_toggles"
+  ]
+ },
+ {
+  "src": "symbio/app/telegram.py",
+  "test": "tests/test_telegram.py",
+  "line": 566,
+  "old": "        group = data.split(\":\", 1)[1]\n",
+  "new": "        group = data.split(\":\", 1)[2]\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_telegram.py::test_handle_tools_callback_toggles"
+  ]
+ },
+ {
+  "src": "symbio/app/telegram.py",
+  "test": "tests/test_telegram.py",
+  "line": 127,
+  "old": "            if not safe:\n",
+  "new": "            if safe:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_telegram.py::test_stream_sender_sends_first_visible_chunk_immediately"
+  ]
+ },
+ {
+  "src": "symbio/app/telegram.py",
+  "test": "tests/test_telegram.py",
+  "line": 218,
+  "old": "        if not text:\n",
+  "new": "        if text:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_telegram.py::test_stream_sender_sends_first_visible_chunk_immediately"
+  ]
+ },
+ {
+  "src": "symbio/app/telemetry.py",
+  "test": "tests/test_telemetry.py",
+  "line": 128,
+  "old": "    text = (payload.get(\"text\") or \"\").strip()\n",
+  "new": "    text = (payload.get(\"text\") and \"\").strip()\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_telemetry.py::test_send_local_fallback_writes_txt"
+  ]
+ },
+ {
+  "src": "symbio/app/telemetry.py",
+  "test": "tests/test_telemetry.py",
+  "line": 122,
+  "old": "    env = payload.get(\"env\") or {}\n",
+  "new": "    env = payload.get(\"env\") and {}\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_telemetry.py::test_send_local_fallback_writes_txt"
+  ]
+ },
+ {
+  "src": "symbio/app/telemetry.py",
+  "test": "tests/test_telemetry.py",
+  "line": 162,
+  "old": "        \"X-Telemetry-Secret\": tcfg.get(\"shared_secret\", \"\") or \"\",\n",
+  "new": "        \"X-Telemetry-Secret\": tcfg.get(\"shared_secret\", \"\") and \"\",\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_telemetry.py::test_send_post_shape_with_secret"
+  ]
+ },
+ {
+  "src": "symbio/app/telemetry.py",
+  "test": "tests/test_telemetry.py",
+  "line": 157,
+  "old": "    kind = \"pings\" if payload.get(\"type\") == \"telemetry\" else \"feedback\"\n",
+  "new": "    kind = \"pings\" if payload.get(\"type\") != \"telemetry\" else \"feedback\"\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_telemetry.py::test_send_post_shape_with_secret"
+  ]
+ },
+ {
+  "src": "symbio/app/tts.py",
+  "test": "tests/test_tts.py",
+  "line": 268,
+  "old": "    cfg = (config or {}).get(\"tts\", {})\n",
+  "new": "    cfg = (config and {}).get(\"tts\", {})\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_tts.py::test_a_voice_name_reaches_the_command"
+  ]
+ },
+ {
+  "src": "symbio/app/tts.py",
+  "test": "tests/test_tts.py",
+  "line": 546,
+  "old": "    return _system_rate_cache[0]\n",
+  "new": "    return _system_rate_cache[1]\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_tts.py::test_the_system_rate_is_read_once_not_per_reply"
+  ]
+ },
+ {
+  "src": "symbio/app/tts.py",
+  "test": "tests/test_tts.py",
+  "line": 279,
+  "old": "    if raw_accent and not want_accent:\n",
+  "new": "    if raw_accent or not want_accent:\n",
+  "kind": "and->or",
+  "fails": [
+   "tests/test_tts.py::test_a_voice_that_is_gone_falls_back_and_says_why"
+  ]
+ },
+ {
+  "src": "symbio/app/tts.py",
+  "test": "tests/test_tts.py",
+  "line": 353,
+  "old": "    return choose_voice(config)[0]\n",
+  "new": "    return choose_voice(config)[1]\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_tts.py::test_a_voice_name_reaches_the_command"
+  ]
+ },
+ {
+  "src": "symbio/app/vocab_skin.py",
+  "test": "tests/test_vocab_skin.py",
+  "line": 211,
+  "old": "        targets = remap[batch[:, 1:]]\n",
+  "new": "        targets = remap[batch[:, 2:]]\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_vocab_skin.py::test_the_skinned_loss_is_the_cross_entropy_over_the_kept_rows[False-False]"
+  ]
+ },
+ {
+  "src": "symbio/app/vocab_skin.py",
+  "test": "tests/test_vocab_skin.py",
+  "line": 168,
+  "old": "            elif bits == 1:\n",
+  "new": "            elif bits != 1:\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_vocab_skin.py::test_the_skinned_loss_is_the_cross_entropy_over_the_kept_rows[False-True]"
+  ]
+ },
+ {
+  "src": "symbio/app/vocab_skin.py",
+  "test": "tests/test_vocab_skin.py",
+  "line": 107,
+  "old": "    return sorted(i for i in keep if 0 <= i < vocab)\n",
+  "new": "    return sorted(i for i in keep if 1 <= i < vocab)\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_vocab_skin.py::test_the_skinned_loss_is_the_cross_entropy_over_the_kept_rows[False-False]"
+  ]
+ },
+ {
+  "src": "symbio/app/vocab_skin.py",
+  "test": "tests/test_vocab_skin.py",
+  "line": 105,
+  "old": "    eos = getattr(tokenizer, \"eos_token_ids\", None) or [getattr(tokenizer, \"eos_token_id\", None)]\n",
+  "new": "    eos = getattr(tokenizer, \"eos_token_ids\", None) and [getattr(tokenizer, \"eos_token_id\", None)]\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_vocab_skin.py::test_the_skinned_loss_is_the_cross_entropy_over_the_kept_rows[False-False]"
+  ]
+ }
+]

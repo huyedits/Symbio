@@ -1925,7 +1925,7 @@ Some important settings:
 
 | Key                             |           Default | Purpose                          |
 | ------------------------------- | ----------------: | -------------------------------- |
-| `model_name`                    | `Qwen/Qwen3-14B` | Base model                       |
+| `model_name`                    | `LiquidAI/LFM2.5-24B-A2B-MLX-4bit` | Base model (LFM2.5 24B A2B, weights streamed/paged) |
 | `assistant_name`                |          `Symbio` | Assistant name                   |
 | `agent.temperature`             |             `0.7` | Generation temperature           |
 | `agent.max_tool_rounds`         |               `3` | Tool rounds per turn             |

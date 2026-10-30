@@ -320,12 +320,21 @@ def setup_names(config: dict[str, Any], first_run: bool = True) -> bool:
 
 
 def _load_model_presets() -> dict[str, dict]:
-    """Load named model presets from models.json if present."""
+    """Load named model presets from models.json if present.
+
+    A file that exists but does not parse is reported loudly, not read as
+    EMPTY: from 2026-09 to 2026-10 one missing close-brace made every /model
+    command answer "No models.json preset file found" while the registry sat
+    right there — the presets existed and were unreachable, and nothing said
+    so."""
     if not MODELS_FILE.exists():
         return {}
     try:
         return json.loads(MODELS_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    except json.JSONDecodeError as e:
+        print(f"  models.json does not parse: line {e.lineno} column "
+              f"{e.colno} ({e.msg}). Preset switching is off until the file "
+              f"is fixed.")
         return {}
 
 

@@ -107,6 +107,127 @@ def parse_pytest_output(output: str) -> dict[str, Any]:
             "bad": bad, "failing": failed[:40]}
 
 
+def trace_test(test_id: str, timeout: int = 300) -> str:
+    """pytest's own traceback for ONE test id, short form, untruncated where
+    it matters: the repair loop reads which source frame the failure surfaced
+    in from here (the whole-suite report keeps only its tail). Returns "" when
+    the id is not a test path or the run cannot start."""
+    if not re.fullmatch(r"(?:tests|bench)/[\w./-]+\.py::[\w\[\].:-]+", test_id or ""):
+        return ""
+    cmd = [str(_venv_python()), "-m", "pytest", test_id, "-q", "--no-header",
+           "--tb=short", "-p", "no:cacheprovider"]
+    try:
+        result = _run_pytest(cmd, timeout)
+    except Exception:
+        return ""
+    return (result.stdout or "") + (result.stderr or "")
+
+
+def locate_fault(test_id: str, timeout: int = 300,
+                 top: int = 12) -> list[tuple[str, int, float]]:
+    """Package lines ranked by how strongly they point at this failure:
+    [(project-relative path, line, Ochiai score)], best first.
+
+    Runs the failing test's whole FILE once under symbio.app.fault_trace, so
+    the file's passing tests are the contrast: a line every passing test also
+    runs is not much of a suspect. Ochiai = f / sqrt(F * (f + p)), with f and
+    p the failing and passing tests that ran the line and F all failing tests.
+    Ties keep the order the failing test first ran them in reverse — the
+    deepest, latest line before the assert is the usual culprit.
+    Returns [] when the run cannot start or nothing failed under tracing.
+    """
+    import json
+    import math
+    import tempfile
+
+    if not re.fullmatch(r"(?:tests|bench)/[\w./-]+\.py::[\w\[\].:-]+", test_id or ""):
+        return []
+    test_file = test_id.split("::")[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "spectrum.json"
+        cmd = [str(_venv_python()), "-m", "pytest", test_file, "-q", "--no-header",
+               "--tb=no", "-p", "no:cacheprovider", "-p", "symbio.app.fault_trace"]
+        try:
+            _run_pytest(cmd, timeout, env={"SYMBIO_FAULT_OUT": str(out)})
+            spectrum = json.loads(out.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+    failed = {n for n, r in spectrum.items() if r.get("failed")}
+    if not failed:
+        return []
+    hits: dict[tuple[str, int], list[int]] = {}
+    for node, r in spectrum.items():
+        for rel, lines in r.get("lines", {}).items():
+            for ln in lines:
+                slot = hits.setdefault((rel, ln), [0, 0])
+                slot[0 if node in failed else 1] += 1
+    ranked = []
+    for (rel, ln), (f, p) in hits.items():
+        if f:
+            ranked.append((rel, ln, round(f / math.sqrt(len(failed) * (f + p)), 4)))
+    ranked.sort(key=lambda r: (-r[2], r[0], -r[1]))
+    return ranked[:top]
+
+
+def _run_pytest(cmd: list[str], timeout: int,
+                env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """Run pytest, and on timeout stop it the way Ctrl-C does before killing.
+
+    subprocess.run's timeout sends SIGKILL. A killed pytest never reaches the
+    `finally` of tests/test_utils.preserve_training_state, so the user's real
+    adapters/ was left holding test junk and the backup orphaned as
+    adapters.testbak.* (measured 2026-10-07: the HEADMASTER adapter and four
+    skill adapters gone after one chat turn's suite run). SIGINT first lets
+    pytest unwind its fixtures; SIGKILL only if it will not.
+    """
+    import os
+    import signal
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, cwd=constants.PROJECT_DIR,
+                            env={**os.environ, **env} if env else None)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def suite_running() -> bool:
+    """True while another pytest run of this project holds the suite lock
+    (tests/conftest.py takes it for the whole session). The suite's own
+    process holds the lock and is not "another" run."""
+    import os
+
+    if os.environ.get("SYMBIO_SUITE_LOCK_PID") == str(os.getpid()):
+        return False
+    try:
+        import fcntl
+    except ImportError:          # Windows: no flock; no guard
+        return False
+
+    lock = constants.PROJECT_DIR / ".pytest-suite.lock"
+    try:
+        fd = open(lock, "a+")
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        fd.close()
+
+
 def run_tests(targets: list[str] | None = None,
               max_output_chars: int = _REPORT_CHARS) -> tuple[bool, str]:
     """Run the project's pytest suite. Returns (ok, report-for-the-model).
@@ -125,12 +246,17 @@ def run_tests(targets: list[str] | None = None,
     else:
         paths = [_KNOWN_TARGETS["tests"]]
 
+    if suite_running():
+        # Two suites at once race on the real adapters/ directory (each backs
+        # it up, writes test adapters into it, restores) — the second run's
+        # "backup" is the first run's junk. Refuse rather than queue: the
+        # caller's verdict would be minutes stale anyway.
+        return False, ("Another test run of this project is in progress; "
+                       "wait for it to finish, then run the tests again.")
     cmd = [str(_venv_python()), "-m", "pytest", *[str(p) for p in paths],
            "-q", "--no-header", "-p", "no:cacheprovider"]
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=TEST_TIMEOUT_SECONDS, cwd=constants.PROJECT_DIR)
+        result = _run_pytest(cmd, TEST_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         return False, f"Test run timed out after {TEST_TIMEOUT_SECONDS}s."
     except FileNotFoundError:

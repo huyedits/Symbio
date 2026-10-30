@@ -2917,6 +2917,104 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
             f"rest of the adapter kept.")
         return True
 
+    def _consider_reshape(self, baseline) -> Any:
+        """Let the model decide whether to fold its adapter into its base
+        weights, or take an earlier fold back out (symbio/app/weights.py).
+
+        Asked here, at the start of a training round, because the user is
+        already waiting on the weights and the golden baseline has just been
+        measured. At most one change a round. The model only decides whether
+        to try: a change it chose is kept only if no check that passed before
+        consistently fails after, and an unbind only if it brings back a
+        check it was blamed for. Returns the golden result for the weights
+        now loaded when a change was kept, else None.
+        """
+        from symbio.app import weights
+
+        if (not weights.settings(self.config)["self_reshape"]
+                or self.model is None or self.tokenizer is None
+                or not self._mlx_generation()):
+            return None
+        try:
+            cands = weights.candidates(self.config, failing_now=baseline.failing)
+        except Exception as e:
+            self.output_fn(f"  [Weights] Could not list changes to consider: {e}")
+            return None
+        for cand in cands:
+            try:
+                verdict = weights.decide(self.model, self.tokenizer, cand, self.config)
+            except Exception as e:
+                self.output_fn(f"  [Weights] Could not ask about a {cand['kind']}: {e}")
+                continue
+            what = ("folding the current adapter into the base weights"
+                    if cand["kind"] == "bind" else f"taking {cand['id']} back out of the base weights")
+            choice = verdict.get("choice") or "too close to call (left alone)"
+            self.output_fn(f"  [Weights] Considered {what}: {choice} "
+                           f"(p={verdict.get('probs', {}).get('yes', 0):.2f} yes).")
+            if verdict["yes"]:
+                return self._trial_reshape(cand, baseline)
+        return None
+
+    def _trial_reshape(self, cand: dict[str, Any], baseline) -> Any:
+        """Build, load and grade one change; keep it or put things back."""
+        from symbio.app import weights
+
+        name = self.config["model_name"]
+        self._unload_model()
+        self.output_fn("  [Weights] Building the new version of the model...")
+        ok, msg, plan = weights.stage(cand)
+        if not ok:
+            self.output_fn(f"  [Weights] Not changed: {msg}")
+            weights.abandon(plan)
+            self._reload_model()
+            return None
+        try:
+            # A bind's adapter is now inside the base: loading it on top again
+            # would apply it twice. An unbind keeps the live adapter.
+            if cand["kind"] == "bind" or not adapter_weights_present():
+                self.model, self.tokenizer = load(name)
+                self.adapter_loaded = False
+            else:
+                self.model, self.tokenizer = load(name, adapter_path=str(constants.ADAPTER_DIR))
+                self.adapter_loaded = True
+        except Exception as e:
+            self.output_fn(f"  [Weights] The new version would not load ({e}); kept the old one.")
+            weights.abandon(plan)
+            self._unload_model()
+            self._reload_model()
+            return None
+
+        after, consistent = golden.run_golden_set_retry(
+            self.model, self.tokenizer, self.generate_fn, self.sampler,
+            self.system_prompt, self.config, self.enabled_groups)
+        # A check counts as lost only if it failed on both runs; one that
+        # failed once and passed on the recheck is noise.
+        lost = sorted((baseline.passing - after.passing) & consistent)
+        regained = sorted(after.passing - baseline.passing)
+        keep = not lost and (cand["kind"] == "bind"
+                             or bool(set(regained) & set(cand.get("lost", []))))
+        self.output_fn(f"  [Weights] Golden checks {baseline.pass_count}/{baseline.total} "
+                       f"before, {after.pass_count}/{after.total} with the change.")
+        if not keep:
+            why = (f"it broke {', '.join(lost)}" if lost
+                   else "it did not bring back the checks it was blamed for")
+            self.output_fn(f"  [Weights] Rolled back: {why}. Nothing was lost.")
+            weights.abandon(plan)
+            self._unload_model()
+            self._reload_model()
+            return None
+        weights.commit(plan, baseline.passing, after.passing)
+        if cand["kind"] == "bind":
+            # The archived copy under weights/archive/ is the adapter now.
+            training.remove_adapter()
+            self.output_fn("  [Weights] Folded the adapter into the base weights; "
+                           "the next round trains a fresh adapter on top. Archived copy kept.")
+        else:
+            self.output_fn(f"  [Weights] Took {cand['id']} out of the base weights; it stays archived.")
+        local_telemetry.log_event("weights", change=cand["kind"], kept=True)
+        self._prefill_system_prompt_cache(show_spinner=False)
+        return after
+
     def _guarded_train(self, config: dict[str, Any] | None = None,
                        iters: int | None = None,
                        sample_weights: list[float] | None = None) -> bool:
@@ -2964,6 +3062,12 @@ class ChatSession(AgentTurnMixin, ToolsMixin, CommandsMixin):
                     self.output_fn(
                         f"  [Train] Injected {added} remedy sample(s) for "
                         f"{len(standing)} standing failure(s): {', '.join(standing)}")
+        if baseline is not None:
+            # The model's chance to fold what it has learned into its base
+            # weights before the next layer is trained on top.
+            reshaped = self._consider_reshape(baseline)
+            if reshaped is not None:
+                baseline = reshaped
         self.output_fn("  [Train] Backing up current adapter before training...")
         backup_dir = training.backup_adapter() if golden_on else None
         # Between here and discard_adapter_backup the previous adapter exists

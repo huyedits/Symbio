@@ -1,3 +1,10 @@
 #!/bin/sh
 # Local development wrapper: run the Symbio CLI without `pip install`.
+# The project's own venv when there is one: a bare `python3` is whatever the
+# shell found first, which lacks the project's dependencies unless the venv
+# happens to be activated.
+dir=$(cd "$(dirname "$0")" && pwd)
+if [ -x "$dir/venv/bin/python" ]; then
+    PYTHONPATH="$dir${PYTHONPATH:+:$PYTHONPATH}" exec "$dir/venv/bin/python" -m symbio.app.cli "$@"
+fi
 exec python3 -m symbio.app.cli "$@"

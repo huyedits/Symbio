@@ -1,0 +1,1146 @@
+[
+ {
+  "src": "symbio/app/adapter_attrib.py",
+  "test": "tests/test_adapter_attrib.py",
+  "line": 106,
+  "old": "        stem = key.rsplit(\".\", 1)[0]\n",
+  "new": "        stem = key.rsplit(\".\", 2)[0]\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_adapter_attrib.py::test_ablation_zeroes_only_lora_b_of_the_named_modules"
+  ]
+ },
+ {
+  "src": "symbio/app/adapter_attrib.py",
+  "test": "tests/test_adapter_attrib.py",
+  "line": 98,
+  "old": "        if item.is_file() and item.name != ADAPTER_FILE:\n",
+  "new": "        if item.is_file() and item.name == ADAPTER_FILE:\n",
+  "kind": "!=->==",
+  "fails": [
+   "tests/test_adapter_attrib.py::test_ablation_carries_the_config_across"
+  ]
+ },
+ {
+  "src": "symbio/app/adapter_attrib.py",
+  "test": "tests/test_adapter_attrib.py",
+  "line": 170,
+  "old": "        size = max(1, len(current) // granularity)\n",
+  "new": "        size = max(2, len(current) // granularity)\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_adapter_attrib.py::test_a_single_culprit_is_found_and_minimal"
+  ]
+ },
+ {
+  "src": "symbio/app/adapter_attrib.py",
+  "test": "tests/test_adapter_attrib.py",
+  "line": 169,
+  "old": "    while len(current) > 1 and calls < max_calls:\n",
+  "new": "    while len(current) > 1 or calls < max_calls:\n",
+  "kind": "and->or",
+  "fails": [
+   "tests/test_adapter_attrib.py::test_a_single_culprit_is_found_and_minimal"
+  ]
+ },
+ {
+  "src": "symbio/app/ane.py",
+  "test": "tests/test_ane.py",
+  "line": 224,
+  "old": "    if not answer.get(\"ok\") and (\"status\" in answer\n",
+  "new": "    if answer.get(\"ok\") and (\"status\" in answer\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_ane.py::test_a_decision_that_times_out_is_not_asked_again_every_turn"
+  ]
+ },
+ {
+  "src": "symbio/app/ane.py",
+  "test": "tests/test_ane.py",
+  "line": 117,
+  "old": "            return {\"ok\": False, \"error\": _build_error or \"the Neural Engine helper is unavailable\"}\n",
+  "new": "            return {\"ok\": False, \"error\": _build_error and \"the Neural Engine helper is unavailable\"}\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_ane.py::test_a_helper_that_will_not_start_is_unavailable_not_a_crash"
+  ]
+ },
+ {
+  "src": "symbio/app/ane.py",
+  "test": "tests/test_ane.py",
+  "line": 257,
+  "old": "        text = str(line.get(\"text\") or \"\").strip()\n",
+  "new": "        text = str(line.get(\"text\") and \"\").strip()\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_ane.py::test_ocr_lines_become_click_elements"
+  ]
+ },
+ {
+  "src": "symbio/app/ane.py",
+  "test": "tests/test_ane.py",
+  "line": 259,
+  "old": "        if not text or len(box) < 4:\n",
+  "new": "        if text or len(box) < 4:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_ane.py::test_ocr_lines_become_click_elements"
+  ]
+ },
+ {
+  "src": "symbio/app/belief.py",
+  "test": "tests/test_belief.py",
+  "line": 402,
+  "old": "        if not scale or scale <= 0 or dynamics == STABLE:\n",
+  "new": "        if scale or scale <= 0 or dynamics == STABLE:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_belief.py::test_a_peaking_belief_is_strongest_at_its_moment"
+  ]
+ },
+ {
+  "src": "symbio/app/belief.py",
+  "test": "tests/test_belief.py",
+  "line": 321,
+  "old": "                   if (d := _parse(row[\"valid_until\"])) is not None and d <= moment]\n",
+  "new": "                   if (d := _parse(row[\"valid_until\"])) is not None or d <= moment]\n",
+  "kind": "and->or",
+  "fails": [
+   "tests/test_belief.py::test_a_permanent_belief_never_expires"
+  ]
+ },
+ {
+  "src": "symbio/app/belief.py",
+  "test": "tests/test_belief.py",
+  "line": 401,
+  "old": "        dynamics = row.get(\"dynamics\") or STABLE\n",
+  "new": "        dynamics = row.get(\"dynamics\") and STABLE\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_belief.py::test_a_peaking_belief_is_strongest_at_its_moment"
+  ]
+ },
+ {
+  "src": "symbio/app/belief.py",
+  "test": "tests/test_belief.py",
+  "line": 555,
+  "old": "    if not ranked:\n",
+  "new": "    if ranked:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_belief.py::test_waiting_can_be_the_top_ranked_move"
+  ]
+ },
+ {
+  "src": "symbio/app/chat_style.py",
+  "test": "tests/test_chat_style.py",
+  "line": 140,
+  "old": "        label = (m.group(1) + (m.group(2) or \"\")).strip()\n",
+  "new": "        label = (m.group(2) + (m.group(2) or \"\")).strip()\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_chat_style.py::test_a_security_label_keeps_its_punctuation"
+  ]
+ },
+ {
+  "src": "symbio/app/chat_style.py",
+  "test": "tests/test_chat_style.py",
+  "line": 126,
+  "old": "            m.group(1).strip(), _BOLD, enabled=on)\n",
+  "new": "            m.group(2).strip(), _BOLD, enabled=on)\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_chat_style.py::test_a_tool_call_becomes_a_bullet"
+  ]
+ },
+ {
+  "src": "symbio/app/chat_style.py",
+  "test": "tests/test_chat_style.py",
+  "line": 119,
+  "old": "    if \"\\n\" in message and not _OBSERVATION_RE.match(message):\n",
+  "new": "    if \"\\n\" in message and _OBSERVATION_RE.match(message):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_chat_style.py::test_multiline_output_stays_aligned"
+  ]
+ },
+ {
+  "src": "symbio/app/chat_style.py",
+  "test": "tests/test_chat_style.py",
+  "line": 130,
+  "old": "        name, body = (m.group(1) or \"\").strip(), m.group(2).rstrip()\n",
+  "new": "        name, body = (m.group(1) or \"\").strip(), m.group(3).rstrip()\n",
+  "kind": "2->3",
+  "fails": [
+   "tests/test_chat_style.py::test_an_observation_hangs_off_its_call"
+  ]
+ },
+ {
+  "src": "symbio/app/cli.py",
+  "test": "tests/test_cli.py",
+  "line": 651,
+  "old": "    elif sub == \"get\":\n",
+  "new": "    elif sub != \"get\":\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_cli.py::test_cli_config_get"
+  ]
+ },
+ {
+  "src": "symbio/app/cli.py",
+  "test": "tests/test_cli.py",
+  "line": 1124,
+  "old": "    if not token:\n",
+  "new": "    if token:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_cli.py::test_cli_legacy_telegram_flag"
+  ]
+ },
+ {
+  "src": "symbio/app/cli.py",
+  "test": "tests/test_cli.py",
+  "line": 653,
+  "old": "    elif sub == \"set\":\n",
+  "new": "    elif sub != \"set\":\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_cli.py::test_cli_config_set"
+  ]
+ },
+ {
+  "src": "symbio/app/cli.py",
+  "test": "tests/test_cli.py",
+  "line": 1480,
+  "old": "    if command == \"eval-lora\":\n",
+  "new": "    if command != \"eval-lora\":\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_cli.py::test_cli_gateway_status"
+  ]
+ },
+ {
+  "src": "symbio/app/constitution.py",
+  "test": "tests/test_constitution.py",
+  "line": 418,
+  "old": "        stances[axis_key] = Stance(axis_key, pole, 1, 0, INFERRED, today,\n",
+  "new": "        stances[axis_key] = Stance(axis_key, pole, 1, 1, INFERRED, today,\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_constitution.py::test_repeated_evidence_reinforces_rather_than_duplicating"
+  ]
+ },
+ {
+  "src": "symbio/app/constitution.py",
+  "test": "tests/test_constitution.py",
+  "line": 214,
+  "old": "        return self.source == STATED or self.weight >= minimum\n",
+  "new": "        return self.source != STATED or self.weight >= minimum\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_constitution.py::test_a_stated_stance_is_served_however_the_evidence_leans"
+  ]
+ },
+ {
+  "src": "symbio/app/constitution.py",
+  "test": "tests/test_constitution.py",
+  "line": 437,
+  "old": "            support=min(_MAX_SUPPORT, current.support + 1), evidence=merged,\n",
+  "new": "            support=min(_MAX_SUPPORT, current.support + 2), evidence=merged,\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_constitution.py::test_repeated_evidence_reinforces_rather_than_duplicating"
+  ]
+ },
+ {
+  "src": "symbio/app/constitution.py",
+  "test": "tests/test_constitution.py",
+  "line": 456,
+  "old": "    against = current.against + 1\n",
+  "new": "    against = current.against + 2\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_constitution.py::test_contrary_evidence_is_counted_before_it_flips_anything"
+  ]
+ },
+ {
+  "src": "symbio/app/curriculum.py",
+  "test": "tests/test_curriculum.py",
+  "line": 338,
+  "old": "    if not planned:\n",
+  "new": "    if planned:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_curriculum.py::test_the_summary_says_where_the_budget_went"
+  ]
+ },
+ {
+  "src": "symbio/app/curriculum.py",
+  "test": "tests/test_curriculum.py",
+  "line": 140,
+  "old": "    if total <= 0:\n",
+  "new": "    if total < 0:\n",
+  "kind": "<=-><",
+  "fails": [
+   "tests/test_curriculum.py::test_a_sample_matching_nothing_lands_in_the_middle"
+  ]
+ },
+ {
+  "src": "symbio/app/curriculum.py",
+  "test": "tests/test_curriculum.py",
+  "line": 93,
+  "old": "            profile[case_id] = WEIGHT_WEAK if not task.get(\"passed\") else WEIGHT_STRONG\n",
+  "new": "            profile[case_id] = WEIGHT_WEAK if task.get(\"passed\") else WEIGHT_STRONG\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_curriculum.py::test_a_failing_case_weighs_more_than_a_passing_one"
+  ]
+ },
+ {
+  "src": "symbio/app/curriculum.py",
+  "test": "tests/test_curriculum.py",
+  "line": 294,
+  "old": "            f\"{leaked[0][:70]!r}. The eval set drives sample weighting, so \"\n",
+  "new": "            f\"{leaked[1][:70]!r}. The eval set drives sample weighting, so \"\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_curriculum.py::test_an_eval_prompt_in_the_corpus_is_refused"
+  ]
+ },
+ {
+  "src": "symbio/app/daemon.py",
+  "test": "tests/test_daemon.py",
+  "line": 59,
+  "old": "    if not constants.DAEMON_SOCKET.exists():\n",
+  "new": "    if constants.DAEMON_SOCKET.exists():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_daemon.py::test_daemon_ready"
+  ]
+ },
+ {
+  "src": "symbio/app/daemon.py",
+  "test": "tests/test_daemon.py",
+  "line": 721,
+  "old": "        return 0\n",
+  "new": "        return 1\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_daemon.py::test_client_message_pump"
+  ]
+ },
+ {
+  "src": "symbio/app/daemon.py",
+  "test": "tests/test_daemon.py",
+  "line": 783,
+  "old": "        if not isinstance(text, str):\n",
+  "new": "        if isinstance(text, str):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_daemon.py::test_a_status_line_is_skinned_for_the_terminal"
+  ]
+ },
+ {
+  "src": "symbio/app/daemon.py",
+  "test": "tests/test_daemon.py",
+  "line": 713,
+  "old": "                elif mtype == \"confirm\":\n",
+  "new": "                elif mtype != \"confirm\":\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_daemon.py::test_client_message_pump"
+  ]
+ },
+ {
+  "src": "symbio/app/devtools.py",
+  "test": "tests/test_devtools.py",
+  "line": 276,
+  "old": "    ok = parsed[\"bad\"] == 0 and result.returncode == 0\n",
+  "new": "    ok = parsed[\"bad\"] == 1 and result.returncode == 0\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_devtools.py::test_run_tests_reports_green_suite_green"
+  ]
+ },
+ {
+  "src": "symbio/app/devtools.py",
+  "test": "tests/test_devtools.py",
+  "line": 168,
+  "old": "    ranked.sort(key=lambda r: (-r[2], r[0], -r[1]))\n",
+  "new": "    ranked.sort(key=lambda r: (-r[3], r[0], -r[1]))\n",
+  "kind": "2->3",
+  "fails": [
+   "tests/test_devtools.py::test_locate_fault_ranks_the_line_only_the_failing_test_runs"
+  ]
+ },
+ {
+  "src": "symbio/app/devtools.py",
+  "test": "tests/test_devtools.py",
+  "line": 208,
+  "old": "    if os.environ.get(\"SYMBIO_SUITE_LOCK_PID\") == str(os.getpid()):\n",
+  "new": "    if os.environ.get(\"SYMBIO_SUITE_LOCK_PID\") != str(os.getpid()):\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_devtools.py::test_unparsable_output_is_not_graded_ok[]"
+  ]
+ },
+ {
+  "src": "symbio/app/devtools.py",
+  "test": "tests/test_devtools.py",
+  "line": 162,
+  "old": "                slot = hits.setdefault((rel, ln), [0, 0])\n",
+  "new": "                slot = hits.setdefault((rel, ln), [1, 0])\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_devtools.py::test_locate_fault_ranks_the_line_only_the_failing_test_runs"
+  ]
+ },
+ {
+  "src": "symbio/app/eyes.py",
+  "test": "tests/test_eyes.py",
+  "line": 94,
+  "old": "    if model_type == PRISM_PACK:\n",
+  "new": "    if model_type != PRISM_PACK:\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_eyes.py::test_a_vision_checkpoint_with_its_tower_has_eyes"
+  ]
+ },
+ {
+  "src": "symbio/app/eyes.py",
+  "test": "tests/test_eyes.py",
+  "line": 159,
+  "old": "        if not name or any(name.startswith(m + \".\") for m in moved):\n",
+  "new": "        if name or any(name.startswith(m + \".\") for m in moved):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_eyes.py::test_an_adapter_the_main_model_wears_is_worn_by_its_eyes"
+  ]
+ },
+ {
+  "src": "symbio/app/eyes.py",
+  "test": "tests/test_eyes.py",
+  "line": 123,
+  "old": "    model = entry[0]()\n",
+  "new": "    model = entry[1]()\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_eyes.py::test_a_resident_model_is_found_by_the_name_it_was_loaded_under"
+  ]
+ },
+ {
+  "src": "symbio/app/eyes.py",
+  "test": "tests/test_eyes.py",
+  "line": 196,
+  "old": "            if x.ndim == 3 and x.shape[1] > 1:\n",
+  "new": "            if x.ndim != 3 and x.shape[1] > 1:\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_eyes.py::test_the_look_projects_only_the_last_position"
+  ]
+ },
+ {
+  "src": "symbio/app/fix_loop.py",
+  "test": "tests/test_fix_loop.py",
+  "line": 250,
+  "old": "           and o[-1 - tail].rstrip() == n[-1 - tail].rstrip()):\n",
+  "new": "           and o[-2 - tail].rstrip() == n[-1 - tail].rstrip()):\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_fix_loop.py::test_a_correct_patch_on_the_first_cycle_ends_the_loop_green"
+  ]
+ },
+ {
+  "src": "symbio/app/fix_loop.py",
+  "test": "tests/test_fix_loop.py",
+  "line": 487,
+  "old": "            last = min(len(lines) - 1, first + span)\n",
+  "new": "            last = min(len(lines) - 2, first + span)\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_fix_loop.py::test_a_long_source_is_sliced_around_the_failing_line"
+  ]
+ },
+ {
+  "src": "symbio/app/fix_loop.py",
+  "test": "tests/test_fix_loop.py",
+  "line": 157,
+  "old": "        if not body:\n",
+  "new": "        if body:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_fix_loop.py::test_a_whole_function_in_a_code_block_is_a_patch"
+  ]
+ },
+ {
+  "src": "symbio/app/fix_loop.py",
+  "test": "tests/test_fix_loop.py",
+  "line": 348,
+  "old": "    func = func.split(\"::\")[-1].split(\"[\")[0]\n",
+  "new": "    func = func.split(\"::\")[-1].split(\"[\")[1]\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_fix_loop.py::test_a_correct_patch_on_the_first_cycle_ends_the_loop_green"
+  ]
+ },
+ {
+  "src": "symbio/app/golden.py",
+  "test": "tests/test_golden.py",
+  "line": 438,
+  "old": "                path.read_text(encoding=\"utf-8\").splitlines(), start=1):\n",
+  "new": "                path.read_text(encoding=\"utf-8\").splitlines(), start=2):\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_golden.py::test_find_corpus_contradictions_flags_samples_that_fail_their_own_case"
+  ]
+ },
+ {
+  "src": "symbio/app/golden.py",
+  "test": "tests/test_golden.py",
+  "line": 347,
+  "old": "    for case in (extra_cases or []):\n",
+  "new": "    for case in (extra_cases and []):\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_golden.py::test_append_golden_remedy_samples"
+  ]
+ },
+ {
+  "src": "symbio/app/golden.py",
+  "test": "tests/test_golden.py",
+  "line": 66,
+  "old": "    return any(n == name for n, _ in tools)\n",
+  "new": "    return any(n != name for n, _ in tools)\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_golden.py::test_run_golden_set_all_pass"
+  ]
+ },
+ {
+  "src": "symbio/app/golden.py",
+  "test": "tests/test_golden.py",
+  "line": 88,
+  "old": "    return sane_reply(display) and config[\"assistant_name\"].lower() in display.lower()\n",
+  "new": "    return sane_reply(display) or config[\"assistant_name\"].lower() in display.lower()\n",
+  "kind": "and->or",
+  "fails": [
+   "tests/test_golden.py::test_run_golden_set_detects_regression"
+  ]
+ },
+ {
+  "src": "symbio/app/importers.py",
+  "test": "tests/test_importers.py",
+  "line": 215,
+  "old": "    home = home or OPENCLAW_HOME\n",
+  "new": "    home = home and OPENCLAW_HOME\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_importers.py::test_openclaw_approvals_are_not_imported"
+  ]
+ },
+ {
+  "src": "symbio/app/importers.py",
+  "test": "tests/test_importers.py",
+  "line": 280,
+  "old": "            if not messages:\n",
+  "new": "            if messages:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_importers.py::test_sessions_are_left_alone_unless_asked_for"
+  ]
+ },
+ {
+  "src": "symbio/app/importers.py",
+  "test": "tests/test_importers.py",
+  "line": 142,
+  "old": "    if risk >= 2:\n",
+  "new": "    if risk > 2:\n",
+  "kind": ">=->>",
+  "fails": [
+   "tests/test_importers.py::test_text_carrying_injection_markers_is_flagged_in_the_note"
+  ]
+ },
+ {
+  "src": "symbio/app/importers.py",
+  "test": "tests/test_importers.py",
+  "line": 175,
+  "old": "    if not home.is_dir():\n",
+  "new": "    if home.is_dir():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_importers.py::test_the_soul_memory_and_skills_all_land_as_notes"
+  ]
+ },
+ {
+  "src": "symbio/app/learn.py",
+  "test": "tests/test_learn.py",
+  "line": 646,
+  "old": "    if len(history) < 4:\n",
+  "new": "    if len(history) <= 4:\n",
+  "kind": "<-><=",
+  "fails": [
+   "tests/test_learn.py::test_the_correction_sample_carries_the_grounded_answer"
+  ]
+ },
+ {
+  "src": "symbio/app/learn.py",
+  "test": "tests/test_learn.py",
+  "line": 819,
+  "old": "    pos = 0\n",
+  "new": "    pos = 1\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_learn.py::test_a_corrected_tool_call_survives_mining_and_grounding"
+  ]
+ },
+ {
+  "src": "symbio/app/learn.py",
+  "test": "tests/test_learn.py",
+  "line": 737,
+  "old": "    return {w for w in words if len(w) > 1 and w not in _GROUNDING_STOPWORDS}\n",
+  "new": "    return {w for w in words if len(w) > 1 or w not in _GROUNDING_STOPWORDS}\n",
+  "kind": "and->or",
+  "fails": [
+   "tests/test_learn.py::test_an_invented_gloss_is_cut_from_the_correct_answer"
+  ]
+ },
+ {
+  "src": "symbio/app/learn.py",
+  "test": "tests/test_learn.py",
+  "line": 791,
+  "old": "    pos = 0\n",
+  "new": "    pos = 1\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_learn.py::test_an_invented_gloss_is_cut_from_the_correct_answer"
+  ]
+ },
+ {
+  "src": "symbio/app/mcp_tools.py",
+  "test": "tests/test_mcp_tools.py",
+  "line": 38,
+  "old": "    if not MCP_MODULE_DIR.exists():\n",
+  "new": "    if MCP_MODULE_DIR.exists():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_mcp_tools.py::test_list_mcp_tools_empty"
+  ]
+ },
+ {
+  "src": "symbio/app/mcp_tools.py",
+  "test": "tests/test_mcp_tools.py",
+  "line": 123,
+  "old": "        if result.returncode != 0:\n",
+  "new": "        if result.returncode != 1:\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_mcp_tools.py::test_execute_mcp_tool"
+  ]
+ },
+ {
+  "src": "symbio/app/mcp_tools.py",
+  "test": "tests/test_mcp_tools.py",
+  "line": 88,
+  "old": "    if not safe:\n",
+  "new": "    if safe:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_mcp_tools.py::test_execute_mcp_tool"
+  ]
+ },
+ {
+  "src": "symbio/app/mcp_tools.py",
+  "test": "tests/test_mcp_tools.py",
+  "line": 44,
+  "old": "        if not manifest.exists():\n",
+  "new": "        if manifest.exists():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_mcp_tools.py::test_refresh_mcp_tools_registers_tool"
+  ]
+ },
+ {
+  "src": "symbio/app/ops_eval.py",
+  "test": "tests/test_ops_eval.py",
+  "line": 112,
+  "old": "        if rc == 0:\n",
+  "new": "        if rc != 0:\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_ops_eval.py::test_every_shipped_task_passes_the_gate"
+  ]
+ },
+ {
+  "src": "symbio/app/ops_eval.py",
+  "test": "tests/test_ops_eval.py",
+  "line": 118,
+  "old": "        if rc != 0:\n",
+  "new": "        if rc == 0:\n",
+  "kind": "!=->==",
+  "fails": [
+   "tests/test_ops_eval.py::test_every_shipped_task_passes_the_gate"
+  ]
+ },
+ {
+  "src": "symbio/app/ops_eval.py",
+  "test": "tests/test_ops_eval.py",
+  "line": 109,
+  "old": "        if rc != 0:\n",
+  "new": "        if rc == 0:\n",
+  "kind": "!=->==",
+  "fails": [
+   "tests/test_ops_eval.py::test_every_shipped_task_passes_the_gate"
+  ]
+ },
+ {
+  "src": "symbio/app/ops_eval.py",
+  "test": "tests/test_ops_eval.py",
+  "line": 248,
+  "old": "        \"agreed\": None if marked is None else (marked == passed),\n",
+  "new": "        \"agreed\": None if marked is None else (marked != passed),\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_ops_eval.py::test_the_shell_decides_and_the_self_mark_sits_beside_it"
+  ]
+ },
+ {
+  "src": "symbio/app/pending.py",
+  "test": "tests/test_pending.py",
+  "line": 104,
+  "old": "    if not path.exists():\n",
+  "new": "    if path.exists():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_pending.py::test_a_finished_task_is_forgotten"
+  ]
+ },
+ {
+  "src": "symbio/app/pending.py",
+  "test": "tests/test_pending.py",
+  "line": 170,
+  "old": "                      if t.get(\"kind\") == kind and t.get(\"role\") == role\n",
+  "new": "                      if t.get(\"kind\") == kind and t.get(\"role\") != role\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_pending.py::test_starting_the_work_supersedes_the_entry_asking_for_it"
+  ]
+ },
+ {
+  "src": "symbio/app/pending.py",
+  "test": "tests/test_pending.py",
+  "line": 77,
+  "old": "        if out.returncode == 0 and out.stdout.strip():\n",
+  "new": "        if out.returncode == 1 and out.stdout.strip():\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_pending.py::test_a_reboot_orphans_the_task_even_when_the_pid_is_reused"
+  ]
+ },
+ {
+  "src": "symbio/app/pending.py",
+  "test": "tests/test_pending.py",
+  "line": 171,
+  "old": "                      and t.get(\"state\") == DEFERRED]\n",
+  "new": "                      and t.get(\"state\") != DEFERRED]\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_pending.py::test_starting_the_work_supersedes_the_entry_asking_for_it"
+  ]
+ },
+ {
+  "src": "symbio/app/pet.py",
+  "test": "tests/test_pet.py",
+  "line": 98,
+  "old": "            return 0\n",
+  "new": "            return 1\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_pet.py::test_start_waits_for_the_pet_to_claim_its_pid"
+  ]
+ },
+ {
+  "src": "symbio/app/pet.py",
+  "test": "tests/test_pet.py",
+  "line": 120,
+  "old": "    while time.monotonic() < deadline and pet_pid() == pid:\n",
+  "new": "    while time.monotonic() < deadline and pet_pid() != pid:\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_pet.py::test_stop_sends_it_home"
+  ]
+ },
+ {
+  "src": "symbio/app/pet.py",
+  "test": "tests/test_pet.py",
+  "line": 127,
+  "old": "    return 0\n",
+  "new": "    return 1\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_pet.py::test_stop_sends_it_home"
+  ]
+ },
+ {
+  "src": "symbio/app/pet.py",
+  "test": "tests/test_pet.py",
+  "line": 122,
+  "old": "    if pet_pid() == pid:\n",
+  "new": "    if pet_pid() != pid:\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_pet.py::test_stop_sends_it_home"
+  ]
+ },
+ {
+  "src": "symbio/app/prism_pack.py",
+  "test": "tests/test_prism_pack.py",
+  "line": 247,
+  "old": "        if record.get(\"dtype\", \"float16\") != \"float16\":\n",
+  "new": "        if record.get(\"dtype\", \"float16\") == \"float16\":\n",
+  "kind": "!=->==",
+  "fails": [
+   "tests/test_prism_pack.py::test_a_pack_loads_as_the_dense_model_it_encodes"
+  ]
+ },
+ {
+  "src": "symbio/app/prism_pack.py",
+  "test": "tests/test_prism_pack.py",
+  "line": 87,
+  "old": "        return self.weight.shape[1] * 32 // self.bits\n",
+  "new": "        return self.weight.shape[2] * 32 // self.bits\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_prism_pack.py::test_lora_on_a_packed_layer_starts_as_the_layer_and_trains"
+  ]
+ },
+ {
+  "src": "symbio/app/prism_pack.py",
+  "test": "tests/test_prism_pack.py",
+  "line": 56,
+  "old": "    return config.get(\"model_type\") == MODEL_TYPE\n",
+  "new": "    return config.get(\"model_type\") != MODEL_TYPE\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_prism_pack.py::test_mlx_lm_load_model_reaches_the_pack_loader"
+  ]
+ },
+ {
+  "src": "symbio/app/prism_pack.py",
+  "test": "tests/test_prism_pack.py",
+  "line": 163,
+  "old": "    if base != \"qwen3_5\":\n",
+  "new": "    if base == \"qwen3_5\":\n",
+  "kind": "!=->==",
+  "fails": [
+   "tests/test_prism_pack.py::test_a_pack_loads_as_the_dense_model_it_encodes"
+  ]
+ },
+ {
+  "src": "symbio/app/prune.py",
+  "test": "tests/test_prune.py",
+  "line": 209,
+  "old": "        counts[key] = counts.get(key, 0) + 1\n",
+  "new": "        counts[key] = counts.get(key, 1) + 1\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_prune.py::test_runaway_repeats_are_capped"
+  ]
+ },
+ {
+  "src": "symbio/app/prune.py",
+  "test": "tests/test_prune.py",
+  "line": 148,
+  "old": "        if reason is None and not is_protected_note(text):\n",
+  "new": "        if reason is None and is_protected_note(text):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_prune.py::test_prune_notes_keeps_the_oldest_of_a_duplicate_pair"
+  ]
+ },
+ {
+  "src": "symbio/app/prune.py",
+  "test": "tests/test_prune.py",
+  "line": 96,
+  "old": "    if m and m.group(1).strip().lower().rstrip(\"?.!\") in _SUBJECTLESS_QUESTIONS:\n",
+  "new": "    if m or m.group(1).strip().lower().rstrip(\"?.!\") in _SUBJECTLESS_QUESTIONS:\n",
+  "kind": "and->or",
+  "fails": [
+   "tests/test_prune.py::test_real_research_note_is_kept"
+  ]
+ },
+ {
+  "src": "symbio/app/prune.py",
+  "test": "tests/test_prune.py",
+  "line": 136,
+  "old": "    if not constants.NOTES_DIR.exists():\n",
+  "new": "    if constants.NOTES_DIR.exists():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_prune.py::test_prune_notes_archives_junk_and_keeps_the_rest"
+  ]
+ },
+ {
+  "src": "symbio/app/scripts.py",
+  "test": "tests/test_scripts.py",
+  "line": 36,
+  "old": "    slug = re.sub(r\"[^a-z0-9_-]+\", \"_\", str(name or \"\").strip().lower()).strip(\"_-\")\n",
+  "new": "    slug = re.sub(r\"[^a-z0-9_-]+\", \"_\", str(name and \"\").strip().lower()).strip(\"_-\")\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_scripts.py::test_a_script_is_saved_listed_and_run_with_its_arguments"
+  ]
+ },
+ {
+  "src": "symbio/app/scripts.py",
+  "test": "tests/test_scripts.py",
+  "line": 79,
+  "old": "        known = \", \".join(s[\"name\"] for s in list_scripts()) or \"none yet\"\n",
+  "new": "        known = \", \".join(s[\"name\"] for s in list_scripts()) and \"none yet\"\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_scripts.py::test_a_missing_script_names_what_there_is"
+  ]
+ },
+ {
+  "src": "symbio/app/scripts.py",
+  "test": "tests/test_scripts.py",
+  "line": 57,
+  "old": "    if not code.strip():\n",
+  "new": "    if code.strip():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_scripts.py::test_a_script_is_saved_listed_and_run_with_its_arguments"
+  ]
+ },
+ {
+  "src": "symbio/app/scripts.py",
+  "test": "tests/test_scripts.py",
+  "line": 67,
+  "old": "    summary = \" \".join(str(description or \"\").split())[:200]\n",
+  "new": "    summary = \" \".join(str(description and \"\").split())[:200]\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_scripts.py::test_a_script_is_saved_listed_and_run_with_its_arguments"
+  ]
+ },
+ {
+  "src": "symbio/app/setup.py",
+  "test": "tests/test_setup.py",
+  "line": 290,
+  "old": "    if not assistant_name:\n",
+  "new": "    if assistant_name:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_setup.py::test_setup_wizard_writes_config_and_sets_names"
+  ]
+ },
+ {
+  "src": "symbio/app/setup.py",
+  "test": "tests/test_setup.py",
+  "line": 268,
+  "old": "    if skip == \"s\":\n",
+  "new": "    if skip != \"s\":\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_setup.py::test_setup_wizard_writes_config_and_sets_names"
+  ]
+ },
+ {
+  "src": "symbio/app/setup.py",
+  "test": "tests/test_setup.py",
+  "line": 30,
+  "old": "    if not answer:\n",
+  "new": "    if answer:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_setup.py::test_setup_wizard_parses_multiple_telegram_chat_ids"
+  ]
+ },
+ {
+  "src": "symbio/app/setup.py",
+  "test": "tests/test_setup.py",
+  "line": 163,
+  "old": "    if not config.get(\"assistant_name\"):\n",
+  "new": "    if config.get(\"assistant_name\"):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_setup.py::test_setup_wizard_skip_leaves_defaults"
+  ]
+ },
+ {
+  "src": "symbio/app/skill_eval.py",
+  "test": "tests/test_skill_eval.py",
+  "line": 227,
+  "old": "    if len(positions) < 2:\n",
+  "new": "    if len(positions) <= 2:\n",
+  "kind": "<-><=",
+  "fails": [
+   "tests/test_skill_eval.py::test_a_reversed_procedure_fails_even_though_every_word_is_present"
+  ]
+ },
+ {
+  "src": "symbio/app/skill_eval.py",
+  "test": "tests/test_skill_eval.py",
+  "line": 134,
+  "old": "        if word in _STOPWORDS or word in seen:\n",
+  "new": "        if word in _STOPWORDS and word in seen:\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_skill_eval.py::test_keywords_ignore_trailing_punctuation"
+  ]
+ },
+ {
+  "src": "symbio/app/skill_eval.py",
+  "test": "tests/test_skill_eval.py",
+  "line": 691,
+  "old": "    if not adapter_present and ARM_ADAPTER in arms:\n",
+  "new": "    if adapter_present and ARM_ADAPTER in arms:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_skill_eval.py::test_missing_adapter_still_runs_but_is_flagged"
+  ]
+ },
+ {
+  "src": "symbio/app/skill_eval.py",
+  "test": "tests/test_skill_eval.py",
+  "line": 237,
+  "old": "                best[i] = max(best[i], best[j] + 1)\n",
+  "new": "                best[i] = max(best[i], best[j] + 2)\n",
+  "kind": "1->2",
+  "fails": [
+   "tests/test_skill_eval.py::test_a_correctly_ordered_recital_scores_full_marks"
+  ]
+ },
+ {
+  "src": "symbio/app/skill_perform.py",
+  "test": "tests/test_skill_perform.py",
+  "line": 468,
+  "old": "    if state == \"unrun\":\n",
+  "new": "    if state != \"unrun\":\n",
+  "kind": "==->!=",
+  "fails": [
+   "tests/test_skill_perform.py::test_code_that_uses_the_right_name_but_crashes_fails"
+  ]
+ },
+ {
+  "src": "symbio/app/skill_perform.py",
+  "test": "tests/test_skill_perform.py",
+  "line": 349,
+  "old": "        fence = _CODE_FENCE.search(output or \"\")\n",
+  "new": "        fence = _CODE_FENCE.search(output and \"\")\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_skill_perform.py::test_it_swaps_a_value_the_request_and_the_script_share"
+  ]
+ },
+ {
+  "src": "symbio/app/skill_perform.py",
+  "test": "tests/test_skill_perform.py",
+  "line": 380,
+  "old": "            if state != \"ran\":\n",
+  "new": "            if state == \"ran\":\n",
+  "kind": "!=->==",
+  "fails": [
+   "tests/test_skill_perform.py::test_it_swaps_a_value_the_request_and_the_script_share"
+  ]
+ },
+ {
+  "src": "symbio/app/skill_perform.py",
+  "test": "tests/test_skill_perform.py",
+  "line": 628,
+  "old": "            if case is not None and case_id not in set(failing):\n",
+  "new": "            if case is not None or case_id not in set(failing):\n",
+  "kind": "and->or",
+  "fails": [
+   "tests/test_skill_perform.py::test_a_case_is_never_written_twice_for_being_in_both_sets"
+  ]
+ },
+ {
+  "src": "symbio/app/tool_eval.py",
+  "test": "tests/test_tool_eval.py",
+  "line": 524,
+  "old": "                      if r.reached and STAGES.index(r.reached) >= idx)\n",
+  "new": "                      if r.reached or STAGES.index(r.reached) >= idx)\n",
+  "kind": "and->or",
+  "fails": [
+   "tests/test_tool_eval.py::test_a_reply_that_invokes_nothing_stops_at_the_start"
+  ]
+ },
+ {
+  "src": "symbio/app/tool_eval.py",
+  "test": "tests/test_tool_eval.py",
+  "line": 463,
+  "old": "        called, args = match if match is not None else tools[0]\n",
+  "new": "        called, args = match if match is not None else tools[1]\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_tool_eval.py::test_calling_the_wrong_tool_stops_at_invoked"
+  ]
+ },
+ {
+  "src": "symbio/app/tool_eval.py",
+  "test": "tests/test_tool_eval.py",
+  "line": 544,
+  "old": "            if not slot[\"sample\"]:\n",
+  "new": "            if slot[\"sample\"]:\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_tool_eval.py::test_the_failing_reply_is_shown_in_the_summary"
+  ]
+ },
+ {
+  "src": "symbio/app/tool_eval.py",
+  "test": "tests/test_tool_eval.py",
+  "line": 552,
+  "old": "            note = v[\"notes\"][0] if v[\"notes\"] else \"\"\n",
+  "new": "            note = v[\"notes\"][1] if v[\"notes\"] else \"\"\n",
+  "kind": "0->1",
+  "fails": [
+   "tests/test_tool_eval.py::test_a_reply_that_invokes_nothing_stops_at_the_start"
+  ]
+ },
+ {
+  "src": "symbio/app/wildcards.py",
+  "test": "tests/test_wildcards.py",
+  "line": 65,
+  "old": "    if not sane_reply(display):\n",
+  "new": "    if sane_reply(display):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_wildcards.py::test_browse_case_requires_the_address_from_the_request"
+  ]
+ },
+ {
+  "src": "symbio/app/wildcards.py",
+  "test": "tests/test_wildcards.py",
+  "line": 101,
+  "old": "    return \"36\" in display or _has_tool(tools, \"execute_code\")\n",
+  "new": "    return \"36\" in display and _has_tool(tools, \"execute_code\")\n",
+  "kind": "or->and",
+  "fails": [
+   "tests/test_wildcards.py::test_trivial_arithmetic_case_rejects_needless_searching"
+  ]
+ },
+ {
+  "src": "symbio/app/wildcards.py",
+  "test": "tests/test_wildcards.py",
+  "line": 97,
+  "old": "    if not sane_reply(display):\n",
+  "new": "    if sane_reply(display):\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_wildcards.py::test_trivial_arithmetic_case_rejects_needless_searching"
+  ]
+ },
+ {
+  "src": "symbio/app/wildcards.py",
+  "test": "tests/test_wildcards.py",
+  "line": 317,
+  "old": "    if not path.exists():\n",
+  "new": "    if path.exists():\n",
+  "kind": "drop not",
+  "fails": [
+   "tests/test_wildcards.py::test_record_run_tracks_the_delta"
+  ]
+ }
+]

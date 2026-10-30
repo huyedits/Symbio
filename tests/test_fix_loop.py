@@ -206,7 +206,10 @@ def test_the_watcher_probes_after_a_turn_that_edited_source(
                                          (False, "FAILED tests/test_a.py::test_ok - x\n"
                                                  "1 failed in 0.01s"))[1])
     fixed = {"n": 0}
-    def fake_repair(failure, source, generate, verify, log):
+    monkeypatch.setattr(fw.devtools, "trace_test", lambda test_id: "")
+    monkeypatch.setattr(fw.devtools, "locate_fault", lambda test_id: [])
+    def fake_repair(failure, source, generate, verify, log, trace=None,
+                    suspects=None):
         repairs.append((failure, source))
         return {"fixed": True, "reverted": False, "cycles": []}
     monkeypatch.setattr(fw.fix_loop, "repair_failure", fake_repair)
@@ -246,3 +249,286 @@ def test_the_watcher_never_runs_two_repairs_at_once(project, monkeypatch):
     t1.start(); t1.join()
     # A second call while the first held the lock is a no-op (no second run):
     assert running["n"] == 1
+
+
+# ---- the inputs the model is handed: right file, right lines ----
+
+_REPORT_WITH_TRACE = """\
+pytest targets=['tests'] exit=1 — 2 failed, 40 passed in 3.00s
+_________________________ test_other _________________________
+symbio/app/elsewhere.py:9: in other
+    raise ValueError
+E   ValueError
+_________________________ test_render_fills_slots _________________________
+tests/test_x.py:4: in test_render_fills_slots
+    assert render("a b") == "a b"
+symbio/app/commands.py:12: in render
+    return helper(text)
+symbio/app/helpers.py:3: in helper
+    raise KeyError(text)
+E   KeyError: 'a b'
+=========================== short test summary info ===========================
+FAILED tests/test_x.py::test_other - ValueError
+FAILED tests/test_x.py::test_render_fills_slots - KeyError
+Failing: FAILED tests/test_x.py::test_other, FAILED tests/test_x.py::test_render_fills_slots
+"""
+
+
+def test_the_source_comes_from_the_failing_tests_own_traceback(project):
+    """The watcher used to map test_custom_commands.py to chat.py by name;
+    the traceback names the real file. Deepest project frame of THIS test's
+    section wins — not a frame from a neighbouring failure."""
+    for rel in ("symbio/app/commands.py", "symbio/app/helpers.py",
+                "symbio/app/elsewhere.py"):
+        (project / rel).write_text("x = 1\n")
+    assert fix_loop.source_from_report(
+        _REPORT_WITH_TRACE, "tests/test_x.py::test_render_fills_slots") == (
+        "symbio/app/helpers.py", 3)
+    from symbio.app import fix_watch
+    assert fix_watch._slice_source_for(
+        "tests/test_x.py::test_render_fills_slots",
+        _REPORT_WITH_TRACE) == "symbio/app/helpers.py"
+
+
+def test_a_long_source_is_sliced_around_the_failing_line(project):
+    """The test's name never appears in the source; slicing by it handed the
+    model the top of the file. The traceback's line is the anchor."""
+    _make_broken(project)
+    body = "".join(f"x{i} = {i}\n" for i in range(400))
+    body += "def greet(name):\n    return 'BUG HERE'\n"
+    (project / "symbio" / "app" / "greet.py").write_text(body)
+    out = fix_loop._slice_for_failure(
+        "tests/test_x.py::test_greet", "symbio/app/greet.py", source_line=402)
+    assert "BUG HERE" in out["source"]
+    assert "x0 = 0" not in out["source"]
+
+
+def test_a_repair_is_judged_by_its_own_test_not_by_unrelated_red(project):
+    """A suite with a failure the patch never touched (a test that needs
+    mlx-vlm on this box) used to make every repair a defeat."""
+    _make_broken(project)
+    unrelated = "FAILED tests/test_vlm.py::test_needs_vlm - ImportError"
+
+    def verify(targets):
+        src = (project / "symbio" / "app" / "greet.py").read_text()
+        if "'Hi ' + name" in src:
+            return False, f"1 failed, 9 passed in 0.1s\n{unrelated}"
+        return False, ("2 failed, 8 passed in 0.1s\n"
+                       f"{unrelated}\nFAILED tests/test_x.py::test_greet - x")
+
+    rec = fix_loop.repair_failure(
+        "tests/test_x.py::test_greet", "symbio/app/greet.py",
+        lambda p: ("<<<< OLD\n    return 'Hi ' + name\n===="
+                   "\n    return 'Hi ' + name + '!'\n>>>> NEW"),
+        verify)
+    # The patched file still holds 'Hi ' + name, so the target passes and
+    # only the unrelated failure is left.
+    assert rec["fixed"] is True
+    assert not list((project / "symbio" / "app").glob("*.repairbak"))
+
+
+def test_a_patch_that_will_not_parse_never_touches_the_file(project):
+    _make_broken(project)
+    before = (project / "symbio" / "app" / "greet.py").read_text()
+    rec = fix_loop.repair_failure(
+        "tests/test_x.py::test_greet", "symbio/app/greet.py",
+        lambda p: ("<<<< OLD\n    return 'Hi ' + name\n===="
+                   "\n    return 'Hi ' + (name\n>>>> NEW"),
+        lambda t: (False, "1 failed in 0.1s"))
+    assert rec["fixed"] is False
+    assert rec["cycles"][0]["result"].startswith("refused: patch does not parse")
+    assert (project / "symbio" / "app" / "greet.py").read_text() == before
+
+
+def test_no_backup_is_left_behind_after_a_two_cycle_fix(project):
+    """A fix that landed on cycle 2 used to leave `<file>.1.repairbak` in the
+    tree (only the last cycle's backup was removed)."""
+    _make_broken(project)
+    (project / "symbio" / "app" / "greet.py").write_text(
+        "def greet(name):\n    return 'A'\n")
+    replies = iter([
+        "<<<< OLD\n    return 'A'\n====\n    return 'B'\n>>>> NEW",
+        "<<<< OLD\n    return 'B'\n====\n    return 'Hi ' + name\n>>>> NEW",
+    ])
+
+    def verify(targets):
+        ok = "'Hi ' + name" in (project / "symbio" / "app" / "greet.py").read_text()
+        return ok, "1 passed in 0.1s" if ok else "1 failed in 0.1s"
+
+    rec = fix_loop.repair_failure(
+        "tests/test_x.py::test_greet", "symbio/app/greet.py",
+        lambda p: next(replies), verify)
+    assert rec["fixed"] is True and len(rec["cycles"]) == 2
+    assert not list((project / "symbio" / "app").glob("*.repairbak"))
+
+
+def test_an_unfixed_patch_left_in_place_keeps_one_named_backup(project):
+    _make_broken(project)
+    rec = fix_loop.repair_failure(
+        "tests/test_x.py::test_greet", "symbio/app/greet.py",
+        lambda p: ("<<<< OLD\n    return 'Hi ' + name\n===="
+                   "\n    return 'Hello ' + name\n>>>> NEW"),
+        lambda t: (False, "1 failed in 0.1s"), budget_cycles=1)
+    assert rec["fixed"] is False
+    assert rec["backup"] == "symbio/app/greet.py.repairbak"
+    assert "'Hi ' + name" in (project / rec["backup"]).read_text()
+
+
+def test_a_bare_close_fence_parses():
+    """Gemma-12B closed its patch with `>>>>` and no NEW (measured live)."""
+    assert fix_loop._extract_patch(
+        "<<<< OLD\na = 1\n====\na = 2\n>>>>\n") == [("a = 1", "a = 2")]
+
+
+def test_a_whole_function_quote_lands_as_the_one_line_it_changes():
+    """The live miss, three cycles running: the right one-line fix quoted
+    inside a whole function, one blank line short of the file. Only the
+    changed line is applied; the file's own blank lines stay."""
+    text = ("def render(x):\n"
+            "    y = x\n"
+            "    return y + 1\n"
+            "\n"
+            "\n"
+            "def suggest():\n"
+            "    pass\n")
+    old = ("def render(x):\n    y = x\n    return y + 1\n\n"
+           "def suggest():\n    pass")
+    new = ("def render(x):\n    y = x\n    return y\n\n"
+           "def suggest():\n    pass")
+    out = fix_loop._apply_patch(text, [(old, new)])
+    assert out == text.replace("return y + 1", "return y")
+
+
+def test_a_rejected_patch_is_shown_back_so_the_next_cycle_differs(project):
+    """Greedy decoding answers the same prompt with the same patch. Measured
+    2026-10-08: the 14B sent one identical no-op patch three cycles running.
+    The second prompt must carry what the first cycle tried."""
+    _make_broken(project)
+    prompts = []
+
+    def generate(prompt):
+        prompts.append(prompt)
+        return "<<<< OLD\n    return 'Hi ' + name\n====\n    return 'Hi ' + name\n>>>> NEW"
+
+    fix_loop.repair_failure(
+        "tests/test_x.py::test_greet", "symbio/app/greet.py", generate,
+        lambda t: (False, "1 failed in 0.1s"), budget_cycles=2)
+    assert len(prompts) == 2
+    assert "Already tried" not in prompts[0]
+    assert "Already tried" in prompts[1]
+
+
+def test_a_worse_patch_is_reverted_and_the_next_cycle_still_runs(project):
+    _make_broken(project)
+    greet = project / "symbio" / "app" / "greet.py"
+    replies = iter([
+        "<<<< OLD\n    return 'Hi ' + name\n====\n    raise RuntimeError\n>>>> NEW",
+        "<<<< OLD\n    return 'Hi ' + name\n====\n    return 'Hi ' + name + '!'\n>>>> NEW",
+    ])
+    prompts = []
+
+    def generate(prompt):
+        prompts.append(prompt)
+        return next(replies)
+
+    def verify(_t):
+        src = greet.read_text()
+        if "raise" in src:
+            return False, ("FAILED tests/test_x.py::test_greet\n"
+                           "FAILED tests/test_x.py::test_greet_bang")
+        if "+ '!'" in src:
+            return True, "2 passed in 0.1s"
+        return False, "FAILED tests/test_x.py::test_greet"
+
+    rec = fix_loop.repair_failure(
+        "tests/test_x.py::test_greet", "symbio/app/greet.py", generate, verify,
+        budget_cycles=3)
+    assert rec["fixed"] is True and rec["reverted"] is True
+    assert "broke other tests" in prompts[1]
+    assert "raise" not in greet.read_text()
+
+
+def test_the_suspects_put_a_far_away_culprit_on_screen(project):
+    _make_broken(project)
+    filler = "".join(f"def f{i}():\n    return {i}\n\n" for i in range(400))
+    (project / "symbio" / "app" / "greet.py").write_text(
+        "def greet(name):\n    return helper(name)\n\n" + filler
+        + "def helper(name):\n    return 'Nope ' + name\n", encoding="utf-8")
+    culprit = (project / "symbio" / "app" / "greet.py").read_text().splitlines().index(
+        "    return 'Nope ' + name") + 1
+    prompts = []
+    fix_loop.repair_failure(
+        "tests/test_x.py::test_greet", "symbio/app/greet.py",
+        lambda p: prompts.append(p) or "no patch",
+        lambda t: (False, "1 failed in 0.1s"), budget_cycles=1,
+        suspects=[("symbio/app/greet.py", culprit, 1.0)])
+    assert "return 'Nope ' + name" in prompts[0]
+
+
+def test_the_top_suspect_overrides_a_caller_frame():
+    suspects = [("symbio/app/belief.py", 480, 1.0), ("symbio/app/learn.py", 12, 0.7)]
+    assert fix_loop.pick_source(suspects, "symbio/app/learn.py") == "symbio/app/belief.py"
+    assert fix_loop.pick_source(suspects, "symbio/app/belief.py") == "symbio/app/belief.py"
+    assert fix_loop.pick_source([], "symbio/app/learn.py") == "symbio/app/learn.py"
+
+
+def test_a_whole_function_in_a_code_block_is_a_patch():
+    """MiMo-9B answers with the fixed function in a ```python block, not the
+    fence; that is a usable patch anchored on the function's name."""
+    text = "import x\n\n\ndef greet(name):\n    return 'Nope'\n\n\ndef other():\n    return 1\n"
+    reply = "The fix:\n```python\ndef greet(name):\n    return 'Hi ' + name\n```\n"
+    hunks = fix_loop._block_patch(reply, text)
+    assert fix_loop._apply_patch(text, hunks) == text.replace("'Nope'", "'Hi ' + name")
+
+
+def test_a_code_block_snippet_replaces_the_span_it_names():
+    text = "def f(a):\n    if a:\n        return 1\n    return 2\n"
+    # The edited line comes first, so it matches nowhere: the block is
+    # anchored by the window it nearly equals, and a stray fence divider
+    # (sent by Nemotron-Elastic-12B) is dropped.
+    reply = "```\n====\n    if not a:\n        return 1\n```"
+    hunks = fix_loop._block_patch(reply, text)
+    assert fix_loop._apply_patch(text, hunks) == "def f(a):\n    if not a:\n        return 1\n    return 2\n"
+    reply = "```\n    if a:\n        return 3\n```"
+    hunks = fix_loop._block_patch(reply, text)
+    assert fix_loop._apply_patch(text, hunks) == "def f(a):\n    if a:\n        return 3\n    return 2\n"
+
+
+def test_a_code_block_naming_nothing_in_the_file_is_no_patch():
+    text = "def f():\n    return 1\n"
+    assert fix_loop._block_patch("```python\ndef g():\n    return 2\n```", text) == []
+    assert fix_loop._block_patch("no code here", text) == []
+
+
+def test_an_edit_tool_call_is_read_as_a_patch():
+    reply = ("The fix.<tool_call><function=patch><parameter=path>/x.py</parameter>"
+             "<parameter=old_string>    return 'Nope'</parameter>"
+             "<parameter=new_string>    return 'Hi ' + name</parameter></function></tool_call>")
+    assert fix_loop._extract_patch(reply) == [("    return 'Nope'", "    return 'Hi ' + name")]
+
+
+def test_a_block_that_nearly_matches_two_places_is_no_patch():
+    text = "def f(a):\n    if a:\n        return 1\n\ndef g(a):\n    if a:\n        return 1\n"
+    assert fix_loop._block_patch("```\n    if not a:\n        return 1\n```", text) == []
+
+
+def test_a_short_open_fence_is_still_a_patch():
+    reply = "<<\nOLD\n    if planned:\n====\n    if not planned:\n>>>> NEW"
+    assert fix_loop._extract_patch(reply) == [("    if planned:", "    if not planned:")]
+
+
+def test_a_chat_turn_starts_no_watcher_when_switched_off(monkeypatch):
+    """The suite runs with SYMBIO_FIX_WATCH=0 (conftest): a scripted turn must
+    not launch a real suite probe from inside the suite."""
+    import threading
+    from tests.test_main_loop import ScriptedSession
+    started = []
+    real = threading.Thread.start
+
+    def spy(self):
+        if getattr(self, "_target", None) and self._target.__name__ == "_watch":
+            started.append(self)
+        return real(self)
+    monkeypatch.setattr(threading.Thread, "start", spy)
+    ScriptedSession(user_inputs=["hi", "/quit", "n"], model_replies=["Hello."]).run()
+    assert started == []

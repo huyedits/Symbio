@@ -146,7 +146,9 @@ def test_an_answered_card_is_not_sent_again():
     bridge.confirm(False)
     bridge.attach(later.append)
 
-    assert later == []
+    # A reattach always ends with `synced`; what must not come back is the card.
+    assert [m for m in later if m["type"] == "confirm"] == []
+    assert later == [{"type": "synced", "busy": False}]
 
 
 def test_always_allow_is_passed_through_only_with_a_yes():

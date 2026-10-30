@@ -29,7 +29,9 @@ test_prune.py covers the pruner directly against its own isolated store.
 """
 import importlib.util
 import json
+import os
 import shutil
+from pathlib import Path
 
 import pytest
 
@@ -37,6 +39,11 @@ from symbio import constants
 from symbio.app import health, prune
 from symbio.app.config import DEFAULT_CONFIG
 from test_utils import preserve_training_state, recover_interrupted_training_state
+
+# No post-turn fix-watcher threads: a scripted turn's watcher ran the whole
+# suite from inside the suite and held the watcher lock its own test needs.
+# The watcher is tested by calling fix_watch.watch_turn directly.
+os.environ["SYMBIO_FIX_WATCH"] = "0"
 
 # Absolute paths of the user's real stores, resolved once at import before
 # any fixture moves the constants.
@@ -59,6 +66,46 @@ def pytest_configure(config):
     """
     config.addinivalue_line(
         "markers", "ram_heavy: loads real model weights (deselected by default)")
+    # Registered here, not in a second pytest_configure further down: a
+    # module's second def of the same hook name silently replaced the first,
+    # and ram_heavy went unregistered.
+    config.addinivalue_line("markers", "uses_ane: runs the real Neural Engine helper (macOS)")
+    config.addinivalue_line("markers", "uses_desk: exercises desk mode (the helper stubbed)")
+    _take_suite_lock()
+
+
+# Held for the life of the pytest process; the OS drops it when the process
+# dies, however it dies.
+_SUITE_LOCK_FD = None
+
+
+def _take_suite_lock():
+    """One pytest run of this project at a time.
+
+    The suite backs up the user's REAL adapters/ and training data, writes
+    test fixtures into them, and restores at the end. Two runs at once (the
+    fix-watcher's probe beside a run_tests turn beside a developer's pytest)
+    each back up the other's junk and restore it as the truth — measured
+    2026-10-07: the HEADMASTER adapter and four skill adapters gone, 30
+    orphaned adapters.testbak.* directories. A second run exits at once
+    instead of racing.
+    """
+    global _SUITE_LOCK_FD
+    import os
+    try:
+        import fcntl
+    except ImportError:          # Windows: no flock
+        return
+    fd = open(constants.PROJECT_DIR / ".pytest-suite.lock", "a+")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fd.close()
+        pytest.exit("Another pytest run of this project is in progress; it "
+                    "shares adapters/ and training_data/ with this one. Wait "
+                    "for it to finish.", returncode=4)
+    _SUITE_LOCK_FD = fd
+    os.environ["SYMBIO_SUITE_LOCK_PID"] = str(os.getpid())
 
 
 def pytest_collection_modifyitems(config, items):
@@ -166,10 +213,37 @@ def isolate_runtime_state():
     real_wildcard_history = getattr(constants, "WILDCARD_HISTORY_FILE", None)
     wildcard_suite_file = constants.PROJECT_DIR / "wildcard_history.suite.json"
     constants.WILDCARD_HISTORY_FILE = wildcard_suite_file
+    # The user's own identity files and config: a customized prompt.md, a security.md
+    # rewritten as <trust>, a standing "reply as a tsundere", a soul.md. The
+    # suite asserts against the SHIPPED prompt, so on a box where these are
+    # customized it went red for reasons no diff caused (11 of 17 failures on
+    # 2026-10-07) — and a red suite is what the fix-watcher acts on. Serve
+    # the shipped defaults from a scratch dir instead; the real files are
+    # never read or written by the suite.
+    import tempfile
+    identity_dir = Path(tempfile.mkdtemp(prefix="symbio-suite-identity-"))
+    real_identity = {name: getattr(constants, name) for name in (
+        "PROMPT_FILE", "SECURITY_FILE", "SECURITY_STAMP_FILE", "STANDING_FILE",
+        "SOUL_FILE", "CONSTITUTION_FILE", "CONFIG_FILE", "GOALS_FILE",
+        "WEIGHTS_DIR")}
+    for name, real in real_identity.items():
+        setattr(constants, name, identity_dir / real.name)
+    # config.json too: the developer's model, thinking dial and learning
+    # thresholds steered scripted sessions (a /quit that ran golden + eval
+    # passes and ate the script's replies), and `config set` in a test wrote
+    # the real file. The shipped example is what a fresh install has.
+    example = constants.PROJECT_DIR / "config.example.json"
+    if example.exists():
+        shutil.copyfile(example, constants.CONFIG_FILE)
+    shutil.copyfile(constants.PROMPT_DEFAULT_FILE, constants.PROMPT_FILE)
+    shutil.copyfile(constants.SECURITY_DEFAULT_FILE, constants.SECURITY_FILE)
     try:
         with preserve_training_state(adapters=True):
             yield
     finally:
+        for name, real in real_identity.items():
+            setattr(constants, name, real)
+        shutil.rmtree(identity_dir, ignore_errors=True)
         shutil.rmtree(constants.SESSIONS_DIR, ignore_errors=True)
         shutil.rmtree(constants.LOG_DIR, ignore_errors=True)
         constants.WORKER_MODELS_FILE.unlink(missing_ok=True)
@@ -204,9 +278,6 @@ def fixture_worker_catalog():
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def pytest_configure(config):
-    config.addinivalue_line("markers", "uses_ane: runs the real Neural Engine helper (macOS)")
-    config.addinivalue_line("markers", "uses_desk: exercises desk mode (the helper stubbed)")
 
 
 @pytest.fixture(autouse=True)

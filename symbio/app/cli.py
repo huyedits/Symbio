@@ -277,6 +277,12 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "acp", help="Speak the Agent Client Protocol on stdio, for Zed, VS Code, "
                     "JetBrains, Toad and other ACP hosts")
+    openai_parser = sub.add_parser(
+        "openai", help="Serve Symbio as an OpenAI-compatible API on 127.0.0.1, "
+                       "for Open WebUI and other chat front-ends")
+    openai_parser.add_argument("--port", type=int, default=8765)
+    openai_parser.add_argument("--show-key", action="store_true",
+                               help="Print the API key and exit")
     connect_parser = sub.add_parser("connect", help="Hook Symbio into another app")
     connect_parser.add_argument("target", choices=["claude-desktop", "hermes"],
                                 help="The app to connect Symbio to")
@@ -1403,18 +1409,22 @@ def main(argv: list[str] | None = None) -> int:
 
         ok = retrain_model(config, digest=not args.no_digest, seed=not args.no_seed)
         return 0 if ok else 1
-    if command in ("acp", "mcp") and (command == "acp" or args.mcp_command == "bridge"):
+    if command in ("acp", "mcp", "openai") and (command != "mcp" or args.mcp_command == "bridge"):
         # The host talks to the bridge on stdio. It becomes this process
         # rather than a child of it, so none of the agent stack this CLI has
         # loaded stays resident behind a bridge that needs none of it.
         from symbio.app.connect import package_root
 
-        module = "symbio_desktop.acp" if command == "acp" else "symbio_desktop.mcp_bridge"
+        module = {"acp": "symbio_desktop.acp", "openai": "symbio_desktop.openai_api"}.get(
+            command, "symbio_desktop.mcp_bridge")
+        extra = []
+        if command == "openai":
+            extra = ["--port", str(args.port)] + (["--show-key"] if args.show_key else [])
         env = dict(os.environ, SYMBIO_HOME=str(constants.PROJECT_DIR))
         env["PYTHONPATH"] = os.pathsep.join(
             p for p in (package_root(), env.get("PYTHONPATH", "")) if p)
         sys.stdout.flush()
-        os.execve(sys.executable, [sys.executable, "-m", module], env)
+        os.execve(sys.executable, [sys.executable, "-m", module, *extra], env)
 
     if command == "connect":
         from symbio.app import connect

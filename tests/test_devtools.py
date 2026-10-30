@@ -55,7 +55,7 @@ def test_unparsable_output_is_not_graded_ok(garbage):
     run_tests turns that into a FAILURE. An unparsable run must never read as
     green — the repair loop would conclude a broken state was fixed."""
     assert devtools.parse_pytest_output(garbage) == {}
-    with patch.object(devtools.subprocess, "run",
+    with patch.object(devtools, "_run_pytest",
                       return_value=FakeResult(0, garbage)):
         ok, report = devtools.run_tests([])
     assert ok is False
@@ -72,7 +72,7 @@ class FakeResult:
 # ---- the runner: right interpreter, right cwd, honest verdict ----
 
 def test_run_tests_reports_green_suite_green():
-    with patch.object(devtools.subprocess, "run",
+    with patch.object(devtools, "_run_pytest",
                       return_value=FakeResult(0, "5 passed in 1.00s")) as run:
         ok, report = devtools.run_tests(["tests"])
     assert ok is True
@@ -86,7 +86,7 @@ def test_exit_code_zero_but_failed_tests_is_a_failure():
     """pytest exit 3 does not happen here, but the verdict is computed from
     the summary AND the exit code together; a green summary beside a non-zero
     exit is a failure, not a win."""
-    with patch.object(devtools.subprocess, "run",
+    with patch.object(devtools, "_run_pytest",
                       return_value=FakeResult(2, "5 passed in 1.00s")):
         ok, report = devtools.run_tests(["tests"])
     assert ok is False
@@ -102,7 +102,7 @@ def test_unknown_target_is_refused_not_run():
 
 
 def test_a_timed_out_run_is_a_failure_named_as_one():
-    with patch.object(devtools.subprocess, "run",
+    with patch.object(devtools, "_run_pytest",
                       side_effect=subprocess.TimeoutExpired(cmd="pytest",
                                                             timeout=900)):
         ok, report = devtools.run_tests(["tests"])
@@ -111,7 +111,7 @@ def test_a_timed_out_run_is_a_failure_named_as_one():
 
 
 def test_targets_default_to_the_main_suite():
-    with patch.object(devtools.subprocess, "run",
+    with patch.object(devtools, "_run_pytest",
                       return_value=FakeResult(0, "5 passed in 1.00s")) as run:
         ok, _ = devtools.run_tests(None)
     assert ok
@@ -121,7 +121,7 @@ def test_targets_default_to_the_main_suite():
 def test_string_target_is_accepted():
     """The model writes targets as a bare string often enough that refusing it
     would cost a round for nothing."""
-    with patch.object(devtools.subprocess, "run",
+    with patch.object(devtools, "_run_pytest",
                       return_value=FakeResult(0, "5 passed in 1.00s")):
         ok, _ = devtools.run_tests(["bench"])
     assert ok
@@ -181,3 +181,67 @@ def test_orphaned_tool_docs_are_gone():
     unimplemented = names - with_branch - from_catalog
     assert not unimplemented, (
         f"advertised but not dispatchable: {sorted(unimplemented)}")
+
+def test_a_timed_out_run_is_interrupted_before_it_is_killed(tmp_path):
+    """SIGKILL skips preserve_training_state's restore and leaves the user's
+    real adapters/ holding test junk. A timeout must SIGINT first, so pytest
+    unwinds its fixtures."""
+    import sys
+
+    marker = tmp_path / "interrupted"
+    script = (
+        "import signal, sys, time\n"
+        "def h(*a):\n"
+        f"    open({str(marker)!r}, 'w').write('yes'); sys.exit(0)\n"
+        "signal.signal(signal.SIGINT, h)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(30)\n")
+    with pytest.raises(subprocess.TimeoutExpired):
+        devtools._run_pytest([sys.executable, "-c", script], timeout=1)
+    assert marker.read_text() == "yes"
+
+
+def test_a_second_suite_run_is_refused_while_one_holds_the_lock(tmp_path, monkeypatch):
+    import fcntl
+    monkeypatch.setattr(devtools.constants, "PROJECT_DIR", tmp_path)
+    monkeypatch.delenv("SYMBIO_SUITE_LOCK_PID", raising=False)
+    assert devtools.suite_running() is False
+    with open(tmp_path / ".pytest-suite.lock", "a+") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        assert devtools.suite_running() is True
+        with patch.object(devtools, "_run_pytest") as run:
+            ok, report = devtools.run_tests(["tests"])
+        assert ok is False and "in progress" in report
+        run.assert_not_called()
+
+
+def test_locate_fault_ranks_the_line_only_the_failing_test_runs():
+    """Ochiai over one traced run of the test file: the line the failing
+    test ran and no passing test did comes first."""
+    import json
+    from pathlib import Path
+
+    spectrum = {
+        "tests/test_x.py::test_bad": {"failed": True, "lines": {
+            "symbio/app/x.py": [1, 2, 9]}},
+        "tests/test_x.py::test_ok": {"failed": False, "lines": {
+            "symbio/app/x.py": [1, 2]}},
+        "tests/test_x.py::test_ok2": {"failed": False, "lines": {
+            "symbio/app/x.py": [1, 5]}},
+    }
+
+    def fake_run(cmd, timeout, env=None):
+        assert "symbio.app.fault_trace" in cmd
+        Path(env["SYMBIO_FAULT_OUT"]).write_text(json.dumps(spectrum))
+        return FakeResult(1, "")
+
+    with patch.object(devtools, "_run_pytest", side_effect=fake_run):
+        ranked = devtools.locate_fault("tests/test_x.py::test_bad")
+    assert ranked[0][:2] == ("symbio/app/x.py", 9)
+    assert ("symbio/app/x.py", 5) not in [r[:2] for r in ranked]
+
+
+def test_locate_fault_is_empty_when_the_run_breaks():
+    with patch.object(devtools, "_run_pytest", side_effect=OSError("no python")):
+        assert devtools.locate_fault("tests/test_x.py::test_bad") == []
+    assert devtools.locate_fault("not a test id") == []

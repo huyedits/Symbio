@@ -1,0 +1,1 @@
+{"model": "/Users/huygpt/.local/share/mlx-models/LFM2.5-24B-A2B-MLX-4bit", "rank": 8, "scale": 8.0, "layers": [38], "paged": true, "arch": "lfm2_moe"}

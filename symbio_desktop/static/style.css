@@ -62,6 +62,9 @@
   --font-display: ui-rounded, 'SF Pro Rounded', -apple-system, system-ui, sans-serif;
   --transition: 160ms ease;
   --sidebar-w: 260px;
+  /* The comfortable control height Claude Desktop's shell uses; every icon
+     button, chip button and action sits on this line. */
+  --control-h: 32px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -148,7 +151,7 @@ html, body {
   color: var(--text-primary);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
-  font-size: 15px;
+  font-size: 15.5px;
 }
 
 button { font: inherit; color: inherit; cursor: pointer; background: none; border: none; }
@@ -158,6 +161,17 @@ button { font: inherit; color: inherit; cursor: pointer; background: none; borde
    A later `display` beats the attribute's UA default, so the settings panel
    covered the whole window from page load. */
 [hidden] { display: none !important; }
+
+/* Read by VoiceOver, not drawn. */
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* ── Sidebar ─────────────────────────────────────────────────────── */
 
@@ -198,7 +212,7 @@ body.sidebar-hidden #sidebar { transform: translateX(-100%); }
 .icon-btn {
   display: grid;
   place-items: center;
-  width: 30px; height: 30px;
+  width: var(--control-h); height: var(--control-h);
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
   transition: background var(--transition), color var(--transition);
@@ -259,7 +273,13 @@ body.sidebar-hidden #sidebar { transform: translateX(-100%); }
   border-top: 1px solid var(--border-subtle);
 }
 
-.status { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-muted); }
+/* One line, ellipsized: the status can be a full sentence ("Waking Symbio —
+   loading the model… 2s"), and wrapping it pushed the footer up against the
+   window edge and let it run under the theme buttons. */
+.status { display: flex; align-items: center; gap: 7px; font-size: 12px;
+  color: var(--text-muted); min-width: 0; flex: 1; }
+#status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-foot .icon-btn { flex-shrink: 0; }
 
 .status-dot {
   width: 7px; height: 7px;
@@ -365,14 +385,14 @@ body.sidebar-hidden #btn-show-sidebar { display: grid; }
 
 .msg.user .msg-body {
   margin-left: auto;
-  max-width: 82%;
+  max-width: 85%;
   width: fit-content;
   padding: 11px 15px;
   border-radius: var(--radius-lg);
   background: var(--user-bubble);
 }
 
-.msg.assistant .msg-body { padding: 0 2px; }
+.msg.assistant .msg-body { padding: 0 4px; }
 
 .msg-body { line-height: 1.62; word-wrap: break-word; }
 .msg-body p + p { margin-top: 0.85em; }
@@ -454,9 +474,9 @@ body.sidebar-hidden #btn-show-sidebar { display: grid; }
   35% { transform: translateY(-4px); opacity: 1; }
 }
 
-/* The composer, while a turn is in flight. */
+/* The composer, while a turn is in flight. The send button stays live: a
+   message typed now is queued, and the strip above the composer says so. */
 body.busy .composer { border-color: var(--accent-glow); }
-body.busy #btn-send { opacity: 0.4; }
 
 .thought {
   margin-bottom: 10px;
@@ -502,8 +522,18 @@ body.busy #btn-send { opacity: 0.4; }
 }
 
 .activity-label { flex: 1; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.activity-chevron { color: var(--text-muted); transition: transform var(--transition); }
-.activity.open .activity-chevron { transform: rotate(180deg); }
+/* A disclosure button: down while the steps are hidden, up while they show.
+   Drawn like the other folds; the ▾ glyph rendered as a 4px speck. */
+.activity-chevron {
+  flex-shrink: 0;
+  width: 6px; height: 6px;
+  margin: 0 3px 3px;
+  border-right: 1.5px solid var(--text-muted);
+  border-bottom: 1.5px solid var(--text-muted);
+  transform: rotate(45deg);
+  transition: transform var(--transition);
+}
+.activity.open .activity-chevron { margin-bottom: -3px; transform: rotate(-135deg); }
 
 .spinner {
   width: 11px; height: 11px;
@@ -515,10 +545,72 @@ body.busy #btn-send { opacity: 0.4; }
 }
 
 .activity.done .spinner { border: 1.6px solid var(--success); animation: none; }
+.activity.failed .spinner { border-color: var(--danger); }
+
+/* One row per step the turn reported. The newest is running; each new line
+   settles the one above it. Collapsed, the card is still a single line. */
+.activity-steps {
+  display: none;
+  list-style: none;
+  margin: 0;
+  padding: 0 13px 10px;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.activity.open .activity-steps { display: flex; }
+
+.activity-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+/* The state is the shape first and the colour second: a ring while running,
+   a dot when done, a diamond when it failed. It still reads with motion off
+   and for anyone who can't tell amber, teal and red apart. */
+.step-dot {
+  box-sizing: border-box;
+  width: 8px; height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.activity-step.running .step-dot { border: 1.5px solid var(--accent); animation: pulse 1.1s infinite; }
+.activity-step.done .step-dot { background: var(--success); }
+.activity-step.failed .step-dot { background: var(--danger); border-radius: 1px; transform: rotate(45deg) scale(0.85); }
+.step-label { overflow-wrap: anywhere; }
+
+.activity-raw { display: none; padding: 0 13px 12px; }
+.activity.open .activity-raw { display: block; }
+.activity-raw summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  padding: 2px 0 6px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+.activity-raw summary:hover { color: var(--text-secondary); }
+.activity-raw summary::-webkit-details-marker { display: none; }
+/* The same turning chevron as the reasoning fold, not a text arrow. */
+.activity-raw summary::before {
+  content: ''; width: 5px; height: 5px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform var(--transition);
+}
+.activity-raw[open] summary::before { transform: rotate(45deg); }
 
 .activity-log {  /* avoid-ai-design-ignore: SD4m — raw tool output, read as a log */
-  display: none;
-  padding: 0 13px 12px;
+  display: block;
+  padding: 0;
   font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.55;
@@ -528,8 +620,6 @@ body.busy #btn-send { opacity: 0.4; }
   max-height: 340px;
   overflow-y: auto;
 }
-
-.activity.open .activity-log { display: block; }
 
 /* ── Confirmation ────────────────────────────────────────────────
    Symbio asking before it acts. What will happen is said in its own voice
@@ -548,6 +638,7 @@ body.busy #btn-send { opacity: 0.4; }
 
 .btn {
   padding: 6px 16px;
+  min-height: var(--control-h);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-medium);
   background: var(--bg-surface);
@@ -619,6 +710,67 @@ body.busy #btn-send { opacity: 0.4; }
 }
 
 .link-btn { color: var(--link); text-decoration: underline; font-size: 12.5px; }
+
+/* Messages typed mid-turn. They are not in the thread yet because they have
+   not been said yet; the strip is the honest place for them, and each row can
+   be taken back before the turn ends. */
+.queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.queue-head { padding: 0 2px; font-size: 12px; color: var(--text-muted); }
+
+/* Five rows show; more scroll, so a long queue never shoves the composer. */
+.queue-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: calc(5 * var(--control-h) + 4 * 4px);
+  overflow-y: auto;
+}
+
+/* Each row sits on the 32px control line. */
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: var(--control-h);
+  padding: 2px 2px 2px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.queue-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.queue-text:hover { color: var(--text-primary); }
+
+/* 28px: the Mac's default hit target. At 12px text and 2px padding it was
+   about 18px tall, under the 20px minimum. */
+.queue-remove {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 28px; height: 28px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.queue-remove:hover { color: var(--danger); background: var(--bg-overlay); }
 
 .composer {
   display: flex;
@@ -708,7 +860,8 @@ body.workspace-open #workspace { transform: none; }
 .ws-tab:hover { background: var(--bg-overlay); color: var(--text-primary); }
 .ws-tab.active { background: var(--bg-elevated); color: var(--text-primary); font-weight: 550; }
 
-.ws-actions { display: flex; gap: 2px; }
+.ws-actions { display: flex; gap: 2px; margin-left: auto; opacity: 0.42; transition: opacity 180ms ease; }
+.ws-actions:hover, .ws-actions:focus-within { opacity: 1; }
 
 @media (max-width: 900px) {
   #sidebar { box-shadow: 0 0 40px rgba(0, 0, 0, 0.18); }
@@ -1278,7 +1431,7 @@ body.workspace-open #workspace { transform: none; }
 }
 
 .switch.on { background: var(--accent); border-color: var(--accent); }
-.switch.on span { transform: translateX(17px); background: #fff; }
+.switch.on span { transform: translateX(17px); background: var(--bg-surface); }
 
 .key-chip {
   flex-shrink: 0;
@@ -1314,7 +1467,7 @@ body.workspace-open #workspace { transform: none; }
 }
 .seg button:last-child { border-right: none; }
 .seg button:hover { color: var(--accent); }
-.seg button.on { background: var(--accent); color: #fff; }
+.seg button.on { background: var(--accent); color: var(--accent-ink); }
 .seg button.on.block { background: var(--danger); }
 .guard-floor { display: flex; gap: 8px; padding: 6px 0; font-size: 13px; color: var(--text-muted); }
 .guard-recent {
@@ -1497,7 +1650,7 @@ body.busy .msg-actions { visibility: hidden; }
 .composer-wrap { padding: 6px 24px 18px; background: transparent; }
 .composer {
   flex-direction: column; align-items: stretch; gap: 4px;
-  padding: 14px 12px 10px 16px; border-radius: 20px; border: 1px solid var(--border-medium);
+  padding: 14px 12px 10px 16px; border-radius: var(--radius-xl); border: 1px solid var(--border-medium);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 22px rgba(0, 0, 0, 0.05);
 }
 .composer:focus-within { border-color: var(--border-medium);
@@ -1544,3 +1697,34 @@ body.busy .msg-actions { visibility: hidden; }
 .notice-text { flex: 1; line-height: 1.5; }
 .notice-text p { margin: 0; }
 .notice .icon-btn { width: 22px; height: 22px; font-size: 11px; }
+
+/* Not reachable: stated once, beside the composer, which stays usable. */
+.conn-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 12px; margin-bottom: 10px;
+  border: 1px solid var(--danger); border-radius: var(--radius-md);
+  background: var(--danger-glow); font-size: 13px; color: var(--text-secondary);
+}
+.conn-banner-text { flex: 1; min-width: 0; line-height: 1.5; }
+
+/* Typed, kept, not yet with Symbio. */
+.msg.user.unsent .msg-body { opacity: 0.6; }
+.msg.user.unsent::after {
+  content: "Waiting to send";
+  display: block; text-align: right; margin-top: 4px;
+  font-size: 11.5px; color: var(--text-secondary);
+}
+
+/* Spacing scale, derived from the 4/8 grid. */
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+}

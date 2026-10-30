@@ -38,3 +38,8 @@ DIM = "#a39684"
 # The identity mark. Hermes Agent's caduceus, which is what "Hermes-shaped"
 # looks like when it is written down.
 MARK = "☤"
+
+# A softer running commentary than a bare spinner.
+WAIT_WORDS = (
+    "Pondering…", "Synchronising…", "Mulling…", "Reading it over…",
+    "Weighing it up…", "Settling on it…")

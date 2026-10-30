@@ -138,13 +138,22 @@ def test_a_small_vocab_model_keeps_the_stock_trainer(tmp_path):
     assert cmd[:4] == [sys.executable, "-m", "mlx_lm", "lora"]
 
 
-@pytest.mark.parametrize("vocab,bits", [(248_320, 4), (151_669, 1)])
-def test_a_wide_head_or_one_bit_weights_go_through_the_runner(tmp_path, vocab, bits):
-    model = _local_model(tmp_path, vocab, bits)
+def test_one_bit_weights_go_through_the_runner(tmp_path):
+    model = _local_model(tmp_path, 151_669, 1)
     cmd = backend.trainer_command(model, "/d", "/a", _lora(), 10, "/c.yaml",
                                   {"backend": "mlx"})
     assert cmd[:3] == [sys.executable, "-m", "symbio.app.lora_runner"]
     assert cmd[cmd.index("--vocab-skin") + 1] == "auto"
+    assert cmd[cmd.index("--model") + 1] == model
+
+
+def test_a_wide_head_goes_through_the_lean_trainer(tmp_path):
+    """The lean trainer (symbio.trim_lora) superseded the skin runner for a
+    model past the vocab wall; see backend.trainer_command."""
+    model = _local_model(tmp_path, 248_320, 4)
+    cmd = backend.trainer_command(model, "/d", "/a", _lora(), 10, "/c.yaml",
+                                  {"backend": "mlx"})
+    assert cmd[:3] == [sys.executable, "-m", "symbio.trim_lora"]
     assert cmd[cmd.index("--model") + 1] == model
 
 

@@ -30,6 +30,9 @@ class FakeLink:
     def send(self, message):
         self.sent.append(message)
 
+    def set_width(self, width):
+        self.widths = getattr(self, "widths", []) + [width]
+
     def close(self):
         self.closed = True
 
@@ -519,3 +522,167 @@ async def test_the_keys_are_on_the_screen_under_the_box():
         hints = app.query_one("#hints")
         assert "ctrl+c" in str(hints.content)
         assert hints.region.y > app.query_one("#prompt").region.y
+
+
+@pytest.mark.asyncio
+async def test_the_history_rewraps_to_the_window_when_it_is_resized():
+    """RichLog wraps a line once and never again, at 78 columns minimum: a
+    wide window left half the pane empty and a narrow one cut lines off."""
+    app = _app()
+    async with app.run_test(size=(120, 30)) as pilot:
+        h = app.query_one(History)
+        h.say_agent("word " * 60)
+        for cols in (60, 200, 40):
+            await pilot.resize_terminal(cols, 30)
+            await pilot.pause()
+            pane = h.scrollable_content_region.width
+            widest = max(s.cell_length for s in h.lines)
+            assert pane - 5 <= widest <= pane
+
+
+@pytest.mark.asyncio
+async def test_a_resize_tells_the_daemon_the_new_width():
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.resize_terminal(70, 30)
+        await pilot.pause()
+        assert app.link.widths[-1] == 70
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_history_stays_cleared_through_a_resize():
+    app = _app()
+    async with app.run_test(size=(100, 30)) as pilot:
+        h = app.query_one(History)
+        h.say_agent("something said")
+        h.clear()
+        await pilot.resize_terminal(70, 30)
+        await pilot.pause()
+        assert len(h.lines) == 0
+
+
+# ---- the raw stream, shown live ----
+
+@pytest.mark.asyncio
+async def test_the_thinking_stream_in_its_own_voice_before_the_answer():
+    """The wire order for a streamed turn is reasoning chunk(s), then the
+    daemon's ⏺ prefix chunk, then answer chunks, then a closing newline
+    (chat.py `_emit` feeding StreamingStripper). One growing gold line used
+    to hold all of it — thinking, answer and the daemon's own bullet
+    concatenated into a single unmarked paste."""
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "stream", "text": "  [Reasoning] add two plus two"})
+        app._handle({"type": "stream", "text": "carry the one.\n"})
+        app._handle({"type": "stream", "text": "⏺ "})
+        app._handle({"type": "stream", "text": "It is four."})
+        app._handle({"type": "input_prompt"})
+        await pilot.pause()
+
+        lines = _lines(app)
+        assert any(line.startswith("⋯ ") for line in lines)
+        assert any(line == "● It is four." for line in lines)
+        assert not any("⏺" in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_a_painted_prefix_chunk_opens_the_answer_all_the_same():
+    """chat_style paints the prefix when the daemon runs on a colour
+    console; the phase check reads the decoded plain form, so the same chunk
+    opens the answer painted or plain."""
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "stream", "text": "  [Reasoning] thinking"})
+        app._handle({"type": "stream", "text": "\x1b[38;5;71m⏺\x1b[0m "})
+        app._handle({"type": "stream", "text": "The answer."})
+        app._handle({"type": "input_prompt"})
+        await pilot.pause()
+
+        lines = _lines(app)
+        assert any(line.startswith("⋯ ") for line in lines)
+        assert any(line == "● The answer." for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_a_lone_newline_chunk_seals_the_round():
+    """After a tool round the stream opens a fresh reasoning marker; the
+    answer of the round before is sealed on the lone closing newline, so a
+    multi-round turn is a list of blocks in turn order, not one merged
+    paste."""
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "stream", "text": "  [Reasoning] one"})
+        app._handle({"type": "stream", "text": "⏺ "})
+        app._handle({"type": "stream", "text": "first answer"})
+        app._handle({"type": "stream", "text": "\n"})
+        app._handle({"type": "stream", "text": "  [Reasoning] two"})
+        app._handle({"type": "stream", "text": "⏺ "})
+        app._handle({"type": "stream", "text": "second answer"})
+        app._handle({"type": "input_prompt"})
+        await pilot.pause()
+
+        lines = _lines(app)
+        first_answer = next(i for i, l in enumerate(lines)
+                            if l == "● first answer")
+        second_think = next(i for i, l in enumerate(lines)
+                            if l.startswith("⋯ two"))
+        second_answer = next(i for i, l in enumerate(lines)
+                             if l == "● second answer")
+        assert first_answer < second_think < second_answer
+
+
+@pytest.mark.asyncio
+async def test_the_reply_is_ink_and_the_dot_alone_is_gold():
+    """A style set on the Text itself covers everything appended after it, so
+    the first version drew the whole reply bold gold (measured 2026-10-14: a
+    single stored span, "bold #ffd700", over the whole line). Theme.py's own
+    rule: gold marks what is live — the dot, and nothing else."""
+    from rich.text import Text as RichText
+
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "output", "text": "I posted it."})
+        await pilot.pause()
+
+        said = [t for t in app.query_one(History)._said
+                if isinstance(t, RichText) and str(t) == "● I posted it."]
+        assert said, "the turn is marked once"
+        reply = said[-1]
+        assert not reply.style
+        gold = [s for s in reply.spans if "ffd700" in str(s.style)]
+        assert gold, "the dot is marked live"
+        assert all(s.end <= 3 for s in gold)
+
+
+@pytest.mark.asyncio
+async def test_a_coloured_daemon_line_arrives_as_colour_not_as_escape_text():
+    """RichLog does not parse SGR codes embedded in a plain string: the raw
+    passthrough stored them as literal characters with no style — colour
+    dropped, escapes sitting in the cell grid (measured 2026-10-14, one
+    styled daemon line came through as one segment, style=None). The decoder
+    carries the same paint over as styles."""
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "output", "text":
+                     "\x1b[38;2;88;184;170m✦ gateway\x1b[0m telegram up"})
+        await pilot.pause()
+
+        history = app.query_one(History)
+        assert not any("\x1b" in seg.text for strip in history.lines
+                       for seg in strip)
+        styled = [seg for strip in history.lines for seg in strip
+                  if "gateway" in seg.text and seg.style]
+        assert styled, "the daemon's own colour survives the hop"
+
+
+@pytest.mark.asyncio
+async def test_a_busy_status_does_not_promise_an_interrupt_nobody_has():
+    """The daemon cannot be interrupted mid-generation (the desktop window
+    says so of the same daemon). A status naming a key that does nothing
+    tells the reader the app is half here."""
+    app = _app()
+    async with app.run_test(size=(80, 30)) as pilot:
+        app._handle({"type": "status", "text": "thinking… (6s)"})
+        await pilot.pause()
+
+        assert "(esc to interrupt)" not in str(app.query_one("#status").content)

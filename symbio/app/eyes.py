@@ -321,12 +321,22 @@ def install() -> bool:
     original = utils.load
 
     def load(path_or_hf_repo, *args, **kwargs):
+        # utils.load is read at CALL time, with this wrapper as the fallback:
+        # a capture-by-value here shadows every later patch of mlx_lm.load —
+        # which is how a monkeypatched test (and any repair tool that swaps
+        # the loader) phoned home to huggingface_hub and 404'd on a name that
+        # was never going to be a repo (adapter-integrity suite, 2026-10-14).
+        latest = utils.load
+        original = latest if latest is not load else self_original
         out = original(path_or_hf_repo, *args, **kwargs)
         try:
             remember(out[0], path_or_hf_repo)
         except Exception:
             pass  # never let bookkeeping fail a load
         return out
+
+    def self_original(*args, **kwargs):
+        return original(*args, **kwargs)
 
     load.__wrapped__ = original
     utils.load = load

@@ -19,6 +19,7 @@ So the harness validates itself before it is allowed to grade a model:
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -277,8 +278,16 @@ def run(suite, model_path, draft_path=None, limit=None, max_tokens=512,
     # Symbio's compat layer patches mlx-lm on import — without it, speculative
     # decoding refuses outright on a hybrid linear-attention target like Bonsai.
     sys.path.insert(0, str(Path(__file__).parent.parent))
-    from symbio.app import mlx_compat  # noqa: F401
-    from mlx_lm import load
+    if os.environ.get("BENCH_PLAIN_LOAD"):
+        # A newer mlx_lm in a side venv (an architecture the pinned one lacks),
+        # where symbio's compat patches do not apply.
+        from mlx_lm import load
+    else:
+        from symbio.app import mlx_compat  # noqa: F401
+        # Symbio's own loader: the architectures it registers
+        # (gemma4_unified) and its stop-token repair are part of how the
+        # model is served.
+        from symbio.app.modelload import load
     from mlx_lm.generate import stream_generate
     from mlx_lm.sample_utils import make_sampler
 
@@ -286,8 +295,12 @@ def run(suite, model_path, draft_path=None, limit=None, max_tokens=512,
     rows = load_fn(limit)
     # adapter_path is what makes a before/after fine-tune comparison possible:
     # the same weights, graded twice, with and without what training produced.
-    model, tok = (load(model_path, adapter_path=adapter_path) if adapter_path
-                  else load(model_path))
+    # BENCH_TRUST_REMOTE: a tokenizer shipped as repo code (Hunyuan's
+    # tiktoken wrapper). Read the .py before setting it.
+    extra = ({"tokenizer_config": {"trust_remote_code": True}}
+             if os.environ.get("BENCH_TRUST_REMOTE") else {})
+    model, tok = (load(model_path, adapter_path=adapter_path, **extra)
+                  if adapter_path else load(model_path, **extra))
     draft = load(draft_path)[0] if draft_path else None
     kw = {"draft_model": draft, "num_draft_tokens": num_draft_tokens} if draft else {}
 

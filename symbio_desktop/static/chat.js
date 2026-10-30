@@ -20,9 +20,34 @@
 const CONVERSATIONS_KEY = 'symbio.conversations.v1';
 const LIVE_KEY = 'symbio.live.v1';
 const THEME_KEY = 'symbio.theme';
+// Messages typed but not yet acknowledged by the server, oldest first.
+const OUTBOX_KEY = 'symbio.outbox.v1';
+// Messages typed while a reply is in flight. The daemon can accept them
+// mid-turn, but the window used to drop them straight into the thread as if
+// they had already been said. They wait here, in view, until the turn ends.
+const QUEUE_KEY = 'symbio.queue.v1';
 
 let ws = null;
-let reconnectDelay = 500;
+// The reconnect ladder (after Hermes Desktop's use-gateway-boot): full-jitter
+// backoff from 300ms to a 15s cap, so a restarting server is not redialled in
+// lockstep; a wake, an `online` or the window coming back nudges it at once.
+let reconnectAttempt = 0;
+let reconnectTimer = null;
+let offlineSince = null;       // when the current disconnect started
+let escalateTimer = null;      // shows the banner once the disconnect has lasted
+let probeTimer = null;         // a liveness ping waiting for any frame back
+let turnInterrupted = false;   // a turn was in flight when the socket dropped
+// New chat was asked for and the server has not answered yet: frames still
+// arriving belong to the conversation that was left.
+let newChatOwed = false;
+let outbox = loadOutbox();
+let queued = loadQueue();
+const RECONNECT_BASE_MS = 300;
+const RECONNECT_CAP_MS = 15000;
+const PROBE_TIMEOUT_MS = 4000;
+// A local server that has not answered for this long has most likely stopped;
+// say so, without taking the transcript or the composer away.
+const ESCALATE_AFTER_MS = 20000;
 let live = { id: null, title: 'New chat', messages: [] };
 let viewingId = null;          // null = the live conversation
 let streamEl = null;           // the assistant bubble currently being written
@@ -31,6 +56,9 @@ let activityCard = null;
 let pendingConfirm = false;
 
 const thread = document.getElementById('thread');
+
+// Keep the live thread from growing without bound in long sessions.
+const MAX_THREAD_MESSAGES = 60;
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('btn-send');
 
@@ -48,6 +76,138 @@ function saveConversations(list) {
   try {
     localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(list.slice(0, 50)));
   } catch (e) { /* private window, full disk: the chat still works */ }
+}
+
+function loadOutbox() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(OUTBOX_KEY));
+    return Array.isArray(saved) ? saved.filter(m => m && m.id && m.text) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveOutbox() {
+  try {
+    localStorage.setItem(OUTBOX_KEY, JSON.stringify(outbox));
+  } catch (e) { /* the message still sends while this page stays open */ }
+}
+
+function loadQueue() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(QUEUE_KEY));
+    return Array.isArray(saved) ? saved.filter(m => m && m.text) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveQueue() {
+  try {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify(queued));
+  } catch (e) { /* the strip still works while this page stays open */ }
+}
+
+/* Above the composer, because that is where the next turn's messages belong:
+ * the thread is what was said, the strip is what is waiting to be said. */
+function renderQueue() {
+  const box = document.getElementById('queue');
+  const rows = document.getElementById('queue-rows');
+  if (!box || !rows) return;
+  box.hidden = queued.length === 0;
+  if (!queued.length) {
+    rows.innerHTML = '';
+    return;
+  }
+  // Says what it is actually waiting for: a reply, or (offline, or a page
+  // reopened with a saved queue) the connection.
+  const until = document.body.classList.contains('busy')
+    ? 'this reply finishes'
+    : `${window.__assistantName || 'Symbio'} is back`;
+  document.getElementById('queue-label').textContent = queued.length === 1
+    ? `Queued — sends when ${until}`
+    : `Queued (${queued.length}) — sends when ${until}`;
+  rows.innerHTML = '';
+  for (const item of queued) {
+    const row = document.createElement('div');
+    row.className = 'queue-row';
+    // The text is a button: a queued message can be taken back and changed,
+    // not only thrown away.
+    const text = document.createElement('button');
+    text.className = 'queue-text';
+    text.type = 'button';
+    text.textContent = item.text;
+    text.title = 'Edit this message';
+    text.setAttribute('aria-label', `Edit queued message: ${item.text}`);
+    text.addEventListener('click', () => editQueued(item));
+    const remove = document.createElement('button');
+    remove.className = 'queue-remove';
+    remove.type = 'button';
+    remove.title = 'Remove from the queue';
+    remove.setAttribute('aria-label', 'Remove queued message');
+    remove.textContent = '✕';
+    remove.addEventListener('click', () => {
+      queued = queued.filter(m => m !== item);
+      saveQueue();
+      renderQueue();
+    });
+    row.append(text, remove);
+    rows.appendChild(row);
+  }
+}
+
+function enqueue(text) {
+  queued.push({ text, at: Date.now() });
+  saveQueue();
+  renderQueue();
+  announce('Queued. It sends when this reply finishes.');
+  input.focus();
+}
+
+/* Back out of the strip and into the composer, after anything already being
+ * typed there, so taking a message back never costs a draft. */
+function editQueued(item) {
+  queued = queued.filter(m => m !== item);
+  saveQueue();
+  renderQueue();
+  const draft = input.value.trim();
+  input.value = draft ? `${draft}\n${item.text}` : item.text;
+  input.dispatchEvent(new Event('input'));
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+function sendQueued() {
+  if (!queued.length || document.body.classList.contains('busy')) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const item = queued.shift();
+  saveQueue();
+  renderQueue();
+  announce('Sending the queued message.');
+  deliver(item.text);
+}
+
+/* Said to VoiceOver and shown nowhere: a change that happens away from where
+ * the person is typing. Cleared first so the same sentence is said again. */
+function announce(text) {
+  const el = document.getElementById('sr-status');
+  if (!el) return;
+  el.textContent = '';
+  requestAnimationFrame(() => { el.textContent = text; });
+}
+
+/* What Enter will do, said where the person is about to type. It carries the
+ * name the user chose, so it is built in one place rather than four. */
+function updatePlaceholder() {
+  const name = window.__assistantName || 'Symbio';
+  input.placeholder = document.body.classList.contains('busy')
+    ? 'Queue a message for when this reply finishes…'
+    : viewingId !== null ? `Message ${name} (sends to the live chat)…`
+    : `Message ${name}…`;
+}
+
+function newMessageId() {
+  return `m${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function archiveLive() {
@@ -99,15 +259,29 @@ function newChat() {
   rememberLive();
   viewingId = null;
   streamEl = null;
+  streamText = '';
   activityCard = null;
+  // Queued messages were never said, and only exist here. A new chat is not
+  // a reason to lose them: they go back into the composer to send or delete.
+  const waiting = queued.map(m => m.text);
+  queued = [];
+  saveQueue();
+  renderQueue();
+  if (waiting.length) {
+    input.value = [input.value.trim(), ...waiting].filter(Boolean).join('\n\n');
+    input.dispatchEvent(new Event('input'));
+  }
   renderThread([]);
   setTitle('New chat');
   document.getElementById('read-only-banner').hidden = true;
   input.disabled = false;
-  // A new conversation is a new server-side session: the socket owns the
-  // history, so reconnecting is what actually clears it. Pretending
-  // otherwise would show an empty thread over a model that still remembers.
-  if (ws && ws.readyState === WebSocket.OPEN) ws.close(4000, 'new chat');
+  // A new conversation is a new server-side session, or the empty thread
+  // would sit over a model that still remembers. Closing the socket used to
+  // end it; the server now keeps its session across sockets (a reload must
+  // not forget), so it is asked. A reply still being written finishes there
+  // unseen, and the composer queues until it has.
+  newChatOwed = true;
+  send({ type: 'new_chat' });
   renderChatList();
   input.focus();
 }
@@ -123,7 +297,7 @@ function openConversation(id) {
   // Not disabled: typing here sends to the live conversation, which is what
   // someone reading an old thread and starting to type actually wants.
   input.disabled = false;
-  input.placeholder = 'Message Symbio (sends to the live chat)…';
+  updatePlaceholder();
   renderChatList();
 }
 
@@ -133,7 +307,7 @@ function backToLive() {
   setTitle(live.title);
   document.getElementById('read-only-banner').hidden = true;
   input.disabled = false;
-  input.placeholder = 'Message Symbio…';
+  updatePlaceholder();
   renderChatList();
   input.focus();
 }
@@ -157,12 +331,26 @@ function showWelcome() {
     <h1 class="greeting"><span class="mark" aria-hidden="true"></span><span class="greeting-name">${escHtml(greetingText())}</span></h1>
   </div>`;
   document.getElementById('main').classList.add('empty');
+  // Nothing to scroll back to: the old thread's "back to latest" arrow
+  // otherwise floats over the empty window.
+  autoFollow = true;
+  updateToBottom();
 }
 
 function clearWelcome() {
   const welcome = thread.querySelector('.welcome');
   if (welcome) welcome.remove();
   document.getElementById('main').classList.remove('empty');
+}
+
+function trimThread() {
+  // Keep at most MAX_THREAD_MESSAGES direct child message nodes; drop the
+  // oldest. Welcome and anything outside #thread (the composer) are left alone.
+  const messages = Array.from(thread.children).filter(el =>
+    el && el.classList && el.classList.contains('msg'));
+  if (messages.length <= MAX_THREAD_MESSAGES) return;
+  const drop = messages.length - MAX_THREAD_MESSAGES;
+  for (let i = 0; i < drop; i++) messages[i].remove();
 }
 
 function renderThread(messages) {
@@ -172,22 +360,27 @@ function renderThread(messages) {
     return;
   }
   document.getElementById('main').classList.remove('empty');
-  for (const m of messages) addBubble(m.role, m.text, false, m.thought);
+  for (const m of messages) addBubble(m.role, m.text, false, m.thought, m.id);
   markLastAssistant();
   scrollToEnd();
 }
 
-function addBubble(role, text, store = true, thought = '') {
+function addBubble(role, text, store = true, thought = '', id = '') {
   clearWelcome();
   const el = document.createElement('div');
   el.className = `msg ${role}`;
+  if (id) {
+    el.dataset.mid = id;
+    // Still in the outbox: it has not reached Symbio yet, and the reader
+    // should not have to guess whether it did.
+    if (outbox.some(m => m.id === id)) el.classList.add('unsent');
+  }
   // The reasoning is KEPT, not dropped: it is the most interesting thing a
   // local model produces and the reason to trust or distrust the answer. It
   // is folded shut because it is not what was said — the answer is.
-  const lines = thought ? thought.trim().split(/\s+/).length : 0;
   el.innerHTML =
     (thought
-      ? `<details class="thought"><summary>Reasoning (${lines} words)</summary>`
+      ? `<details class="thought"><summary>${reasoningLabel(thought)}</summary>`
         + `<div class="thought-body">${escHtml(thought.trim())}</div></details>`
       : '')
     + `<div class="msg-body">${renderMarkdown(text)}</div>`;
@@ -214,8 +407,11 @@ function addBubble(role, text, store = true, thought = '') {
     el.appendChild(actions);
   }
   thread.appendChild(el);
+  trimThread();
   if (store && viewingId === null) {
-    live.messages.push(thought ? { role, text, thought } : { role, text });
+    const stored = thought ? { role, text, thought } : { role, text };
+    if (id) stored.id = id;
+    live.messages.push(stored);
     if (live.messages.length === 1) {
       live.title = text.slice(0, 48);
       setTitle(live.title);
@@ -255,6 +451,7 @@ function startWaiting() {
       + '<span></span><span></span><span></span></span>'
       + '<span class="wait-label"></span></div>';
     thread.appendChild(pending);
+    trimThread();
   }
   scrollToEnd();
   clearInterval(waitTimer);
@@ -271,7 +468,12 @@ function tickWaiting() {
     if (waking) waking.textContent = `${wakingText} — your message goes as soon as it is up`;
     return;
   }
-  setStatus('busy', `Thinking… ${seconds}s`);
+  // Words, not a ticking second counter: a bare "60s" reads like a stall.
+  // The resident model is usually just thinking; only speak up if it has gone
+  // quiet long enough that something else is the likelier explanation.
+  const phases = ['Pondering…', 'Synchronising…', 'Mulling it over…',
+    'Reading the room…', 'Weighing it up…', 'Still with you…'];
+  setStatus('busy', phases[Math.min(phases.length - 1, Math.floor(seconds / 6))]);
   const label = document.querySelector('#pending .wait-label');
   if (!label) return;
   // What it is actually waiting on, rather than a spinner that means nothing.
@@ -279,10 +481,10 @@ function tickWaiting() {
   // silence past half a minute more likely means the resident model is busy
   // with another window, since it serves one at a time.
   if (quiet > 30) {
-    label.textContent = `still nothing after ${quiet}s — the resident model `
+    label.textContent = `nothing back after ${quiet}s — the resident model `
       + 'serves one window at a time, so it may be busy with another';
   } else if (seconds > 3) {
-    label.textContent = `reading the prompt… ${seconds}s`;
+    label.textContent = 'reading the prompt…';
   } else {
     label.textContent = '';
   }
@@ -304,6 +506,7 @@ function ensureStream() {
   streamEl.className = 'msg assistant streaming';
   streamEl.innerHTML = '<div class="msg-body"></div>';
   thread.appendChild(streamEl);
+  trimThread();
   scrollToEnd();
   return streamEl;
 }
@@ -349,12 +552,23 @@ function appendToken(text) {
   if (thought && !thoughtEl) {
     thoughtEl = document.createElement('details');
     thoughtEl.className = 'thought';
-    thoughtEl.innerHTML = '<summary>Thinking…</summary><div class="thought-body"></div>';
+    thoughtEl.innerHTML = '<summary></summary><div class="thought-body"></div>';
     el.insertBefore(thoughtEl, el.firstChild);
   }
-  if (thoughtEl) thoughtEl.querySelector('.thought-body').textContent = thought;
+  if (thoughtEl) {
+    thoughtEl.querySelector('.thought-body').textContent = thought;
+    // The count updates while the block is still arriving; the ellipsis goes
+    // when the answer starts, because the thinking has stopped.
+    thoughtEl.querySelector('summary').textContent = reasoningLabel(thought, !answer);
+  }
   el.querySelector('.msg-body').innerHTML = renderMarkdown(answer);
   scrollToEnd();
+}
+
+/* The count is the honest measure of how much the model thought. */
+function reasoningLabel(thought, thinking = false) {
+  const words = thought.trim().split(/\s+/).filter(Boolean).length;
+  return `Reasoning${thinking ? '…' : ''} (${words} ${words === 1 ? 'word' : 'words'})`;
 }
 
 function markLastAssistant() {
@@ -384,10 +598,7 @@ function finishStream(finalText) {
     streamEl = null;
   }
   streamText = '';
-  if (activityCard) {
-    activityCard.classList.add('done');
-    activityCard = null;
-  }
+  settleActivity('done');
   if (text || split.thought) addBubble('assistant', text, true, split.thought);
   markLastAssistant();
 }
@@ -408,18 +619,25 @@ function addActivity(text) {
     activityCard = document.createElement('div');
     activityCard.className = 'activity';
     activityCard.innerHTML = `
-      <button class="activity-head" type="button">
-        <span class="spinner"></span>
+      <button class="activity-head" type="button" aria-expanded="false">
+        <span class="spinner" aria-hidden="true"></span>
         <span class="activity-label">Working…</span>
-        <span class="activity-chevron">▾</span>
+        <span class="activity-chevron" aria-hidden="true"></span>
       </button>
-      <pre class="activity-log"></pre>`;
-    activityCard.querySelector('.activity-head').addEventListener('click', () => {
-      activityCard.classList.toggle('open');
+      <ol class="activity-steps"></ol>
+      <details class="activity-raw"><summary>Raw log</summary><pre class="activity-log"></pre></details>`;
+    // This card, not whichever one is current: once the turn settles,
+    // activityCard is null (or the next turn's), and the steps are read after
+    // the reply far more often than during it.
+    const card = activityCard;
+    card.querySelector('.activity-head').addEventListener('click', (e) => {
+      const open = card.classList.toggle('open');
+      e.currentTarget.setAttribute('aria-expanded', String(open));
     });
     // Before the streaming bubble, so the answer always sits last.
     if (streamEl) thread.insertBefore(activityCard, streamEl);
     else thread.appendChild(activityCard);
+    trimThread();
   }
   const log = activityCard.querySelector('.activity-log');
   log.textContent += (log.textContent ? '\n' : '') + clean;
@@ -430,7 +648,44 @@ function addActivity(text) {
     .replace(/\s+/g, ' ');
   activityCard.querySelector('.activity-label').textContent =
     label.length > 80 ? label.slice(0, 80) + '…' : label;
+  // Each line is one step of the turn. The one being reported is running;
+  // the previous one finished when the next arrived. The collapsed card still
+  // says one line — open it to read the steps.
+  const steps = activityCard.querySelector('.activity-steps');
+  steps.querySelectorAll('.activity-step.running').forEach(step => setStepState(step, 'done'));
+  const step = document.createElement('li');
+  step.className = 'activity-step';
+  step.innerHTML = '<span class="step-dot" aria-hidden="true"></span>'
+    + '<span class="sr-only step-state"></span><span class="step-label"></span>';
+  step.querySelector('.step-label').textContent = label;
+  setStepState(step, 'running');
+  steps.appendChild(step);
+  while (steps.children.length > 60) steps.firstElementChild.remove();
   scrollToEnd();
+}
+
+/* The turn is over: whatever was still running has either finished or died.
+ * Called from both the normal end and the error path, so the card cannot be
+ * left spinning after the reply has landed. */
+function settleActivity(state = 'done') {
+  if (!activityCard) return;
+  activityCard.classList.add('done');
+  // A failed turn must not end on the success ring.
+  activityCard.classList.toggle('failed', state === 'failed');
+  activityCard.querySelectorAll('.activity-step.running').forEach(step => setStepState(step, state));
+  activityCard = null;
+}
+
+/* A step's state is a shape (ring, dot, diamond) and a word for VoiceOver as
+ * well as a colour: in the dark theme teal and red are the same lightness
+ * (1.02:1), and amber against teal is the blue-orange pair colour-blind
+ * readers lose. */
+const STEP_STATE_WORDS = { running: 'Running', done: 'Done', failed: 'Failed' };
+
+function setStepState(step, state) {
+  step.classList.remove('running', 'done', 'failed');
+  step.classList.add(state);
+  step.querySelector('.step-state').textContent = `${STEP_STATE_WORDS[state]}: `;
 }
 
 function showNotice(text) {
@@ -483,6 +738,7 @@ function showConfirm(prompt, card) {
   }
   if (card && card.warning) el.classList.add('warned');
   thread.appendChild(el);
+  trimThread();
   scrollToEnd(true);
   const answer = (approved, always = false) => {
     if (!pendingConfirm) return;
@@ -491,7 +747,7 @@ function showConfirm(prompt, card) {
     el.classList.add('answered');
     const verdict = !approved ? 'Denied'
       : always ? `Allowed — won't ask about “${card.kind_label}” again (Settings → Guardrails)`
-      : 'Allowed';
+      : (card.kind ? 'Allowed once' : 'Allowed');
     el.querySelector('.confirm-actions').innerHTML =
       `<span class="confirm-verdict">${escHtml(verdict)}</span>`;
   };
@@ -574,23 +830,39 @@ function renderMarkdown(src) {
 // ── socket ──────────────────────────────────────────────────────────
 
 function connect() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${scheme}://${location.host}/ws/chat`);
 
-  ws.onopen = () => {
-    reconnectDelay = 500;
+  const sock = ws;
+
+  sock.onopen = () => {
+    if (sock !== ws) return;
     setStatus('ok', 'Connected');
   };
 
-  ws.onmessage = (event) => {
+  sock.onmessage = (event) => {
+    // A late frame from a socket this page already replaced must not paint
+    // over the live one.
+    if (sock !== ws) return;
     let data;
     try { data = JSON.parse(event.data); } catch (e) { return; }
     lastFrameAt = Date.now();
+    clearProbe();                // any frame at all proves the socket alive
+    // The old conversation's reply, steps and questions, sent before the
+    // server heard New chat, are not drawn into the new one. Its `done`
+    // still counts: that is what frees the composer.
+    if (newChatOwed && ['token', 'system', 'progress', 'confirm', 'resume'].includes(data.type)) return;
     switch (data.type) {
       case 'connected':
+        reconnectAttempt = 0;
+        offlineSince = null;
+        clearTimeout(escalateTimer); escalateTimer = null;
+        hideConnectionBanner();
         window.__assistantName = data.assistant_name || 'Symbio';
         window.__userName = data.user_name || '';
-        input.placeholder = `Message ${window.__assistantName}…`;
+        updatePlaceholder();
         document.getElementById('model-chip').textContent =
           (data.model_name || '').split('/').pop() || '—';
         // Asleep is not an error: the first message wakes it.
@@ -625,44 +897,231 @@ function connect() {
       case 'confirm': showConfirm(data.prompt, data.card); break;
       case 'done':
         wakingText = '';
+        turnInterrupted = false;
         stopWaiting();
         finishStream(data.text);
         setStatus('ok', `Ready. Last reply took ${Math.round((Date.now() - waitStarted) / 1000)} s`);
         setBusy(false);
+        sendQueued();
         break;
       case 'error':
         stopWaiting();
         finishStream('');
         addActivity(data.text);
+        settleActivity('failed');
         addBubble('assistant', `**Something failed.** ${String(data.text).split('\n')[0]}`);
         setBusy(false);
+        // A failed turn is still a finished turn: the next queued message
+        // goes, or it would sit in the strip until the user typed again.
+        sendQueued();
         break;
       case 'quit':
         setStatus('off', 'Session ended');
         break;
+      case 'new_chat':
+        newChatOwed = false;
+        // The old session is over. Busy means its last reply is still being
+        // finished, unseen; its `done` clears the composer for this chat.
+        stopWaiting();
+        if (data.busy) {
+          setStatus('busy', 'Finishing the last reply first…');
+        } else {
+          setBusy(false);
+          setStatus('ok', `${window.__assistantName || 'Symbio'} is ready`);
+        }
+        break;
+      case 'ack':    markSent(data.id); break;
+      case 'resume': resumeTurn(data); break;
+      case 'synced': reconcile(data); break;
     }
   };
 
-  ws.onclose = () => {
-    stopWaiting();
+  sock.onclose = () => {
+    if (sock !== ws) return;
+    ws = null;
+    clearProbe();
+    // The reply may still be running on the server: keep what has streamed
+    // so far on screen, and let `resume` bring it level on reconnect.
+    turnInterrupted = turnInterrupted || document.body.classList.contains('busy')
+      || streamEl !== null;
+    clearInterval(waitTimer);
+    waitTimer = null;
+    setBusy(false);              // the composer stays usable; sends wait in the outbox
+    if (offlineSince === null) offlineSince = Date.now();
     setStatus('off', 'Reconnecting…');
-    setBusy(false);
-    // Backs off rather than hammering: the server is a local process that
-    // may be restarting, and a tight loop would just fill its log.
-    setTimeout(connect, reconnectDelay);
-    reconnectDelay = Math.min(reconnectDelay * 2, 8000);
+    scheduleReconnect();
   };
 
-  ws.onerror = () => setStatus('off', 'Connection problem');
+  sock.onerror = () => { if (sock === ws) setStatus('off', 'Connection problem'); };
 }
 
 function send(payload) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(payload));
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(payload));
+    return true;
+  }
+  return false;
+}
+
+// ── the reconnect ladder ────────────────────────────────────────────
+
+function scheduleReconnect() {
+  if (reconnectTimer !== null || (ws && ws.readyState !== WebSocket.CLOSED)) return;
+  // The banner comes up at ESCALATE_AFTER_MS on the dot, not at whichever
+  // jittered retry happens to fire after it (that can be 15 s later).
+  if (offlineSince !== null && escalateTimer === null) {
+    escalateTimer = setTimeout(() => {
+      escalateTimer = null;
+      if (offlineSince !== null) showConnectionBanner();
+    }, Math.max(0, offlineSince + ESCALATE_AFTER_MS - Date.now()));
+  }
+  const cap = Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** reconnectAttempt);
+  reconnectAttempt += 1;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, Math.random() * cap);
+}
+
+/* A wake, a network change, or the reader coming back to the window. A socket
+ * that says CLOSED is redialled now. One that says OPEN may be half-open after
+ * sleep (no close event ever fires, and every send vanishes), so it is asked
+ * to prove itself: a ping, and if no frame of any kind comes back in time the
+ * socket is closed and the ladder takes over. */
+function reconnectNow() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    if (probeTimer !== null) return;
+    send({ type: 'ping' });
+    const probed = ws;
+    probeTimer = setTimeout(() => {
+      probeTimer = null;
+      if (probed === ws) probed.close();
+    }, PROBE_TIMEOUT_MS);
+    return;
+  }
+  if (ws && ws.readyState === WebSocket.CONNECTING) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  reconnectAttempt = 0;
+  connect();
+}
+
+function clearProbe() {
+  if (probeTimer !== null) {
+    clearTimeout(probeTimer);
+    probeTimer = null;
+  }
+}
+
+function showConnectionBanner() {
+  const banner = document.getElementById('conn-banner');
+  if (!banner || !banner.hidden) return;
+  const since = new Date(offlineSince || Date.now())
+    .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  document.getElementById('conn-banner-text').textContent =
+    `Can't reach Symbio's window server since ${since}. It may have stopped: `
+    + 'start it again with symbio-desktop (or symbio_desktop/launch.sh). Your messages are kept '
+    + 'and send when it is back.';
+  banner.hidden = false;
+}
+
+function hideConnectionBanner() {
+  const banner = document.getElementById('conn-banner');
+  if (banner) banner.hidden = true;
+}
+
+// ── catching up after a reconnect ───────────────────────────────────
+
+/* The server's account of the turn this page may have missed part of. It
+ * REPLACES what the page streamed rather than adding to it, so it is right
+ * whether the page reloaded (and has nothing) or only lost its socket (and
+ * has half). */
+function resumeTurn(data) {
+  turnInterrupted = false;
+  const text = data.text || '';
+  if (data.busy) {
+    if (text) {
+      ensureStream();
+      streamText = '';
+      appendToken(text);
+    } else if (!streamEl) {
+      startWaiting();
+    }
+    setBusy(true);
+    setStatus('busy', 'Back. The reply is still being written…');
+    return;
+  }
+  if (!text && !streamEl) return;
+  // A reply this page already stored (its `done` did arrive) is not added twice.
+  const last = live.messages[live.messages.length - 1];
+  if (!streamEl && last && last.role === 'assistant'
+      && last.text === splitReasoning(text, true).answer.trim()) return;
+  stopWaiting();
+  ensureStream();
+  streamText = text || streamText;
+  finishStream();
+  setBusy(false);
+  setStatus('ok', 'Caught up on the reply that finished while the window was away');
+}
+
+/* Last word after a reconnect: is a turn running on the server or not? A
+ * turn this page was waiting on that the server no longer has (the window
+ * server itself restarted) is closed with what arrived, and said so, instead
+ * of leaving the page waiting on a reply that will never come. Then whatever
+ * is in the outbox goes. */
+function reconcile(data) {
+  // A New chat the server never answered (made offline, or the socket fell
+  // between) is asked again first, so nothing in the outbox lands in the
+  // old session.
+  if (newChatOwed) send({ type: 'new_chat' });
+  if (data.busy) {
+    turnInterrupted = false;
+    setBusy(true);
+    if (!streamEl && !waitTimer) startWaiting();
+  } else if (turnInterrupted) {
+    turnInterrupted = false;
+    stopWaiting();
+    if (streamEl || streamText) finishStream();
+    setBusy(false);
+    showNotice('The reply was cut off: the window server restarted while it '
+               + 'was being written. Ask again to get the rest.');
+  }
+  flushOutbox();
+  sendQueued();
+}
+
+// ── the outbox: a message is kept from the moment it is sent ─────────
+
+function flushOutbox() {
+  let sent = false;
+  for (const item of outbox) {
+    // Resent blindly: the server ignores an id it already holds and acks it.
+    if (send({ type: 'chat', id: item.id, message: item.text })) sent = true;
+  }
+  if (sent && !document.body.classList.contains('busy')) {
+    setBusy(true);
+    startWaiting();
+  }
+}
+
+function markSent(id) {
+  const before = outbox.length;
+  outbox = outbox.filter(m => m.id !== id);
+  if (outbox.length !== before) saveOutbox();
+  const el = thread.querySelector(`.msg[data-mid="${CSS.escape(String(id))}"]`);
+  if (el) el.classList.remove('unsent');
 }
 
 function setBusy(busy) {
   document.body.classList.toggle('busy', busy);
-  sendBtn.disabled = busy || !input.value.trim();
+  // Sending mid-turn is a queue, not a refusal: the button stays live so the
+  // next message can be written while the model is still talking.
+  sendBtn.disabled = !input.value.trim();
+  // The label is what VoiceOver says, so it changes with the action.
+  sendBtn.title = busy ? 'Queue message' : 'Send';
+  sendBtn.setAttribute('aria-label', sendBtn.title);
+  updatePlaceholder();
+  renderQueue();
 }
 
 function submit() {
@@ -673,18 +1132,34 @@ function submit() {
   // the window looked broken. Send it to the live conversation instead —
   // that is plainly what was meant.
   if (viewingId !== null) backToLive();
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    addActivity('Not connected to the window server yet — nothing was sent. '
-                + 'Retrying the connection.');
-    return;
-  }
-  addBubble('user', text);
-  scrollToEnd(true);             // sending is looking at the conversation again
   input.value = '';
   input.style.height = 'auto';
-  setBusy(true);
-  startWaiting();
-  send({ type: 'chat', message: text });
+  // A message typed mid-turn is queued, not interleaved: the resident model
+  // finishes the reply it is writing, then this one goes.
+  if (document.body.classList.contains('busy')) {
+    enqueue(text);
+    return;
+  }
+  deliver(text);
+}
+
+function deliver(text) {
+  // Durable at send: the message is in the transcript and the outbox before
+  // anything is written to the socket, so a dropped connection, a reload or a
+  // closed window between here and the server's `ack` cannot lose it. Typing
+  // while disconnected used to say "nothing was sent" and drop it.
+  const id = newMessageId();
+  outbox.push({ id, text, at: Date.now() });
+  saveOutbox();
+  addBubble('user', text, true, '', id);
+  scrollToEnd(true);             // sending is looking at the conversation again
+  if (send({ type: 'chat', id, message: text })) {
+    setBusy(true);
+    startWaiting();
+  } else {
+    setStatus('off', 'Not connected. Your message will send as soon as it reconnects');
+    reconnectNow();
+  }
 }
 
 // ── wiring ──────────────────────────────────────────────────────────
@@ -699,12 +1174,18 @@ input.addEventListener('keydown', (e) => {
     e.preventDefault();
     submit();
   }
+  // Up in an empty composer takes the newest queued message back to edit,
+  // the way chat apps reopen the last thing sent.
+  if (e.key === 'ArrowUp' && !input.value && queued.length && !e.isComposing) {
+    e.preventDefault();
+    editQueued(queued[queued.length - 1]);
+  }
 });
 
 input.addEventListener('input', () => {
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 200) + 'px';
-  sendBtn.disabled = !input.value.trim() || document.body.classList.contains('busy');
+  sendBtn.disabled = !input.value.trim();
 });
 
 document.getElementById('btn-new-chat').addEventListener('click', newChat);
@@ -796,6 +1277,14 @@ function rememberLive() {
   } catch (e) { /* the conversation still works, it just will not survive */ }
 }
 
+window.addEventListener('online', reconnectNow);
+window.addEventListener('pageshow', (e) => { if (e.persisted) reconnectNow(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') reconnectNow();
+});
+document.getElementById('btn-reconnect').addEventListener('click', reconnectNow);
+
 restoreLive();
 renderChatList();
+renderQueue();
 connect();
