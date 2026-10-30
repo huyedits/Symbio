@@ -166,6 +166,53 @@ def ram_used_fraction() -> float | None:
         return None
     return max(0.0, min(1.0, 1.0 - free / total))
 
+def swap_used_bytes() -> int | None:
+    """Bytes held in swap, or None when unreadable."""
+    try:
+        out = subprocess.run(["sysctl", "-n", "vm.swapusage"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    # "total = 2048.00M  used = 1023.75M  free = 1024.25M (encrypted)"
+    match = re.search(r"used\s*=\s*([0-9.]+)\s*([KMGT])", out)
+    if not match:
+        return None
+    return int(float(match.group(1)) * {"K": 2**10, "M": 2**20,
+                                        "G": 2**30, "T": 2**40}[match.group(2)])
+
+def on_battery() -> bool | None:
+    """True on battery, False on AC, None when unreadable. Warns; never gates."""
+    try:
+        out = subprocess.run(["pmset", "-g", "batt"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if "'Battery Power'" in out:
+        return True
+    if "'AC Power'" in out:
+        return False
+    return None
+
+def device_snapshot() -> dict[str, Any]:
+    """What this machine can offer a training run right now."""
+    return {
+        "total_ram": total_ram_bytes(),
+        "free_ram": free_ram_bytes(),
+        "swap_used": swap_used_bytes(),
+        "on_battery": on_battery(),
+    }
+
+def describe_device(snapshot: dict[str, Any]) -> str:
+    """The snapshot as one log line."""
+    def _gb(n: int | None) -> str:
+        return "unknown" if n is None else f"{n / 1024 ** 3:.1f} GB"
+    power = snapshot.get("on_battery")
+    return (f"Device: {_gb(snapshot.get('free_ram'))} free of "
+            f"{_gb(snapshot.get('total_ram'))} RAM, "
+            f"{_gb(snapshot.get('swap_used'))} in swap, "
+            + ("on battery" if power else "on AC" if power is False else
+               "power unknown"))
+
 # Set by run_training when the trainer child has exited, cleared by the settle
 # that waits it out. It is what makes settle_after_trainer_exit a no-op for a
 # caller whose run_training was stubbed — there was no child, so there is no
@@ -2166,7 +2213,7 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
         if warning:
             _say(f"  [Train] WARNING: {warning}")
     except Exception:
-        pass  # A diagnostic must never block the training it describes.
+        stats = None  # A diagnostic must never block the training it describes.
 
     # Sweep temp LoRA config files left behind by previous crashed runs.
     for stale in data_dir.glob("tmp*.yaml"):
@@ -2176,6 +2223,26 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
             pass
 
     lora = config["lora"]
+
+    # Device-aware recipe: relieve memory pressure before it costs anything,
+    # refuse up front only when even the cheapest recipe cannot fit.
+    plan = plan_training(config, model_name or config.get("model_name"),
+                         corpus_longest=stats.get("longest") if stats else None)
+    if plan is not None:
+        if plan["refuse"]:
+            _say(f"  [Train] Not enough memory to train: {plan['refuse']}")
+            _say(f"  [Train] {describe_device(plan['device'])}")
+            return False
+        _say(f"  [Train] {describe_device(plan['device'])}")
+        device_changes = list(plan["changes"])
+        if device_changes:
+            for change in device_changes:
+                _say(f"  [Train] Device-aware plan: {change}.")
+            lora = plan["lora"]
+            if plan["device"].get("on_battery"):
+                _say("  [Train] On battery: a fine-tune holds the GPU under "
+                      "load for its whole run.")
+    plan_config = {**config, "lora": lora}
 
     # Bring legacy text-only samples up to the structured shape, then decide
     # whether the loss can be restricted to the assistant's answer.
@@ -2316,7 +2383,8 @@ def _run_training(config: dict[str, Any], iters: int | None = None,
     # own copy of the weights, and overlapping it with another trainer or a
     # resident chat model is what took the machine down (see TRAINER_LOCK).
     with TRAINER_LOCK:
-        shortfall = _memory_shortfall(config, model_name)
+        # Judge the planned recipe, not the configured one it relieved.
+        shortfall = _memory_shortfall(plan_config, model_name)
         if shortfall:
             _say(f"  [Train] {shortfall}")
             try:
@@ -2595,6 +2663,78 @@ def _training_need(config: dict[str, Any], weights: int) -> int:
                 * _OVERHEAD_REFERENCE_WEIGHTS
                 * min(1.0, seq / _OVERHEAD_REFERENCE_SEQ))
     return int(weights + overhead)
+
+# System prompt alone is ~800 tokens; below this a shrunken window cuts every
+# sample's answer off instead of saving memory.
+_PLAN_MIN_SEQ = 1024
+
+def _shrinkable_window(lora: dict[str, Any],
+                       corpus_longest: int | None) -> int | None:
+    """Smallest max_seq_length that still covers the corpus, or None.
+    Rounded up to 128 tokens, never below _PLAN_MIN_SEQ or above configured."""
+    configured = max(1, int(lora.get("max_seq_length", 2048)))
+    if not corpus_longest:
+        return None
+    target = ((corpus_longest + 64 + 127) // 128) * 128
+    target = max(_PLAN_MIN_SEQ, min(configured, target))
+    return target if target < configured else None
+
+def plan_training(config: dict[str, Any], model_name: str | None = None,
+                  corpus_longest: int | None = None) -> dict[str, Any] | None:
+    """Pick the cheapest LoRA recipe that fits the device right now.
+
+    Reliefs in order of cost: shrink the window to the corpus (free), then
+    gradient checkpointing (slower steps). Batch size and layer count are
+    never touched — those change what is learned. Returns None when the
+    device cannot be measured or planning is off; otherwise {"lora",
+    "changes", "device", "refuse"}, with "refuse" set when nothing fits.
+    """
+    lora = config.get("lora", {}) or {}
+    if not lora.get("device_aware", True):
+        return None
+    if not config.get("gpu", {}).get("memory_preflight", True):
+        return None
+    weights = _model_weight_bytes(model_name or config.get("model_name"))
+    snapshot = device_snapshot()
+    free = snapshot["free_ram"]
+    if weights is None or free is None:
+        return None  # Unknown on either side is not evidence of a problem.
+
+    # Reliefs, cheapest first: (label, lora-overrides).
+    reliefs: list[tuple[str, dict[str, Any]]] = []
+    shrink = _shrinkable_window(lora, corpus_longest)
+    if shrink is not None:
+        reliefs.append((
+            f"shrunk the window {lora.get('max_seq_length', 2048)} -> "
+            f"{shrink} tokens (longest corpus sample is {corpus_longest})",
+            {"max_seq_length": shrink}))
+    if not lora.get("grad_checkpoint", False):
+        relieved: dict[str, Any] = {"grad_checkpoint": True}
+        if shrink is not None:
+            relieved["max_seq_length"] = shrink
+        reliefs.append(("turned gradient checkpointing on"
+                        + (" and " + reliefs[-1][0] if shrink is not None
+                           else "") + " (less memory, slower steps)",
+                        relieved))
+
+    candidates: list[tuple[str, dict[str, Any]]] = [("", dict(lora))] + [
+        (change, {**lora, **overrides}) for change, overrides in reliefs]
+    cheapest_need: int | None = None
+    for change, candidate in candidates:
+        need = _training_need({**config, "lora": candidate}, weights)
+        cheapest_need = need
+        if free >= need:
+            changes = [change] if change else []
+            return {"lora": candidate, "changes": changes,
+                    "device": snapshot, "refuse": None}
+    tried = "; ".join(c[0] for c in candidates[1:]) or "no reliefs available"
+    reason = (f"the cheapest recipe available still needs about "
+              f"{cheapest_need / 1e9:.1f} GB and only {free / 1e9:.1f} GB is "
+              f"free (tried: {tried}). Close what is holding memory — a "
+              f"resident chat model, another worker, another trainer — or "
+              f"pick a smaller model.")
+    return {"lora": dict(lora), "changes": [], "device": snapshot,
+            "refuse": reason}
 
 # A load-and-generate needs the weights plus a KV cache, with no optimiser
 # state and no retained activations, so it sits far below any of the training
